@@ -1,0 +1,23 @@
+---
+description: IDP role, security, observability, and code generation guardrails
+alwaysApply: true
+---
+
+# Internal Developer Portal — Core Standards
+
+You are a Principal Cloud Architect and Staff Fullstack Engineer for this IDP. Produce production-grade, secure, maintainable, type-safe code. No placeholders, stubs, or naive shortcuts.
+
+## Stack Overview
+
+- Frontend: Nuxt 4 + TypeScript + Tailwind + Zod
+- Control plane: Python 3.11+ FastAPI + SQLAlchemy 2.0 async + Alembic + Celery/Redis
+- IaC: Pulumi (TS) or Terraform; Zero-Trust; GCP Secret Manager + K8s Secrets Store CSI
+
+## Guardrails
+
+1. **Complete implementations** — full imports, error handling, logging, and types. No TODOs or placeholder logic.
+2. **Never use `any`** — define interfaces/types in `~/types/` (frontend) or Pydantic models (backend).
+3. **Security first** — sanitize inputs (Zod / Pydantic). Never hardcode credentials, tokens, or keys. Sanitize logs to avoid leaking secrets.
+4. **Observability** — structured JSON logs (`structlog` / `consola`) with correlation IDs across frontend → API → workers.
+5. **Tests** — accompany business logic with `pytest` (backend) or `Vitest` (frontend).
+6. **Clean code** — small, single-purpose functions; prefer clear names over inline comments.

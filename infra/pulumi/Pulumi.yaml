@@ -1,0 +1,6 @@
+name: launchpad-ephemeral
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+description: Ephemeral environment stack for Launchpad IDP

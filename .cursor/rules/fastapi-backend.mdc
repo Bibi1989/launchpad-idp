@@ -1,0 +1,26 @@
+---
+description: FastAPI control-plane architecture, async, and data conventions
+globs: apps/api/**/*.py,**/routers/**/*.py,**/services/**/*.py,**/repositories/**/*.py,**/models/**/*.py,**/alembic/**/*.py,**/workers/**/*.py
+alwaysApply: false
+---
+
+# FastAPI Control Plane
+
+- Python 3.11+, `asyncio`, full type annotations, Pydantic v2.
+- Layers: `routers` → `services` → `repositories` → `models`. Do not skip layers or put DB logic in routers.
+- Keep HTTP handlers fast: offload IaC runs and K8s API work to Celery/Redis workers.
+- DB: SQLAlchemy 2.0 async sessions + Alembic. Enforce PostgreSQL FKs and indexes on queried IDs.
+- Errors: custom HTTPException handlers with structured schemas. Log full stack traces internally; return clean client messages.
+
+```python
+# ❌ BAD — blocking work in the request path
+@router.post("/environments")
+async def create_env(payload: CreateEnv):
+    run_pulumi_up(payload)  # blocks
+
+# ✅ GOOD — enqueue and return immediately
+@router.post("/environments", status_code=202)
+async def create_env(payload: CreateEnv, svc: EnvService = Depends()):
+    job_id = await svc.enqueue_provision(payload)
+    return {"job_id": job_id, "status": "queued"}
+```

@@ -1,0 +1,45 @@
+---
+description: Enforces research and schema/spec verification before generating any code or UI implementation.
+globs: "*"
+alwaysApply: true
+---
+
+# Mandatory Directive: Research Before Implementation
+
+## 1. Zero Assumption & Schema Verification
+You must NEVER guess, assume, or fabricate:
+- Framework/Library API signatures or component props.
+- System/API schemas, specs, or configuration fields.
+- Architectural patterns or existing utility signatures in the codebase.
+
+---
+
+## 2. Mandatory Pre-Implementation Protocol
+
+Before writing or editing code, execute a **3-Step Research Phase**:
+
+### Step 1: Internal Codebase Search
+- Search the codebase for existing conventions, types, state patterns, and reusable components.
+- Check data models, interfaces, and function signatures to ensure contract compatibility.
+
+### Step 2: External/Spec Verification
+- Verify that every proposed field, prop, or parameter actually exists on the target schema or tool specification.
+- If a requested input/feature does not natively belong to the targeted entity, flag the mismatch explicitly and route it to the correct entity.
+
+### Step 3: Plan & Sanity Check
+Before outputting code, output a brief execution plan confirming:
+1. Target schema/module being modified.
+2. Verified fields/APIs to be used.
+3. Confirmation that no invalid assumptions were introduced.
+
+---
+
+## 3. Output Format Standard
+
+Begin implementation responses with:
+
+```text
+### 🔍 Pre-Implementation Research Summary
+- Target Files/Schemas: [Verified types, models, or components]
+- Key Constraints: [Confirmed properties and data specs]
+- Routing Adjustments: [Any field/logic corrected to match specs]

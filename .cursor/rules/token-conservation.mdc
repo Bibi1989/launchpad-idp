@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+# Token Conservation Rules
+- Output ONLY the modified lines of code or diffs. Do NOT re-print unchanged files or long boilerplate.
+- Keep explanations brief and concise (2-3 sentences max).
+- Do not add conversational intro/outro text.

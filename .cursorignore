@@ -1,0 +1,19 @@
+# Dependencies & Builds
+node_modules/
+.next/
+dist/
+build/
+coverage/
+
+# Large Datasets, Logs & Lockfiles
+*.log
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+*.csv
+*.json
+*.sarif
+
+# Local Environment & Secrets
+.env*
+.git/

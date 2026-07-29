@@ -1,0 +1,164 @@
+import type {
+  AuditLogEntry,
+  Environment,
+  EnvironmentCreatePayload,
+  EnvironmentExtendPayload,
+  EnvironmentPromotePayload,
+  KindClusterStatus,
+  PreviewAppTemplate,
+  PreviewBuildStatus,
+  PreviewLaunchPayload,
+} from '~/types/environment'
+import type { EnvironmentCreateInput } from '~/utils/validation'
+
+export function useEnvironments() {
+  const { apiFetch } = useApi()
+  const environments = useState<Environment[]>('environments', () => [])
+  const loading = useState<boolean>('environments-loading', () => false)
+  const error = useState<string | null>('environments-error', () => null)
+
+  async function refresh() {
+    loading.value = true
+    error.value = null
+    try {
+      environments.value = await apiFetch<Environment[]>('/environments')
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'Failed to load environments'
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function create(payload: EnvironmentCreateInput): Promise<Environment> {
+    const body: EnvironmentCreatePayload = {
+      name: payload.name,
+      git_branch: payload.git_branch,
+      git_repo_url: payload.git_repo_url,
+      ttl_hours: payload.ttl_hours,
+      workspace_id: payload.workspace_id ?? null,
+    }
+    const result = await apiFetch<Environment>('/environments', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    await refresh()
+    return result
+  }
+
+  async function listPreviewTemplates(): Promise<PreviewAppTemplate[]> {
+    return apiFetch<PreviewAppTemplate[]>('/preview/templates')
+  }
+
+  async function getKindStatus(): Promise<KindClusterStatus> {
+    return apiFetch<KindClusterStatus>('/preview/kind/status')
+  }
+
+  async function getPreviewBuildStatus(): Promise<PreviewBuildStatus> {
+    return apiFetch<PreviewBuildStatus>('/preview/build/status')
+  }
+
+  async function listAudits(environmentId: string, limit = 50): Promise<AuditLogEntry[]> {
+    return apiFetch<AuditLogEntry[]>(
+      `/environments/${environmentId}/audits?limit=${limit}`,
+    )
+  }
+
+  async function scanDrift(id: string): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/drift-scan`, {
+      method: 'POST',
+    })
+    await refresh()
+    return environment
+  }
+
+  async function launchPreview(payload: PreviewLaunchPayload): Promise<Environment> {
+    const result = await apiFetch<Environment>('/preview/launch', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    await refresh()
+    return result
+  }
+
+  async function getById(id: string): Promise<Environment> {
+    return apiFetch<Environment>(`/environments/${id}`)
+  }
+
+  async function destroy(id: string): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}`, {
+      method: 'DELETE',
+    })
+    await refresh()
+    return environment
+  }
+
+  async function retryProvision(id: string): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/retry`, {
+      method: 'POST',
+    })
+    await refresh()
+    return environment
+  }
+
+  async function extendTtl(
+    id: string,
+    payload: EnvironmentExtendPayload = {},
+  ): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/extend`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    await refresh()
+    return environment
+  }
+
+  async function promoteToCloud(
+    id: string,
+    payload: EnvironmentPromotePayload,
+  ): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    await refresh()
+    return environment
+  }
+
+  async function pauseEnvironment(id: string): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/pause`, {
+      method: 'POST',
+    })
+    await refresh()
+    return environment
+  }
+
+  async function resumeEnvironment(id: string): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/resume`, {
+      method: 'POST',
+    })
+    await refresh()
+    return environment
+  }
+
+  return {
+    environments,
+    loading,
+    error,
+    refresh,
+    create,
+    listPreviewTemplates,
+    getKindStatus,
+    getPreviewBuildStatus,
+    listAudits,
+    scanDrift,
+    launchPreview,
+    getById,
+    destroy,
+    retryProvision,
+    extendTtl,
+    promoteToCloud,
+    pauseEnvironment,
+    resumeEnvironment,
+  }
+}

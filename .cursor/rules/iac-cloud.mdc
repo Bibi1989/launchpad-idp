@@ -1,0 +1,28 @@
+---
+description: IaC, Zero-Trust, tagging, and idempotent provisioning standards
+globs: infra/**/*,**/Pulumi*.{ts,yaml,yml},**/*.{tf,tfvars},**/kubernetes/**/*.{yaml,yml},**/charts/**/*
+alwaysApply: false
+---
+
+# IaC & Cloud Architecture
+
+- Prefer Pulumi (TypeScript) or Terraform (HCL). All provisioning must be **idempotent** and support safe rollback on failure.
+- **Zero-Trust**: never embed credentials. Mount secrets via GCP Secret Manager and the Kubernetes Secrets Store CSI Driver.
+- Isolate ephemeral namespaces with Kubernetes `NetworkPolicies`.
+- **Required tags** on every provisioned resource: `EnvironmentId`, `Owner`, `CreatedBy`, `TTL_Expiration`.
+
+```typescript
+// ❌ BAD — hardcoded secret, missing governance tags
+const db = new gcp.sql.DatabaseInstance("db", {
+  rootPassword: "supersecret",
+});
+
+// ✅ GOOD — secret reference + required tags
+const password = gcp.secretmanager.getSecretVersionOutput({ secret: "db-root" });
+const db = new gcp.sql.DatabaseInstance("db", {
+  // ...config using password
+}, {
+  customTimeouts: { create: "30m" },
+  // apply EnvironmentId, Owner, CreatedBy, TTL_Expiration via labels/tags
+});
+```

@@ -1,0 +1,1307 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import time
+from dataclasses import dataclass, field
+
+from app.core.config import Settings, get_settings
+from app.core.logging import get_logger
+from app.services.k8s_spec import (
+    build_preview_labels,
+    build_preview_limit_range,
+    build_preview_network_policy,
+    build_preview_resource_quota,
+    preview_workload_selector,
+    sanitize_label,
+)
+
+logger = get_logger(__name__)
+
+
+# Preferred HTTP ports when an image EXPOSEs several (skip brokers/DBs).
+_HTTP_PORT_PREFERENCE: tuple[int, ...] = (
+    80,
+    8080,
+    8000,
+    3000,
+    5000,
+    5173,
+    4200,
+    4000,
+    8501,
+    15672,
+)
+_NON_HTTP_PORTS = frozenset({5672, 6379, 5432, 3306, 27017, 9092, 9200})
+
+
+def _is_nginx_image(image: str) -> bool:
+    return "nginx" in image.lower()
+
+
+def _inspect_image_exposed_ports(image: str) -> list[int]:
+    """Return EXPOSE ports from a local Docker image (empty if unavailable)."""
+    try:
+        completed = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                image,
+                "--format",
+                "{{json .Config.ExposedPorts}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info("image_expose_inspect_unavailable", image=image, error=str(exc))
+        return []
+
+    if completed.returncode != 0:
+        # Image may not be local yet — best-effort pull then re-inspect.
+        pull = subprocess.run(
+            ["docker", "pull", image],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if pull.returncode != 0:
+            logger.info(
+                "image_expose_pull_failed",
+                image=image,
+                error=(pull.stderr or pull.stdout or "").strip()[:300],
+            )
+            return []
+        completed = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                image,
+                "--format",
+                "{{json .Config.ExposedPorts}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return []
+
+    raw = (completed.stdout or "").strip()
+    if not raw or raw == "null":
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    ports: list[int] = []
+    for key in payload:
+        try:
+            ports.append(int(str(key).split("/", 1)[0]))
+        except ValueError:
+            continue
+    return sorted(set(ports))
+
+
+def _resolve_listen_port_from_image(image: str) -> int:
+    """Best-effort resolve the container's HTTP-like listen port."""
+    if "http-echo" in image:
+        return 80
+
+    exposed_ports = _inspect_image_exposed_ports(image)
+    for preferred in _HTTP_PORT_PREFERENCE:
+        if preferred in exposed_ports:
+            return preferred
+
+    httpish = [port for port in exposed_ports if port not in _NON_HTTP_PORTS]
+    if httpish:
+        return httpish[0]
+    if exposed_ports:
+        return exposed_ports[0]
+    return 80
+
+
+def _workload_ready_timeout_seconds(*, image: str, base_timeout_seconds: float) -> float:
+    # Non-nginx images (pull + cold Node/Vite bind) need more headroom than nginx.
+    # Keep probe windows in sync with the worker's ready timeout.
+    if not _is_nginx_image(image):
+        return max(base_timeout_seconds, 240.0)
+    return base_timeout_seconds
+
+
+@dataclass
+class ProvisionedResources:
+    namespace: str
+    preview_url: str | None = None
+    created_namespace: bool = False
+    created_quota: bool = False
+    created_limit_range: bool = False
+    created_network_policy: bool = False
+    created_workload: bool = False
+    simulated: bool = False
+    node_port: int | None = None
+    image: str | None = None
+    labels: dict[str, str] = field(default_factory=dict)
+
+
+class KubernetesProvisioner:
+    """Idempotent namespace + ResourceQuota + NetworkPolicy + workload provisioner."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self._settings = settings or get_settings()
+        self._core = None
+        self._networking = None
+        self._apps = None
+        self._autoscaling = None
+        if self._settings.kubernetes_enabled:
+            self._load_clients()
+
+    def _load_clients(self) -> None:
+        from kubernetes import client, config
+
+        if self._settings.kubernetes_in_cluster:
+            config.load_incluster_config()
+        else:
+            load_kwargs: dict[str, str] = {}
+            if self._settings.kubernetes_kubeconfig_path:
+                load_kwargs["config_file"] = self._settings.kubernetes_kubeconfig_path
+            if self._settings.kubernetes_context:
+                load_kwargs["context"] = self._settings.kubernetes_context
+            config.load_kube_config(**load_kwargs)
+
+        self._core = client.CoreV1Api()
+        self._networking = client.NetworkingV1Api()
+        self._apps = client.AppsV1Api()
+        self._autoscaling = client.AutoscalingV2Api()
+
+    def provision(
+        self,
+        *,
+        namespace: str,
+        environment_id: str,
+        name: str,
+        git_branch: str,
+        git_repo_url: str,
+        ttl_expires_at: str,
+        owner_label: str = "launchpad",
+        image: str | None = None,
+    ) -> ProvisionedResources:
+        workload_image = image or self._settings.default_workload_image
+        listen_port = _resolve_listen_port_from_image(workload_image)
+        ready_timeout = _workload_ready_timeout_seconds(
+            image=workload_image, base_timeout_seconds=self._settings.kubernetes_ready_timeout_seconds
+        )
+        labels = build_preview_labels(
+            environment_id=environment_id,
+            name=name,
+            git_branch=git_branch,
+            git_repo_url=git_repo_url,
+            ttl_expires_at=ttl_expires_at,
+            owner_label=owner_label,
+        )
+        resources = ProvisionedResources(
+            namespace=namespace,
+            labels=labels,
+            image=workload_image,
+        )
+
+        if not self._settings.kubernetes_enabled:
+            logger.info(
+                "kubernetes_simulate_provision",
+                namespace=namespace,
+                environment_id=environment_id,
+                git_repo_url=git_repo_url,
+                git_branch=git_branch,
+            )
+            resources.created_namespace = True
+            resources.created_quota = True
+            resources.created_limit_range = True
+            resources.created_network_policy = True
+            resources.created_workload = True
+            resources.simulated = True
+            resources.preview_url = self._portal_preview_url(environment_id=environment_id)
+            return resources
+
+        self.apply_governance(namespace=namespace, labels=labels, resources=resources)
+
+        used_ports = self._list_allocated_node_ports(exclude_namespace=namespace)
+        # Prefer a sticky in-range NodePort; ignore API auto-assigned ports outside the
+        # kind-mapped PREVIEW_NODE_PORT_MIN/MAX window (those are unreachable from the host).
+        existing_port = self._read_namespaced_app_node_port(namespace)
+        node_port = resolve_preview_node_port(
+            environment_id,
+            existing_port=existing_port,
+            port_min=self._settings.preview_node_port_min,
+            port_max=self._settings.preview_node_port_max,
+            used_ports=used_ports,
+        )
+        node_port = self._apply_workload(
+            namespace=namespace,
+            labels=labels,
+            git_branch=git_branch,
+            git_repo_url=git_repo_url,
+            image=workload_image,
+            listen_port=listen_port,
+            node_port=node_port,
+            used_ports=used_ports,
+        )
+        resources.created_workload = True
+        resources.node_port = node_port
+
+        if self._settings.preview_ingress_host_template:
+            host = self._settings.preview_ingress_host_template.format(
+                name=name,
+                environment_id=environment_id,
+                namespace=namespace,
+            )
+            self._apply_ingress(namespace=namespace, labels=labels, host=host)
+            resources.preview_url = f"http://{host}"
+        else:
+            resources.preview_url = self._node_port_preview_url(node_port=node_port)
+
+        self.wait_for_workload_ready(
+            namespace=namespace,
+            timeout_seconds=ready_timeout,
+            expected_image=workload_image,
+        )
+        return resources
+
+    def apply_governance(
+        self,
+        *,
+        namespace: str,
+        labels: dict[str, str],
+        resources: ProvisionedResources,
+        listen_ports: list[int] | None = None,
+    ) -> None:
+        """Create or update namespace governance objects shared by preview and manifest deploy."""
+        if not self._settings.kubernetes_enabled:
+            resources.created_namespace = True
+            resources.created_quota = True
+            resources.created_limit_range = True
+            resources.created_network_policy = True
+            return
+
+        assert self._core is not None and self._networking is not None
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        try:
+            self._core.read_namespace(namespace)
+            logger.info("kubernetes_namespace_exists", namespace=namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            body = client.V1Namespace(
+                metadata=client.V1ObjectMeta(name=namespace, labels=labels),
+            )
+            self._core.create_namespace(body)
+            resources.created_namespace = True
+            logger.info("kubernetes_namespace_created", namespace=namespace)
+
+        quota_spec = build_preview_resource_quota(
+            self._settings,
+            namespace=namespace,
+            labels=labels,
+        )
+        self._apply_namespaced_core_object(
+            kind="resource_quota",
+            namespace=namespace,
+            body=quota_spec,
+            created_attr="created_quota",
+            resources=resources,
+        )
+
+        limit_range = build_preview_limit_range(namespace=namespace, labels=labels)
+        self._apply_namespaced_core_object(
+            kind="limit_range",
+            namespace=namespace,
+            body=limit_range,
+            created_attr="created_limit_range",
+            resources=resources,
+        )
+
+        policy = build_preview_network_policy(
+            namespace=namespace,
+            labels=labels,
+            listen_ports=listen_ports,
+        )
+        self._apply_namespaced_networking_object(
+            kind="network_policy",
+            namespace=namespace,
+            body=policy,
+            created_attr="created_network_policy",
+            resources=resources,
+        )
+
+        for legacy_name in ("deny-cross-namespace-egress", "deny-cross-namespace"):
+            try:
+                self._networking.delete_namespaced_network_policy(legacy_name, namespace)
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+
+    def _apply_namespaced_core_object(
+        self,
+        *,
+        kind: str,
+        namespace: str,
+        body: object,
+        created_attr: str,
+        resources: ProvisionedResources,
+    ) -> None:
+        """Create-or-replace a namespaced core object; treat 409 as replace."""
+        assert self._core is not None
+        from kubernetes.client.rest import ApiException
+
+        name = getattr(getattr(body, "metadata", None), "name", None)
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"governance {kind} missing metadata.name")
+        read = getattr(self._core, f"read_namespaced_{kind}")
+        create = getattr(self._core, f"create_namespaced_{kind}")
+        replace = getattr(self._core, f"replace_namespaced_{kind}")
+        try:
+            existing = read(name, namespace)
+            existing_meta = getattr(existing, "metadata", None)
+            body_meta = getattr(body, "metadata", None)
+            resource_version = getattr(existing_meta, "resource_version", None)
+            if body_meta is not None and resource_version:
+                body_meta.resource_version = resource_version
+            replace(name, namespace, body)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            try:
+                create(namespace, body)
+                setattr(resources, created_attr, True)
+            except ApiException as create_exc:
+                if create_exc.status != 409:
+                    raise
+                existing = read(name, namespace)
+                existing_meta = getattr(existing, "metadata", None)
+                body_meta = getattr(body, "metadata", None)
+                resource_version = getattr(existing_meta, "resource_version", None)
+                if body_meta is not None and resource_version:
+                    body_meta.resource_version = resource_version
+                replace(name, namespace, body)
+
+    def _apply_namespaced_networking_object(
+        self,
+        *,
+        kind: str,
+        namespace: str,
+        body: object,
+        created_attr: str,
+        resources: ProvisionedResources,
+    ) -> None:
+        """Create-or-replace a namespaced networking object; treat 409 as replace."""
+        assert self._networking is not None
+        from kubernetes.client.rest import ApiException
+
+        name = getattr(getattr(body, "metadata", None), "name", None)
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"governance {kind} missing metadata.name")
+        read = getattr(self._networking, f"read_namespaced_{kind}")
+        create = getattr(self._networking, f"create_namespaced_{kind}")
+        replace = getattr(self._networking, f"replace_namespaced_{kind}")
+        try:
+            existing = read(name, namespace)
+            existing_meta = getattr(existing, "metadata", None)
+            body_meta = getattr(body, "metadata", None)
+            resource_version = getattr(existing_meta, "resource_version", None)
+            if body_meta is not None and resource_version:
+                body_meta.resource_version = resource_version
+            replace(name, namespace, body)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            try:
+                create(namespace, body)
+                setattr(resources, created_attr, True)
+            except ApiException as create_exc:
+                if create_exc.status != 409:
+                    raise
+                existing = read(name, namespace)
+                existing_meta = getattr(existing, "metadata", None)
+                body_meta = getattr(body, "metadata", None)
+                resource_version = getattr(existing_meta, "resource_version", None)
+                if body_meta is not None and resource_version:
+                    body_meta.resource_version = resource_version
+                replace(name, namespace, body)
+
+    def _portal_preview_url(self, *, environment_id: str) -> str:
+        base = self._settings.preview_public_base_url.rstrip("/")
+        return f"{base}/p/{environment_id}"
+
+    def _node_port_preview_url(self, *, node_port: int) -> str:
+        host = self._settings.preview_node_host.rstrip("/")
+        if "://" in host:
+            return f"{host}:{node_port}"
+        return f"http://{host}:{node_port}"
+    def wait_for_workload_ready(
+        self,
+        *,
+        namespace: str,
+        timeout_seconds: float,
+        expected_image: str | None = None,
+    ) -> None:
+        """Block until the *current* Deployment revision is Ready.
+
+        Ready replicas from a previous ReplicaSet (e.g. nginx still serving while a
+        new image is ImagePullBackOff) must not count as success.
+        """
+        if not self._settings.kubernetes_enabled:
+            return
+        assert self._apps is not None
+        deadline = time.monotonic() + timeout_seconds
+        last_ready = 0
+        last_updated = 0
+        last_desired = 1
+        last_unavailable = 0
+        stable_ready_polls = 0
+        required_stable_polls = 2
+        start_time = time.monotonic()
+        while time.monotonic() < deadline:
+            pull_error = self._first_pod_image_error(namespace=namespace)
+            if pull_error:
+                raise RuntimeError(pull_error)
+
+            snapshot = self._deployment_ready_snapshot(namespace=namespace)
+            last_desired = snapshot["desired"]
+            last_ready = snapshot["ready"]
+            last_updated = snapshot["updated"]
+            last_unavailable = snapshot["unavailable"]
+
+            if last_updated == 0 and (time.monotonic() - start_time) > 15.0:
+                cp_stall = self._control_plane_stall_hint()
+                if cp_stall:
+                    raise RuntimeError(cp_stall)
+
+            if snapshot["revision_ready"]:
+                if expected_image and not self._ready_pods_match_image(
+                    namespace=namespace,
+                    expected_image=expected_image,
+                ):
+                    stable_ready_polls = 0
+                    time.sleep(self._settings.kubernetes_ready_poll_seconds)
+                    continue
+                stable_ready_polls += 1
+                if stable_ready_polls < required_stable_polls:
+                    time.sleep(self._settings.kubernetes_ready_poll_seconds)
+                    continue
+                logger.info(
+                    "kubernetes_workload_ready",
+                    namespace=namespace,
+                    ready_replicas=last_ready,
+                    updated_replicas=last_updated,
+                    image=expected_image,
+                )
+                return
+            stable_ready_polls = 0
+            time.sleep(self._settings.kubernetes_ready_poll_seconds)
+
+        # Final check: kind control-plane blips often flip Ready just after the
+        # deadline. Accept success if the current revision is Ready now.
+        snapshot = self._deployment_ready_snapshot(namespace=namespace)
+        if snapshot["revision_ready"] and (
+            not expected_image
+            or self._ready_pods_match_image(namespace=namespace, expected_image=expected_image)
+        ):
+            logger.info(
+                "kubernetes_workload_ready_after_deadline",
+                namespace=namespace,
+                ready_replicas=snapshot["ready"],
+                updated_replicas=snapshot["updated"],
+                image=expected_image,
+            )
+            return
+
+        hint = self._first_pod_probe_hint(namespace=namespace)
+        control_plane = self._control_plane_stall_hint()
+        extras = " ".join(part for part in (hint, control_plane) if part)
+        raise TimeoutError(
+            f"Deployment/app in {namespace} not Ready on current revision "
+            f"(updated={snapshot['updated']}, ready={snapshot['ready']}, "
+            f"unavailable={snapshot['unavailable']}, desired={snapshot['desired']}) "
+            f"within {timeout_seconds:.0f}s"
+            + (f" for image {expected_image}" if expected_image else "")
+            + (f". {extras}" if extras else "")
+        )
+
+    def _deployment_ready_snapshot(self, *, namespace: str) -> dict[str, int | bool]:
+        assert self._apps is not None
+        deployment = self._apps.read_namespaced_deployment("app", namespace)
+        meta = deployment.metadata
+        status = deployment.status
+        desired = (deployment.spec.replicas if deployment.spec else None) or 1
+        ready = (status.ready_replicas if status else None) or 0
+        updated = (status.updated_replicas if status else None) or 0
+        unavailable = (status.unavailable_replicas if status else None) or 0
+        generation = (meta.generation if meta else None) or 0
+        observed = (status.observed_generation if status else None) or 0
+        revision_ready = (
+            observed >= generation
+            and updated >= desired
+            and ready >= desired
+            and unavailable == 0
+        )
+        return {
+            "desired": desired,
+            "ready": ready,
+            "updated": updated,
+            "unavailable": unavailable,
+            "revision_ready": revision_ready,
+        }
+
+    def _control_plane_stall_hint(self) -> str | None:
+        """Detect kind/control-plane issues that stall Deployment rollouts."""
+        if self._core is None:
+            return None
+        try:
+            pods = self._core.list_namespaced_pod(
+                "kube-system",
+                label_selector="component=kube-controller-manager",
+            )
+        except Exception:
+            return None
+        for pod in pods.items or []:
+            phase = pod.status.phase if pod.status else None
+            for status in pod.status.container_statuses or []:
+                waiting = status.state.waiting if status.state else None
+                reason = waiting.reason if waiting else None
+                if reason in {"CrashLoopBackOff", "Error", "ImagePullBackOff"} or (
+                    phase and phase != "Running"
+                ):
+                    return (
+                        f"Cluster control plane unhealthy: kube-controller-manager "
+                        f"is {reason or phase}. Deployment rollouts will stall until "
+                        "it recovers (common on overloaded kind clusters)."
+                    )
+                if status.ready is False:
+                    restarts = status.restart_count or 0
+                    if restarts >= 3:
+                        return (
+                            "Cluster control plane unhealthy: kube-controller-manager "
+                            f"not Ready (restarts={restarts}). Deployment rollouts may stall."
+                        )
+        return None
+
+    def delete_namespaced_hpa(self, *, namespace: str, name: str = "app") -> None:
+        """Best-effort remove of preview HPA (kind has no metrics-server)."""
+        if self._autoscaling is None:
+            return
+        from kubernetes.client.rest import ApiException
+
+        try:
+            self._autoscaling.delete_namespaced_horizontal_pod_autoscaler(name, namespace)
+            logger.info("preview_hpa_removed", namespace=namespace, name=name)
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                logger.warning(
+                    "preview_hpa_remove_failed",
+                    namespace=namespace,
+                    name=name,
+                    error=str(exc),
+                )
+        except Exception as exc:
+            logger.warning(
+                "preview_hpa_remove_failed",
+                namespace=namespace,
+                name=name,
+                error=str(exc),
+            )
+
+    def scale_deployment(self, *, namespace: str, replicas: int = 1) -> None:
+        """Scale deployment replicas in namespace (0 to pause, 1 to resume)."""
+        if not self._settings.kubernetes_enabled or self._apps is None:
+            return
+        from kubernetes.client.rest import ApiException
+
+        try:
+            deployments = self._apps.list_namespaced_deployment(namespace)
+            for dep in deployments.items or []:
+                dep_name = dep.metadata.name if dep.metadata else "app"
+                body = {"spec": {"replicas": replicas}}
+                self._apps.patch_namespaced_deployment(dep_name, namespace, body)
+                logger.info(
+                    "kubernetes_deployment_scaled",
+                    namespace=namespace,
+                    name=dep_name,
+                    replicas=replicas,
+                )
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                logger.warning(
+                    "kubernetes_scale_deployment_failed",
+                    namespace=namespace,
+                    replicas=replicas,
+                    error=str(exc),
+                )
+
+    def _first_pod_image_error(self, *, namespace: str) -> str | None:
+        if self._core is None:
+            return None
+        from app.services.k8s_spec import preview_workload_selector
+
+        selector = ",".join(f"{k}={v}" for k, v in preview_workload_selector().items())
+        try:
+            pods = self._core.list_namespaced_pod(namespace, label_selector=selector)
+        except Exception as exc:
+            logger.warning("kubernetes_list_pods_for_image_error_failed", error=str(exc))
+            return None
+        terminal_reasons = {"ErrImagePull", "ImagePullBackOff", "InvalidImageName"}
+        for pod in pods.items or []:
+            pod_name = pod.metadata.name if pod.metadata else "app"
+            for status in pod.status.container_statuses or []:
+                waiting = status.state.waiting if status.state else None
+                if waiting is None or waiting.reason not in terminal_reasons:
+                    continue
+                detail = (waiting.message or "").strip()
+                image = status.image or "unknown"
+                if detail:
+                    return (
+                        f"Failed to pull image {image} for pod {pod_name}: "
+                        f"{waiting.reason} — {detail}"
+                    )
+                return f"Failed to pull image {image} for pod {pod_name}: {waiting.reason}"
+        return None
+
+    def _first_pod_probe_hint(self, *, namespace: str) -> str | None:
+        """Best-effort hint from pod conditions / container state for timeouts."""
+        if self._core is None:
+            return None
+        from app.services.k8s_spec import preview_workload_selector
+
+        selector = ",".join(f"{k}={v}" for k, v in preview_workload_selector().items())
+        try:
+            pods = self._core.list_namespaced_pod(namespace, label_selector=selector)
+        except Exception:
+            return None
+        for pod in pods.items or []:
+            pod_name = pod.metadata.name if pod.metadata else "app"
+            for status in pod.status.container_statuses or []:
+                waiting = status.state.waiting if status.state else None
+                if waiting and waiting.reason:
+                    detail = (waiting.message or waiting.reason).strip()
+                    return f"Pod {pod_name} waiting: {detail}"
+                last = status.last_state.terminated if status.last_state else None
+                if last and last.reason:
+                    return (
+                        f"Pod {pod_name} last exit={last.exit_code} reason={last.reason}. "
+                        "Check that readiness probes target the port your app listens on "
+                        "(image EXPOSE / containerPort)."
+                    )
+            for condition in pod.status.conditions or []:
+                if condition.type == "Ready" and condition.status != "True" and condition.message:
+                    return f"Pod {pod_name}: {condition.message}"
+        return (
+            "Check readiness/liveness probes and containerPort — "
+            "apps that listen on a non-80 port need matching probes/Service targetPort. "
+            "Dev servers (Vite/Node) often need TCP probes: HTTP GET can hang awaiting headers "
+            "while the process is compiling."
+        )
+
+    def _ready_pods_match_image(self, *, namespace: str, expected_image: str) -> bool:
+        if self._core is None:
+            return True
+        from app.services.k8s_spec import preview_workload_selector
+
+        selector = ",".join(f"{k}={v}" for k, v in preview_workload_selector().items())
+        try:
+            pods = self._core.list_namespaced_pod(namespace, label_selector=selector)
+        except Exception:
+            return False
+        matched = False
+        for pod in pods.items or []:
+            phase = pod.status.phase if pod.status else None
+            if phase != "Running":
+                continue
+            for status in pod.status.container_statuses or []:
+                if not status.ready:
+                    continue
+                if status.image == expected_image or (status.image_id or "").find(
+                    expected_image.split(":")[0]
+                ) >= 0:
+                    matched = True
+                else:
+                    return False
+        return matched
+
+    def _apply_ingress(
+        self,
+        *,
+        namespace: str,
+        labels: dict[str, str],
+        host: str,
+    ) -> None:
+        assert self._networking is not None
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        ingress = client.V1Ingress(
+            metadata=client.V1ObjectMeta(name="app", namespace=namespace, labels=labels),
+            spec=client.V1IngressSpec(
+                rules=[
+                    client.V1IngressRule(
+                        host=host,
+                        http=client.V1HTTPIngressRuleValue(
+                            paths=[
+                                client.V1HTTPIngressPath(
+                                    path="/",
+                                    path_type="Prefix",
+                                    backend=client.V1IngressBackend(
+                                        service=client.V1IngressServiceBackend(
+                                            name="app",
+                                            port=client.V1ServiceBackendPort(number=80),
+                                        )
+                                    ),
+                                )
+                            ]
+                        ),
+                    )
+                ]
+            ),
+        )
+        try:
+            self._networking.read_namespaced_ingress("app", namespace)
+            self._networking.replace_namespaced_ingress("app", namespace, ingress)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._networking.create_namespaced_ingress(namespace, ingress)
+        logger.info("kubernetes_ingress_applied", namespace=namespace, host=host)
+
+    def _list_allocated_node_ports(self, *, exclude_namespace: str | None = None) -> set[int]:
+        """Return NodePorts already claimed by Services cluster-wide."""
+        if not self._settings.kubernetes_enabled or self._core is None:
+            return set()
+        used: set[int] = set()
+        try:
+            services = self._core.list_service_for_all_namespaces()
+        except Exception as exc:
+            logger.warning("kubernetes_list_services_for_nodeports_failed", error=str(exc))
+            return used
+        for svc in services.items or []:
+            meta = svc.metadata
+            if (
+                exclude_namespace
+                and meta is not None
+                and meta.namespace == exclude_namespace
+            ):
+                continue
+            ports = (svc.spec.ports if svc.spec else None) or []
+            for port in ports:
+                if port.node_port:
+                    used.add(int(port.node_port))
+        return used
+
+    def _read_namespaced_app_node_port(self, namespace: str) -> int | None:
+        if not self._settings.kubernetes_enabled or self._core is None:
+            return None
+        from kubernetes.client.rest import ApiException
+
+        try:
+            existing = self._core.read_namespaced_service("app", namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if (
+            existing.spec is None
+            or existing.spec.type != "NodePort"
+            or not existing.spec.ports
+            or existing.spec.ports[0].node_port is None
+        ):
+            return None
+        return int(existing.spec.ports[0].node_port)
+
+    def _build_app_container(
+        self,
+        *,
+        image: str,
+        git_repo_url: str,
+        git_branch: str,
+        commit_sha: str | None = None,
+        listen_port: int,
+    ) -> object:
+        """Hardened app container spec shared by provision and rebuild paths."""
+        from kubernetes import client
+
+        effective_port = 80 if "http-echo" in image else listen_port
+        nginx = _is_nginx_image(image)
+
+        env = [
+            client.V1EnvVar(name="GIT_REPO_URL", value=git_repo_url),
+            client.V1EnvVar(name="GIT_BRANCH", value=git_branch),
+            client.V1EnvVar(name="PORT", value=str(effective_port)),
+        ]
+        if commit_sha:
+            env.append(client.V1EnvVar(name="GIT_COMMIT_SHA", value=commit_sha))
+        if not nginx and not "http-echo" in image:
+            # Frontend dev servers often require binding to all interfaces for probes.
+            env.extend(
+                [
+                    client.V1EnvVar(name="HOST", value="0.0.0.0"),
+                    client.V1EnvVar(name="APP_PORT", value=str(effective_port)),
+                ]
+            )
+
+        resources = (
+            # Non-nginx workloads can cold-start longer and need more headroom.
+            client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "256Mi"},
+                limits={"cpu": "500m", "memory": "768Mi"},
+            )
+            if not nginx and "http-echo" not in image
+            else client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "128Mi"},
+                limits={"cpu": "500m", "memory": "512Mi"},
+            )
+        )
+
+        read_only_root_filesystem = nginx and "http-echo" not in image
+
+        container = client.V1Container(
+            name="app",
+            image=image,
+            ports=[client.V1ContainerPort(container_port=effective_port)],
+            resources=resources,
+            readiness_probe=client.V1Probe(
+                http_get=client.V1HTTPGetAction(path="/", port=effective_port) if nginx else None,
+                tcp_socket=client.V1TCPSocketAction(port=effective_port) if not nginx else None,
+                initial_delay_seconds=5 if nginx else 5,
+                period_seconds=10 if nginx else 5,
+                timeout_seconds=3,
+                failure_threshold=3 if nginx else 12,
+                success_threshold=1,
+            ),
+            liveness_probe=client.V1Probe(
+                http_get=client.V1HTTPGetAction(path="/", port=effective_port) if nginx else None,
+                tcp_socket=client.V1TCPSocketAction(port=effective_port) if not nginx else None,
+                initial_delay_seconds=15 if nginx else 120,
+                period_seconds=20 if nginx else 20,
+                timeout_seconds=3,
+                failure_threshold=3 if nginx else 6,
+                success_threshold=1,
+            ),
+            startup_probe=client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=effective_port) if not nginx else None,
+                period_seconds=5 if not nginx else None,
+                timeout_seconds=3 if not nginx else None,
+                failure_threshold=48 if not nginx else None,
+                success_threshold=1 if not nginx else None,
+                initial_delay_seconds=0 if not nginx else None,
+            )
+            if not nginx
+            else None,
+            env=env,
+            security_context=client.V1SecurityContext(
+                allow_privilege_escalation=False,
+                read_only_root_filesystem=bool(read_only_root_filesystem),
+                capabilities=client.V1Capabilities(drop=["ALL"]),
+            ),
+            volume_mounts=[
+                client.V1VolumeMount(name="tmp", mount_path="/tmp"),
+                client.V1VolumeMount(name="cache", mount_path="/var/cache/nginx"),
+                client.V1VolumeMount(name="run", mount_path="/var/run"),
+            ],
+        )
+        if "http-echo" in image:
+            container.args = ["-listen=:80", "-text=launchpad-preview"]
+            container.volume_mounts = None
+            container.security_context = client.V1SecurityContext(
+                allow_privilege_escalation=False,
+                read_only_root_filesystem=False,
+                capabilities=client.V1Capabilities(drop=["ALL"]),
+            )
+        return container
+
+    def _build_app_deployment(
+        self,
+        *,
+        namespace: str,
+        labels: dict[str, str],
+        annotations: dict[str, str],
+        image: str,
+        git_repo_url: str,
+        git_branch: str,
+        commit_sha: str | None = None,
+        listen_port: int,
+    ) -> object:
+        from kubernetes import client
+
+        selector = preview_workload_selector()
+        container = self._build_app_container(
+            image=image,
+            git_repo_url=git_repo_url,
+            git_branch=git_branch,
+            commit_sha=commit_sha,
+            listen_port=listen_port,
+        )
+        volumes = [
+            client.V1Volume(name="tmp", empty_dir=client.V1EmptyDirVolumeSource()),
+            client.V1Volume(name="cache", empty_dir=client.V1EmptyDirVolumeSource()),
+            client.V1Volume(name="run", empty_dir=client.V1EmptyDirVolumeSource()),
+        ]
+        pod_security: object | None = None
+        if _is_nginx_image(image):
+            pod_security = client.V1PodSecurityContext(
+                run_as_non_root=True,
+                run_as_user=101,
+                seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
+            )
+        if "http-echo" in image:
+            volumes = []
+            pod_security = None
+
+        return client.V1Deployment(
+            metadata=client.V1ObjectMeta(
+                name="app",
+                namespace=namespace,
+                labels=labels,
+                annotations=annotations,
+            ),
+            spec=client.V1DeploymentSpec(
+                replicas=1,
+                selector=client.V1LabelSelector(match_labels=selector),
+                template=client.V1PodTemplateSpec(
+                    metadata=client.V1ObjectMeta(
+                        labels={**labels, **selector},
+                        annotations=annotations,
+                    ),
+                    spec=client.V1PodSpec(
+                        containers=[container],
+                        volumes=volumes or None,
+                        security_context=pod_security,
+                    ),
+                ),
+            ),
+        )
+
+    def _apply_workload(
+        self,
+        *,
+        namespace: str,
+        labels: dict[str, str],
+        git_branch: str,
+        git_repo_url: str,
+        image: str,
+        listen_port: int,
+        node_port: int,
+        used_ports: set[int] | None = None,
+        environment_id: str | None = None,
+    ) -> int:
+        assert self._core is not None and self._apps is not None
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        annotations = {
+            "launchpad.io/git-repo": git_repo_url,
+            "launchpad.io/git-branch": git_branch,
+        }
+        deployment = self._build_app_deployment(
+            namespace=namespace,
+            labels=labels,
+            annotations=annotations,
+            image=image,
+            git_repo_url=git_repo_url,
+            git_branch=git_branch,
+            listen_port=listen_port,
+        )
+        selector = preview_workload_selector()
+        try:
+            self._apps.read_namespaced_deployment("app", namespace)
+            self._apps.replace_namespaced_deployment("app", namespace, deployment)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._apps.create_namespaced_deployment(namespace, deployment)
+
+        claimed = set(used_ports or ())
+        candidates = [node_port]
+        # On collision races, walk the configured range for another free port.
+        port_min = self._settings.preview_node_port_min
+        port_max = self._settings.preview_node_port_max
+        for port in range(port_min, port_max + 1):
+            if port not in candidates and port not in claimed:
+                candidates.append(port)
+
+        last_error: ApiException | None = None
+        applied_port = node_port
+        for candidate in candidates:
+            service = client.V1Service(
+                metadata=client.V1ObjectMeta(name="app", namespace=namespace, labels=labels),
+                spec=client.V1ServiceSpec(
+                    selector=selector,
+                    ports=[
+                        client.V1ServicePort(
+                            port=80,
+                            target_port=listen_port,
+                            protocol="TCP",
+                            node_port=candidate,
+                        )
+                    ],
+                    type="NodePort",
+                ),
+            )
+            try:
+                existing = self._core.read_namespaced_service("app", namespace)
+                if (
+                    existing.spec is not None
+                    and existing.spec.type == "NodePort"
+                    and existing.spec.ports
+                    and existing.spec.ports[0].node_port == candidate
+                ):
+                    self._core.replace_namespaced_service("app", namespace, service)
+                else:
+                    try:
+                        self._core.delete_namespaced_service("app", namespace)
+                    except ApiException as delete_exc:
+                        if delete_exc.status != 404:
+                            raise
+                    self._core.create_namespaced_service(namespace, service)
+                applied_port = candidate
+                last_error = None
+                break
+            except ApiException as exc:
+                if exc.status == 404:
+                    try:
+                        self._core.create_namespaced_service(namespace, service)
+                        applied_port = candidate
+                        last_error = None
+                        break
+                    except ApiException as create_exc:
+                        if _is_node_port_allocated_error(create_exc):
+                            logger.warning(
+                                "kubernetes_node_port_collision",
+                                namespace=namespace,
+                                node_port=candidate,
+                            )
+                            claimed.add(candidate)
+                            last_error = create_exc
+                            continue
+                        raise
+                if _is_node_port_allocated_error(exc):
+                    logger.warning(
+                        "kubernetes_node_port_collision",
+                        namespace=namespace,
+                        node_port=candidate,
+                    )
+                    claimed.add(candidate)
+                    last_error = exc
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+
+        logger.info(
+            "kubernetes_workload_applied",
+            namespace=namespace,
+            image=image,
+            git_branch=git_branch,
+            node_port=applied_port,
+            environment_id=environment_id,
+        )
+        return applied_port
+
+    def rebuild_workload(
+        self,
+        *,
+        namespace: str,
+        environment_id: str,
+        name: str,
+        git_branch: str,
+        git_repo_url: str,
+        commit_sha: str,
+        owner_label: str = "launchpad",
+        image: str | None = None,
+    ) -> None:
+        """Roll the app Deployment to a commit-tagged image annotation/env."""
+        resolved_image = image or self._image_for_commit(commit_sha)
+        listen_port = _resolve_listen_port_from_image(resolved_image)
+        ready_timeout = _workload_ready_timeout_seconds(
+            image=resolved_image, base_timeout_seconds=self._settings.kubernetes_ready_timeout_seconds
+        )
+        labels = build_preview_labels(
+            environment_id=environment_id,
+            name=name,
+            git_branch=git_branch,
+            git_repo_url=git_repo_url,
+            owner_label=owner_label,
+        )
+        labels["launchpad.io/git-commit"] = sanitize_label(commit_sha)
+
+        if not self._settings.kubernetes_enabled:
+            logger.info(
+                "kubernetes_simulate_rebuild",
+                namespace=namespace,
+                environment_id=environment_id,
+                commit_sha=commit_sha,
+                image=resolved_image,
+            )
+            return
+
+        assert self._apps is not None and self._core is not None
+        from kubernetes.client.rest import ApiException
+
+        annotations = {
+            "launchpad.io/git-repo": git_repo_url,
+            "launchpad.io/git-branch": git_branch,
+            "launchpad.io/git-commit": commit_sha,
+        }
+        deployment = self._build_app_deployment(
+            namespace=namespace,
+            labels=labels,
+            annotations=annotations,
+            image=resolved_image,
+            git_repo_url=git_repo_url,
+            git_branch=git_branch,
+            commit_sha=commit_sha,
+            listen_port=listen_port,
+        )
+        try:
+            self._apps.read_namespaced_deployment("app", namespace)
+            self._apps.replace_namespaced_deployment("app", namespace, deployment)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._apps.create_namespaced_deployment(namespace, deployment)
+
+        # Best-effort: align the Service targetPort with the Deployment containerPort.
+        try:
+            existing_svc = self._core.read_namespaced_service("app", namespace)
+            if existing_svc.spec and existing_svc.spec.ports:
+                existing_svc.spec.ports[0].target_port = listen_port
+                self._core.replace_namespaced_service("app", namespace, existing_svc)
+        except Exception:
+            pass
+
+        self.wait_for_workload_ready(
+            namespace=namespace,
+            timeout_seconds=ready_timeout,
+            expected_image=resolved_image,
+        )
+
+        logger.info(
+            "kubernetes_workload_rebuilt",
+            namespace=namespace,
+            image=resolved_image,
+            commit_sha=commit_sha,
+        )
+
+    def _image_for_commit(self, commit_sha: str) -> str:
+        base = self._settings.default_workload_image
+        if ":" in base.rsplit("/", 1)[-1]:
+            repo = base.rsplit(":", 1)[0]
+        else:
+            repo = base
+        tag = commit_sha if commit_sha else "latest"
+        return f"{repo}:{tag}"
+
+    def teardown(self, namespace: str) -> None:
+        if not self._settings.kubernetes_enabled:
+            logger.info("kubernetes_simulate_teardown", namespace=namespace)
+            return
+
+        assert self._core is not None
+        from kubernetes.client.rest import ApiException
+
+        try:
+            self._core.delete_namespace(namespace)
+            logger.info("kubernetes_namespace_deleted", namespace=namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                logger.info("kubernetes_namespace_already_gone", namespace=namespace)
+                return
+            raise
+
+    def rollback(self, resources: ProvisionedResources) -> None:
+        """Undo provision work without destroying a pre-existing preview namespace.
+
+        Retry/re-provision often applies into an existing namespace. Tearing that
+        namespace down on Ready-timeout deletes the manifest image and leaves Open
+        app pointing at a different nginx NodePort on another environment.
+        """
+        if not self._settings.kubernetes_enabled:
+            return
+        if resources.created_namespace:
+            self.teardown(resources.namespace)
+            return
+        logger.info(
+            "kubernetes_rollback_skipped_existing_namespace",
+            namespace=resources.namespace,
+            created_workload=resources.created_workload,
+            image=resources.image,
+            node_port=resources.node_port,
+        )
+
+
+def allocate_node_port(
+    environment_id: str,
+    *,
+    port_min: int,
+    port_max: int,
+    used_ports: set[int] | frozenset[int] | None = None,
+) -> int:
+    """Pick a NodePort in [port_min, port_max], preferring a stable hash of env id.
+
+    Skips ports listed in ``used_ports`` (already allocated in the cluster).
+    """
+    if port_max < port_min:
+        raise ValueError("preview_node_port_max must be >= preview_node_port_min")
+    span = port_max - port_min + 1
+    digest = hashlib.sha256(environment_id.encode("utf-8")).hexdigest()
+    start = int(digest[:8], 16) % span
+    used = used_ports or set()
+    for step in range(span):
+        candidate = port_min + ((start + step) % span)
+        if candidate not in used:
+            return candidate
+    raise RuntimeError(
+        f"No free NodePort in [{port_min}, {port_max}] "
+        f"({len(used)} already allocated). Destroy a preview or widen "
+        "PREVIEW_NODE_PORT_MIN/MAX (and kind port mappings)."
+    )
+
+
+def resolve_preview_node_port(
+    environment_id: str,
+    *,
+    existing_port: int | None,
+    port_min: int,
+    port_max: int,
+    used_ports: set[int] | frozenset[int] | None = None,
+) -> int:
+    """Keep an in-range sticky NodePort; otherwise allocate inside the mapped window.
+
+    Kubernetes auto-assigns NodePorts in 30000–32767 when a Service is created as
+    NodePort without an explicit ``nodePort``. Those ports are usually outside the
+    kind ``extraPortMappings`` range and will not load from the host.
+    """
+    if existing_port is not None and port_min <= existing_port <= port_max:
+        return existing_port
+    return allocate_node_port(
+        environment_id,
+        port_min=port_min,
+        port_max=port_max,
+        used_ports=used_ports,
+    )
+
+
+def _is_node_port_allocated_error(exc: Exception) -> bool:
+    body = getattr(exc, "body", None) or str(exc)
+    text = body if isinstance(body, str) else str(body)
+    return "nodePort" in text and "already allocated" in text
+
+

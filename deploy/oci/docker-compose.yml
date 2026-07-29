@@ -1,0 +1,170 @@
+# Production-oriented stack for Oracle Cloud Always Free (Ampere A1 / x86).
+# From repo root:
+#   cp deploy/oci/env.example deploy/oci/.env
+#   # edit deploy/oci/.env
+#   docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build
+#
+# Or: make oci-up
+
+name: launchpad-oci
+
+services:
+  caddy:
+    image: caddy:2.9-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      LAUNCHPAD_SITE_ADDRESS: ${LAUNCHPAD_SITE_ADDRESS:-:80}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ../../apps/web
+      dockerfile: Dockerfile
+      args:
+        NUXT_PUBLIC_API_BASE: /api/v1
+        # Empty → browser uses same-origin wss/ws via Caddy (see useTerminalSession).
+        NUXT_PUBLIC_WS_BASE: ""
+    restart: unless-stopped
+    environment:
+      NUXT_PUBLIC_API_BASE: /api/v1
+      NUXT_PUBLIC_WS_BASE: ""
+      NITRO_HOST: 0.0.0.0
+      NITRO_PORT: "3000"
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment: &api_env
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-launchpad}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-launchpad}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CORS_ORIGINS: '["${LAUNCHPAD_PUBLIC_ORIGIN}"]'
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JWT_SECRET: ${JWT_SECRET}
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY}
+      AUTH_DEV_LOGIN_ENABLED: ${AUTH_DEV_LOGIN_ENABLED:-false}
+      DEFAULT_WORKLOAD_IMAGE: ${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine}
+      KUBERNETES_ENABLED: ${KUBERNETES_ENABLED:-false}
+      IAC_WORKSPACE_ROOT: /var/lib/launchpad/workspaces
+      INVITE_BASE_URL: ${LAUNCHPAD_PUBLIC_ORIGIN}/invite
+      GITHUB_APP_SETUP_URL: ${LAUNCHPAD_PUBLIC_ORIGIN}/integrations/github
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+    volumes:
+      - workspace_data:/var/lib/launchpad/workspaces
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile
+    command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+    restart: unless-stopped
+    environment:
+      <<: *api_env
+    volumes:
+      - workspace_data:/var/lib/launchpad/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile
+    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+    restart: unless-stopped
+    environment:
+      <<: *api_env
+      TTL_REAPER_INTERVAL_SECONDS: ${TTL_REAPER_INTERVAL_SECONDS:-300}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-launchpad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-launchpad}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-launchpad} -d ${POSTGRES_DB:-launchpad}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Not published — only reachable on the compose network.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
+  workspace_data:
+  caddy_data:
+  caddy_config:

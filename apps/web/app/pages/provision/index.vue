@@ -1,0 +1,1518 @@
+<script setup lang="ts">
+import {
+  githubRepoSchema,
+  provisioningWizardSchema,
+  type ProvisioningWizardInput,
+} from '~/utils/cloudValidation'
+import type {
+  CloudProvider,
+  CostOptimizationConfig,
+  GitHubAppStatus,
+  GitHubRepoResult,
+  IaCBundleSummary,
+  IaCEngine,
+  InfraGenerationConfig,
+  KubernetesPackaging,
+  KubernetesWorkloadOptions,
+  WorkspaceArtifactsMode,
+  WorkspaceListItem,
+  WorkspaceWizardConfig,
+} from '~/types/provisioning'
+import { defaultKubernetesWorkloadOptions } from '~/utils/cloudValidation'
+import {
+  applyCostOptimizationToWorkloadOptions,
+  costOptimizationFromApi,
+  defaultCostOptimizationConfig,
+} from '~/utils/costOptimization'
+import {
+  artifactModeToInfraConfig,
+  buildCiCdScaffold,
+  defaultInfraGenerationConfig,
+  infraConfigToArtifactMode,
+  infraConfigToKubernetesPackaging,
+} from '~/utils/workspaceInfraScaffold'
+
+const {
+  createWorkspace,
+  updateWorkspace,
+  openTerminal,
+  createGithubRepo,
+  getGithubAppStatus,
+  getWizardConfig,
+  getWorkspace,
+  listWorkspaces,
+  writeWorkspaceFile,
+} = useProvisioning()
+const terminalOpen = useState('lp-terminal-open', () => false)
+const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
+
+const TOTAL_STEPS = 4
+const currentStep = ref(1)
+const NEW_WORKSPACE = '__new__'
+
+const existingWorkspaces = ref<WorkspaceListItem[]>([])
+const selectedWorkspaceId = ref<string>(NEW_WORKSPACE)
+/** Workspace created in this browser session; retries update it instead of creating again. */
+const sessionCreatedWorkspaceId = ref<string | null>(null)
+const hasStoredCredentials = ref(false)
+const loadingConfig = ref(false)
+
+const infraGeneration = ref<InfraGenerationConfig>(defaultInfraGenerationConfig({ isLocal: true }))
+
+const form = reactive({
+  name: '',
+  iac_engine: 'terraform' as IaCEngine,
+  provider: 'local' as CloudProvider,
+  run_init: true,
+  artifact_mode: 'manifest_only' as WorkspaceArtifactsMode,
+  kubernetes_packaging: 'raw_manifests' as KubernetesPackaging,
+  kubernetes_options: defaultKubernetesWorkloadOptions() as KubernetesWorkloadOptions,
+  cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
+  container_scaffold: {
+    enabled: false,
+    generate_dockerfile: true,
+    generate_docker_compose: true,
+    stack: 'node' as const,
+    app_name: 'app',
+    listen_port: 8080,
+  },
+  local: {
+    cluster_name: 'launchpad',
+    context: 'kind-launchpad',
+  },
+  gcp: {
+    vpc: true,
+    subnets: true,
+    gke: false,
+    artifact_registry: false,
+    secret_backend: 'secret_manager' as 'secret_manager' | 'native_k8s',
+    cloud_run: false,
+    cloud_functions: false,
+    cloud_sql: false,
+    cloud_storage: false,
+    pubsub: false,
+    memorystore: false,
+    bigquery: false,
+    region: 'us-central1',
+    project_id: '',
+  },
+  aws: {
+    vpc: true,
+    subnets: true,
+    ec2: false,
+    s3: false,
+    eks: false,
+    secrets_manager: true,
+    rds: false,
+    ecr: false,
+    elasticache: false,
+    lambda_fn: false,
+    dynamodb: false,
+    sqs: false,
+    alb: false,
+    region: 'us-east-1',
+    account_alias: '',
+  },
+  azure: {
+    vnet: true,
+    subnets: true,
+    aks: false,
+    key_vault: true,
+    container_apps: false,
+    acr: false,
+    storage_account: false,
+    cosmos_db: false,
+    redis_cache: false,
+    app_service: false,
+    log_analytics: false,
+    location: 'eastus',
+    resource_group: '',
+  },
+  cloudflare: {
+    workers: false,
+    r2: false,
+    dns_records: false,
+    pages: false,
+    kv: false,
+    d1: false,
+    tunnels: false,
+    queues: false,
+    account_id: '',
+    zone_name: '',
+  },
+  credentials: {
+    gcp_sa_key_json: '',
+    aws_access_key_id: '',
+    aws_secret_access_key: '',
+    aws_session_token: '',
+    azure_client_id: '',
+    azure_client_secret: '',
+    azure_tenant_id: '',
+    azure_subscription_id: '',
+    cloudflare_api_token: '',
+  },
+  github: {
+    name: '',
+    description: 'Bootstrapped by Launchpad',
+    private: true,
+    installation_id: null as number | null,
+    organization: '',
+    set_cloud_secrets: false,
+    include_workflow: true,
+    include_dockerfiles: true,
+    repo_mode: 'create' as 'create' | 'existing',
+    existing_full_name: '',
+  },
+})
+
+const fieldError = ref<string | null>(null)
+const githubError = ref<string | null>(null)
+const githubStatus = ref<string | null>(null)
+const submitting = ref(false)
+const bundle = ref<IaCBundleSummary | null>(null)
+const wsPath = ref<string | null>(null)
+const githubResult = ref<GitHubRepoResult | null>(null)
+const githubApp = ref<GitHubAppStatus | null>(null)
+
+const isNewWorkspace = computed(() => selectedWorkspaceId.value === NEW_WORKSPACE)
+const selectedExisting = computed(() =>
+  existingWorkspaces.value.find((ws) => ws.id === selectedWorkspaceId.value) ?? null,
+)
+
+const showsKubernetesPackaging = computed(() => {
+  if (form.artifact_mode === 'iac_only') return false
+  if (form.provider === 'local') return true
+  if (form.provider === 'gcp') return form.gcp.gke || form.gcp.cloud_run
+  if (form.provider === 'aws') return form.aws.eks
+  if (form.provider === 'azure') return form.azure.aks || form.azure.container_apps
+  return false
+})
+
+const isLocalProvider = computed(() => form.provider === 'local')
+
+const packagingSectionEl = ref<HTMLElement | null>(null)
+
+watch(showsKubernetesPackaging, async (visible) => {
+  if (!visible) {
+    if (form.provider !== 'local') {
+      infraGeneration.value.kubernetes.enabled = false
+      form.kubernetes_packaging = 'none'
+      form.kubernetes_options = defaultKubernetesWorkloadOptions()
+    }
+    return
+  }
+  if (form.kubernetes_packaging === 'none') {
+    form.kubernetes_packaging = 'raw_manifests'
+    infraGeneration.value.kubernetes.enabled = true
+    form.kubernetes_options = defaultKubernetesWorkloadOptions()
+  }
+  await nextTick()
+  packagingSectionEl.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+})
+
+function syncFormFromInfraGeneration() {
+  if (form.provider === 'local') {
+    form.artifact_mode = 'manifest_only'
+    form.kubernetes_packaging =
+      infraGeneration.value.kubernetes.mode === 'helm' ? 'helm' : 'raw_manifests'
+    return
+  }
+  form.artifact_mode = infraConfigToArtifactMode(infraGeneration.value)
+  form.iac_engine = infraGeneration.value.provision.engine
+  form.kubernetes_packaging = infraConfigToKubernetesPackaging(infraGeneration.value)
+}
+
+watch(
+  infraGeneration,
+  () => {
+    syncFormFromInfraGeneration()
+  },
+  { deep: true },
+)
+
+watch(
+  () => form.kubernetes_packaging,
+  (packaging) => {
+    if (packaging === 'helm') {
+      infraGeneration.value.kubernetes.mode = 'helm'
+    } else if (packaging === 'raw_manifests') {
+      infraGeneration.value.kubernetes.mode = 'k8s'
+    }
+  },
+)
+
+watch(
+  () => form.provider,
+  (provider) => {
+    if (provider === 'local') {
+      infraGeneration.value = defaultInfraGenerationConfig({ isLocal: true })
+      form.github.set_cloud_secrets = false
+      return
+    }
+    if (!infraGeneration.value.provision.enabled && !infraGeneration.value.kubernetes.enabled) {
+      infraGeneration.value = defaultInfraGenerationConfig()
+    } else {
+      infraGeneration.value = {
+        ...infraGeneration.value,
+        provision: { ...infraGeneration.value.provision, enabled: true },
+      }
+    }
+  },
+)
+
+onMounted(async () => {
+  try {
+    existingWorkspaces.value = await listWorkspaces()
+  } catch {
+    existingWorkspaces.value = []
+  }
+  try {
+    githubApp.value = await getGithubAppStatus()
+    applyGithubDefaults(githubApp.value)
+  } catch {
+    githubApp.value = {
+      configured: false,
+      message: 'Unable to load GitHub App status',
+      installations: [],
+    }
+  }
+})
+
+function applyGithubDefaults(status: GitHubAppStatus) {
+  const defaultId = status.default_installation_id
+  if (defaultId && !form.github.installation_id) {
+    form.github.installation_id = defaultId
+  } else if (status.installations.length === 1 && !form.github.installation_id) {
+    form.github.installation_id = status.installations[0]!.id
+  }
+}
+
+function onGithubAppUpdated(status: GitHubAppStatus) {
+  githubApp.value = status
+  applyGithubDefaults(status)
+}
+
+const providers: Array<{
+  id: CloudProvider
+  label: string
+  badge: string
+  icon: string
+  blurb: string
+}> = [
+  {
+    id: 'local',
+    label: 'Dev (kind)',
+    badge: 'LOCAL',
+    icon: 'developer_board',
+    blurb: 'Verify Launchpad on your machine with kind — no cloud credentials.',
+  },
+  {
+    id: 'aws',
+    label: 'Amazon Web Services',
+    badge: 'AWS',
+    icon: 'cloud',
+    blurb: 'Enterprise scalability with EKS, EC2, and Secrets Manager.',
+  },
+  {
+    id: 'gcp',
+    label: 'Google Cloud',
+    badge: 'GCP',
+    icon: 'deployed_code',
+    blurb: 'Best-in-class GKE, Artifact Registry, and Cloud Run.',
+  },
+  {
+    id: 'azure',
+    label: 'Microsoft Azure',
+    badge: 'AZURE',
+    icon: 'grid_view',
+    blurb: 'AKS, Key Vault, and Container Apps for MS stacks.',
+  },
+  {
+    id: 'cloudflare',
+    label: 'Cloudflare',
+    badge: 'EDGE',
+    icon: 'bolt',
+    blurb: 'Low-latency Workers, R2, and edge DNS.',
+  },
+]
+
+const progressPct = computed(() => (currentStep.value / TOTAL_STEPS) * 100)
+
+const stepTitle = computed(() => {
+  switch (currentStep.value) {
+    case 1:
+      return 'Select workspace & cloud'
+    case 2:
+      return `${form.provider.toUpperCase()} resources & credentials`
+    case 3:
+      return 'Connect GitHub'
+    default:
+      return isNewWorkspace.value ? 'Generate & launch sandbox' : 'Save changes & open sandbox'
+  }
+})
+
+function clearCredentials() {
+  form.credentials.gcp_sa_key_json = ''
+  form.credentials.aws_access_key_id = ''
+  form.credentials.aws_secret_access_key = ''
+  form.credentials.aws_session_token = ''
+  form.credentials.azure_client_id = ''
+  form.credentials.azure_client_secret = ''
+  form.credentials.azure_tenant_id = ''
+  form.credentials.azure_subscription_id = ''
+  form.credentials.cloudflare_api_token = ''
+}
+
+function applyWizardConfig(config: WorkspaceWizardConfig) {
+  form.name = config.name
+  form.iac_engine = config.iac_engine
+  form.run_init = config.run_init
+  form.artifact_mode = config.artifact_mode
+  form.kubernetes_packaging = config.kubernetes_packaging
+  infraGeneration.value = artifactModeToInfraConfig(
+    config.artifact_mode,
+    config.iac_engine,
+    config.kubernetes_packaging,
+  )
+  form.kubernetes_options = {
+    ...defaultKubernetesWorkloadOptions(),
+    ...config.kubernetes_options,
+  }
+  form.cost_optimization = costOptimizationFromApi(
+    config.cost_optimization as unknown as Record<string, unknown>,
+  )
+  if (config.container_scaffold) {
+    Object.assign(form.container_scaffold, config.container_scaffold)
+  }
+  form.provider = config.cloud.provider
+  hasStoredCredentials.value = config.has_credentials
+  clearCredentials()
+
+  const resources = config.cloud.resources as Record<string, unknown>
+  if (config.cloud.provider === 'local') {
+    Object.assign(form.local, {
+      cluster_name: 'launchpad',
+      context: 'kind-launchpad',
+      ...resources,
+    })
+    if (form.kubernetes_packaging === 'none') {
+      form.kubernetes_packaging = 'raw_manifests'
+    }
+    form.github.set_cloud_secrets = false
+  } else if (config.cloud.provider === 'gcp') {
+    Object.assign(form.gcp, {
+      vpc: true,
+      subnets: true,
+      gke: false,
+      artifact_registry: false,
+      secret_backend: 'secret_manager',
+      cloud_run: false,
+      cloud_functions: false,
+      cloud_sql: false,
+      cloud_storage: false,
+      pubsub: false,
+      memorystore: false,
+      bigquery: false,
+      region: 'us-central1',
+      project_id: '',
+      ...resources,
+    })
+  } else if (config.cloud.provider === 'aws') {
+    const accountAlias = (resources.account_alias as string | null | undefined) ?? ''
+    Object.assign(form.aws, {
+      vpc: true,
+      subnets: true,
+      ec2: false,
+      s3: false,
+      eks: false,
+      secrets_manager: true,
+      rds: false,
+      ecr: false,
+      elasticache: false,
+      lambda_fn: false,
+      dynamodb: false,
+      sqs: false,
+      alb: false,
+      region: 'us-east-1',
+      ...resources,
+      account_alias: accountAlias,
+    })
+  } else if (config.cloud.provider === 'azure') {
+    Object.assign(form.azure, {
+      vnet: true,
+      subnets: true,
+      aks: false,
+      key_vault: true,
+      container_apps: false,
+      acr: false,
+      storage_account: false,
+      cosmos_db: false,
+      redis_cache: false,
+      app_service: false,
+      log_analytics: false,
+      location: 'eastus',
+      resource_group: '',
+      ...resources,
+    })
+  } else {
+    const zoneName = (resources.zone_name as string | null | undefined) ?? ''
+    Object.assign(form.cloudflare, {
+      workers: false,
+      r2: false,
+      dns_records: false,
+      pages: false,
+      kv: false,
+      d1: false,
+      tunnels: false,
+      queues: false,
+      account_id: '',
+      ...resources,
+      zone_name: zoneName,
+    })
+  }
+}
+
+watch(selectedWorkspaceId, async (id) => {
+  if (id === NEW_WORKSPACE) {
+    sessionCreatedWorkspaceId.value = null
+    hasStoredCredentials.value = false
+    clearCredentials()
+    return
+  }
+  loadingConfig.value = true
+  fieldError.value = null
+  try {
+    const config = await getWizardConfig(id)
+    applyWizardConfig(config)
+  } catch (err) {
+    const ws = existingWorkspaces.value.find((item) => item.id === id)
+    if (ws) {
+      form.name = ws.name
+      if (ws.provider === 'local' || ws.provider === 'gcp' || ws.provider === 'aws' || ws.provider === 'azure' || ws.provider === 'cloudflare') {
+        form.provider = ws.provider
+      }
+      if (ws.engine === 'terraform' || ws.engine === 'opentofu' || ws.engine === 'pulumi') {
+        form.iac_engine = ws.engine
+      }
+    }
+    fieldError.value = err instanceof Error ? err.message : 'Failed to load workspace config'
+  } finally {
+    loadingConfig.value = false
+  }
+})
+
+watch(
+  () => form.github.installation_id,
+  (id) => {
+    const match = githubApp.value?.installations.find((item) => item.id === id)
+    if (match && match.account_type === 'Organization') {
+      form.github.organization = match.account_login
+    }
+  },
+)
+
+function buildWizardPayload(): ProvisioningWizardInput {
+  const syncedOptions = applyCostOptimizationToWorkloadOptions(
+    form.kubernetes_options,
+    form.cost_optimization,
+  )
+  form.kubernetes_options = syncedOptions
+  const base = {
+    name: form.name,
+    iac_engine: form.iac_engine,
+    credentials: form.credentials,
+    run_init: form.run_init,
+    kubernetes_packaging: form.kubernetes_packaging,
+    kubernetes_options: syncedOptions,
+    cost_optimization: form.cost_optimization,
+    container_scaffold: form.container_scaffold,
+  }
+  if (form.provider === 'local') {
+    return {
+      ...base,
+      provider: 'local',
+      resources: form.local,
+      artifact_mode: 'manifest_only',
+      kubernetes_packaging:
+        form.kubernetes_packaging === 'none' ? 'raw_manifests' : form.kubernetes_packaging,
+    }
+  }
+  if (form.provider === 'gcp') {
+    return { ...base, provider: 'gcp', resources: form.gcp, artifact_mode: form.artifact_mode }
+  }
+  if (form.provider === 'aws') {
+    return {
+      ...base,
+      provider: 'aws',
+      artifact_mode: form.artifact_mode,
+      resources: { ...form.aws, account_alias: form.aws.account_alias || null },
+    }
+  }
+  if (form.provider === 'azure') {
+    return { ...base, provider: 'azure', resources: form.azure, artifact_mode: form.artifact_mode }
+  }
+  return {
+    ...base,
+    provider: 'cloudflare',
+    artifact_mode: form.artifact_mode,
+    resources: { ...form.cloudflare, zone_name: form.cloudflare.zone_name || null },
+  }
+}
+
+function validateStep(): boolean {
+  fieldError.value = null
+  if (currentStep.value === 1) {
+    if (!isNewWorkspace.value) {
+      if (!selectedExisting.value) {
+        fieldError.value = 'Select a workspace.'
+        return false
+      }
+      return true
+    }
+    if (!form.name.trim() || form.name.trim().length < 3) {
+      fieldError.value = 'Workspace name must be at least 3 characters (lowercase, hyphens).'
+      return false
+    }
+    if (!/^[a-z][a-z0-9-]*$/.test(form.name.trim().toLowerCase())) {
+      fieldError.value = 'Name must start with a letter and use only a-z, 0-9, hyphens.'
+      return false
+    }
+  }
+  if (currentStep.value === 2) {
+    if (form.provider === 'local') {
+      if (!form.local.cluster_name.trim() || !form.local.context.trim()) {
+        fieldError.value = 'Kind cluster name and kubectl context are required.'
+        return false
+      }
+      if (!infraGeneration.value.kubernetes.enabled) {
+        fieldError.value = 'Enable Kubernetes generation for Dev (kind) workspaces.'
+        return false
+      }
+      return true
+    }
+    if (!infraGeneration.value.provision.enabled && !infraGeneration.value.kubernetes.enabled) {
+      fieldError.value = 'Enable at least Provision or Kubernetes generation.'
+      return false
+    }
+    if (form.provider === 'gcp' && form.gcp.project_id.trim().length < 3) {
+      fieldError.value = 'GCP Project ID is required.'
+      return false
+    }
+    if (form.provider === 'azure' && form.azure.resource_group.trim().length < 3) {
+      fieldError.value = 'Azure resource group is required.'
+      return false
+    }
+    if (form.provider === 'cloudflare' && form.cloudflare.account_id.trim().length < 8) {
+      fieldError.value = 'Cloudflare account ID is required.'
+      return false
+    }
+  }
+  return true
+}
+
+function nextStep() {
+  if (!validateStep()) return
+  if (currentStep.value < TOTAL_STEPS) {
+    currentStep.value += 1
+  }
+}
+
+function prevStep() {
+  fieldError.value = null
+  if (currentStep.value > 1) {
+    currentStep.value -= 1
+  }
+}
+
+async function scaffoldCiCdFiles(workspaceId: string) {
+  if (!infraGeneration.value.cicd.enabled) return
+  const targets = buildCiCdScaffold(
+    infraGeneration.value.cicd.platform,
+    infraGeneration.value.cicd.security,
+  )
+  for (const target of targets) {
+    await writeWorkspaceFile(workspaceId, target.path, target.content)
+  }
+}
+
+async function refreshBundle(workspaceId: string) {
+  try {
+    bundle.value = await getWorkspace(workspaceId)
+  } catch {
+    // Keep the prior bundle summary if refresh fails.
+  }
+}
+
+async function recoverCreatedWorkspaceByName(name: string): Promise<string | null> {
+  try {
+    existingWorkspaces.value = await listWorkspaces()
+    const match = existingWorkspaces.value.find((ws) => ws.name === name)
+    if (!match) return null
+    sessionCreatedWorkspaceId.value = match.id
+    return match.id
+  } catch {
+    return null
+  }
+}
+
+async function onGenerate() {
+  if (submitting.value) return
+  fieldError.value = null
+  githubError.value = null
+  githubStatus.value = null
+  githubResult.value = null
+  submitting.value = true
+  try {
+    let workspaceId: string
+    syncFormFromInfraGeneration()
+    const parsed = provisioningWizardSchema.safeParse(buildWizardPayload())
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      const path = issue?.path?.length ? `${issue.path.join('.')}: ` : ''
+      fieldError.value = `${path}${issue?.message ?? 'Invalid form'}`
+      return
+    }
+
+    const reuseId =
+      (!isNewWorkspace.value && selectedExisting.value?.id) ||
+      sessionCreatedWorkspaceId.value ||
+      null
+
+    if (reuseId) {
+      workspaceId = reuseId
+      bundle.value = await updateWorkspace(workspaceId, parsed.data)
+      await scaffoldCiCdFiles(workspaceId)
+      await refreshBundle(workspaceId)
+      const terminal = await openTerminal(workspaceId, {
+        run_init: form.run_init,
+      })
+      wsPath.value = terminal.ws_path
+      activeTerminalWsPath.value = terminal.ws_path
+      terminalOpen.value = false
+      if (selectedWorkspaceId.value !== workspaceId) {
+        selectedWorkspaceId.value = workspaceId
+      }
+    } else {
+      bundle.value = await createWorkspace(parsed.data)
+      workspaceId = bundle.value.workspace_id
+      sessionCreatedWorkspaceId.value = workspaceId
+      await scaffoldCiCdFiles(workspaceId)
+      await refreshBundle(workspaceId)
+      if (!form.github.name.trim()) {
+        form.github.name = `launchpad-${parsed.data.name}`
+      }
+      const terminal = await openTerminal(workspaceId, {
+        run_init: form.run_init,
+      })
+      wsPath.value = terminal.ws_path
+      activeTerminalWsPath.value = terminal.ws_path
+      terminalOpen.value = false
+      existingWorkspaces.value = await listWorkspaces()
+      selectedWorkspaceId.value = workspaceId
+    }
+
+    if (shouldPushGithub()) {
+      await pushGithubBootstrap(workspaceId)
+    }
+    hasStoredCredentials.value = true
+    clearCredentials()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Provisioning failed'
+    const timedOut = message.toLowerCase().includes('timed out')
+    if (timedOut && isNewWorkspace.value && !sessionCreatedWorkspaceId.value && form.name.trim()) {
+      const recoveredId = await recoverCreatedWorkspaceByName(form.name.trim())
+      if (recoveredId) {
+        selectedWorkspaceId.value = recoveredId
+        fieldError.value =
+          'Workspace was created, but a later step timed out. Click Generate again to finish — a duplicate will not be created.'
+        return
+      }
+    }
+    if (timedOut && sessionCreatedWorkspaceId.value) {
+      fieldError.value =
+        'A step timed out after the workspace was created. Click Generate again to continue — a duplicate will not be created.'
+      return
+    }
+    fieldError.value = message
+  } finally {
+    submitting.value = false
+  }
+}
+
+function shouldPushGithub(): boolean {
+  if (!form.github.installation_id) return false
+  if (form.github.repo_mode === 'existing') {
+    return Boolean(form.github.existing_full_name.trim())
+  }
+  return Boolean(form.github.name.trim())
+}
+
+async function pushGithubBootstrap(workspaceId: string) {
+  githubError.value = null
+  githubStatus.value = null
+  githubResult.value = null
+
+  const selectedInstall =
+    githubApp.value?.installations.find((item) => item.id === form.github.installation_id) ?? null
+  const organization =
+    selectedInstall?.account_type.toLowerCase() === 'organization'
+      ? selectedInstall.account_login
+      : form.github.organization || null
+
+  const existingFullName =
+    form.github.repo_mode === 'existing' ? form.github.existing_full_name.trim() || null : null
+
+  const parsed = githubRepoSchema.safeParse({
+    name: form.github.name,
+    description: form.github.description,
+    private: form.github.private,
+    installation_id: form.github.installation_id,
+    organization,
+    workspace_id: workspaceId,
+    set_cloud_secrets: form.github.set_cloud_secrets,
+    include_workflow: form.github.include_workflow,
+    include_dockerfiles: form.github.include_dockerfiles,
+    existing_full_name: existingFullName,
+  })
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]
+    const path = issue?.path?.length ? `${issue.path.join('.')}: ` : ''
+    githubError.value = `${path}${issue?.message ?? 'Invalid GitHub form'}`
+    fieldError.value = githubError.value
+    return
+  }
+
+  githubStatus.value = form.github.include_workflow
+    ? 'Saving infra and workflow to GitHub…'
+    : 'Saving infra to GitHub…'
+  try {
+    githubResult.value = await createGithubRepo(parsed.data, form.credentials)
+    const workflowNote = githubResult.value.workflow_path
+      ? ` · ${githubResult.value.workflow_path}`
+      : ' · workflow skipped'
+    githubStatus.value = githubResult.value.created
+      ? `Repository created and infra pushed${workflowNote}`
+      : `Infra pushed to ${githubResult.value.full_name}${workflowNote}`
+  } catch (err) {
+    githubError.value = err instanceof Error ? err.message : 'GitHub provisioning failed'
+    githubStatus.value = null
+    fieldError.value = githubError.value
+  }
+}
+
+async function onPrimaryAction() {
+  if (currentStep.value < TOTAL_STEPS) {
+    nextStep()
+    return
+  }
+  await onGenerate()
+}
+</script>
+
+<template>
+  <div class="mx-auto max-w-4xl animate-fade-up space-y-6 pb-10">
+    <header class="flex flex-wrap items-end justify-between gap-4">
+      <div>
+        <p class="lp-label mb-1">Infrastructure</p>
+        <h1 class="text-2xl font-semibold tracking-tight text-[var(--lp-text)] sm:text-3xl">
+          Provision cloud environment
+        </h1>
+        <p class="mt-2 max-w-2xl text-sm text-[var(--lp-muted)]">
+          Configure multi-cloud infrastructure, connect GitHub, and launch a sandboxed terminal.
+          Existing workspaces keep their prior selections so you can review or edit before regenerating.
+        </p>
+      </div>
+      <NuxtLink to="/workspaces" class="lp-btn-ghost">
+        <span class="material-symbols-outlined text-base">arrow_back</span>
+        Workspaces
+      </NuxtLink>
+    </header>
+
+    <div class="space-y-6 rounded-2xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/80 p-6 sm:p-8">
+      <!-- Progress -->
+      <div class="flex items-center gap-4">
+        <div class="h-1 flex-1 overflow-hidden rounded-full bg-[var(--lp-line)]">
+          <div
+            class="h-full rounded-full bg-[var(--lp-accent)] transition-all duration-500"
+            :style="{ width: `${progressPct}%` }"
+          />
+        </div>
+        <span class="shrink-0 font-mono text-xs text-[var(--lp-accent)]">
+          STEP {{ currentStep }}/{{ TOTAL_STEPS }}
+        </span>
+      </div>
+
+      <!-- Steps -->
+      <div>
+        <h2 class="mb-6 flex items-center gap-2 text-lg font-semibold">
+          <span class="material-symbols-outlined text-[var(--lp-accent)]">settings_suggest</span>
+          {{ stepTitle }}
+        </h2>
+
+        <!-- Step 1: Cloud + workspace -->
+        <div v-show="currentStep === 1" class="space-y-6">
+          <div class="grid gap-4 sm:grid-cols-2">
+            <label class="block space-y-2 sm:col-span-2">
+              <span class="lp-label">Workspace</span>
+              <select v-model="selectedWorkspaceId" class="lp-input">
+                <option :value="NEW_WORKSPACE">+ Create new workspace</option>
+                <option
+                  v-for="ws in existingWorkspaces"
+                  :key="ws.id"
+                  :value="ws.id"
+                >
+                  {{ ws.name }} · {{ ws.provider }}/{{ ws.engine }}
+                </option>
+              </select>
+              <p class="text-xs text-[var(--lp-muted)]">
+                Create a new stack, or reopen an existing one with its previous settings filled in.
+              </p>
+            </label>
+
+            <label class="block space-y-2">
+              <span class="lp-label">Workspace name</span>
+              <input
+                v-model="form.name"
+                class="lp-input"
+                placeholder="demo-stack"
+                autocomplete="off"
+                :disabled="!isNewWorkspace || loadingConfig"
+              >
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">IaC engine</span>
+              <select
+                v-model="form.iac_engine"
+                class="lp-input"
+                :disabled="loadingConfig || isLocalProvider"
+              >
+                <option value="terraform">Terraform</option>
+                <option value="opentofu">OpenTofu</option>
+                <option value="pulumi">Pulumi</option>
+              </select>
+              <p v-if="isLocalProvider" class="text-xs text-[var(--lp-muted)]">
+                Dev (kind) scaffolds Kubernetes manifests only — switch to a cloud provider for
+                Terraform, OpenTofu, or Pulumi.
+              </p>
+            </label>
+          </div>
+
+          <div
+            v-if="!isNewWorkspace && selectedExisting"
+            class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
+          >
+            Editing
+            <strong class="text-[var(--lp-text)]">{{ selectedExisting.name }}</strong>
+            — prior resource selections are loaded on the next step. Leave credentials blank to keep
+            the ones already stored.
+          </div>
+
+          <div class="grid gap-4 sm:grid-cols-2">
+            <button
+              v-for="p in providers"
+              :key="p.id"
+              type="button"
+              class="group rounded-xl border p-5 text-left transition active:scale-[0.98]"
+              :class="
+                form.provider === p.id
+                  ? 'border-2 border-[var(--lp-accent)] bg-[var(--lp-panel-2)]'
+                  : 'border-[var(--lp-line)] bg-[var(--lp-panel)]/60 hover:border-[var(--lp-accent)]/50 hover:bg-[var(--lp-panel-2)]/60'
+              "
+              :disabled="loadingConfig"
+              @click="form.provider = p.id"
+            >
+              <div class="mb-4 flex items-center justify-between">
+                <span
+                  class="material-symbols-outlined text-3xl"
+                  :class="form.provider === p.id ? 'text-[var(--lp-accent)]' : 'text-[var(--lp-muted)] group-hover:text-[var(--lp-accent)]'"
+                >
+                  {{ p.icon }}
+                </span>
+                <span
+                  class="rounded px-2 py-1 font-mono text-[10px] uppercase tracking-wide"
+                  :class="
+                    form.provider === p.id
+                      ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)]'
+                      : 'bg-[var(--lp-panel-2)] text-[var(--lp-muted)]'
+                  "
+                >
+                  {{ p.badge }}
+                </span>
+              </div>
+              <h3 class="text-base font-semibold">{{ p.label }}</h3>
+              <p class="mt-2 text-xs text-[var(--lp-muted)]">{{ p.blurb }}</p>
+            </button>
+          </div>
+        </div>
+
+        <!-- Step 2: Resources -->
+        <div v-show="currentStep === 2" class="space-y-4">
+          <div
+            v-if="hasStoredCredentials && !isLocalProvider"
+            class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50 p-4 text-sm text-[var(--lp-muted)]"
+          >
+            Credentials are already stored for this workspace. Paste new values only if you want to
+            replace them; otherwise leave the fields blank.
+          </div>
+
+          <div v-if="!isLocalProvider" class="rounded-xl border border-[var(--lp-line)] p-4">
+            <p class="lp-label mb-3">Infrastructure generation</p>
+            <WorkspaceInfraActions
+              v-model:config="infraGeneration"
+              v-model:container-scaffold="form.container_scaffold"
+              mode="selection"
+              :provision-disabled="isLocalProvider"
+              :kubernetes-disabled="!showsKubernetesPackaging"
+              :disabled="loadingConfig"
+            />
+          </div>
+
+          <ContainerScaffoldCard
+            v-if="form.container_scaffold.enabled"
+            v-model="form.container_scaffold"
+            :disabled="loadingConfig"
+          />
+
+          <template v-if="form.provider === 'local'">
+            <div
+              class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
+            >
+              <p class="font-medium text-[var(--lp-text)]">Verify your local kind setup</p>
+              <ol class="mt-2 list-decimal space-y-1 pl-5">
+                <li>
+                  Launchpad runs
+                  <code class="font-mono text-xs text-[var(--lp-accent)]">make kind-up</code>
+                  automatically when you provision (requires Docker, kind, and kubectl).
+                </li>
+                <li>
+                  Keep
+                  <code class="font-mono text-xs">KUBERNETES_ENABLED=true</code>
+                  and
+                  <code class="font-mono text-xs">KUBERNETES_CONTEXT={{ form.local.context }}</code>
+                  in
+                  <code class="font-mono text-xs">apps/api/.env</code>, then restart API + worker once.
+                </li>
+                <li>
+                  Open the sandbox — kubectl apply runs against kind. Destroying the last Dev
+                  workspace runs
+                  <code class="font-mono text-xs text-[var(--lp-accent)]">make kind-down</code>.
+                </li>
+                <li>
+                  When it looks good, switch the provider to GCP/AWS/Azure/Cloudflare and save.
+                </li>
+              </ol>
+            </div>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <label class="block space-y-2">
+                <span class="lp-label">Kind cluster name</span>
+                <input v-model="form.local.cluster_name" class="lp-input" placeholder="launchpad">
+              </label>
+              <label class="block space-y-2">
+                <span class="lp-label">kubectl context</span>
+                <input v-model="form.local.context" class="lp-input" placeholder="kind-launchpad">
+              </label>
+            </div>
+            <div ref="packagingSectionEl">
+              <WorkspaceInfraActions
+                v-model:config="infraGeneration"
+                mode="selection"
+                provision-disabled
+                :disabled="loadingConfig"
+              />
+              <KubernetesPackagingPicker
+                v-model:packaging="form.kubernetes_packaging"
+                v-model:options="form.kubernetes_options"
+                :allow-none="false"
+                class="mt-4"
+              />
+              <CostOptimizationCard
+                v-model:cost="form.cost_optimization"
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
+            </div>
+          </template>
+
+          <template v-else-if="form.provider === 'gcp'">
+            <label class="block space-y-2">
+              <span class="lp-label">Project ID</span>
+              <input v-model="form.gcp.project_id" class="lp-input" placeholder="my-gcp-project">
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Region</span>
+              <input v-model="form.gcp.region" class="lp-input">
+            </label>
+            <div class="space-y-2">
+              <label
+                v-for="opt in [
+                  { key: 'vpc', title: 'VPC', desc: 'Isolated network with custom routing' },
+                  { key: 'subnets', title: 'Subnets', desc: 'Regional subnet layout' },
+                  { key: 'gke', title: 'GKE', desc: 'Managed Kubernetes cluster' },
+                  { key: 'artifact_registry', title: 'Artifact Registry', desc: 'Container image storage' },
+                  { key: 'cloud_run', title: 'Cloud Run', desc: 'Serverless containers' },
+                  { key: 'cloud_functions', title: 'Cloud Functions', desc: 'Event-driven functions' },
+                  { key: 'cloud_sql', title: 'Cloud SQL', desc: 'Managed PostgreSQL / MySQL' },
+                  { key: 'cloud_storage', title: 'Cloud Storage', desc: 'Object storage buckets' },
+                  { key: 'pubsub', title: 'Pub/Sub', desc: 'Messaging topics & subscriptions' },
+                  { key: 'memorystore', title: 'Memorystore', desc: 'Managed Redis' },
+                  { key: 'bigquery', title: 'BigQuery', desc: 'Analytics warehouse dataset' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-4 transition hover:bg-[var(--lp-panel-2)]"
+              >
+                <div class="flex items-center gap-3">
+                  <span class="material-symbols-outlined text-[var(--lp-muted)]">lan</span>
+                  <div>
+                    <p class="text-sm font-medium">{{ opt.title }}</p>
+                    <p class="text-xs text-[var(--lp-muted)]">{{ opt.desc }}</p>
+                  </div>
+                </div>
+                <input v-model="form.gcp[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+            <div v-if="showsKubernetesPackaging" ref="packagingSectionEl">
+              <KubernetesPackagingPicker
+                v-model:packaging="form.kubernetes_packaging"
+                v-model:options="form.kubernetes_options"
+              />
+              <CostOptimizationCard
+                v-model:cost="form.cost_optimization"
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
+            </div>
+            <label class="block space-y-2">
+              <span class="lp-label">Secret backend</span>
+              <select v-model="form.gcp.secret_backend" class="lp-input">
+                <option value="secret_manager">Secret Manager</option>
+                <option value="native_k8s">Native K8s Secret</option>
+              </select>
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">GCP SA key JSON</span>
+              <textarea
+                v-model="form.credentials.gcp_sa_key_json"
+                rows="3"
+                class="lp-input"
+                :placeholder="hasStoredCredentials ? 'Leave blank to keep stored credentials' : 'Paste service account JSON (encrypted at rest)'"
+              />
+            </label>
+          </template>
+
+          <template v-else-if="form.provider === 'aws'">
+            <label class="block space-y-2">
+              <span class="lp-label">Region</span>
+              <input v-model="form.aws.region" class="lp-input">
+            </label>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label
+                v-for="opt in [
+                  { key: 'vpc', title: 'VPC' },
+                  { key: 'subnets', title: 'Subnets' },
+                  { key: 'ec2', title: 'EC2' },
+                  { key: 's3', title: 'S3' },
+                  { key: 'eks', title: 'EKS' },
+                  { key: 'secrets_manager', title: 'Secrets Manager' },
+                  { key: 'rds', title: 'RDS' },
+                  { key: 'ecr', title: 'ECR' },
+                  { key: 'elasticache', title: 'ElastiCache' },
+                  { key: 'lambda_fn', title: 'Lambda' },
+                  { key: 'dynamodb', title: 'DynamoDB' },
+                  { key: 'sqs', title: 'SQS' },
+                  { key: 'alb', title: 'ALB' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
+              >
+                <span class="text-sm">{{ opt.title }}</span>
+                <input v-model="form.aws[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+            <div v-if="showsKubernetesPackaging" ref="packagingSectionEl">
+              <KubernetesPackagingPicker
+                v-model:packaging="form.kubernetes_packaging"
+                v-model:options="form.kubernetes_options"
+              />
+              <CostOptimizationCard
+                v-model:cost="form.cost_optimization"
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
+            </div>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <label class="block space-y-2">
+                <span class="lp-label">Access key</span>
+                <input
+                  v-model="form.credentials.aws_access_key_id"
+                  class="lp-input"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
+                >
+              </label>
+              <label class="block space-y-2">
+                <span class="lp-label">Secret key</span>
+                <input
+                  v-model="form.credentials.aws_secret_access_key"
+                  class="lp-input"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
+                >
+              </label>
+            </div>
+          </template>
+
+          <template v-else-if="form.provider === 'azure'">
+            <label class="block space-y-2">
+              <span class="lp-label">Resource group</span>
+              <input v-model="form.azure.resource_group" class="lp-input">
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Location</span>
+              <input v-model="form.azure.location" class="lp-input">
+            </label>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label
+                v-for="opt in [
+                  { key: 'vnet', title: 'VNet' },
+                  { key: 'subnets', title: 'Subnets' },
+                  { key: 'aks', title: 'AKS' },
+                  { key: 'key_vault', title: 'Key Vault' },
+                  { key: 'container_apps', title: 'Container Apps' },
+                  { key: 'acr', title: 'ACR' },
+                  { key: 'storage_account', title: 'Storage Account' },
+                  { key: 'cosmos_db', title: 'Cosmos DB' },
+                  { key: 'redis_cache', title: 'Redis Cache' },
+                  { key: 'app_service', title: 'App Service' },
+                  { key: 'log_analytics', title: 'Log Analytics' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
+              >
+                <span class="text-sm">{{ opt.title }}</span>
+                <input v-model="form.azure[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+            <div v-if="showsKubernetesPackaging" ref="packagingSectionEl">
+              <KubernetesPackagingPicker
+                v-model:packaging="form.kubernetes_packaging"
+                v-model:options="form.kubernetes_options"
+              />
+              <CostOptimizationCard
+                v-model:cost="form.cost_optimization"
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
+            </div>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <label class="block space-y-2">
+                <span class="lp-label">Client ID</span>
+                <input
+                  v-model="form.credentials.azure_client_id"
+                  class="lp-input"
+                  autocomplete="off"
+                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
+                >
+              </label>
+              <label class="block space-y-2">
+                <span class="lp-label">Client secret</span>
+                <input
+                  v-model="form.credentials.azure_client_secret"
+                  class="lp-input"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
+                >
+              </label>
+              <label class="block space-y-2">
+                <span class="lp-label">Tenant ID</span>
+                <input
+                  v-model="form.credentials.azure_tenant_id"
+                  class="lp-input"
+                  autocomplete="off"
+                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
+                >
+              </label>
+              <label class="block space-y-2">
+                <span class="lp-label">Subscription ID</span>
+                <input
+                  v-model="form.credentials.azure_subscription_id"
+                  class="lp-input"
+                  autocomplete="off"
+                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
+                >
+              </label>
+            </div>
+          </template>
+
+          <template v-else>
+            <label class="block space-y-2">
+              <span class="lp-label">Account ID</span>
+              <input v-model="form.cloudflare.account_id" class="lp-input">
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Zone name (optional)</span>
+              <input v-model="form.cloudflare.zone_name" class="lp-input" placeholder="example.com">
+            </label>
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label
+                v-for="opt in [
+                  { key: 'workers', title: 'Workers' },
+                  { key: 'r2', title: 'R2' },
+                  { key: 'dns_records', title: 'DNS' },
+                  { key: 'pages', title: 'Pages' },
+                  { key: 'kv', title: 'KV' },
+                  { key: 'd1', title: 'D1' },
+                  { key: 'tunnels', title: 'Tunnel' },
+                  { key: 'queues', title: 'Queues' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
+              >
+                <span class="text-sm">{{ opt.title }}</span>
+                <input v-model="form.cloudflare[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+            <label class="block space-y-2">
+              <span class="lp-label">API token</span>
+              <input
+                v-model="form.credentials.cloudflare_api_token"
+                class="lp-input"
+                type="password"
+                autocomplete="off"
+                :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
+              >
+            </label>
+          </template>
+        </div>
+
+        <!-- Step 3: GitHub -->
+        <div v-show="currentStep === 3" class="space-y-6">
+          <GithubConnectCard
+            v-model:model-installation-id="form.github.installation_id"
+            v-model:model-repo-name="form.github.name"
+            v-model:model-repo-mode="form.github.repo_mode"
+            v-model:model-repo-full-name="form.github.existing_full_name"
+            show-repo-picker
+            compact
+            @updated="onGithubAppUpdated"
+          />
+
+          <div class="flex flex-wrap gap-4">
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="form.github.private" type="checkbox" class="accent-[var(--lp-accent)]">
+              Private repository
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input
+                v-model="form.github.set_cloud_secrets"
+                type="checkbox"
+                class="accent-[var(--lp-accent)]"
+                :disabled="isLocalProvider"
+              >
+              Set cloud CI secrets
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="form.github.include_workflow" type="checkbox" class="accent-[var(--lp-accent)]">
+              Add deploy workflow
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="form.github.include_dockerfiles" type="checkbox" class="accent-[var(--lp-accent)]">
+              Add Docker files
+            </label>
+          </div>
+          <div class="flex items-start gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+            <span class="material-symbols-outlined text-[var(--lp-ok)]">verified_user</span>
+            <p class="text-sm text-[var(--lp-muted)]">
+              Pick or create a repository now. At the final step Launchpad pushes generated infra
+              and, if selected, adds a new workflow file without overwriting existing workflows.
+            </p>
+          </div>
+          <p v-if="githubError" class="text-sm text-[var(--lp-danger)]">{{ githubError }}</p>
+          <p v-else-if="githubStatus" class="text-sm text-[var(--lp-ok)]">{{ githubStatus }}</p>
+          <a
+            v-if="githubResult"
+            :href="githubResult.html_url"
+            target="_blank"
+            rel="noreferrer"
+            class="block font-mono text-xs text-[var(--lp-accent)] hover:underline"
+          >
+            {{ githubResult.full_name }}<template v-if="githubResult.workflow_path"> · {{ githubResult.workflow_path }}</template>
+          </a>
+        </div>
+
+        <!-- Step 4: Generate -->
+        <div v-show="currentStep === 4" class="space-y-8">
+          <div class="rounded-2xl border border-[var(--lp-accent)]/20 bg-[var(--lp-panel-2)]/60 p-6">
+            <h3 class="text-lg font-semibold">Review</h3>
+            <dl class="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+              <div>
+                <dt class="lp-label">Workspace</dt>
+                <dd class="font-mono">
+                  {{ isNewWorkspace ? (form.name || '—') : selectedExisting?.name || '—' }}
+                  <span v-if="!isNewWorkspace" class="text-[var(--lp-muted)]"> (existing)</span>
+                </dd>
+              </div>
+              <div>
+                <dt class="lp-label">Provider</dt>
+                <dd class="font-mono uppercase">{{ form.provider }}</dd>
+              </div>
+              <div>
+                <dt class="lp-label">Engine</dt>
+                <dd class="font-mono">{{ form.iac_engine }}</dd>
+              </div>
+              <div>
+                <dt class="lp-label">Artifacts</dt>
+                <dd class="font-mono">{{ form.artifact_mode }}</dd>
+              </div>
+              <div>
+                <dt class="lp-label">Provision</dt>
+                <dd class="font-mono">
+                  {{
+                    infraGeneration.provision.enabled
+                      ? infraGeneration.provision.engine
+                      : 'skipped'
+                  }}
+                </dd>
+              </div>
+              <div>
+                <dt class="lp-label">Kubernetes</dt>
+                <dd class="font-mono">
+                  {{
+                    infraGeneration.kubernetes.enabled
+                      ? infraGeneration.kubernetes.mode
+                      : 'skipped'
+                  }}
+                </dd>
+              </div>
+              <div>
+                <dt class="lp-label">CI/CD</dt>
+                <dd class="font-mono">
+                  {{
+                    infraGeneration.cicd.enabled
+                      ? [
+                          infraGeneration.cicd.platform,
+                          infraGeneration.cicd.security.containerScan.enabled ? 'A' : null,
+                          infraGeneration.cicd.security.sastGuardrails.enabled ? 'B' : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')
+                      : 'skipped'
+                  }}
+                </dd>
+              </div>
+              <div>
+                <dt class="lp-label">GitHub repo</dt>
+                <dd class="font-mono">
+                  <template v-if="form.github.repo_mode === 'existing' && form.github.existing_full_name">
+                    {{ form.github.existing_full_name }} (import)
+                  </template>
+                  <template v-else-if="form.github.name">
+                    {{ form.github.name }} (create)
+                  </template>
+                  <template v-else>(skip)</template>
+                </dd>
+              </div>
+              <div>
+                <dt class="lp-label">Deploy workflow</dt>
+                <dd class="font-mono">
+                  {{ form.github.include_workflow && (form.github.name || form.github.existing_full_name) ? 'yes' : 'no' }}
+                </dd>
+              </div>
+              <div>
+                <dt class="lp-label">Docker files</dt>
+                <dd class="font-mono">
+                  {{ form.github.include_dockerfiles && (form.github.name || form.github.existing_full_name) ? 'yes' : 'no' }}
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <label class="flex items-center gap-3 rounded-lg border border-[var(--lp-line)] p-4">
+            <input v-model="form.run_init" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+            <div>
+              <p class="text-sm font-medium">
+                {{ isLocalProvider ? 'Run kubectl apply in sandbox on open' : 'Run IaC init in sandbox on open' }}
+              </p>
+              <p class="text-xs text-[var(--lp-muted)]">
+                <template v-if="isLocalProvider">
+                  Applies Kubernetes manifests (and Helm chart if selected) against your kind context.
+                </template>
+                <template v-else>
+                  Executes terraform/pulumi init inside the sandboxed terminal session.
+                </template>
+              </p>
+            </div>
+          </label>
+
+          <p v-if="githubStatus" class="text-sm text-[var(--lp-ok)]">{{ githubStatus }}</p>
+          <a
+            v-if="githubResult"
+            :href="githubResult.html_url"
+            target="_blank"
+            rel="noreferrer"
+            class="block font-mono text-xs text-[var(--lp-accent)] hover:underline"
+          >
+            {{ githubResult.full_name }}<template v-if="githubResult.workflow_path"> · {{ githubResult.workflow_path }}</template>
+          </a>
+
+          <div v-if="bundle" class="space-y-3 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4 font-mono text-xs text-[var(--lp-muted)]">
+            <p class="text-[var(--lp-ok)]">Workspace ready</p>
+            <p>workspace {{ bundle.workspace_id }}</p>
+            <p>{{ bundle.engine }} / {{ bundle.provider }} · {{ bundle.files.length }} files</p>
+            <NuxtLink
+              :to="`/launch?workspace=${bundle.workspace_id}`"
+              class="inline-block rounded border border-[var(--lp-accent)]/50 px-3 py-1.5 text-[var(--lp-accent)] transition hover:bg-[var(--lp-accent)]/10"
+            >
+              Launch environment from this workspace
+            </NuxtLink>
+          </div>
+
+          <ClientOnly>
+            <TerminalPanel v-if="wsPath" :ws-path="wsPath" />
+          </ClientOnly>
+        </div>
+
+        <p v-if="fieldError" class="mt-4 text-sm text-[var(--lp-danger)]">{{ fieldError }}</p>
+      </div>
+
+      <!-- Footer -->
+      <div class="flex items-center justify-between border-t border-[var(--lp-line)] pt-6">
+        <button
+          type="button"
+          class="lp-btn-ghost"
+          :class="{ invisible: currentStep === 1 }"
+          @click="prevStep"
+        >
+          <span class="material-symbols-outlined text-base">arrow_back</span>
+          Back
+        </button>
+        <button
+          type="button"
+          class="lp-btn-primary px-8"
+          :class="currentStep === TOTAL_STEPS ? 'bg-[var(--lp-ok)]' : ''"
+          :disabled="submitting || loadingConfig"
+          @click="onPrimaryAction"
+        >
+          <template v-if="currentStep < TOTAL_STEPS">
+            <span>Continue</span>
+            <span class="material-symbols-outlined text-base">arrow_forward</span>
+          </template>
+          <template v-else>
+            <span>{{
+              submitting
+                ? isLocalProvider
+                  ? 'Starting kind…'
+                  : 'Saving…'
+                : isNewWorkspace
+                  ? 'Generate workspace'
+                  : 'Save & open terminal'
+            }}</span>
+            <span class="material-symbols-outlined text-base">rocket_launch</span>
+          </template>
+        </button>
+      </div>
+    </div>
+  </div>
+</template>

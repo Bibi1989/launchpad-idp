@@ -1,0 +1,17 @@
+node_modules
+.nuxt
+.output
+.nitro
+.cache
+dist
+coverage
+*.log
+.env
+.env.*
+.git
+.gitignore
+README.md
+tests
+**/*.spec.ts
+**/*.test.ts
+.DS_Store

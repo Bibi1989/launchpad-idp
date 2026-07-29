@@ -1,0 +1,30 @@
+---
+description: Nuxt 4 + TypeScript frontend conventions for the IDP
+globs: apps/web/**/*.{vue,ts},**/composables/**/*.{ts,vue},**/pages/**/*.vue,**/components/**/*.vue,**/stores/**/*.ts,**/types/**/*.ts
+alwaysApply: false
+---
+
+# Nuxt 4 Frontend
+
+- Use Composition API with `<script setup lang="ts">`.
+- State: `useState` or typed Pinia stores. Prefer `shallowRef` for large non-reactive objects (terminals, log buffers).
+- Styling: Tailwind utilities only — no inline styles.
+- Types: strict TypeScript; define shared types in `~/types/`. Never use `any`.
+- Validation: Zod for forms and API payloads.
+- Real-time: prefer SSE or WebSockets for deployment logs; always remove listeners in `onUnmounted()`.
+
+```typescript
+// ❌ BAD — listener leak + any
+onMounted(() => eventSource.addEventListener('message', (e: any) => { ... }))
+
+// ✅ GOOD
+const es = shallowRef<EventSource | null>(null)
+onMounted(() => {
+  es.value = new EventSource(url)
+  es.value.addEventListener('message', onMessage)
+})
+onUnmounted(() => {
+  es.value?.removeEventListener('message', onMessage)
+  es.value?.close()
+})
+```
