@@ -38,11 +38,11 @@ services:
       context: ./apps/web
       dockerfile: Dockerfile
       args:
-        NUXT_PUBLIC_API_BASE: http://localhost:8000/api/v1
-        NUXT_PUBLIC_WS_BASE: ws://localhost:8000
+        NUXT_PUBLIC_API_BASE: http://92.5.2.108:8000/api/v1
+        NUXT_PUBLIC_WS_BASE: ws://92.5.2.108:8000
     environment:
-      NUXT_PUBLIC_API_BASE: http://localhost:8000/api/v1
-      NUXT_PUBLIC_WS_BASE: ws://localhost:8000
+      NUXT_PUBLIC_API_BASE: http://92.5.2.108:8000/api/v1
+      NUXT_PUBLIC_WS_BASE: ws://92.5.2.108:8000
     ports:
       - "3000:3000"
 
@@ -51,7 +51,7 @@ services:
       context: ./apps/api
       dockerfile: Dockerfile
     env_file:
-      - .env.local
+      - .env
     ports:
       - "8000:8000"
     depends_on:
@@ -66,7 +66,7 @@ services:
       dockerfile: Dockerfile
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
     env_file:
-      - .env.local
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,7 +79,7 @@ services:
       dockerfile: Dockerfile
     command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
     env_file:
-      - .env.local
+      - .env
     depends_on:
       postgres:
         condition: service_healthy

@@ -22,3 +22,4 @@ infra/pulumi/Pulumi.*.yaml
 .idea/
 .vscode/
 *.log
+docker-compose.yml
