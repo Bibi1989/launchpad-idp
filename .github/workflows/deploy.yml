@@ -3,7 +3,7 @@ name: Deploy to OCI
 on:
   push:
     branches:
-      - main  # Triggers deployment whenever you push to main
+      - main
 
 jobs:
   deploy:
@@ -18,17 +18,13 @@ jobs:
           key: ${{ secrets.OCI_SSH_KEY }}
           port: 22
           script: |
-            # 1. Navigate to your project directory on the VM
-            cd ~/your-repo-name   # Replace 'your-repo-name' with your actual folder name on the VM
+            set -euo pipefail
+            cd ~/launchpad-idp
 
-            # 2. Fetch latest changes from GitHub
-            git pull origin main
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
 
-            # 3. Build new images in the background FIRST (prevents downtime during build)
-            docker compose build
-
-            # 4. Swap running containers with the newly built images
-            docker compose up -d --no-build
-
-            # 5. Clean up unused/dangling old images to save disk space
+            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env build
+            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --no-build
             docker image prune -f
