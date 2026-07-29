@@ -19,6 +19,9 @@ jobs:
           port: 22
           script: |
             set -euo pipefail
+            if [ ! -d ~/launchpad-idp ]; then
+              git clone https://github.com/Bibi1989/launchpad-idp.git ~/launchpad-idp
+            fi
             cd ~/launchpad-idp
 
             git fetch origin main
