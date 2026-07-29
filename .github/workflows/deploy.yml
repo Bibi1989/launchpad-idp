@@ -1,0 +1,34 @@
+name: Deploy to OCI
+
+on:
+  push:
+    branches:
+      - main  # Triggers deployment whenever you push to main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Oracle Cloud via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USERNAME }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          port: 22
+          script: |
+            # 1. Navigate to your project directory on the VM
+            cd ~/your-repo-name   # Replace 'your-repo-name' with your actual folder name on the VM
+
+            # 2. Fetch latest changes from GitHub
+            git pull origin main
+
+            # 3. Build new images in the background FIRST (prevents downtime during build)
+            docker compose build
+
+            # 4. Swap running containers with the newly built images
+            docker compose up -d --no-build
+
+            # 5. Clean up unused/dangling old images to save disk space
+            docker image prune -f
