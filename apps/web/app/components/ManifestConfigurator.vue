@@ -2,6 +2,10 @@
 import type {
   SastLanguage,
 } from '~/types/provisioning'
+import {
+  containerScanToolsForPlatform,
+  sastToolsForPlatform,
+} from '~/utils/cicdSecurityTools'
 import type { InfraManifestModel, KeyValueItem } from '~/utils/infraManifestMapper'
 import {
   K8S_DEPLOYMENT_PATH,
@@ -13,6 +17,10 @@ import {
 } from '~/utils/infraManifestMapper'
 import { copyTextToClipboard, downloadTextFile } from '~/utils/clipboardFile'
 
+const WorkspaceMonacoEditor = defineAsyncComponent(
+  () => import('~/components/WorkspaceMonacoEditor.vue'),
+)
+
 const props = defineProps<{
   workspaceId: string
   selectedPath: string | null
@@ -20,21 +28,25 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   saved: []
+  deleted: [path: string]
   error: [message: string]
 }>()
 
-const { readWorkspaceFile, writeWorkspaceFile, inspectImage } = useProvisioning()
+const { readWorkspaceFile, writeWorkspaceFile, deleteWorkspacePath, inspectImage } = useProvisioning()
 
 const loading = ref(false)
 const saving = ref(false)
 const linking = ref(false)
 const inspectingImage = ref(false)
 const rawContent = ref('')
+const originalRawContent = ref('')
 const model = ref<InfraManifestModel | null>(null)
 const originalModel = ref<InfraManifestModel | null>(null)
+const deleting = ref(false)
 const statusMessage = ref<string | null>(null)
 const syncServiceOnSave = ref(true)
 const autoSavePortsFromImage = ref(true)
+const showAiAnalysis = ref(false)
 let loadToken = 0
 let loadAbortController: AbortController | null = null
 let loadTimeoutHandle: ReturnType<typeof setTimeout> | null = null
@@ -42,7 +54,37 @@ let imageInspectTimer: ReturnType<typeof setTimeout> | null = null
 let lastInspectedImage = ''
 let suppressImageWatch = false
 
-const supported = computed(() => Boolean(model.value && model.value.kind !== 'unknown'))
+const STRUCTURED_MANIFEST_KINDS = new Set<InfraManifestModel['kind']>([
+  'k8s-deployment',
+  'k8s-service',
+  'k8s-namespace',
+  'k8s-hpa',
+  'k8s-vpa',
+  'k8s-pdb',
+  'k8s-ingress',
+  'k8s-configmap',
+  'k8s-secret',
+  'k8s-serviceaccount',
+  'k8s-networkpolicy',
+  'k8s-resourcequota',
+  'k8s-limitrange',
+  'helm-values',
+  'terraform',
+  'opentofu',
+  'pulumi',
+  'github-workflow',
+  'gitlab-ci',
+])
+
+const supported = computed(() =>
+  Boolean(model.value && STRUCTURED_MANIFEST_KINDS.has(model.value.kind)),
+)
+const showsStructuredForm = computed(() =>
+  Boolean(model.value && STRUCTURED_MANIFEST_KINDS.has(model.value.kind)),
+)
+const isRawEditor = computed(() =>
+  Boolean(props.selectedPath) && !showsStructuredForm.value,
+)
 const isDeployment = computed(() => model.value?.kind === 'k8s-deployment')
 const isService = computed(() => model.value?.kind === 'k8s-service')
 const isNamespace = computed(() => model.value?.kind === 'k8s-namespace')
@@ -62,6 +104,9 @@ const isProvision = computed(() =>
 )
 const isCi = computed(() => model.value?.kind === 'github-workflow' || model.value?.kind === 'gitlab-ci')
 const isGithubWorkflow = computed(() => model.value?.kind === 'github-workflow')
+const cicdPlatform = computed(() => (isGithubWorkflow.value ? 'github' : 'gitlab'))
+const sastToolOptions = computed(() => sastToolsForPlatform(cicdPlatform.value))
+const containerScanToolOptions = computed(() => containerScanToolsForPlatform(cicdPlatform.value))
 const isDataMap = computed(() => isConfigMap.value || isSecret.value)
 const showNodePort = computed(() =>
   Boolean(
@@ -70,39 +115,59 @@ const showNodePort = computed(() =>
     && serviceUsesNodePort(model.value.serviceType),
   ),
 )
-const hasChanges = computed(
-  () => JSON.stringify(model.value) !== JSON.stringify(originalModel.value),
-)
+const hasChanges = computed(() => {
+  if (isRawEditor.value) return rawContent.value !== originalRawContent.value
+  return JSON.stringify(model.value) !== JSON.stringify(originalModel.value)
+})
+
+const activeFileContent = computed(() => {
+  if (isCi.value && workflowYaml.value) return workflowYaml.value
+  return rawContent.value
+})
+
+const downloadFileName = computed(() => {
+  if (!props.selectedPath) return 'file.txt'
+  return props.selectedPath.split('/').pop() || 'file.txt'
+})
 
 const workflowYaml = computed(() => {
   if (!model.value || !props.selectedPath || !isCi.value) return ''
   return serializeInfraManifest(props.selectedPath, rawContent.value, model.value)
 })
 
+const analysisContent = computed(() => {
+  if (!props.selectedPath) return ''
+  if (model.value && model.value.kind !== 'unknown') {
+    return serializeInfraManifest(props.selectedPath, rawContent.value, model.value)
+  }
+  return rawContent.value
+})
+
 const workflowDownloadName = computed(() =>
   isGithubWorkflow.value ? 'deploy.yml' : '.gitlab-ci.yml',
 )
 
-const copiedWorkflow = ref(false)
-let copiedWorkflowTimer: ReturnType<typeof setTimeout> | null = null
+const copiedFile = ref(false)
+let copiedFileTimer: ReturnType<typeof setTimeout> | null = null
 
-async function copyWorkflowYaml() {
-  if (!workflowYaml.value) return
-  const ok = await copyTextToClipboard(workflowYaml.value)
+async function copyActiveFile() {
+  if (!activeFileContent.value) return
+  const ok = await copyTextToClipboard(activeFileContent.value)
   if (!ok) {
-    emit('error', 'Could not copy workflow YAML')
+    emit('error', 'Could not copy file contents')
     return
   }
-  copiedWorkflow.value = true
-  if (copiedWorkflowTimer) clearTimeout(copiedWorkflowTimer)
-  copiedWorkflowTimer = setTimeout(() => {
-    copiedWorkflow.value = false
+  copiedFile.value = true
+  if (copiedFileTimer) clearTimeout(copiedFileTimer)
+  copiedFileTimer = setTimeout(() => {
+    copiedFile.value = false
   }, 2000)
 }
 
-function downloadWorkflowYaml() {
-  if (!workflowYaml.value) return
-  downloadTextFile(workflowDownloadName.value, workflowYaml.value)
+function downloadActiveFile() {
+  if (!activeFileContent.value) return
+  const name = isCi.value ? workflowDownloadName.value : downloadFileName.value
+  downloadTextFile(name, activeFileContent.value)
 }
 
 const breadcrumb = computed(() => {
@@ -161,6 +226,7 @@ async function loadSelected() {
     model.value = null
     originalModel.value = null
     rawContent.value = ''
+    originalRawContent.value = ''
     loading.value = false
     return
   }
@@ -177,6 +243,7 @@ async function loadSelected() {
     )
     if (token !== loadToken) return
     rawContent.value = file.content
+    originalRawContent.value = file.content
     suppressImageWatch = true
     model.value = parseInfraManifest(props.selectedPath, file.content)
     originalModel.value = JSON.parse(JSON.stringify(model.value)) as InfraManifestModel
@@ -195,6 +262,7 @@ async function loadSelected() {
     model.value = null
     originalModel.value = null
     rawContent.value = ''
+    originalRawContent.value = ''
   } finally {
     if (loadTimeoutHandle) {
       clearTimeout(loadTimeoutHandle)
@@ -310,7 +378,23 @@ function scheduleImagePortDetect() {
 }
 
 async function saveChanges(opts: { quiet?: boolean } = {}) {
-  if (!props.selectedPath || !model.value) return
+  if (!props.selectedPath) return
+  if (isRawEditor.value) {
+    saving.value = true
+    if (!opts.quiet) statusMessage.value = null
+    try {
+      await writeWorkspaceFile(props.workspaceId, props.selectedPath, rawContent.value)
+      originalRawContent.value = rawContent.value
+      if (!opts.quiet) statusMessage.value = `Saved ${props.selectedPath}`
+      emit('saved')
+    } catch (err) {
+      emit('error', err instanceof Error ? err.message : 'Failed to save file')
+    } finally {
+      saving.value = false
+    }
+    return
+  }
+  if (!model.value) return
   saving.value = true
   if (!opts.quiet) statusMessage.value = null
   try {
@@ -360,6 +444,11 @@ async function saveChanges(opts: { quiet?: boolean } = {}) {
 }
 
 function discardChanges() {
+  if (isRawEditor.value) {
+    rawContent.value = originalRawContent.value
+    statusMessage.value = null
+    return
+  }
   if (!originalModel.value) return
   suppressImageWatch = true
   model.value = JSON.parse(JSON.stringify(originalModel.value)) as InfraManifestModel
@@ -370,6 +459,38 @@ function discardChanges() {
   void nextTick(() => {
     suppressImageWatch = false
   })
+}
+
+function applyAiImprovedContent(content: string) {
+  if (!props.selectedPath) return
+  if (isRawEditor.value) {
+    rawContent.value = content
+  } else if (model.value) {
+    model.value = parseInfraManifest(props.selectedPath, content)
+  }
+  showAiAnalysis.value = false
+  statusMessage.value = 'Applied AI suggestion — save to persist'
+}
+
+async function deleteSelectedFile() {
+  if (!props.selectedPath || deleting.value) return
+  const path = props.selectedPath
+  if (!window.confirm(`Delete “${path}” from this workspace?`)) return
+  deleting.value = true
+  statusMessage.value = null
+  try {
+    await deleteWorkspacePath(props.workspaceId, path)
+    emit('deleted', path)
+    statusMessage.value = `Deleted ${path}`
+  } catch (err) {
+    emit('error', err instanceof Error ? err.message : 'Failed to delete file')
+  } finally {
+    deleting.value = false
+  }
+}
+
+function onAiError(message: string) {
+  emit('error', message)
 }
 
 watch(
@@ -396,9 +517,9 @@ onBeforeUnmount(() => {
     clearTimeout(imageInspectTimer)
     imageInspectTimer = null
   }
-  if (copiedWorkflowTimer) {
-    clearTimeout(copiedWorkflowTimer)
-    copiedWorkflowTimer = null
+  if (copiedFileTimer) {
+    clearTimeout(copiedFileTimer)
+    copiedFileTimer = null
   }
   loadAbortController?.abort()
   loadAbortController = null
@@ -406,7 +527,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[var(--lp-panel)]/40">
+  <section class="flex min-h-[78vh] min-w-0 flex-1 flex-col overflow-hidden bg-[var(--lp-panel)]/40">
     <header class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/60 px-5 py-4">
       <div class="min-w-0 space-y-1">
         <div
@@ -428,31 +549,52 @@ onBeforeUnmount(() => {
           >
             Mapped
           </span>
+          <span
+            v-else-if="isRawEditor"
+            class="rounded border border-[var(--lp-line)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]"
+          >
+            IDE
+          </span>
         </div>
       </div>
       <div class="flex shrink-0 flex-wrap items-center gap-2">
-        <template v-if="isCi">
-          <button
-            type="button"
-            class="lp-btn-ghost py-2 text-xs uppercase tracking-wide"
-            :disabled="!workflowYaml"
-            @click="copyWorkflowYaml"
-          >
-            <span class="material-symbols-outlined text-sm">
-              {{ copiedWorkflow ? 'check' : 'content_copy' }}
-            </span>
-            {{ copiedWorkflow ? 'Copied' : 'Copy' }}
-          </button>
-          <button
-            type="button"
-            class="lp-btn-ghost py-2 text-xs uppercase tracking-wide"
-            :disabled="!workflowYaml"
-            @click="downloadWorkflowYaml"
-          >
-            <span class="material-symbols-outlined text-sm">download</span>
-            Download
-          </button>
-        </template>
+        <button
+          type="button"
+          class="lp-btn-ghost py-2 text-xs uppercase tracking-wide"
+          :disabled="!activeFileContent"
+          @click="copyActiveFile"
+        >
+          <span class="material-symbols-outlined text-sm">
+            {{ copiedFile ? 'check' : 'content_copy' }}
+          </span>
+          {{ copiedFile ? 'Copied' : 'Copy' }}
+        </button>
+        <button
+          type="button"
+          class="lp-btn-ghost py-2 text-xs uppercase tracking-wide"
+          :disabled="!activeFileContent"
+          @click="downloadActiveFile"
+        >
+          <span class="material-symbols-outlined text-sm">download</span>
+          Download
+        </button>
+        <button
+          type="button"
+          class="lp-btn-ghost py-2 text-xs uppercase tracking-wide disabled:opacity-40"
+          :disabled="!selectedPath || !rawContent.trim() || loading"
+          @click="showAiAnalysis = true"
+        >
+          <span class="material-symbols-outlined text-sm">auto_awesome</span>
+          AI analyze
+        </button>
+        <button
+          type="button"
+          class="px-2 py-2 text-xs font-medium uppercase tracking-wide text-[var(--lp-danger)] transition hover:bg-[var(--lp-danger)]/10 disabled:opacity-40"
+          :disabled="!selectedPath || deleting"
+          @click="deleteSelectedFile"
+        >
+          {{ deleting ? 'Deleting…' : 'Delete file' }}
+        </button>
         <button
           type="button"
           class="px-2 py-2 text-xs font-medium uppercase tracking-wide text-[var(--lp-muted)] transition hover:text-[var(--lp-text)] disabled:opacity-40"
@@ -464,7 +606,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="lp-btn-primary py-2 text-xs uppercase tracking-wide"
-          :disabled="!selectedPath || !supported || saving || !hasChanges"
+          :disabled="!selectedPath || saving || !hasChanges || (!isRawEditor && !supported)"
           @click="saveChanges"
         >
           <span class="material-symbols-outlined text-sm">save</span>
@@ -481,13 +623,22 @@ onBeforeUnmount(() => {
         Loading file…
       </div>
       <div
-        v-else-if="!supported"
-        class="rounded-xl border border-dashed border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-6 py-8 text-sm text-[var(--lp-muted)]"
+        v-else-if="isRawEditor"
+        class="flex h-[min(70vh,720px)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30"
       >
-        This file is not yet mapped to structured fields. Switch to <strong class="text-[var(--lp-text)]">Advanced IDE</strong> for raw edits.
+        <ClientOnly>
+          <WorkspaceMonacoEditor
+            v-model="rawContent"
+            :path="selectedPath"
+            class="min-h-0 flex-1"
+          />
+          <template #fallback>
+            <p class="p-6 text-sm text-[var(--lp-muted)]">Loading editor…</p>
+          </template>
+        </ClientOnly>
       </div>
 
-      <div v-else-if="model" class="mx-auto max-w-4xl space-y-10 pb-16">
+      <div v-else class="mx-auto max-w-4xl space-y-10 pb-16">
         <!-- Namespace -->
         <section v-if="isNamespace" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
@@ -1033,33 +1184,9 @@ onBeforeUnmount(() => {
 
         <!-- CI/CD -->
         <section v-if="isCi" class="space-y-4">
-          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--lp-line)] pb-2">
-            <div class="flex items-center gap-2">
-              <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">integration_instructions</span>
-              <h3 class="lp-label">CI/CD pipeline</h3>
-            </div>
-            <div class="flex items-center gap-2">
-              <button
-                type="button"
-                class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
-                :disabled="!workflowYaml"
-                @click="copyWorkflowYaml"
-              >
-                <span class="material-symbols-outlined text-sm">
-                  {{ copiedWorkflow ? 'check' : 'content_copy' }}
-                </span>
-                {{ copiedWorkflow ? 'Copied' : 'Copy YAML' }}
-              </button>
-              <button
-                type="button"
-                class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
-                :disabled="!workflowYaml"
-                @click="downloadWorkflowYaml"
-              >
-                <span class="material-symbols-outlined text-sm">download</span>
-                Download
-              </button>
-            </div>
+          <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
+            <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">integration_instructions</span>
+            <h3 class="lp-label">CI/CD pipeline</h3>
           </div>
           <div class="space-y-4">
             <div class="grid gap-4 sm:grid-cols-2">
@@ -1096,6 +1223,21 @@ onBeforeUnmount(() => {
                 v-if="model.cicdSecurity.containerScan.enabled"
                 class="grid gap-3 sm:grid-cols-2"
               >
+                <label class="block space-y-1.5 sm:col-span-2">
+                  <span class="lp-label">Container scanner</span>
+                  <select v-model="model.cicdSecurity.containerScan.tool" class="lp-input font-mono text-xs">
+                    <option
+                      v-for="opt in containerScanToolOptions"
+                      :key="opt.id"
+                      :value="opt.id"
+                    >
+                      {{ opt.label }}
+                    </option>
+                  </select>
+                  <span class="block font-mono text-[10px] text-[var(--lp-muted)]">
+                    {{ containerScanToolOptions.find((o) => o.id === model.cicdSecurity.containerScan.tool)?.hint }}
+                  </span>
+                </label>
                 <label class="block space-y-1.5">
                   <span class="lp-label">Severity threshold</span>
                   <select v-model="model.cicdSecurity.containerScan.severityThreshold" class="lp-input">
@@ -1139,7 +1281,25 @@ onBeforeUnmount(() => {
                   v-if="model.cicdSecurity.sastGuardrails.enableSast"
                   class="block space-y-1.5"
                 >
-                  <span class="lp-label">Primary language pack</span>
+                  <span class="lp-label">SAST scanner</span>
+                  <select v-model="model.cicdSecurity.sastGuardrails.sastTool" class="lp-input font-mono text-xs">
+                    <option
+                      v-for="opt in sastToolOptions"
+                      :key="opt.id"
+                      :value="opt.id"
+                    >
+                      {{ opt.label }}
+                    </option>
+                  </select>
+                  <span class="block font-mono text-[10px] text-[var(--lp-muted)]">
+                    {{ sastToolOptions.find((o) => o.id === model.cicdSecurity.sastGuardrails.sastTool)?.hint }}
+                  </span>
+                </label>
+                <label
+                  v-if="model.cicdSecurity.sastGuardrails.enableSast && model.cicdSecurity.sastGuardrails.sastTool === 'codeql-v3.28.10'"
+                  class="block space-y-1.5"
+                >
+                  <span class="lp-label">CodeQL language pack</span>
                   <select
                     :value="model.cicdSecurity.sastGuardrails.sastLanguages[0] ?? 'javascript-typescript'"
                     class="lp-input"
@@ -1202,5 +1362,15 @@ onBeforeUnmount(() => {
         <span v-else>{{ hasChanges ? 'Unsaved changes' : 'No pending changes' }}</span>
       </p>
     </footer>
+
+    <WorkspaceAiAnalysisDrawer
+      :open="showAiAnalysis"
+      :workspace-id="workspaceId"
+      :path="selectedPath"
+      :content="analysisContent"
+      @update:open="(value) => { showAiAnalysis = value }"
+      @apply="applyAiImprovedContent"
+      @error="onAiError"
+    />
   </section>
 </template>

@@ -9,7 +9,8 @@ down:
 migrate:
 	cd apps/api && .venv/bin/alembic upgrade head
 
-api:
+# Applies pending Alembic revisions, then starts the API (same as Docker image entrypoint).
+api: migrate
 	cd apps/api && .venv/bin/uvicorn app.main:app --reload --port 8000
 
 worker:

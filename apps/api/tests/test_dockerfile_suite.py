@@ -16,7 +16,13 @@ from app.schemas.dockerfile_schema import (
 )
 from app.services.dockerfile_manager import DockerfileManagerError, _normalize_dockers_path
 from app.services.dockerfile_registry import resolve_image_refs
-from app.services.dockerfile_scaffold import detect_stack, scaffold_docker_compose, scaffold_dockerfile
+from app.services.dockerfile_scaffold import (
+    detect_stack,
+    resolve_scaffold_stacks,
+    scaffold_docker_compose,
+    scaffold_docker_compose_services,
+    scaffold_dockerfile,
+)
 from app.services.dockerfile_security import DockerfileSecurityService
 
 
@@ -26,6 +32,35 @@ def test_scaffold_docker_compose() -> None:
     assert "my-service:" in compose
     assert 'ports:\n      - "9090:9090"' in compose
     assert "healthcheck:" in compose
+
+
+def test_resolve_scaffold_stacks_prefers_frameworks() -> None:
+    stacks = resolve_scaffold_stacks(
+        stack="node",
+        frameworks=["nuxtjs", "fastapi", "nestjs", "nuxtjs"],
+    )
+    assert [s.value for s in stacks] == ["nuxtjs", "fastapi", "nestjs"]
+
+
+def test_scaffold_docker_compose_services_multi() -> None:
+    compose = scaffold_docker_compose_services(
+        [
+            {
+                "name": "shop-nuxtjs",
+                "listen_port": 3000,
+                "dockerfile_path": "dockers/nuxtjs/Dockerfile",
+            },
+            {
+                "name": "shop-fastapi",
+                "listen_port": 8000,
+                "dockerfile_path": "dockers/fastapi/Dockerfile",
+            },
+        ]
+    )
+    assert "shop-nuxtjs:" in compose
+    assert "shop-fastapi:" in compose
+    assert "dockerfile: dockers/nuxtjs/Dockerfile" in compose
+    assert "dockerfile: dockers/fastapi/Dockerfile" in compose
 
 
 def test_detect_stack_node() -> None:

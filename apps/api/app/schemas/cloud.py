@@ -33,6 +33,7 @@ class KubernetesPackaging(str, Enum):
     NONE = "none"
     RAW_MANIFESTS = "raw_manifests"
     HELM = "helm"
+    KUSTOMIZE = "kustomize"
 
 
 class WorkspaceArtifactsMode(str, Enum):
@@ -114,6 +115,34 @@ class CostResourceConfig(BaseModel):
 class IdleShutdownConfig(BaseModel):
     enabled: bool = False
     schedule: IdleShutdownSchedule = IdleShutdownSchedule.WEEKNIGHTS_WEEKENDS
+
+
+class DependencyPlacement(str, Enum):
+    IN_CLUSTER = "in_cluster"
+    MANAGED = "managed"
+
+
+class DataStoreDependency(BaseModel):
+    enabled: bool = False
+    placement: DependencyPlacement = DependencyPlacement.IN_CLUSTER
+
+
+class WorkloadDependenciesConfig(BaseModel):
+    postgres: DataStoreDependency = Field(default_factory=DataStoreDependency)
+    mysql: DataStoreDependency = Field(default_factory=DataStoreDependency)
+    mongodb: DataStoreDependency = Field(default_factory=DataStoreDependency)
+    redis: DataStoreDependency = Field(default_factory=DataStoreDependency)
+
+    def any_enabled(self) -> bool:
+        return any(
+            store.enabled
+            for store in (
+                self.postgres,
+                self.mysql,
+                self.mongodb,
+                self.redis,
+            )
+        )
 
 
 class CostOptimizationConfig(BaseModel):
@@ -402,6 +431,9 @@ class ProvisioningWizardRequest(BaseModel):
     container_scaffold: ContainerScaffoldConfig = Field(
         default_factory=ContainerScaffoldConfig
     )
+    dependencies: WorkloadDependenciesConfig = Field(
+        default_factory=WorkloadDependenciesConfig
+    )
 
     @field_validator("name")
     @classmethod
@@ -442,6 +474,13 @@ class ProvisioningWizardRequest(BaseModel):
                 "kubernetes_packaging requires a Kubernetes or container runtime "
                 "(GKE, EKS, AKS, Cloud Run, or Container Apps)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_workload_dependencies(self) -> ProvisioningWizardRequest:
+        from app.services.workload_dependencies import validate_managed_dependencies
+
+        validate_managed_dependencies(self.cloud, self.dependencies)
         return self
 
 
@@ -563,6 +602,9 @@ class WorkspaceWizardConfig(BaseModel):
     )
     container_scaffold: ContainerScaffoldConfig = Field(
         default_factory=ContainerScaffoldConfig
+    )
+    dependencies: WorkloadDependenciesConfig = Field(
+        default_factory=WorkloadDependenciesConfig
     )
     has_credentials: bool = False
 

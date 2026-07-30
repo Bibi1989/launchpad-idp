@@ -18,6 +18,8 @@ from app.schemas.dockerfile_schema import (
     DockerfileScaffoldResponse,
     DockerfileScanRequest,
     DockerfileScanResponse,
+    RepoPushBundleRequest,
+    RepoPushBundleResponse,
 )
 from app.services.dockerfile_jobs import get_build_job
 from app.services.dockerfile_manager import DockerfileManagerError, DockerfileManagerService
@@ -96,6 +98,23 @@ async def push_dockerfile(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "dockerfile_push_failed", "message": str(exc)},
+        ) from exc
+
+
+@router.post("/push-bundle", response_model=RepoPushBundleResponse)
+async def push_scaffold_bundle(
+    payload: RepoPushBundleRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    service: DockerfileManagerService = Depends(get_dockerfile_manager),
+) -> RepoPushBundleResponse:
+    _ = user, org
+    try:
+        return await service.push_bundle(payload)
+    except DockerfileManagerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "repo_push_bundle_failed", "message": str(exc)},
         ) from exc
 
 

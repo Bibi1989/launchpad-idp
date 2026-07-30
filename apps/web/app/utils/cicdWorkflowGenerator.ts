@@ -1,10 +1,20 @@
 import type {
   CicdPlatform,
   CicdSecurityConfig,
+  ContainerScanToolId,
   SastLanguage,
+  SastToolId,
   ScanFindingAction,
   ScanSeverityThreshold,
 } from '~/types/provisioning'
+import {
+  defaultContainerScanToolForPlatform,
+  defaultSastToolForPlatform,
+  getContainerScanToolOption,
+  getSastToolOption,
+  normalizeContainerScanToolId,
+  normalizeSastToolId,
+} from '~/utils/cicdSecurityTools'
 
 export type { CicdSecurityConfig, SastLanguage, ScanFindingAction, ScanSeverityThreshold }
 
@@ -28,20 +38,24 @@ export interface CicdWorkflowOptions {
   containerName?: string
   /** Full image reference template (GitHub Actions / GitLab CI expressions allowed). */
   imageRef?: string
+  /** Path to Dockerfile relative to repo root (defaults to Docker auto-detect). */
+  dockerfilePath?: string
 }
 
-export function defaultCicdSecurityConfig(): CicdSecurityConfig {
+export function defaultCicdSecurityConfig(platform: CicdPlatform = 'github'): CicdSecurityConfig {
   return {
     containerScan: {
       enabled: false,
       severityThreshold: 'critical_high',
       onFinding: 'block',
+      tool: defaultContainerScanToolForPlatform(platform),
     },
     sastGuardrails: {
       enabled: false,
       enableSast: true,
       enableHealthRollback: true,
       sastLanguages: ['javascript-typescript'],
+      sastTool: defaultSastToolForPlatform(platform),
     },
   }
 }
@@ -64,11 +78,71 @@ function needsClause(deps: string[]): string {
   return ['    needs:', ...deps.map((d) => `      - ${d}`)].join('\n')
 }
 
+function buildGithubSastSteps(
+  security: CicdSecurityConfig,
+  languages: SastLanguage[],
+): string[] {
+  const tool = getSastToolOption(security.sastGuardrails.sastTool)
+  if (tool.codeqlInit && tool.codeqlAnalyze) {
+    return [
+      '      - name: Initialize CodeQL',
+      `        uses: ${tool.codeqlInit}`,
+      '        with:',
+      '          languages: |',
+      ...yamlList(languages, 12),
+      '      - name: Perform CodeQL Analysis',
+      `        uses: ${tool.codeqlAnalyze}`,
+    ]
+  }
+  const image = tool.image ?? 'returntocorp/semgrep:1.97.0'
+  return [
+    '      - name: Run Semgrep (pinned image)',
+    '        run: |',
+    `          docker run --rm -v "\${GITHUB_WORKSPACE}:/src" -w /src ${image} \\`,
+    '            semgrep scan --config p/ci --error --sarif --output semgrep.sarif || true',
+    `          docker run --rm -v "\${GITHUB_WORKSPACE}:/src" -w /src ${image} \\`,
+    '            semgrep scan --config p/security-audit --error',
+  ]
+}
+
+function buildGithubTrivySteps(
+  security: CicdSecurityConfig,
+  severity: string,
+  exitCode: string,
+): string[] {
+  const tool = getContainerScanToolOption(security.containerScan.tool)
+  if (tool.githubAction) {
+    return [
+      '      - name: Run Trivy vulnerability scanner',
+      `        uses: ${tool.githubAction}`,
+      '        with:',
+      '          image-ref: ${{ needs.build-image.outputs.image }}',
+      '          format: sarif',
+      '          output: trivy-results.sarif',
+      `          exit-code: "${exitCode}"`,
+      `          severity: ${severity}`,
+      '          ignore-unfixed: true',
+    ]
+  }
+  const image = tool.image ?? 'aquasec/trivy:0.58.1'
+  const exitFlag = exitCode === '1' ? '--exit-code 1' : '--exit-code 0'
+  return [
+    '      - name: Run Trivy vulnerability scanner (pinned image)',
+    '        run: |',
+    `          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ${image} image \\`,
+    `            --format sarif --output trivy-results.sarif --severity ${severity} ${exitFlag} \\`,
+    '            "${{ needs.build-image.outputs.image }}"',
+  ]
+}
+
 function buildGithubWorkflow(
   security: CicdSecurityConfig,
   options: Required<
-    Pick<CicdWorkflowOptions, 'branch' | 'runner' | 'deploymentName' | 'namespace' | 'containerName' | 'imageRef'>
-  >,
+    Pick<
+      CicdWorkflowOptions,
+      'branch' | 'runner' | 'deploymentName' | 'namespace' | 'containerName' | 'imageRef'
+    >
+  > & { dockerfilePath?: string },
 ): string {
   const solutionA = security.containerScan.enabled
   const solutionB = security.sastGuardrails.enabled
@@ -89,6 +163,7 @@ function buildGithubWorkflow(
         enableSast: security.sastGuardrails.enableSast,
         enableHealthRollback: security.sastGuardrails.enableHealthRollback,
         sastLanguages: languages,
+        sastTool: security.sastGuardrails.sastTool,
       },
     })}`,
     'name: Build, Scan & Deploy',
@@ -120,13 +195,7 @@ function buildGithubWorkflow(
       '    steps:',
       `      - name: Checkout`,
       `        uses: ${PINNED_ACTIONS.checkout}`,
-      '      - name: Initialize CodeQL',
-      `        uses: ${PINNED_ACTIONS.codeqlInit}`,
-      '        with:',
-      '          languages: |',
-      ...yamlList(languages, 12),
-      '      - name: Perform CodeQL Analysis',
-      `        uses: ${PINNED_ACTIONS.codeqlAnalyze}`,
+      ...buildGithubSastSteps(security, languages),
       '',
     )
   }
@@ -157,6 +226,9 @@ function buildGithubWorkflow(
     `        uses: ${PINNED_ACTIONS.buildPush}`,
     '        with:',
     '          context: .',
+    ...(options.dockerfilePath
+      ? [`          file: ${options.dockerfilePath}`]
+      : []),
     '          push: true',
     '          tags: ${{ env.IMAGE_REF }}',
     '',
@@ -169,15 +241,7 @@ function buildGithubWorkflow(
       '    needs: build-image',
       `    runs-on: ${options.runner}`,
       '    steps:',
-      '      - name: Run Trivy vulnerability scanner',
-      `        uses: ${PINNED_ACTIONS.trivy}`,
-      '        with:',
-      '          image-ref: ${{ needs.build-image.outputs.image }}',
-      '          format: sarif',
-      '          output: trivy-results.sarif',
-      `          exit-code: "${exitCode}"`,
-      `          severity: ${severity}`,
-      '          ignore-unfixed: true',
+      ...buildGithubTrivySteps(security, severity, exitCode),
       '      - name: Upload Trivy SARIF',
       `        uses: ${PINNED_ACTIONS.codeqlUploadSarif}`,
       '        if: always()',
@@ -234,8 +298,11 @@ function buildGithubWorkflow(
 function buildGitlabPipeline(
   security: CicdSecurityConfig,
   options: Required<
-    Pick<CicdWorkflowOptions, 'branch' | 'runner' | 'deploymentName' | 'namespace' | 'containerName' | 'imageRef'>
-  >,
+    Pick<
+      CicdWorkflowOptions,
+      'branch' | 'runner' | 'deploymentName' | 'namespace' | 'containerName' | 'imageRef'
+    >
+  > & { dockerfilePath?: string },
 ): string {
   const solutionA = security.containerScan.enabled
   const solutionB = security.sastGuardrails.enabled
@@ -262,6 +329,7 @@ function buildGitlabPipeline(
         enableSast: security.sastGuardrails.enableSast,
         enableHealthRollback: security.sastGuardrails.enableHealthRollback,
         sastLanguages: languages,
+        sastTool: security.sastGuardrails.sastTool,
       },
     })}`,
     `stages: [${stages.join(', ')}]`,
@@ -275,10 +343,11 @@ function buildGitlabPipeline(
   ]
 
   if (runSast) {
+    const sastImage = getSastToolOption(security.sastGuardrails.sastTool).image ?? 'returntocorp/semgrep:1.97.0'
     lines.push(
       'sast-code-scan:',
       '  stage: sast',
-      '  image: returntocorp/semgrep:1.97.0',
+      `  image: ${sastImage}`,
       '  script:',
       '    - semgrep scan --config p/ci --error --sarif --output semgrep.sarif || true',
       '    - semgrep scan --config p/security-audit --error',
@@ -294,6 +363,7 @@ function buildGitlabPipeline(
     )
   }
 
+  const dockerFileFlag = options.dockerfilePath ? `-f "${options.dockerfilePath}" ` : ''
   lines.push(
     'build-image:',
     '  stage: build',
@@ -302,7 +372,7 @@ function buildGitlabPipeline(
     '  services:',
     '    - docker:27-dind',
     '  script:',
-    '    - docker build -t "$IMAGE_REF" .',
+    `    - docker build ${dockerFileFlag}-t "$IMAGE_REF" .`,
     '    - docker push "$IMAGE_REF"',
     '  rules:',
     `    - if: $CI_COMMIT_BRANCH == "${options.branch}"`,
@@ -311,12 +381,13 @@ function buildGitlabPipeline(
 
   if (solutionA) {
     const exitFlag = failOnVuln ? '--exit-code 1' : '--exit-code 0'
+    const trivyImage = getContainerScanToolOption(security.containerScan.tool).image ?? 'aquasec/trivy:0.58.1'
     lines.push(
       'container-security-scan:',
       '  stage: scan',
       '  needs: ["build-image"]',
       '  image:',
-      '    name: aquasec/trivy:0.58.1',
+      `    name: ${trivyImage}`,
       '    entrypoint: [""]',
       '  script:',
       `    - trivy image --format sarif --output trivy-results.sarif --severity ${severity} ${exitFlag} "$IMAGE_REF"`,
@@ -366,9 +437,34 @@ function buildGitlabPipeline(
   return lines.join('\n')
 }
 
+function inferPlatformFromWorkflow(content: string): CicdPlatform {
+  if (/runs-on:|github\.|GITHUB_WORKSPACE/.test(content)) return 'github'
+  return 'gitlab'
+}
+
+function inferSastToolFromContent(content: string, platform: CicdPlatform): SastToolId {
+  if (/codeql-action\/init/.test(content)) return 'codeql-v3.28.10'
+  const semgrep = content.match(/returntocorp\/semgrep:([0-9.]+)/)
+  if (semgrep?.[1]) {
+    const id = `semgrep-${semgrep[1]}` as SastToolId
+    if (normalizeSastToolId(id, platform) === id) return id
+  }
+  return defaultSastToolForPlatform(platform)
+}
+
+function inferContainerScanToolFromContent(content: string, platform: CicdPlatform): ContainerScanToolId {
+  if (/aquasecurity\/trivy-action@/.test(content)) return 'trivy-action-v0.30.0'
+  const trivy = content.match(/aquasec\/trivy:([0-9.]+)/)
+  if (trivy?.[1]) {
+    const id = `trivy-${trivy[1]}` as ContainerScanToolId
+    if (normalizeContainerScanToolId(id, platform) === id) return id
+  }
+  return defaultContainerScanToolForPlatform(platform)
+}
+
 export function renderCicdWorkflow(
   platform: CicdPlatform,
-  security: CicdSecurityConfig = defaultCicdSecurityConfig(),
+  security: CicdSecurityConfig = defaultCicdSecurityConfig(platform),
   options: CicdWorkflowOptions = {},
 ): string {
   const resolved = {
@@ -382,26 +478,30 @@ export function renderCicdWorkflow(
       ?? (platform === 'github'
         ? 'ghcr.io/${{ github.repository }}:${{ github.sha }}'
         : '${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}'),
+    dockerfilePath: options.dockerfilePath,
   }
   return platform === 'github'
     ? buildGithubWorkflow(security, resolved)
     : buildGitlabPipeline(security, resolved)
 }
 
-export function parseCicdSecurityMarker(content: string): CicdSecurityConfig | null {
+export function parseCicdSecurityMarker(content: string, platform?: CicdPlatform): CicdSecurityConfig | null {
   const match = content.match(/# launchpad-cicd-security:\s*(\{.*\})\s*$/m)
   if (!match?.[1]) return null
+  const resolvedPlatform = platform ?? inferPlatformFromWorkflow(content)
   try {
     const parsed = JSON.parse(match[1]) as Partial<CicdSecurityConfig>
-    const defaults = defaultCicdSecurityConfig()
+    const defaults = defaultCicdSecurityConfig(resolvedPlatform)
     return {
       containerScan: {
         ...defaults.containerScan,
         ...(parsed.containerScan ?? {}),
+        tool: normalizeContainerScanToolId(parsed.containerScan?.tool, resolvedPlatform),
       },
       sastGuardrails: {
         ...defaults.sastGuardrails,
         ...(parsed.sastGuardrails ?? {}),
+        sastTool: normalizeSastToolId(parsed.sastGuardrails?.sastTool, resolvedPlatform),
       },
     }
   } catch {
@@ -413,7 +513,8 @@ export function inferCicdSecurityFromContent(content: string): CicdSecurityConfi
   const fromMarker = parseCicdSecurityMarker(content)
   if (fromMarker) return fromMarker
 
-  const defaults = defaultCicdSecurityConfig()
+  const platform = inferPlatformFromWorkflow(content)
+  const defaults = defaultCicdSecurityConfig(platform)
   const hasContainerScan = /container-security-scan:/.test(content) || /trivy image/.test(content)
   const hasSast = /sast-code-scan:/.test(content) || /codeql-action\/init/.test(content) || /semgrep scan/.test(content)
   const hasHealth = /rollout undo/.test(content)
@@ -429,12 +530,18 @@ export function inferCicdSecurityFromContent(content: string): CicdSecurityConfi
       enabled: hasContainerScan,
       severityThreshold: severity,
       onFinding,
+      tool: hasContainerScan
+        ? inferContainerScanToolFromContent(content, platform)
+        : defaults.containerScan.tool,
     },
     sastGuardrails: {
       enabled: hasSast || hasHealth,
       enableSast: hasSast,
       enableHealthRollback: hasHealth,
       sastLanguages: defaults.sastGuardrails.sastLanguages,
+      sastTool: hasSast
+        ? inferSastToolFromContent(content, platform)
+        : defaults.sastGuardrails.sastTool,
     },
   }
 }

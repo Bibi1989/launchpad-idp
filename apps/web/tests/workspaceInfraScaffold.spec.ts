@@ -8,6 +8,7 @@ import {
 import {
   artifactModeToInfraConfig,
   buildCiCdScaffold,
+  buildDockerScaffold,
   buildKubernetesScaffold,
   buildProvisionScaffold,
   defaultInfraGenerationConfig,
@@ -16,6 +17,7 @@ import {
   kubernetesRunCommands,
   provisionRunCommands,
 } from '../app/utils/workspaceInfraScaffold'
+import { buildRepoScaffoldBundle } from '../app/utils/workspaceRepoScaffold'
 
 function securityWith(opts: {
   a?: boolean
@@ -114,11 +116,97 @@ describe('workspaceInfraScaffold', () => {
     expect(cicd[0]?.content).toContain('deploy:')
   })
 
+  it('writes one CI workflow per selected framework', () => {
+    const files = buildCiCdScaffold('github', undefined, ['nuxtjs', 'fastapi', 'nestjs'], 'demo')
+    expect(files.map((f) => f.path)).toEqual([
+      'ci/github/workflows/nuxtjs-deploy.yml',
+      'ci/github/workflows/fastapi-deploy.yml',
+      'ci/github/workflows/nestjs-deploy.yml',
+    ])
+    expect(files[0]?.content).toContain('file: dockers/Dockerfile.demo-nuxtjs')
+    expect(files[1]?.content).toContain('file: dockers/Dockerfile.demo-fastapi')
+    expect(files[2]?.content).toContain('file: dockers/Dockerfile.demo-nestjs')
+  })
+
+  it('writes gitlab include root plus per-framework fragments', () => {
+    const files = buildCiCdScaffold('gitlab', undefined, ['nuxtjs', 'fastapi'], 'demo')
+    expect(files[0]?.path).toBe('ci/gitlab/.gitlab-ci.yml')
+    expect(files[0]?.content).toContain('local: ci/gitlab/nuxtjs.yml')
+    expect(files.map((f) => f.path)).toContain('ci/gitlab/fastapi.yml')
+    expect(files.find((f) => f.path === 'ci/gitlab/fastapi.yml')?.content).toContain(
+      '-f "dockers/Dockerfile.demo-fastapi"',
+    )
+  })
+
+  it('writes dockers/ and docker-compose.yml when container scaffold is enabled', () => {
+    expect(buildDockerScaffold({ enabled: false } as never)).toEqual([])
+
+    const single = buildDockerScaffold({
+      enabled: true,
+      generate_dockerfile: true,
+      generate_docker_compose: true,
+      stack: 'fastapi',
+      frameworks: [],
+      app_name: 'demo',
+      listen_port: 8000,
+    })
+    expect(single.map((f) => f.path)).toEqual(['dockers/Dockerfile.demo', 'docker-compose.yml'])
+    expect(single[0]?.content).toContain('uvicorn')
+
+    const multi = buildDockerScaffold({
+      enabled: true,
+      generate_dockerfile: true,
+      generate_docker_compose: true,
+      stack: 'nuxtjs',
+      frameworks: ['nuxtjs', 'fastapi', 'nestjs'],
+      app_name: 'demo',
+      listen_port: 8080,
+    })
+    expect(multi.map((f) => f.path)).toEqual([
+      'dockers/Dockerfile.demo-nuxtjs',
+      'dockers/Dockerfile.demo-fastapi',
+      'dockers/Dockerfile.demo-nestjs',
+      'docker-compose.yml',
+    ])
+    expect(multi[3]?.content).toContain('dockerfile: dockers/Dockerfile.demo-fastapi')
+  })
+
   it('returns separate run commands per area', () => {
     expect(provisionRunCommands('terraform')).toHaveLength(2)
     expect(kubernetesRunCommands('helm')).toEqual([
       'helm upgrade --install app-chart infra/helm/app-chart/',
     ])
+  })
+
+  it('builds multi-artifact repo scaffold bundle', () => {
+    const files = buildRepoScaffoldBundle({
+      appName: 'demo',
+      infra: {
+        provision: { enabled: true, engine: 'terraform' },
+        kubernetes: { enabled: true, mode: 'kustomize' },
+        cicd: {
+          enabled: true,
+          platform: 'github',
+          security: defaultCicdSecurityConfig(),
+          frameworks: ['fastapi'],
+        },
+      },
+      containerScaffold: {
+        enabled: true,
+        generate_dockerfile: true,
+        generate_docker_compose: true,
+        stack: 'fastapi',
+        frameworks: ['fastapi'],
+        app_name: 'demo',
+        listen_port: 8000,
+      },
+      detectedFramework: 'fastapi',
+    })
+    const paths = files.map((f) => f.path)
+    expect(paths).toContain('dockers/Dockerfile.demo-fastapi')
+    expect(paths).toContain('infra/terraform/main.tf')
+    expect(paths).toContain('infra/kustomize/base/kustomization.yaml')
+    expect(paths.some((p) => p.startsWith('ci/github/workflows/'))).toBe(true)
   })
 })
 
@@ -196,9 +284,17 @@ describe('cicdWorkflowGenerator', () => {
     expect(inferred.sastGuardrails.enableHealthRollback).toBe(true)
   })
 
-  it('scaffolds gitlab path with security config', () => {
-    const files = buildCiCdScaffold('gitlab', securityWith({ a: true }))
-    expect(files[0]?.path).toBe('ci/gitlab/.gitlab-ci.yml')
-    expect(files[0]?.content).toContain('container-security-scan:')
+  it('uses selected Semgrep image in GitLab pipeline', () => {
+    const security = securityWith({ b: true, sast: true })
+    security.sastGuardrails.sastTool = 'semgrep-1.96.0'
+    const yaml = renderCicdWorkflow('gitlab', security)
+    expect(yaml).toContain('returntocorp/semgrep:1.96.0')
+  })
+
+  it('uses selected Trivy image in GitLab pipeline', () => {
+    const security = securityWith({ a: true })
+    security.containerScan.tool = 'trivy-0.57.2'
+    const yaml = renderCicdWorkflow('gitlab', security)
+    expect(yaml).toContain('aquasec/trivy:0.57.2')
   })
 })

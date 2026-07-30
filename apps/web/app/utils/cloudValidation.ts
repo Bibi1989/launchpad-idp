@@ -3,7 +3,7 @@ import { z } from 'zod'
 export const cloudProviderSchema = z.enum(['local', 'gcp', 'aws', 'azure', 'cloudflare'])
 export const iacEngineSchema = z.enum(['terraform', 'opentofu', 'pulumi'])
 export const secretBackendSchema = z.enum(['secret_manager', 'native_k8s'])
-export const kubernetesPackagingSchema = z.enum(['none', 'raw_manifests', 'helm'])
+export const kubernetesPackagingSchema = z.enum(['none', 'raw_manifests', 'helm', 'kustomize'])
 export const workspaceArtifactsModeSchema = z.enum(['iac_only', 'manifest_only', 'both'])
 export const ingressClassSchema = z.enum([
   'nginx',
@@ -277,99 +277,124 @@ export const cloudCredentialsSchema = z.object({
   cloudflare_api_token: z.string().optional().nullable(),
 })
 
+export const frameworkOptionSchema = z.enum([
+  'react_vite',
+  'nextjs',
+  'nuxtjs',
+  'vuejs',
+  'svelte',
+  'fastapi',
+  'flask',
+  'django',
+  'express',
+  'nestjs',
+  'springboot',
+  'go',
+  'rust',
+  'node',
+  'python',
+  'java',
+  'generic',
+])
+
+export const dependencyPlacementSchema = z.enum(['in_cluster', 'managed'])
+
+export const dataStoreDependencySchema = z.object({
+  enabled: z.boolean().default(false),
+  placement: dependencyPlacementSchema.default('in_cluster'),
+})
+
+export const workloadDependenciesSchema = z.object({
+  postgres: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
+  mysql: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
+  mongodb: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
+  redis: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
+})
+
+export const defaultWorkloadDependencies = (): z.infer<typeof workloadDependenciesSchema> => ({
+  postgres: { enabled: false, placement: 'in_cluster' },
+  mysql: { enabled: false, placement: 'in_cluster' },
+  mongodb: { enabled: false, placement: 'in_cluster' },
+  redis: { enabled: false, placement: 'in_cluster' },
+})
+
+export const containerScaffoldSchema = z.object({
+  enabled: z.boolean().default(false),
+  generate_dockerfile: z.boolean().default(true),
+  generate_docker_compose: z.boolean().default(true),
+  stack: frameworkOptionSchema.default('node'),
+  frameworks: z.array(frameworkOptionSchema).default([]),
+  app_name: z.string().trim().min(1).max(100).default('app'),
+  listen_port: z.number().int().min(1).max(65535).default(8080),
+})
+
+export const defaultContainerScaffold = (): z.infer<typeof containerScaffoldSchema> => ({
+  enabled: false,
+  generate_dockerfile: true,
+  generate_docker_compose: true,
+  stack: 'node',
+  frameworks: [],
+  app_name: 'app',
+  listen_port: 8080,
+})
+
+const wizardNameSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(3)
+  .max(64)
+  .regex(/^[a-z][a-z0-9-]*$/)
+
+const wizardCommonFields = {
+  name: wizardNameSchema,
+  iac_engine: iacEngineSchema.default('terraform'),
+  credentials: cloudCredentialsSchema.default({}),
+  run_init: z.boolean().default(true),
+  kubernetes_options: kubernetesWorkloadOptionsSchema.default(defaultKubernetesWorkloadOptions()),
+  cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
+  container_scaffold: containerScaffoldSchema.default(defaultContainerScaffold()),
+  dependencies: workloadDependenciesSchema.default(defaultWorkloadDependencies()),
+}
+
 export const provisioningWizardSchema = z.discriminatedUnion('provider', [
   z.object({
-    name: z
-      .string()
-      .trim()
-      .toLowerCase()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z][a-z0-9-]*$/),
-    iac_engine: iacEngineSchema.default('terraform'),
+    ...wizardCommonFields,
     provider: z.literal('local'),
     resources: localResourcesSchema.default({
       cluster_name: 'launchpad',
       context: 'kind-launchpad',
     }),
-    credentials: cloudCredentialsSchema.default({}),
-    run_init: z.boolean().default(true),
     artifact_mode: workspaceArtifactsModeSchema.default('manifest_only'),
     kubernetes_packaging: kubernetesPackagingSchema.default('raw_manifests'),
-    kubernetes_options: kubernetesWorkloadOptionsSchema.default(defaultKubernetesWorkloadOptions()),
-    cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
   }),
   z.object({
-    name: z
-      .string()
-      .trim()
-      .toLowerCase()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z][a-z0-9-]*$/),
-    iac_engine: iacEngineSchema.default('terraform'),
+    ...wizardCommonFields,
     provider: z.literal('gcp'),
     resources: gcpResourcesSchema,
-    credentials: cloudCredentialsSchema.default({}),
-    run_init: z.boolean().default(true),
     artifact_mode: workspaceArtifactsModeSchema.default('iac_only'),
     kubernetes_packaging: kubernetesPackagingSchema.default('none'),
-    kubernetes_options: kubernetesWorkloadOptionsSchema.default(defaultKubernetesWorkloadOptions()),
-    cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
   }),
   z.object({
-    name: z
-      .string()
-      .trim()
-      .toLowerCase()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z][a-z0-9-]*$/),
-    iac_engine: iacEngineSchema.default('terraform'),
+    ...wizardCommonFields,
     provider: z.literal('aws'),
     resources: awsResourcesSchema,
-    credentials: cloudCredentialsSchema.default({}),
-    run_init: z.boolean().default(true),
     artifact_mode: workspaceArtifactsModeSchema.default('iac_only'),
     kubernetes_packaging: kubernetesPackagingSchema.default('none'),
-    kubernetes_options: kubernetesWorkloadOptionsSchema.default(defaultKubernetesWorkloadOptions()),
-    cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
   }),
   z.object({
-    name: z
-      .string()
-      .trim()
-      .toLowerCase()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z][a-z0-9-]*$/),
-    iac_engine: iacEngineSchema.default('terraform'),
+    ...wizardCommonFields,
     provider: z.literal('azure'),
     resources: azureResourcesSchema,
-    credentials: cloudCredentialsSchema.default({}),
-    run_init: z.boolean().default(true),
     artifact_mode: workspaceArtifactsModeSchema.default('iac_only'),
     kubernetes_packaging: kubernetesPackagingSchema.default('none'),
-    kubernetes_options: kubernetesWorkloadOptionsSchema.default(defaultKubernetesWorkloadOptions()),
-    cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
   }),
   z.object({
-    name: z
-      .string()
-      .trim()
-      .toLowerCase()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z][a-z0-9-]*$/),
-    iac_engine: iacEngineSchema.default('terraform'),
+    ...wizardCommonFields,
     provider: z.literal('cloudflare'),
     resources: cloudflareResourcesSchema,
-    credentials: cloudCredentialsSchema.default({}),
-    run_init: z.boolean().default(true),
     artifact_mode: workspaceArtifactsModeSchema.default('iac_only'),
     kubernetes_packaging: kubernetesPackagingSchema.default('none'),
-    kubernetes_options: kubernetesWorkloadOptionsSchema.default(defaultKubernetesWorkloadOptions()),
-    cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
   }),
 ]).superRefine((value, ctx) => {
   if (value.provider === 'local') {

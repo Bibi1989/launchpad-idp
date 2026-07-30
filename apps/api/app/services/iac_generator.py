@@ -408,10 +408,13 @@ class IaCGenerator:
             raise FileNotFoundError(f"IaC workspace '{workspace_dir}' does not exist")
 
         # Clear prior generated layouts so deselected resources do not leave orphans.
-        for relative in ("infra",):
+        for relative in ("infra", "dockers"):
             target = root / relative
             if target.exists():
                 shutil.rmtree(target)
+        compose_file = root / "docker-compose.yml"
+        if compose_file.is_file():
+            compose_file.unlink()
         for pulumi_file in (
             "Pulumi.yaml",
             "Pulumi.dev.yaml",
@@ -469,8 +472,19 @@ class IaCGenerator:
                     packaging=request.kubernetes_packaging,
                     options=request.kubernetes_options,
                     cost_optimization=request.cost_optimization,
+                    dependencies=request.dependencies,
+                    cloud=request.cloud,
                 )
             )
+        if request.dependencies.any_enabled():
+            from app.services.workload_dependencies import managed_connections_readme
+
+            readme = managed_connections_readme(request.dependencies, request.cloud)
+            if readme:
+                path = workspace_dir / "infra" / "MANAGED_DATASTORES.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(readme, encoding="utf-8")
+                files.append("infra/MANAGED_DATASTORES.md")
         if request.container_scaffold.enabled:
             files.extend(self._write_container_scaffold(workspace_dir, request))
 
@@ -481,32 +495,60 @@ class IaCGenerator:
         workspace_dir: Path,
         request: ProvisioningWizardRequest,
     ) -> list[str]:
-        from app.schemas.dockerfile_schema import ProjectStack
         from app.services.dockerfile_scaffold import (
-            scaffold_docker_compose,
+            default_listen_port_for_stack,
+            dockerfile_path_for_service,
+            resolve_scaffold_stacks,
+            scaffold_docker_compose_services,
             scaffold_dockerfile,
         )
 
         written: list[str] = []
         c_cfg = request.container_scaffold
-        stack_val = c_cfg.stack.lower()
-        try:
-            stack = ProjectStack(stack_val)
-        except ValueError:
-            stack = ProjectStack.NODE
-
+        stacks = resolve_scaffold_stacks(stack=c_cfg.stack, frameworks=c_cfg.frameworks)
+        multi = len(stacks) > 1 or bool(c_cfg.frameworks)
         app_name = c_cfg.app_name or request.name
-        port = c_cfg.listen_port or 8080
+        compose_services: list[dict[str, object]] = []
 
-        if c_cfg.generate_dockerfile:
-            df_content = scaffold_dockerfile(stack, app_name=app_name, listen_port=port)
-            df_path = workspace_dir / "dockers" / "Dockerfile"
-            df_path.parent.mkdir(parents=True, exist_ok=True)
-            df_path.write_text(df_content, encoding="utf-8")
-            written.append("dockers/Dockerfile")
+        for stack in stacks:
+            port = (
+                default_listen_port_for_stack(stack, c_cfg.listen_port or 8080)
+                if multi
+                else (c_cfg.listen_port or default_listen_port_for_stack(stack, 8080))
+            )
+            service_name = f"{app_name}-{stack.value}" if multi else app_name
+            rel_dockerfile = dockerfile_path_for_service(
+                app_name,
+                stack if multi else None,
+                multi=multi,
+            )
+            df_path = workspace_dir / rel_dockerfile
+
+            if c_cfg.generate_dockerfile:
+                df_content = scaffold_dockerfile(
+                    stack,
+                    app_name=service_name,
+                    listen_port=port,
+                )
+                df_path.parent.mkdir(parents=True, exist_ok=True)
+                df_path.write_text(df_content, encoding="utf-8")
+                written.append(rel_dockerfile)
+
+            compose_services.append(
+                {
+                    "name": service_name,
+                    "listen_port": port,
+                    "dockerfile_path": rel_dockerfile,
+                }
+            )
 
         if c_cfg.generate_docker_compose:
-            dc_content = scaffold_docker_compose(app_name=app_name, listen_port=port)
+            from app.services.dockerfile_scaffold import scaffold_dependency_compose_blocks
+
+            dc_content = scaffold_docker_compose_services(
+                compose_services,
+                dependency_blocks=scaffold_dependency_compose_blocks(request.dependencies),
+            )
             dc_path = workspace_dir / "docker-compose.yml"
             dc_path.write_text(dc_content, encoding="utf-8")
             written.append("docker-compose.yml")
@@ -577,6 +619,8 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
                 packaging=packaging,
                 options=request.kubernetes_options,
                 cost_optimization=request.cost_optimization,
+                dependencies=request.dependencies,
+                cloud=request.cloud,
             ),
         ]
         if request.container_scaffold.enabled:
@@ -603,6 +647,7 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
             "kubernetes_options": request.kubernetes_options.model_dump(mode="json"),
             "cost_optimization": request.cost_optimization.model_dump(mode="json"),
             "container_scaffold": request.container_scaffold.model_dump(mode="json"),
+            "dependencies": request.dependencies.model_dump(mode="json"),
         }
         path = self.wizard_snapshot_path(workspace_dir)
         path.parent.mkdir(parents=True, exist_ok=True)

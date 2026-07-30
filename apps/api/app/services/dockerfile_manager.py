@@ -22,11 +22,13 @@ from app.schemas.dockerfile_schema import (
     DockerfileScanRequest,
     DockerfileScanResponse,
     ProjectStack,
+    RepoPushBundleRequest,
+    RepoPushBundleResponse,
 )
 from app.services.dockerfile_jobs import create_build_job
 from app.services.dockerfile_scaffold import (
-    default_dockerfile_path,
     detect_stack,
+    dockerfile_path_for_service,
     scaffold_dockerfile,
 )
 from app.services.dockerfile_scanner import (
@@ -98,9 +100,10 @@ class DockerfileManagerService:
             app_name=app_name,
             listen_port=request.listen_port,
         )
+        rel_path = dockerfile_path_for_service(app_name)
         return DockerfileScaffoldResponse(
             stack=stack,
-            path=default_dockerfile_path(),
+            path=rel_path,
             content=content,
             detected_from=markers,
         )
@@ -140,6 +143,27 @@ class DockerfileManagerService:
                 message = _friendly_github(exc)
             raise DockerfileManagerError(message) from exc
 
+        return result
+
+    async def push_bundle(self, request: RepoPushBundleRequest) -> RepoPushBundleResponse:
+        normalized: dict[str, str] = {}
+        for item in request.files:
+            path = _normalize_scaffold_path(item.path)
+            normalized[path] = item.content
+        try:
+            result = await asyncio.to_thread(
+                _commit_scaffold_bundle,
+                installation_id=request.installation_id,
+                full_name=request.full_name,
+                files=normalized,
+                commit_message=request.commit_message,
+                branch=request.branch,
+            )
+        except (GithubException, DockerfileManagerError) as exc:
+            message = str(exc)
+            if isinstance(exc, GithubException):
+                message = _friendly_github(exc)
+            raise DockerfileManagerError(message) from exc
         return result
 
     async def enqueue_build(
@@ -191,6 +215,88 @@ def _normalize_dockers_path(path: str) -> str:
     if not name.lower().startswith("dockerfile") and name.lower() != "containerfile":
         cleaned = f"{_DOCKERS_PREFIX}Dockerfile"
     return cleaned
+
+
+def _normalize_scaffold_path(path: str) -> str:
+    cleaned = path.strip().removeprefix("./")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if cleaned.startswith("/"):
+        cleaned = cleaned.lstrip("/")
+    if not cleaned:
+        raise DockerfileManagerError("path is required")
+    parts = cleaned.split("/")
+    if any(part == ".." for part in parts):
+        raise DockerfileManagerError("path must not contain '..'")
+    if not _SAFE_PATH.match(cleaned):
+        raise DockerfileManagerError("path contains invalid characters")
+    allowed = (
+        cleaned.startswith("dockers/")
+        or cleaned.startswith("infra/")
+        or cleaned.startswith("ci/")
+        or cleaned in {"docker-compose.yml", "docker-compose.yaml"}
+    )
+    if not allowed:
+        raise DockerfileManagerError(
+            "path must be under dockers/, infra/, ci/, or docker-compose.yml"
+        )
+    return cleaned
+
+
+def _commit_scaffold_bundle(
+    *,
+    installation_id: int,
+    full_name: str,
+    files: dict[str, str],
+    commit_message: str,
+    branch: str | None,
+) -> RepoPushBundleResponse:
+    client, resolved_installation_id, _, _ = get_installation_client(
+        installation_id=installation_id,
+    )
+    try:
+        repo = client.get_repo(full_name)
+    except GithubException as exc:
+        raise DockerfileManagerError(
+            f"Unable to open repository {full_name}: {_friendly_github(exc)}"
+        ) from exc
+
+    target_branch = (branch or repo.default_branch or "main").strip()
+    try:
+        ref = repo.get_git_ref(f"heads/{target_branch}")
+        base_sha = ref.object.sha
+        base_tree = repo.get_git_tree(base_sha)
+        elements: list[InputGitTreeElement] = []
+        for path, content in sorted(files.items()):
+            blob = repo.create_git_blob(content, "utf-8")
+            elements.append(
+                InputGitTreeElement(path=path, mode="100644", type="blob", sha=blob.sha),
+            )
+        tree = repo.create_git_tree(elements, base_tree)
+        parent = repo.get_git_commit(base_sha)
+        commit = repo.create_git_commit(commit_message, tree, [parent])
+        ref.edit(commit.sha)
+    except GithubException as exc:
+        raise DockerfileManagerError(
+            f"Failed to push scaffold bundle: {_friendly_github(exc)}"
+        ) from exc
+
+    paths = sorted(files.keys())
+    logger.info(
+        "repo_scaffold_bundle_push_ok",
+        full_name=repo.full_name,
+        paths=paths,
+        branch=target_branch,
+        installation_id=resolved_installation_id,
+    )
+    return RepoPushBundleResponse(
+        full_name=repo.full_name,
+        html_url=repo.html_url,
+        default_branch=target_branch,
+        paths=paths,
+        commit_message=commit_message,
+        installation_id=resolved_installation_id,
+    )
 
 
 def _commit_dockerfile(

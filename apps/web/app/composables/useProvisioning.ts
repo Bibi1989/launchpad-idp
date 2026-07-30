@@ -35,7 +35,8 @@ export function useProvisioning() {
       kubernetes_packaging: input.kubernetes_packaging,
       kubernetes_options: input.kubernetes_options,
       cost_optimization: costOptimizationToApi(input.cost_optimization),
-      container_scaffold: (input as { container_scaffold?: unknown }).container_scaffold,
+      container_scaffold: input.container_scaffold,
+      dependencies: input.dependencies,
       cloud: {
         provider: input.provider,
         resources: input.resources,
@@ -61,7 +62,8 @@ export function useProvisioning() {
       kubernetes_packaging: input.kubernetes_packaging,
       kubernetes_options: input.kubernetes_options,
       cost_optimization: costOptimizationToApi(input.cost_optimization),
-      container_scaffold: (input as { container_scaffold?: unknown }).container_scaffold,
+      container_scaffold: input.container_scaffold,
+      dependencies: input.dependencies,
       cloud: {
         provider: input.provider,
         resources: input.resources,
@@ -211,6 +213,25 @@ export function useProvisioning() {
     })
   }
 
+  async function analyzeWorkspaceFile(
+    workspaceId: string,
+    payload: {
+      path: string
+      content: string
+      kind?: 'auto' | 'cicd' | 'docker' | 'iac' | 'kubernetes'
+    },
+  ): Promise<import('~/utils/workspaceFileAnalysis').WorkspaceFileAnalysisReport> {
+    return apiFetch(`/provisioning/workspaces/${workspaceId}/analyze-file`, {
+      method: 'POST',
+      body: JSON.stringify({
+        path: payload.path,
+        content: payload.content,
+        kind: payload.kind ?? 'auto',
+      }),
+      timeoutMs: 90_000,
+    })
+  }
+
   async function createGithubRepo(
     input: GitHubRepoInput,
     credentials: Record<string, string | null | undefined> = {},
@@ -281,6 +302,7 @@ export function useProvisioning() {
     listTemplates,
     applyTemplate,
     pushWorkspaceToGithub,
+    analyzeWorkspaceFile,
     createGithubRepo,
     getGithubAppStatus,
     listGithubInstallations,

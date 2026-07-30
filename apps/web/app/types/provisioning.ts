@@ -1,9 +1,9 @@
 export type CloudProvider = 'local' | 'gcp' | 'aws' | 'azure' | 'cloudflare'
 export type IaCEngine = 'terraform' | 'opentofu' | 'pulumi'
-export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm'
+export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm' | 'kustomize'
 export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
 export type ProvisionEngine = IaCEngine
-export type K8sScaffoldMode = 'k8s' | 'helm'
+export type K8sScaffoldMode = 'k8s' | 'helm' | 'kustomize'
 export type CicdPlatform = 'github' | 'gitlab'
 
 /** Container scan severity gate (Solution A). */
@@ -21,10 +21,25 @@ export type SastLanguage =
   | 'csharp'
   | 'ruby'
 
+/** Pinned container CVE scanner (GitHub Action or OCI image). */
+export type ContainerScanToolId =
+  | 'trivy-action-v0.30.0'
+  | 'trivy-0.58.1'
+  | 'trivy-0.57.2'
+  | 'trivy-0.56.2'
+
+/** Pinned SAST scanner (CodeQL actions or Semgrep image). */
+export type SastToolId =
+  | 'codeql-v3.28.10'
+  | 'semgrep-1.97.0'
+  | 'semgrep-1.96.0'
+  | 'semgrep-1.95.0'
+
 export interface CicdContainerScanConfig {
   enabled: boolean
   severityThreshold: ScanSeverityThreshold
   onFinding: ScanFindingAction
+  tool: ContainerScanToolId
 }
 
 export interface CicdSastGuardrailsConfig {
@@ -34,6 +49,7 @@ export interface CicdSastGuardrailsConfig {
   /** kubectl rollout status + auto undo on failure. */
   enableHealthRollback: boolean
   sastLanguages: SastLanguage[]
+  sastTool: SastToolId
 }
 
 export interface CicdSecurityConfig {
@@ -100,6 +116,8 @@ export interface InfraGenerationConfig {
     enabled: boolean
     platform: CicdPlatform
     security: CicdSecurityConfig
+    /** Target frameworks for per-service CI workflows (Nuxt / FastAPI / NestJS, …). */
+    frameworks: FrameworkOption[]
   }
 }
 export type IngressClassName =
@@ -133,6 +151,22 @@ export interface KubernetesWorkloadOptions {
   network_policy: boolean
   resource_quota: boolean
   limit_range: boolean
+}
+
+export type DependencyPlacement = 'in_cluster' | 'managed'
+
+export type DataStoreKind = 'postgres' | 'mysql' | 'mongodb' | 'redis'
+
+export interface DataStoreDependency {
+  enabled: boolean
+  placement: DependencyPlacement
+}
+
+export interface WorkloadDependenciesConfig {
+  postgres: DataStoreDependency
+  mysql: DataStoreDependency
+  mongodb: DataStoreDependency
+  redis: DataStoreDependency
 }
 
 export interface IaCBundleSummary {
@@ -172,6 +206,8 @@ export interface WorkspaceWizardConfig {
   kubernetes_packaging: KubernetesPackaging
   kubernetes_options: KubernetesWorkloadOptions
   cost_optimization: CostOptimizationConfig
+  container_scaffold: ContainerScaffoldConfig
+  dependencies: WorkloadDependenciesConfig
   has_credentials: boolean
 }
 
@@ -288,7 +324,7 @@ export interface ContainerScaffoldConfig {
   generate_dockerfile: boolean
   generate_docker_compose: boolean
   stack: ProjectStackOption
-  frameworks?: FrameworkOption[]
+  frameworks: FrameworkOption[]
   app_name: string
   listen_port: number
 }

@@ -144,6 +144,34 @@ class DockerfilePushResponse(BaseModel):
     installation_id: int
 
 
+class RepoScaffoldFile(BaseModel):
+    path: str = Field(..., min_length=1, max_length=500)
+    content: str = Field(..., min_length=1, max_length=400_000)
+
+
+class RepoPushBundleRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    installation_id: int = Field(..., ge=1)
+    full_name: str = Field(..., min_length=3, max_length=200, pattern=r"^[^/\s]+/[^/\s]+$")
+    files: list[RepoScaffoldFile] = Field(..., min_length=1, max_length=80)
+    commit_message: str = Field(
+        default="chore: add Launchpad infra scaffold",
+        min_length=1,
+        max_length=500,
+    )
+    branch: str | None = Field(default=None, max_length=200)
+
+
+class RepoPushBundleResponse(BaseModel):
+    full_name: str
+    html_url: str
+    default_branch: str
+    paths: list[str]
+    commit_message: str
+    installation_id: int
+
+
 class DockerHubCredentials(BaseModel):
     username: str = Field(..., min_length=1, max_length=200)
     password_or_token: str = Field(..., min_length=1, max_length=500)

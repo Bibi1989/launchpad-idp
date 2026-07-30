@@ -5,6 +5,7 @@ import {
   dockerfileReviewResponseSchema,
   dockerfileScaffoldResponseSchema,
   dockerfileScanResponseSchema,
+  repoPushBundleResponseSchema,
   type DockerfileBuildEnqueueResponse,
   type DockerfileBuildJobResponse,
   type DockerfileBuildPayload,
@@ -15,6 +16,7 @@ import {
   type DockerfileSecurityReport,
   type ProjectStack,
   type RegistryProvider,
+  type RepoPushBundleResponse,
 } from '~/types/dockerfileSchema'
 
 export function useDockerfiles() {
@@ -166,6 +168,36 @@ export function useDockerfiles() {
     }
   }
 
+  async function pushBundle(input: {
+    installation_id: number
+    full_name: string
+    files: Array<{ path: string; content: string }>
+    commit_message?: string
+    branch?: string | null
+  }): Promise<RepoPushBundleResponse> {
+    loading.value = true
+    error.value = null
+    try {
+      const raw = await apiFetch<unknown>('/dockerfiles/push-bundle', {
+        method: 'POST',
+        body: JSON.stringify({
+          installation_id: input.installation_id,
+          full_name: input.full_name,
+          files: input.files,
+          commit_message: input.commit_message ?? 'chore: add Launchpad infra scaffold',
+          branch: input.branch ?? null,
+        }),
+        timeoutMs: 90_000,
+      })
+      return repoPushBundleResponseSchema.parse(raw)
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'Scaffold push failed'
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
   async function enqueueBuild(
     payload: DockerfileBuildPayload,
   ): Promise<DockerfileBuildEnqueueResponse> {
@@ -247,6 +279,7 @@ export function useDockerfiles() {
     review,
     applyImprovedDockerfile,
     pushToGitHub,
+    pushBundle,
     enqueueBuild,
     getBuildJob,
     pollBuildJob,

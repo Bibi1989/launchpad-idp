@@ -15,8 +15,10 @@ describe('inferInfraManifestKind', () => {
     expect(inferInfraManifestKind('infra/k8s/manifests/resourcequota.yaml')).toBe('k8s-resourcequota')
   })
 
-  it('recognizes opentofu paths', () => {
-    expect(inferInfraManifestKind('infra/opentofu/main.tf')).toBe('opentofu')
+  it('maps dependency datastore deployment filenames', () => {
+    expect(inferInfraManifestKind('infra/k8s/manifests/postgres-deployment.yaml')).toBe('k8s-deployment')
+    expect(inferInfraManifestKind('infra/k8s/manifests/redis-service.yaml')).toBe('k8s-service')
+    expect(inferInfraManifestKind('infra/kustomize/deployment.yaml')).toBe('k8s-deployment')
   })
 })
 

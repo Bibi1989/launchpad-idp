@@ -34,6 +34,30 @@ describe('provisioningWizardSchema', () => {
     expect(parsed.kubernetes_packaging).toBe('raw_manifests')
   })
 
+  it('keeps container_scaffold frameworks through parse', () => {
+    const parsed = provisioningWizardSchema.parse({
+      name: 'multi-stack',
+      provider: 'local',
+      resources: {
+        cluster_name: 'launchpad',
+        context: 'kind-launchpad',
+      },
+      credentials: {},
+      container_scaffold: {
+        enabled: true,
+        generate_dockerfile: true,
+        generate_docker_compose: true,
+        stack: 'nuxtjs',
+        frameworks: ['nuxtjs', 'fastapi', 'nestjs'],
+        app_name: 'shop',
+        listen_port: 3000,
+      },
+    })
+    expect(parsed.container_scaffold.enabled).toBe(true)
+    expect(parsed.container_scaffold.frameworks).toEqual(['nuxtjs', 'fastapi', 'nestjs'])
+    expect(parsed.container_scaffold.stack).toBe('nuxtjs')
+  })
+
   it('requires zone_name for cloudflare dns', () => {
     const result = provisioningWizardSchema.safeParse({
       name: 'cf-stack',

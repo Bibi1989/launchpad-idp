@@ -49,6 +49,23 @@ def _tf(
     )
 
 
+def _cicd(
+    kind_id: str,
+    label: str,
+    description: str,
+    default_path: str,
+    content: str,
+) -> WorkspaceTemplate:
+    return WorkspaceTemplate(
+        id=f"cicd.{kind_id}",
+        label=label,
+        category="cicd",
+        description=description,
+        default_path=default_path,
+        content=content,
+    )
+
+
 _K8S_TEMPLATES: tuple[WorkspaceTemplate, ...] = (
     _k8s(
         "namespace",
@@ -586,8 +603,199 @@ region           = "us-central1"
     ),
 )
 
+
+_CICD_TEMPLATES: tuple[WorkspaceTemplate, ...] = (
+    _cicd(
+        "github_actions_k8s",
+        "GitHub Actions (Kubernetes Deploy)",
+        "Shift-Left CI/CD pipeline blocking vulnerabilities from the registry, deploying to Kubernetes.",
+        ".github/workflows/deploy.yml",
+        """\
+name: Deploy to Kubernetes
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: my-org/my-app
+
+jobs:
+  sast:
+    name: Static Application Security Testing (SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/src" -w /src returntocorp/semgrep:1.97.0 \\
+            semgrep scan --config "p/ci" --config "p/security-audit" --error .
+
+  build-scan-push:
+    name: Local Build, Scan, & Push
+    needs: sast
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Local Container Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true 
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Pre-Push Security Scan with Trivy
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \\
+            aquasec/trivy image \\
+            --severity CRITICAL,HIGH \\
+            --exit-code 1 \\
+            --no-progress \\
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Push Container Image to Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    name: Kubernetes Deployment
+    needs: build-scan-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    container:
+      image: bitnami/kubectl:1.30
+    steps:
+      - name: Configure Kubeconfig
+        run: |
+          export KUBECONFIG=/tmp/kubeconfig
+          echo "${{ secrets.KUBECONFIG }}" > $KUBECONFIG
+          chmod 600 $KUBECONFIG
+          echo "KUBECONFIG=$KUBECONFIG" >> $GITHUB_ENV
+          
+      - name: Update Deployment Image
+        run: |
+          kubectl set image deployment/app app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -n lp-app
+          
+      - name: Rollout Health Check and Automated Rollback
+        run: |
+          if ! kubectl rollout status deployment/app -n lp-app --timeout=120s; then
+            echo "Rollout failed or timed out! Initiating automated rollback..."
+            kubectl rollout undo deployment/app -n lp-app
+            exit 1
+          fi
+""",
+    ),
+    _cicd(
+        "gitlab_ci_k8s",
+        "GitLab CI (Kubernetes Deploy)",
+        "Shift-Left CI/CD pipeline blocking vulnerabilities from the registry, deploying to Kubernetes.",
+        ".gitlab-ci.yml",
+        """\
+stages:
+  - sast
+  - build-scan-push
+  - deploy
+
+variables:
+  IMAGE_TAG_SHA: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+  IMAGE_TAG_LATEST: $CI_REGISTRY_IMAGE:latest
+
+sast:
+  stage: sast
+  image: returntocorp/semgrep:1.97.0
+  script:
+    - semgrep scan --config "p/ci" --config "p/security-audit" --error .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+build_scan_push:
+  stage: build-scan-push
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker pull $IMAGE_TAG_LATEST || true
+    - >
+      docker build
+      --cache-from $IMAGE_TAG_LATEST
+      -t $IMAGE_TAG_SHA
+      -t $IMAGE_TAG_LATEST
+      .
+    - |
+      docker run --rm \\
+        -v /var/run/docker.sock:/var/run/docker.sock \\
+        aquasec/trivy image \\
+        --severity CRITICAL,HIGH \\
+        --exit-code 1 \\
+        --no-progress \\
+        $IMAGE_TAG_SHA
+    - |
+      if [ "$CI_COMMIT_BRANCH" == "main" ]; then
+        echo "Trivy scan passed. Pushing verified image to registry..."
+        docker push $IMAGE_TAG_SHA
+        docker push $IMAGE_TAG_LATEST
+      else
+        echo "Merge Request pipeline: skipping registry push."
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+deploy:
+  stage: deploy
+  image: bitnami/kubectl:1.30
+  before_script:
+    - export KUBECONFIG=/tmp/kubeconfig
+    - echo "$KUBE_CONFIG" > $KUBECONFIG
+    - chmod 600 $KUBECONFIG
+  script:
+    - kubectl set image deployment/app app=$IMAGE_TAG_SHA -n lp-app
+    - |
+      if ! kubectl rollout status deployment/app -n lp-app --timeout=120s; then
+        echo "Rollout failed or timed out! Initiating automated rollback..."
+        kubectl rollout undo deployment/app -n lp-app
+        exit 1
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+""",
+    ),
+)
+
 _ALL_TEMPLATES: dict[str, WorkspaceTemplate] = {
-    t.id: t for t in (*_K8S_TEMPLATES, *_TF_TEMPLATES)
+    t.id: t for t in (*_K8S_TEMPLATES, *_TF_TEMPLATES, *_CICD_TEMPLATES)
 }
 
 

@@ -90,8 +90,21 @@ def scaffold_dockerfile(
     return gen(safe_name, port)
 
 
-def default_dockerfile_path() -> str:
-    return _DEFAULT_PATH
+def dockerfile_path_for_service(
+    app_name: str,
+    stack: ProjectStack | None = None,
+    *,
+    multi: bool = False,
+) -> str:
+    """Return a meaningful Dockerfile path under ``dockers/``."""
+    app_slug = _sanitize_name(app_name)
+    if multi and stack is not None:
+        return f"dockers/Dockerfile.{app_slug}-{stack.value}"
+    return f"dockers/Dockerfile.{app_slug}"
+
+
+def default_dockerfile_path(app_name: str = "app") -> str:
+    return dockerfile_path_for_service(app_name)
 
 
 def scaffold_docker_compose(
@@ -100,27 +113,181 @@ def scaffold_docker_compose(
     dockerfile_path: str = "dockers/Dockerfile",
 ) -> str:
     """Return a production-ready docker-compose.yml file for the application."""
-    safe_name = _sanitize_name(app_name)
-    return f"""services:
-  {safe_name}:
-    build:
-      context: .
-      dockerfile: {dockerfile_path}
-    image: ${{APP_IMAGE:-{safe_name}:latest}}
-    container_name: {safe_name}
-    ports:
-      - "{listen_port}:{listen_port}"
-    environment:
-      - PORT={listen_port}
-      - NODE_ENV=production
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:{listen_port}/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-"""
+    return scaffold_docker_compose_services(
+        [
+            {
+                "name": app_name,
+                "listen_port": listen_port,
+                "dockerfile_path": dockerfile_path,
+            }
+        ]
+    )
+
+
+def scaffold_docker_compose_services(
+    services: list[dict[str, object]],
+    dependency_blocks: list[str] | None = None,
+) -> str:
+    """Return a docker-compose.yml covering one or more scaffolded services."""
+    if not services:
+        return scaffold_docker_compose()
+
+    lines: list[str] = ["services:"]
+    for service in services:
+        raw_name = str(service.get("name") or "app")
+        safe_name = _sanitize_name(raw_name)
+        port = int(service.get("listen_port") or 8080)
+        dockerfile_path = str(service.get("dockerfile_path") or "dockers/Dockerfile")
+        image_env = f"APP_IMAGE_{safe_name.upper().replace('-', '_').replace('.', '_')}"
+        lines.extend(
+            [
+                f"  {safe_name}:",
+                "    build:",
+                "      context: .",
+                f"      dockerfile: {dockerfile_path}",
+                f"    image: ${{{image_env}:-{safe_name}:latest}}",
+                f"    container_name: {safe_name}",
+                "    ports:",
+                f'      - "{port}:{port}"',
+                "    environment:",
+                f"      - PORT={port}",
+                "      - NODE_ENV=production",
+                "    restart: unless-stopped",
+                "    healthcheck:",
+                f'      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:{port}/health"]',
+                "      interval: 30s",
+                "      timeout: 5s",
+                "      retries: 3",
+                "      start_period: 20s",
+                "",
+            ]
+        )
+    if dependency_blocks:
+        lines.extend(dependency_blocks)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def scaffold_dependency_compose_blocks(
+    dependencies: object,
+) -> list[str]:
+    """Return docker-compose service blocks for enabled in-cluster datastores."""
+    from app.schemas.cloud import DependencyPlacement, WorkloadDependenciesConfig
+
+    if not isinstance(dependencies, WorkloadDependenciesConfig):
+        return []
+    lines: list[str] = []
+    if (
+        dependencies.postgres.enabled
+        and dependencies.postgres.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        lines.extend(
+            [
+                "  postgres:",
+                "    image: postgres:16-alpine",
+                "    environment:",
+                "      POSTGRES_USER: launchpad",
+                "      POSTGRES_PASSWORD: changeme",
+                "      POSTGRES_DB: app",
+                "    ports:",
+                "      - \"5432:5432\"",
+                "",
+            ]
+        )
+    if (
+        dependencies.mysql.enabled
+        and dependencies.mysql.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        lines.extend(
+            [
+                "  mysql:",
+                "    image: mysql:8.4",
+                "    environment:",
+                "      MYSQL_ROOT_PASSWORD: changeme",
+                "      MYSQL_DATABASE: app",
+                "      MYSQL_USER: launchpad",
+                "      MYSQL_PASSWORD: changeme",
+                "    ports:",
+                "      - \"3306:3306\"",
+                "",
+            ]
+        )
+    if (
+        dependencies.mongodb.enabled
+        and dependencies.mongodb.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        lines.extend(
+            [
+                "  mongodb:",
+                "    image: mongo:7",
+                "    environment:",
+                "      MONGO_INITDB_ROOT_USERNAME: launchpad",
+                "      MONGO_INITDB_ROOT_PASSWORD: changeme",
+                "    ports:",
+                "      - \"27017:27017\"",
+                "",
+            ]
+        )
+    if (
+        dependencies.redis.enabled
+        and dependencies.redis.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        lines.extend(
+            [
+                "  redis:",
+                "    image: redis:7-alpine",
+                "    ports:",
+                "      - \"6379:6379\"",
+                "",
+            ]
+        )
+    return lines
+
+
+_DEFAULT_LISTEN_PORTS: Final[dict[ProjectStack, int]] = {
+    ProjectStack.REACT_VITE: 80,
+    ProjectStack.NEXTJS: 3000,
+    ProjectStack.NUXTJS: 3000,
+    ProjectStack.VUEJS: 80,
+    ProjectStack.SVELTE: 3000,
+    ProjectStack.FASTAPI: 8000,
+    ProjectStack.FLASK: 5000,
+    ProjectStack.DJANGO: 8000,
+    ProjectStack.EXPRESS: 3000,
+    ProjectStack.NESTJS: 3000,
+    ProjectStack.SPRINGBOOT: 8080,
+    ProjectStack.NODE: 3000,
+    ProjectStack.PYTHON: 8000,
+    ProjectStack.GO: 8080,
+    ProjectStack.JAVA: 8080,
+    ProjectStack.RUST: 8080,
+    ProjectStack.GENERIC: 8080,
+    ProjectStack.UNKNOWN: 8080,
+}
+
+
+def default_listen_port_for_stack(stack: ProjectStack, fallback: int = 8080) -> int:
+    return _DEFAULT_LISTEN_PORTS.get(stack, fallback)
+
+
+def resolve_scaffold_stacks(
+    *,
+    stack: str,
+    frameworks: list[str] | None,
+) -> list[ProjectStack]:
+    """Prefer explicit multi-select frameworks; fall back to single stack."""
+    resolved: list[ProjectStack] = []
+    candidates = frameworks if frameworks else [stack]
+    for raw in candidates:
+        value = str(raw or "").strip().lower()
+        if not value:
+            continue
+        try:
+            item = ProjectStack(value)
+        except ValueError:
+            continue
+        if item not in resolved:
+            resolved.append(item)
+    return resolved or [ProjectStack.NODE]
 
 
 def _sanitize_name(name: str) -> str:

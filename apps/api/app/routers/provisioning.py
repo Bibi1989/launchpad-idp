@@ -48,6 +48,12 @@ from app.services.manifest_deploy import (
     resolve_workload_listen_port,
 )
 from app.services.provisioning import ProvisioningService
+from app.services.workspace_file_analyzer import (
+    WorkspaceFileAnalyzeRequest,
+    WorkspaceFileAnalyzeResponse,
+    WorkspaceFileAnalyzerError,
+    WorkspaceFileAnalyzerService,
+)
 
 router = APIRouter(prefix="/provisioning", tags=["provisioning"])
 
@@ -334,6 +340,33 @@ async def push_workspace_github(
     service: ProvisioningService = Depends(get_provisioning_service),
 ) -> GitHubRepoResult:
     return await service.push_workspace_to_github(workspace_id, user, payload)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/analyze-file",
+    response_model=WorkspaceFileAnalyzeResponse,
+)
+async def analyze_workspace_file(
+    workspace_id: UUID,
+    payload: WorkspaceFileAnalyzeRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> WorkspaceFileAnalyzeResponse:
+    """AI/heuristic review for CI/CD, Docker, IaC, or Kubernetes workspace files."""
+    await service.get_workspace_for_owner(workspace_id, user)
+    analyzer = WorkspaceFileAnalyzerService()
+    try:
+        return await analyzer.analyze(
+            path=payload.path,
+            content=payload.content,
+            kind=payload.kind,
+            correlation_id=str(workspace_id),
+        )
+    except WorkspaceFileAnalyzerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "analyze_failed", "message": str(exc)},
+        ) from exc
 
 
 @router.get("/github/status", response_model=GitHubAppStatusResponse)

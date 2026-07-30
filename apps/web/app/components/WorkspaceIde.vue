@@ -1,7 +1,5 @@
 <script setup lang="ts">
 import type {
-  GitHubAppStatus,
-  GitHubRepositoryItem,
   IaCEngine,
   WorkspaceFileNode,
   WorkspaceTemplateInfo,
@@ -28,9 +26,6 @@ const {
   formatWorkspaceContent,
   listTemplates,
   applyTemplate,
-  pushWorkspaceToGithub,
-  getGithubAppStatus,
-  listGithubRepositories,
 } = useProvisioning()
 
 type TreeNode = WorkspaceTreeNodeModel
@@ -67,17 +62,11 @@ const showNewFolder = ref(false)
 const showRename = ref(false)
 const showTemplates = ref<'kubernetes' | 'terraform' | null>(null)
 const showPush = ref(false)
+const showAiAnalysis = ref(false)
 const confirmIacDestroy = ref<{ title: string; message: string; command: string } | null>(null)
 const newName = ref('')
 const openDropdown = ref<'k8s' | 'terraform' | 'pulumi' | null>(null)
 const contextMenu = ref<ContextMenuState | null>(null)
-
-const githubApp = ref<GitHubAppStatus | null>(null)
-const pushInstallationId = ref<number | null>(null)
-const pushRepos = ref<GitHubRepositoryItem[]>([])
-const pushRepo = ref('')
-const pushMessage = ref('chore: update Launchpad workspace files')
-const pushing = ref(false)
 
 const dirty = computed(() => editorContent.value !== savedContent.value)
 const hasK8sFiles = computed(() =>
@@ -443,51 +432,26 @@ function toggleDropdown(id: 'k8s' | 'terraform' | 'pulumi') {
 async function openPush() {
   showPush.value = true
   openDropdown.value = null
-  try {
-    githubApp.value = await getGithubAppStatus()
-    const defaultId =
-      githubApp.value.default_installation_id ?? githubApp.value.installations[0]?.id ?? null
-    pushInstallationId.value = defaultId
-    if (defaultId) {
-      pushRepos.value = await listGithubRepositories(defaultId)
-      if (pushRepos.value[0]) {
-        pushRepo.value = pushRepos.value[0].full_name
-      }
-    }
-  } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'GitHub status failed'
-  }
 }
 
-watch(pushInstallationId, async (id) => {
-  if (!id) {
-    pushRepos.value = []
-    return
-  }
-  try {
-    pushRepos.value = await listGithubRepositories(id)
-  } catch {
-    pushRepos.value = []
-  }
-})
+function openAiAnalysis() {
+  if (!selectedPath.value || !editorContent.value) return
+  showAiAnalysis.value = true
+  openDropdown.value = null
+}
 
-async function doPush() {
-  if (!pushInstallationId.value || !pushRepo.value) return
-  pushing.value = true
-  errorMessage.value = null
-  try {
-    const result = await pushWorkspaceToGithub(props.workspaceId, {
-      installation_id: pushInstallationId.value,
-      existing_full_name: pushRepo.value,
-      commit_message: pushMessage.value,
-    })
-    showPush.value = false
-    statusMessage.value = `Pushed to ${result.full_name}`
-  } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Push failed'
-  } finally {
-    pushing.value = false
-  }
+function onPushSuccess(fullName: string) {
+  statusMessage.value = `Pushed to ${fullName}`
+}
+
+function onPushError(message: string) {
+  errorMessage.value = message
+}
+
+async function applyAiImprovedContent(content: string) {
+  editorContent.value = content
+  showAiAnalysis.value = false
+  statusMessage.value = 'Applied AI suggestion — save to persist'
 }
 
 function onGlobalClick() {
@@ -560,6 +524,15 @@ onUnmounted(() => {
         @click="saveFile"
       >
         {{ saving ? 'Saving…' : dirty ? 'Save' : 'Saved' }}
+      </button>
+      <button
+        type="button"
+        class="lp-btn-ghost px-2 py-1 text-[12px] disabled:opacity-40"
+        :disabled="!selectedPath || !editorContent"
+        @click="openAiAnalysis"
+      >
+        <span class="material-symbols-outlined !text-[13px] mr-1">auto_awesome</span>
+        AI analyze
       </button>
       <button
         type="button"
@@ -880,70 +853,23 @@ onUnmounted(() => {
       </div>
     </Teleport>
 
-    <Teleport to="body">
-      <div
-        v-if="showPush"
-        class="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 p-4"
-        @click.self="showPush = false"
-      >
-        <div class="w-full max-w-md space-y-4 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] p-5 shadow-2xl">
-          <h3 class="text-base font-semibold text-[var(--lp-text)]">Push to GitHub</h3>
-          <p v-if="githubApp && !githubApp.configured" class="text-[12px] text-[var(--lp-danger)]">
-            {{ githubApp.message }}
-          </p>
-          <label class="block space-y-1">
-            <span class="text-[11px] uppercase tracking-wide text-[var(--lp-muted)]">Installation</span>
-            <select
-              v-model.number="pushInstallationId"
-              class="lp-input w-full"
-            >
-              <option
-                v-for="inst in githubApp?.installations || []"
-                :key="inst.id"
-                :value="inst.id"
-              >
-                {{ inst.account_login }} ({{ inst.account_type }})
-              </option>
-            </select>
-          </label>
-          <label class="block space-y-1">
-            <span class="text-[11px] uppercase tracking-wide text-[var(--lp-muted)]">Repository</span>
-            <select
-              v-model="pushRepo"
-              class="lp-input w-full"
-            >
-              <option v-for="repo in pushRepos" :key="repo.id" :value="repo.full_name">
-                {{ repo.full_name }}
-              </option>
-            </select>
-          </label>
-          <label class="block space-y-1">
-            <span class="text-[11px] uppercase tracking-wide text-[var(--lp-muted)]">Commit message</span>
-            <input
-              v-model="pushMessage"
-              class="lp-input w-full"
-            >
-          </label>
-          <div class="flex justify-end gap-2">
-            <button
-              type="button"
-              class="lp-btn-ghost px-3 py-1.5 text-[12px]"
-              @click="showPush = false"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              class="lp-btn-primary px-3 py-1.5 text-[12px] disabled:opacity-40"
-              :disabled="pushing || !pushRepo"
-              @click="doPush"
-            >
-              {{ pushing ? 'Pushing…' : 'Push changes' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <WorkspaceGithubPushModal
+      :open="showPush"
+      :workspace-id="workspaceId"
+      @update:open="(value) => { showPush = value }"
+      @pushed="onPushSuccess"
+      @error="onPushError"
+    />
+
+    <WorkspaceAiAnalysisDrawer
+      :open="showAiAnalysis"
+      :workspace-id="workspaceId"
+      :path="selectedPath"
+      :content="editorContent"
+      @update:open="(value) => { showAiAnalysis = value }"
+      @apply="applyAiImprovedContent"
+      @error="onPushError"
+    />
 
     <ConfirmDialog
       :open="confirmIacDestroy !== null"

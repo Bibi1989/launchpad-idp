@@ -17,6 +17,7 @@ const packagingChoices = computed(() => {
     { value: 'none' as const, title: 'None', desc: 'Skip workload manifests' },
     { value: 'raw_manifests' as const, title: 'Raw K8s Manifests', desc: 'infra/k8s/manifests/' },
     { value: 'helm' as const, title: 'Helm Chart', desc: 'infra/helm/app-chart/' },
+    { value: 'kustomize' as const, title: 'Kustomize', desc: 'infra/kustomize/' },
   ]
   return props.allowNone ? all : all.filter((item) => item.value !== 'none')
 })
@@ -95,7 +96,7 @@ watch(
       </p>
     </div>
 
-    <div class="grid gap-2 sm:grid-cols-3">
+    <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
       <label
         v-for="opt in packagingChoices"
         :key="opt.value"

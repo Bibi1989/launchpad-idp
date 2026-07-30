@@ -154,9 +154,13 @@ function matchGroup(content: string, regex: RegExp): string {
 export function inferInfraManifestKind(path: string): InfraManifestKind {
   const lower = path.toLowerCase()
   const base = lower.split('/').pop() || lower
-  if (lower.includes('/k8s/')) {
-    if (base === 'deployment.yaml') return 'k8s-deployment'
-    if (base === 'service.yaml') return 'k8s-service'
+  if (lower.includes('/k8s/') || lower.includes('/manifests/') || lower.includes('/kustomize/')) {
+    if (base === 'deployment.yaml' || base === 'deployment.yml' || /-deployment\.ya?ml$/.test(base)) {
+      return 'k8s-deployment'
+    }
+    if (base === 'service.yaml' || base === 'service.yml' || /-service\.ya?ml$/.test(base)) {
+      return 'k8s-service'
+    }
     if (base === 'namespace.yaml') return 'k8s-namespace'
     if (base === 'hpa.yaml') return 'k8s-hpa'
     if (base === 'vpa.yaml') return 'k8s-vpa'
@@ -1088,7 +1092,7 @@ export function serializeInfraManifest(
 
   if (kind === 'github-workflow' || kind === 'gitlab-ci') {
     const platform: CicdPlatform = kind === 'github-workflow' ? 'github' : 'gitlab'
-    return renderCicdWorkflow(platform, model.cicdSecurity ?? defaultCicdSecurityConfig(), {
+    return renderCicdWorkflow(platform, model.cicdSecurity ?? defaultCicdSecurityConfig(platform), {
       branch: model.branch || 'main',
       runner: model.runner || (platform === 'github' ? 'ubuntu-latest' : 'docker:27'),
     })

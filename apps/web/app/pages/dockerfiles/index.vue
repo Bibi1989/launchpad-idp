@@ -4,7 +4,23 @@ import type {
   ProjectStack,
   RegistryProvider,
 } from '~/types/dockerfileSchema'
-import type { GitHubInstallationItem, GitHubRepositoryItem } from '~/types/provisioning'
+import type {
+  ContainerScaffoldConfig,
+  FrameworkOption,
+  GitHubInstallationItem,
+  GitHubRepositoryItem,
+  InfraGenerationConfig,
+} from '~/types/provisioning'
+import {
+  buildRepoScaffoldBundle,
+  mapDetectedStackToFramework,
+} from '~/utils/workspaceRepoScaffold'
+import { defaultInfraGenerationConfig } from '~/utils/workspaceInfraScaffold'
+import { copyTextToClipboard, downloadTextFile } from '~/utils/clipboardFile'
+
+const WorkspaceMonacoEditor = defineAsyncComponent(
+  () => import('~/components/WorkspaceMonacoEditor.vue'),
+)
 
 const { listGithubInstallations, listGithubRepositories } = useProvisioning()
 const {
@@ -19,10 +35,9 @@ const {
   scaffold,
   review,
   applyImprovedDockerfile,
-  pushToGitHub,
+  pushBundle,
   enqueueBuild,
   pollBuildJob,
-  selectDetected,
   clearReport,
 } = useDockerfiles()
 
@@ -36,12 +51,27 @@ const successMessage = ref<string | null>(null)
 const installationId = ref<number | null>(null)
 const fullName = ref('')
 const branch = ref('main')
-const pushPath = ref('dockers/Dockerfile')
-const commitMessage = ref('chore: add Launchpad-hardened Dockerfile under dockers/')
+const pushPath = ref('dockers/Dockerfile.app')
+const commitMessage = ref('chore: add Launchpad infra scaffold')
+const repoFiles = ref<Record<string, string>>({})
+const detectedFramework = ref<FrameworkOption | null>(null)
+
+const infraGeneration = ref<InfraGenerationConfig>(
+  defaultInfraGenerationConfig({ isLocal: false }),
+)
+const containerScaffold = ref<ContainerScaffoldConfig>({
+  enabled: true,
+  generate_dockerfile: true,
+  generate_docker_compose: true,
+  stack: 'node',
+  frameworks: [],
+  app_name: 'app',
+  listen_port: 8080,
+})
 
 const registryProvider = ref<RegistryProvider>('docker_hub')
 const tagsInput = ref('latest')
-const dockerfilePath = ref('dockers/Dockerfile')
+const dockerfilePath = ref('dockers/Dockerfile.app')
 const contextPath = ref('.')
 
 const dockerHub = reactive({
@@ -76,6 +106,20 @@ const stacks: Array<{ id: ProjectStack; label: string }> = [
 
 const selectedStack = ref<ProjectStack | null>(null)
 
+const appName = computed(() => {
+  const fromRepo = fullName.value.split('/').pop()?.trim()
+  return containerScaffold.value.app_name?.trim() || fromRepo || 'app'
+})
+
+const filePaths = computed(() => Object.keys(repoFiles.value).sort())
+
+const hasScaffoldSelection = computed(() =>
+  containerScaffold.value.enabled
+  || infraGeneration.value.provision.enabled
+  || infraGeneration.value.kubernetes.enabled
+  || infraGeneration.value.cicd.enabled,
+)
+
 const tags = computed(() =>
   tagsInput.value
     .split(/[,\s]+/)
@@ -87,12 +131,60 @@ const canActOnRepo = computed(
   () => Boolean(installationId.value && fullName.value.includes('/')),
 )
 
+watch(fullName, (name) => {
+  const repoApp = name.split('/').pop()?.trim()
+  if (repoApp) {
+    containerScaffold.value = { ...containerScaffold.value, app_name: repoApp }
+  }
+})
+
+watch(editorContent, (content) => {
+  if (!selectedPath.value) return
+  repoFiles.value = { ...repoFiles.value, [selectedPath.value]: content }
+})
+
+function selectFile(path: string) {
+  selectedPath.value = path
+  editorContent.value = repoFiles.value[path] ?? ''
+  pushPath.value = path
+  if (path.startsWith('dockers/')) {
+    dockerfilePath.value = path
+  }
+}
+
+function deleteFile(path: string) {
+  if (!window.confirm(`Remove “${path}” from this scaffold session?`)) return
+  const next = { ...repoFiles.value }
+  delete next[path]
+  repoFiles.value = next
+  if (selectedPath.value === path) {
+    const first = Object.keys(next)[0] ?? null
+    if (first) selectFile(first)
+    else {
+      selectedPath.value = null
+      editorContent.value = ''
+    }
+  }
+}
+
+async function copyActiveFile() {
+  if (!editorContent.value) return
+  await copyTextToClipboard(editorContent.value)
+}
+
+function downloadActiveFile() {
+  if (!editorContent.value || !selectedPath.value) return
+  const name = selectedPath.value.split('/').pop() || 'file.txt'
+  downloadTextFile(name, editorContent.value)
+}
+
 onMounted(async () => {
   loadingInstalls.value = true
   try {
     installations.value = await listGithubInstallations()
-    if (installations.value.length === 1) {
-      installationId.value = installations.value[0].id
+    const soleInstallation = installations.value[0]
+    if (soleInstallation) {
+      installationId.value = soleInstallation.id
       await loadRepos()
     }
   } catch {
@@ -145,8 +237,18 @@ async function onScan() {
       ref: branch.value || null,
     })
     selectedStack.value = result.detected_stack
+    detectedFramework.value = mapDetectedStackToFramework(result.detected_stack)
+    const merged = { ...repoFiles.value }
+    for (const file of result.dockerfiles) {
+      merged[file.path] = file.content
+    }
+    repoFiles.value = merged
+    if (result.dockerfiles.length > 0) {
+      const firstDockerfile = result.dockerfiles[0]
+      if (firstDockerfile) selectFile(firstDockerfile.path)
+    }
     if (result.scaffold_suggested) {
-      successMessage.value = 'No Dockerfile found — scaffold a hardened one for the detected stack.'
+      successMessage.value = 'No Dockerfile found — scaffold artifacts for the detected stack.'
     } else {
       successMessage.value = `Found ${result.dockerfiles.length} Dockerfile(s).`
     }
@@ -157,8 +259,8 @@ async function onScan() {
   }
 }
 
-async function onScaffold(stack?: ProjectStack) {
-  busyAction.value = 'scaffold'
+async function onScaffoldDockerfile(stack?: ProjectStack) {
+  busyAction.value = 'scaffold-docker'
   successMessage.value = null
   try {
     const result = await scaffold({
@@ -166,13 +268,48 @@ async function onScaffold(stack?: ProjectStack) {
       full_name: fullName.value || null,
       stack: stack ?? selectedStack.value,
       ref: branch.value || null,
+      app_name: appName.value,
     })
     selectedStack.value = result.stack
-    pushPath.value = result.path
-    dockerfilePath.value = result.path
+    repoFiles.value = { ...repoFiles.value, [result.path]: result.content }
+    selectFile(result.path)
     successMessage.value = `Scaffolded ${result.stack} Dockerfile at ${result.path}.`
   } catch {
     /* handled */
+  } finally {
+    busyAction.value = null
+  }
+}
+
+async function onScaffoldSelected() {
+  if (!hasScaffoldSelection.value) return
+  busyAction.value = 'scaffold'
+  successMessage.value = null
+  try {
+    const framework = detectedFramework.value
+    const targets = buildRepoScaffoldBundle({
+      appName: appName.value,
+      infra: infraGeneration.value,
+      containerScaffold: {
+        ...containerScaffold.value,
+        app_name: appName.value,
+      },
+      detectedFramework: framework,
+    })
+    if (!targets.length) {
+      successMessage.value = 'Enable at least one scaffold category below.'
+      return
+    }
+    const merged = { ...repoFiles.value }
+    for (const target of targets) {
+      merged[target.path] = target.content
+    }
+    repoFiles.value = merged
+    const firstTarget = targets[0]
+    if (firstTarget) selectFile(firstTarget.path)
+    successMessage.value = `Scaffolded ${targets.length} file(s) for ${appName.value}.`
+  } catch (err) {
+    successMessage.value = err instanceof Error ? err.message : 'Scaffold failed'
   } finally {
     busyAction.value = null
   }
@@ -198,25 +335,53 @@ async function onReview() {
 
 async function onApplyImproved() {
   await applyImprovedDockerfile()
-  pushPath.value = 'dockers/Dockerfile'
-  dockerfilePath.value = 'dockers/Dockerfile'
+  if (selectedPath.value) {
+    repoFiles.value = {
+      ...repoFiles.value,
+      [selectedPath.value]: editorContent.value,
+    }
+  }
   successMessage.value = 'Applied improved Dockerfile to the editor.'
 }
 
-async function onPush() {
+async function onPushAll() {
   if (!installationId.value || !fullName.value) return
+  const files = Object.entries(repoFiles.value).map(([path, content]) => ({ path, content }))
+  if (!files.length) return
   busyAction.value = 'push'
   successMessage.value = null
   try {
-    const result = await pushToGitHub({
+    const result = await pushBundle({
       installation_id: installationId.value,
       full_name: fullName.value,
-      dockerfile_content: editorContent.value,
-      path: pushPath.value,
+      files,
       commit_message: commitMessage.value,
       branch: branch.value || null,
     })
-    successMessage.value = `Pushed ${result.path} to ${result.full_name}@${result.default_branch}.`
+    successMessage.value = `Pushed ${result.paths.length} file(s) to ${result.full_name}@${result.default_branch}.`
+  } catch {
+    /* handled */
+  } finally {
+    busyAction.value = null
+  }
+}
+
+async function onPush() {
+  if (!installationId.value || !fullName.value || !selectedPath.value || !editorContent.value.trim()) return
+  busyAction.value = 'push-one'
+  successMessage.value = null
+  try {
+    const result = await pushBundle({
+      installation_id: installationId.value,
+      full_name: fullName.value,
+      files: [{ path: selectedPath.value, content: editorContent.value }],
+      commit_message: commitMessage.value,
+      branch: branch.value || null,
+    })
+    const pushedPath = result.paths[0]
+    successMessage.value = pushedPath
+      ? `Pushed ${pushedPath} to ${result.full_name}@${result.default_branch}.`
+      : `Pushed to ${result.full_name}@${result.default_branch}.`
   } catch {
     /* handled */
   } finally {
@@ -270,13 +435,12 @@ async function onBuild() {
   <div class="mx-auto max-w-6xl space-y-8 animate-fade-up pb-16">
     <header class="space-y-2">
       <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">
-        Containers
+        Repository scaffold
       </p>
-      <h1 class="text-3xl font-semibold tracking-tight">Dockerfiles</h1>
-      <p class="max-w-2xl text-sm text-[var(--lp-muted)]">
-        Scan a GitHub repository for Dockerfiles, scaffold a hardened multi-stage image when missing,
-        run a Gemini security review, push under <code class="font-mono text-xs">dockers/</code>,
-        then build and push to Docker Hub, AWS ECR, or GCP Artifact Registry.
+      <h1 class="text-3xl font-semibold tracking-tight">Repo scaffolding</h1>
+      <p class="max-w-3xl text-sm text-[var(--lp-muted)]">
+        Scan an imported GitHub repository, scaffold Dockerfiles, CI/CD, IaC (Terraform/Pulumi),
+        and Kubernetes (manifests, Helm, or Kustomize), then push everything in one commit.
       </p>
     </header>
 
@@ -334,6 +498,10 @@ async function onBuild() {
             </option>
           </select>
         </label>
+        <label class="block space-y-1.5">
+          <span class="lp-label">App name</span>
+          <input v-model="containerScaffold.app_name" type="text" class="lp-input" placeholder="my-service">
+        </label>
       </div>
       <div class="flex flex-wrap gap-2">
         <button
@@ -342,15 +510,23 @@ async function onBuild() {
           :disabled="!canActOnRepo || busyAction === 'scan'"
           @click="onScan"
         >
-          {{ busyAction === 'scan' ? 'Scanning…' : 'Scan for Dockerfiles' }}
+          {{ busyAction === 'scan' ? 'Scanning…' : 'Scan repository' }}
+        </button>
+        <button
+          type="button"
+          class="lp-btn-primary text-xs uppercase tracking-wide"
+          :disabled="!canActOnRepo || busyAction === 'scaffold' || !hasScaffoldSelection"
+          @click="onScaffoldSelected"
+        >
+          {{ busyAction === 'scaffold' ? 'Scaffolding…' : 'Scaffold selected' }}
         </button>
         <button
           type="button"
           class="lp-btn-ghost text-xs uppercase tracking-wide"
-          :disabled="busyAction === 'scaffold'"
-          @click="onScaffold()"
+          :disabled="busyAction === 'scaffold-docker'"
+          @click="onScaffoldDockerfile()"
         >
-          {{ busyAction === 'scaffold' ? 'Scaffolding…' : 'Scaffold Dockerfile' }}
+          {{ busyAction === 'scaffold-docker' ? 'Scaffolding…' : 'Dockerfile only' }}
         </button>
       </div>
       <p v-if="scanResult" class="text-sm text-[var(--lp-muted)]">
@@ -361,24 +537,54 @@ async function onBuild() {
       </p>
     </section>
 
-    <div class="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+    <section class="lp-panel space-y-4 p-5">
+      <h2 class="text-base font-semibold">Scaffold artifacts</h2>
+      <p class="text-sm text-[var(--lp-muted)]">
+        Choose what to generate from the scanned repo stack
+        <span v-if="detectedFramework" class="font-mono text-xs text-[var(--lp-accent)]">
+          ({{ detectedFramework }})
+        </span>.
+      </p>
+      <WorkspaceInfraActions
+        v-model:config="infraGeneration"
+        v-model:container-scaffold="containerScaffold"
+        mode="selection"
+      />
+    </section>
+
+    <div class="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
       <aside class="lp-panel space-y-2 p-4">
-        <h3 class="lp-label">Detected files</h3>
-        <p v-if="!scanResult?.dockerfiles.length" class="text-xs text-[var(--lp-muted)]">
-          No Dockerfiles yet. Scan a repo or scaffold one.
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="lp-label">Scaffold files</h3>
+          <span class="font-mono text-[10px] text-[var(--lp-muted)]">{{ filePaths.length }}</span>
+        </div>
+        <p v-if="!filePaths.length" class="text-xs text-[var(--lp-muted)]">
+          Scan a repo or scaffold selected artifacts.
         </p>
-        <button
-          v-for="file in scanResult?.dockerfiles ?? []"
-          :key="file.path"
-          type="button"
-          class="block w-full truncate rounded-md px-2 py-1.5 text-left font-mono text-xs transition"
-          :class="selectedPath === file.path
-            ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]'
-            : 'text-[var(--lp-muted)] hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]'"
-          @click="selectDetected(file.path)"
+        <div
+          v-for="path in filePaths"
+          :key="path"
+          class="group flex items-center gap-1"
         >
-          {{ file.path }}
-        </button>
+          <button
+            type="button"
+            class="min-w-0 flex-1 truncate rounded-md px-2 py-1.5 text-left font-mono text-xs transition"
+            :class="selectedPath === path
+              ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]'
+              : 'text-[var(--lp-muted)] hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]'"
+            @click="selectFile(path)"
+          >
+            {{ path }}
+          </button>
+          <button
+            type="button"
+            class="rounded p-1 text-[var(--lp-muted)] opacity-0 transition hover:text-[var(--lp-danger)] group-hover:opacity-100"
+            title="Remove from session"
+            @click="deleteFile(path)"
+          >
+            <span class="material-symbols-outlined text-sm">delete</span>
+          </button>
+        </div>
       </aside>
 
       <section class="lp-panel space-y-3 p-4">
@@ -392,8 +598,24 @@ async function onBuild() {
           <div class="flex flex-wrap gap-2">
             <button
               type="button"
+              class="lp-btn-ghost text-xs uppercase tracking-wide"
+              :disabled="!editorContent.trim()"
+              @click="copyActiveFile"
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              class="lp-btn-ghost text-xs uppercase tracking-wide"
+              :disabled="!editorContent.trim() || !selectedPath"
+              @click="downloadActiveFile"
+            >
+              Download
+            </button>
+            <button
+              type="button"
               class="lp-btn-primary text-xs uppercase tracking-wide"
-              :disabled="!editorContent.trim() || busyAction === 'review'"
+              :disabled="!editorContent.trim() || busyAction === 'review' || !selectedPath?.startsWith('dockers/')"
               @click="onReview"
             >
               {{ busyAction === 'review' ? 'Reviewing…' : 'AI security review' }}
@@ -408,12 +630,16 @@ async function onBuild() {
             </button>
           </div>
         </div>
-        <textarea
-          v-model="editorContent"
-          class="lp-input min-h-[320px] font-mono text-xs leading-relaxed"
-          spellcheck="false"
-          placeholder="Dockerfile content…"
-        />
+        <ClientOnly>
+          <WorkspaceMonacoEditor
+            v-model="editorContent"
+            :path="pushPath || 'dockers/Dockerfile'"
+            class="min-h-[420px] rounded-lg border border-[var(--lp-line)]"
+          />
+          <template #fallback>
+            <p class="text-sm text-[var(--lp-muted)]">Loading editor…</p>
+          </template>
+        </ClientOnly>
       </section>
     </div>
 
@@ -456,26 +682,38 @@ async function onBuild() {
     <section class="lp-panel space-y-4 p-5">
       <h2 class="text-base font-semibold">Push to GitHub</h2>
       <p class="text-sm text-[var(--lp-muted)]">
-        Commits the editor contents under <code class="font-mono text-xs">dockers/</code> via the GitHub App.
+        Commits scaffold files under <code class="font-mono text-xs">dockers/</code>,
+        <code class="font-mono text-xs">ci/</code>, and <code class="font-mono text-xs">infra/</code>
+        via the GitHub App.
       </p>
       <div class="grid gap-4 md:grid-cols-2">
         <label class="block space-y-1.5">
-          <span class="lp-label">Path</span>
-          <input v-model="pushPath" type="text" class="lp-input" placeholder="dockers/Dockerfile">
+          <span class="lp-label">Active file path</span>
+          <input v-model="pushPath" type="text" class="lp-input" placeholder="dockers/Dockerfile.app">
         </label>
         <label class="block space-y-1.5">
           <span class="lp-label">Commit message</span>
           <input v-model="commitMessage" type="text" class="lp-input">
         </label>
       </div>
-      <button
-        type="button"
-        class="lp-btn-primary text-xs uppercase tracking-wide"
-        :disabled="!canActOnRepo || !editorContent.trim() || busyAction === 'push'"
-        @click="onPush"
-      >
-        {{ busyAction === 'push' ? 'Pushing…' : 'Push Dockerfile' }}
-      </button>
+      <div class="flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="lp-btn-primary text-xs uppercase tracking-wide"
+          :disabled="!canActOnRepo || !filePaths.length || busyAction === 'push'"
+          @click="onPushAll"
+        >
+          {{ busyAction === 'push' ? 'Pushing…' : `Push all (${filePaths.length})` }}
+        </button>
+        <button
+          type="button"
+          class="lp-btn-ghost text-xs uppercase tracking-wide"
+          :disabled="!canActOnRepo || !editorContent.trim() || busyAction === 'push-one'"
+          @click="onPush"
+        >
+          {{ busyAction === 'push-one' ? 'Pushing…' : 'Push active file' }}
+        </button>
+      </div>
     </section>
 
     <section class="lp-panel space-y-4 p-5">

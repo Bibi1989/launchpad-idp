@@ -2,11 +2,17 @@
 import {
   githubRepoSchema,
   provisioningWizardSchema,
+  containerScaffoldSchema,
+  defaultContainerScaffold,
+  defaultWorkloadDependencies,
+  workloadDependenciesSchema,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
   CloudProvider,
+  ContainerScaffoldConfig,
   CostOptimizationConfig,
+  FrameworkOption,
   GitHubAppStatus,
   GitHubRepoResult,
   IaCBundleSummary,
@@ -17,6 +23,7 @@ import type {
   WorkspaceArtifactsMode,
   WorkspaceListItem,
   WorkspaceWizardConfig,
+  WorkloadDependenciesConfig,
 } from '~/types/provisioning'
 import { defaultKubernetesWorkloadOptions } from '~/utils/cloudValidation'
 import {
@@ -27,10 +34,16 @@ import {
 import {
   artifactModeToInfraConfig,
   buildCiCdScaffold,
+  buildDockerScaffold,
   defaultInfraGenerationConfig,
   infraConfigToArtifactMode,
   infraConfigToKubernetesPackaging,
 } from '~/utils/workspaceInfraScaffold'
+import {
+  detectRepoStackForScaffold,
+  enhanceDockerScaffoldTargets,
+} from '~/utils/workspaceRepoScaffold'
+import { AWS_REGIONS, AZURE_LOCATIONS, GCP_REGIONS } from '~/utils/cloudRegions'
 
 const {
   createWorkspace,
@@ -42,7 +55,9 @@ const {
   getWorkspace,
   listWorkspaces,
   writeWorkspaceFile,
+  analyzeWorkspaceFile,
 } = useProvisioning()
+const { scanRepo } = useDockerfiles()
 const terminalOpen = useState('lp-terminal-open', () => false)
 const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
 
@@ -68,14 +83,8 @@ const form = reactive({
   kubernetes_packaging: 'raw_manifests' as KubernetesPackaging,
   kubernetes_options: defaultKubernetesWorkloadOptions() as KubernetesWorkloadOptions,
   cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
-  container_scaffold: {
-    enabled: false,
-    generate_dockerfile: true,
-    generate_docker_compose: true,
-    stack: 'node' as const,
-    app_name: 'app',
-    listen_port: 8080,
-  },
+  container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
+  dependencies: defaultWorkloadDependencies() as WorkloadDependenciesConfig,
   local: {
     cluster_name: 'launchpad',
     context: 'kind-launchpad',
@@ -179,13 +188,18 @@ const selectedExisting = computed(() =>
   existingWorkspaces.value.find((ws) => ws.id === selectedWorkspaceId.value) ?? null,
 )
 
-const showsKubernetesPackaging = computed(() => {
-  if (form.artifact_mode === 'iac_only') return false
+const hasKubernetesRuntime = computed(() => {
   if (form.provider === 'local') return true
   if (form.provider === 'gcp') return form.gcp.gke || form.gcp.cloud_run
   if (form.provider === 'aws') return form.aws.eks
   if (form.provider === 'azure') return form.azure.aks || form.azure.container_apps
   return false
+})
+
+const showsKubernetesPackaging = computed(() => {
+  if (!hasKubernetesRuntime.value) return false
+  if (form.provider === 'local') return form.artifact_mode !== 'iac_only'
+  return infraGeneration.value.kubernetes.enabled
 })
 
 const isLocalProvider = computed(() => form.provider === 'local')
@@ -210,11 +224,16 @@ watch(showsKubernetesPackaging, async (visible) => {
   packagingSectionEl.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 })
 
+function packagingFromK8sMode(mode: InfraGenerationConfig['kubernetes']['mode']): KubernetesPackaging {
+  if (mode === 'helm') return 'helm'
+  if (mode === 'kustomize') return 'kustomize'
+  return 'raw_manifests'
+}
+
 function syncFormFromInfraGeneration() {
   if (form.provider === 'local') {
     form.artifact_mode = 'manifest_only'
-    form.kubernetes_packaging =
-      infraGeneration.value.kubernetes.mode === 'helm' ? 'helm' : 'raw_manifests'
+    form.kubernetes_packaging = packagingFromK8sMode(infraGeneration.value.kubernetes.mode)
     return
   }
   form.artifact_mode = infraConfigToArtifactMode(infraGeneration.value)
@@ -235,6 +254,8 @@ watch(
   (packaging) => {
     if (packaging === 'helm') {
       infraGeneration.value.kubernetes.mode = 'helm'
+    } else if (packaging === 'kustomize') {
+      infraGeneration.value.kubernetes.mode = 'kustomize'
     } else if (packaging === 'raw_manifests') {
       infraGeneration.value.kubernetes.mode = 'k8s'
     }
@@ -384,6 +405,9 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
   if (config.container_scaffold) {
     Object.assign(form.container_scaffold, config.container_scaffold)
   }
+  if (config.dependencies) {
+    Object.assign(form.dependencies, config.dependencies)
+  }
   form.provider = config.cloud.provider
   hasStoredCredentials.value = config.has_credentials
   clearCredentials()
@@ -525,7 +549,8 @@ function buildWizardPayload(): ProvisioningWizardInput {
     kubernetes_packaging: form.kubernetes_packaging,
     kubernetes_options: syncedOptions,
     cost_optimization: form.cost_optimization,
-    container_scaffold: form.container_scaffold,
+    container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
+    dependencies: workloadDependenciesSchema.parse(form.dependencies),
   }
   if (form.provider === 'local') {
     return {
@@ -626,10 +651,46 @@ function prevStep() {
 
 async function scaffoldCiCdFiles(workspaceId: string) {
   if (!infraGeneration.value.cicd.enabled) return
+  const frameworks =
+    infraGeneration.value.cicd.frameworks.length > 0
+      ? infraGeneration.value.cicd.frameworks
+      : (form.container_scaffold.frameworks ?? [])
   const targets = buildCiCdScaffold(
     infraGeneration.value.cicd.platform,
     infraGeneration.value.cicd.security,
+    frameworks,
+    form.container_scaffold.app_name || form.name || 'app',
   )
+  for (const target of targets) {
+    await writeWorkspaceFile(workspaceId, target.path, target.content)
+  }
+}
+
+async function scaffoldDockerFiles(
+  workspaceId: string,
+  scaffold: ContainerScaffoldConfig = form.container_scaffold,
+) {
+  if (!scaffold.enabled) return
+  let resolvedScaffold = { ...scaffold }
+  if (
+    form.github.repo_mode === 'existing'
+    && form.github.installation_id
+    && form.github.existing_full_name.trim()
+  ) {
+    const detected = await detectRepoStackForScaffold(scanRepo, {
+      installationId: form.github.installation_id,
+      fullName: form.github.existing_full_name.trim(),
+    })
+    if (detected) {
+      resolvedScaffold = {
+        ...resolvedScaffold,
+        stack: detected,
+        frameworks: resolvedScaffold.frameworks?.length ? resolvedScaffold.frameworks : [detected],
+      }
+    }
+  }
+  let targets = buildDockerScaffold(resolvedScaffold)
+  targets = await enhanceDockerScaffoldTargets(workspaceId, targets, analyzeWorkspaceFile)
   for (const target of targets) {
     await writeWorkspaceFile(workspaceId, target.path, target.content)
   }
@@ -681,6 +742,7 @@ async function onGenerate() {
     if (reuseId) {
       workspaceId = reuseId
       bundle.value = await updateWorkspace(workspaceId, parsed.data)
+      await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
       await refreshBundle(workspaceId)
       const terminal = await openTerminal(workspaceId, {
@@ -696,6 +758,7 @@ async function onGenerate() {
       bundle.value = await createWorkspace(parsed.data)
       workspaceId = bundle.value.workspace_id
       sessionCreatedWorkspaceId.value = workspaceId
+      await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
       await refreshBundle(workspaceId)
       if (!form.github.name.trim()) {
@@ -955,6 +1018,151 @@ async function onPrimaryAction() {
             replace them; otherwise leave the fields blank.
           </div>
 
+          <template v-if="form.provider === 'gcp'">
+            <label class="block space-y-2">
+              <span class="lp-label">Project ID</span>
+              <input v-model="form.gcp.project_id" class="lp-input" placeholder="my-gcp-project">
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Region</span>
+              <select v-model="form.gcp.region" class="lp-input">
+                <option v-for="region in GCP_REGIONS" :key="region.value" :value="region.value">
+                  {{ region.label }}
+                </option>
+              </select>
+            </label>
+            <div class="space-y-2">
+              <label
+                v-for="opt in [
+                  { key: 'vpc', title: 'VPC', desc: 'Isolated network with custom routing' },
+                  { key: 'subnets', title: 'Subnets', desc: 'Regional subnet layout' },
+                  { key: 'gke', title: 'GKE', desc: 'Managed Kubernetes cluster' },
+                  { key: 'artifact_registry', title: 'Artifact Registry', desc: 'Container image storage' },
+                  { key: 'cloud_run', title: 'Cloud Run', desc: 'Serverless containers' },
+                  { key: 'cloud_functions', title: 'Cloud Functions', desc: 'Event-driven functions' },
+                  { key: 'cloud_sql', title: 'Cloud SQL', desc: 'Managed PostgreSQL / MySQL' },
+                  { key: 'cloud_storage', title: 'Cloud Storage', desc: 'Object storage buckets' },
+                  { key: 'pubsub', title: 'Pub/Sub', desc: 'Messaging topics & subscriptions' },
+                  { key: 'memorystore', title: 'Memorystore', desc: 'Managed Redis' },
+                  { key: 'bigquery', title: 'BigQuery', desc: 'Analytics warehouse dataset' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-4 transition hover:bg-[var(--lp-panel-2)]"
+              >
+                <div class="flex items-center gap-3">
+                  <span class="material-symbols-outlined text-[var(--lp-muted)]">lan</span>
+                  <div>
+                    <p class="text-sm font-medium">{{ opt.title }}</p>
+                    <p class="text-xs text-[var(--lp-muted)]">{{ opt.desc }}</p>
+                  </div>
+                </div>
+                <input v-model="form.gcp[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+          </template>
+
+          <template v-else-if="form.provider === 'aws'">
+            <label class="block space-y-2">
+              <span class="lp-label">Region</span>
+              <select v-model="form.aws.region" class="lp-input">
+                <option v-for="region in AWS_REGIONS" :key="region.value" :value="region.value">
+                  {{ region.label }}
+                </option>
+              </select>
+            </label>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label
+                v-for="opt in [
+                  { key: 'vpc', title: 'VPC' },
+                  { key: 'subnets', title: 'Subnets' },
+                  { key: 'ec2', title: 'EC2' },
+                  { key: 's3', title: 'S3' },
+                  { key: 'eks', title: 'EKS' },
+                  { key: 'secrets_manager', title: 'Secrets Manager' },
+                  { key: 'rds', title: 'RDS' },
+                  { key: 'ecr', title: 'ECR' },
+                  { key: 'elasticache', title: 'ElastiCache' },
+                  { key: 'lambda_fn', title: 'Lambda' },
+                  { key: 'dynamodb', title: 'DynamoDB' },
+                  { key: 'sqs', title: 'SQS' },
+                  { key: 'alb', title: 'ALB' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
+              >
+                <span class="text-sm">{{ opt.title }}</span>
+                <input v-model="form.aws[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+          </template>
+
+          <template v-else-if="form.provider === 'azure'">
+            <label class="block space-y-2">
+              <span class="lp-label">Resource group</span>
+              <input v-model="form.azure.resource_group" class="lp-input">
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Location</span>
+              <select v-model="form.azure.location" class="lp-input">
+                <option v-for="loc in AZURE_LOCATIONS" :key="loc.value" :value="loc.value">
+                  {{ loc.label }}
+                </option>
+              </select>
+            </label>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label
+                v-for="opt in [
+                  { key: 'vnet', title: 'VNet' },
+                  { key: 'subnets', title: 'Subnets' },
+                  { key: 'aks', title: 'AKS' },
+                  { key: 'key_vault', title: 'Key Vault' },
+                  { key: 'container_apps', title: 'Container Apps' },
+                  { key: 'acr', title: 'ACR' },
+                  { key: 'storage_account', title: 'Storage Account' },
+                  { key: 'cosmos_db', title: 'Cosmos DB' },
+                  { key: 'redis_cache', title: 'Redis Cache' },
+                  { key: 'app_service', title: 'App Service' },
+                  { key: 'log_analytics', title: 'Log Analytics' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
+              >
+                <span class="text-sm">{{ opt.title }}</span>
+                <input v-model="form.azure[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+          </template>
+
+          <template v-else-if="form.provider === 'cloudflare'">
+            <label class="block space-y-2">
+              <span class="lp-label">Account ID</span>
+              <input v-model="form.cloudflare.account_id" class="lp-input">
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Zone name (optional)</span>
+              <input v-model="form.cloudflare.zone_name" class="lp-input" placeholder="example.com">
+            </label>
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label
+                v-for="opt in [
+                  { key: 'workers', title: 'Workers' },
+                  { key: 'r2', title: 'R2' },
+                  { key: 'dns_records', title: 'DNS' },
+                  { key: 'pages', title: 'Pages' },
+                  { key: 'kv', title: 'KV' },
+                  { key: 'd1', title: 'D1' },
+                  { key: 'tunnels', title: 'Tunnel' },
+                  { key: 'queues', title: 'Queues' },
+                ] as const"
+                :key="opt.key"
+                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
+              >
+                <span class="text-sm">{{ opt.title }}</span>
+                <input v-model="form.cloudflare[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
+              </label>
+            </div>
+          </template>
+
           <div v-if="!isLocalProvider" class="rounded-xl border border-[var(--lp-line)] p-4">
             <p class="lp-label mb-3">Infrastructure generation</p>
             <WorkspaceInfraActions
@@ -962,18 +1170,18 @@ async function onPrimaryAction() {
               v-model:container-scaffold="form.container_scaffold"
               mode="selection"
               :provision-disabled="isLocalProvider"
-              :kubernetes-disabled="!showsKubernetesPackaging"
+              :kubernetes-disabled="!hasKubernetesRuntime"
               :disabled="loadingConfig"
             />
           </div>
 
           <ContainerScaffoldCard
-            v-if="form.container_scaffold.enabled"
+            v-if="form.container_scaffold.enabled && !isLocalProvider"
             v-model="form.container_scaffold"
             :disabled="loadingConfig"
           />
 
-          <template v-if="form.provider === 'local'">
+          <template v-if="isLocalProvider">
             <div
               class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
             >
@@ -1015,8 +1223,15 @@ async function onPrimaryAction() {
             <div ref="packagingSectionEl">
               <WorkspaceInfraActions
                 v-model:config="infraGeneration"
+                v-model:container-scaffold="form.container_scaffold"
                 mode="selection"
                 provision-disabled
+                :disabled="loadingConfig"
+              />
+              <ContainerScaffoldCard
+                v-if="form.container_scaffold.enabled"
+                v-model="form.container_scaffold"
+                class="mt-4"
                 :disabled="loadingConfig"
               />
               <KubernetesPackagingPicker
@@ -1024,6 +1239,12 @@ async function onPrimaryAction() {
                 v-model:options="form.kubernetes_options"
                 :allow-none="false"
                 class="mt-4"
+              />
+              <WorkloadDependenciesPicker
+                v-model:dependencies="form.dependencies"
+                provider="local"
+                class="mt-4"
+                :disabled="loadingConfig"
               />
               <CostOptimizationCard
                 v-model:cost="form.cost_optimization"
@@ -1033,47 +1254,20 @@ async function onPrimaryAction() {
             </div>
           </template>
 
-          <template v-else-if="form.provider === 'gcp'">
-            <label class="block space-y-2">
-              <span class="lp-label">Project ID</span>
-              <input v-model="form.gcp.project_id" class="lp-input" placeholder="my-gcp-project">
-            </label>
-            <label class="block space-y-2">
-              <span class="lp-label">Region</span>
-              <input v-model="form.gcp.region" class="lp-input">
-            </label>
-            <div class="space-y-2">
-              <label
-                v-for="opt in [
-                  { key: 'vpc', title: 'VPC', desc: 'Isolated network with custom routing' },
-                  { key: 'subnets', title: 'Subnets', desc: 'Regional subnet layout' },
-                  { key: 'gke', title: 'GKE', desc: 'Managed Kubernetes cluster' },
-                  { key: 'artifact_registry', title: 'Artifact Registry', desc: 'Container image storage' },
-                  { key: 'cloud_run', title: 'Cloud Run', desc: 'Serverless containers' },
-                  { key: 'cloud_functions', title: 'Cloud Functions', desc: 'Event-driven functions' },
-                  { key: 'cloud_sql', title: 'Cloud SQL', desc: 'Managed PostgreSQL / MySQL' },
-                  { key: 'cloud_storage', title: 'Cloud Storage', desc: 'Object storage buckets' },
-                  { key: 'pubsub', title: 'Pub/Sub', desc: 'Messaging topics & subscriptions' },
-                  { key: 'memorystore', title: 'Memorystore', desc: 'Managed Redis' },
-                  { key: 'bigquery', title: 'BigQuery', desc: 'Analytics warehouse dataset' },
-                ] as const"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-4 transition hover:bg-[var(--lp-panel-2)]"
-              >
-                <div class="flex items-center gap-3">
-                  <span class="material-symbols-outlined text-[var(--lp-muted)]">lan</span>
-                  <div>
-                    <p class="text-sm font-medium">{{ opt.title }}</p>
-                    <p class="text-xs text-[var(--lp-muted)]">{{ opt.desc }}</p>
-                  </div>
-                </div>
-                <input v-model="form.gcp[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
-            </div>
+          <template v-if="form.provider === 'gcp'">
             <div v-if="showsKubernetesPackaging" ref="packagingSectionEl">
               <KubernetesPackagingPicker
                 v-model:packaging="form.kubernetes_packaging"
                 v-model:options="form.kubernetes_options"
+                :allow-none="false"
+              />
+              <WorkloadDependenciesPicker
+                v-model:dependencies="form.dependencies"
+                provider="gcp"
+                :gcp-cloud-sql="form.gcp.cloud_sql"
+                :gcp-memorystore="form.gcp.memorystore"
+                class="mt-4"
+                :disabled="loadingConfig"
               />
               <CostOptimizationCard
                 v-model:cost="form.cost_optimization"
@@ -1099,39 +1293,20 @@ async function onPrimaryAction() {
             </label>
           </template>
 
-          <template v-else-if="form.provider === 'aws'">
-            <label class="block space-y-2">
-              <span class="lp-label">Region</span>
-              <input v-model="form.aws.region" class="lp-input">
-            </label>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label
-                v-for="opt in [
-                  { key: 'vpc', title: 'VPC' },
-                  { key: 'subnets', title: 'Subnets' },
-                  { key: 'ec2', title: 'EC2' },
-                  { key: 's3', title: 'S3' },
-                  { key: 'eks', title: 'EKS' },
-                  { key: 'secrets_manager', title: 'Secrets Manager' },
-                  { key: 'rds', title: 'RDS' },
-                  { key: 'ecr', title: 'ECR' },
-                  { key: 'elasticache', title: 'ElastiCache' },
-                  { key: 'lambda_fn', title: 'Lambda' },
-                  { key: 'dynamodb', title: 'DynamoDB' },
-                  { key: 'sqs', title: 'SQS' },
-                  { key: 'alb', title: 'ALB' },
-                ] as const"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input v-model="form.aws[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
-            </div>
+          <template v-if="form.provider === 'aws'">
             <div v-if="showsKubernetesPackaging" ref="packagingSectionEl">
               <KubernetesPackagingPicker
                 v-model:packaging="form.kubernetes_packaging"
                 v-model:options="form.kubernetes_options"
+                :allow-none="false"
+              />
+              <WorkloadDependenciesPicker
+                v-model:dependencies="form.dependencies"
+                provider="aws"
+                :aws-rds="form.aws.rds"
+                :aws-elasticache="form.aws.elasticache"
+                class="mt-4"
+                :disabled="loadingConfig"
               />
               <CostOptimizationCard
                 v-model:cost="form.cost_optimization"
@@ -1163,41 +1338,20 @@ async function onPrimaryAction() {
             </div>
           </template>
 
-          <template v-else-if="form.provider === 'azure'">
-            <label class="block space-y-2">
-              <span class="lp-label">Resource group</span>
-              <input v-model="form.azure.resource_group" class="lp-input">
-            </label>
-            <label class="block space-y-2">
-              <span class="lp-label">Location</span>
-              <input v-model="form.azure.location" class="lp-input">
-            </label>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label
-                v-for="opt in [
-                  { key: 'vnet', title: 'VNet' },
-                  { key: 'subnets', title: 'Subnets' },
-                  { key: 'aks', title: 'AKS' },
-                  { key: 'key_vault', title: 'Key Vault' },
-                  { key: 'container_apps', title: 'Container Apps' },
-                  { key: 'acr', title: 'ACR' },
-                  { key: 'storage_account', title: 'Storage Account' },
-                  { key: 'cosmos_db', title: 'Cosmos DB' },
-                  { key: 'redis_cache', title: 'Redis Cache' },
-                  { key: 'app_service', title: 'App Service' },
-                  { key: 'log_analytics', title: 'Log Analytics' },
-                ] as const"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input v-model="form.azure[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
-            </div>
+          <template v-if="form.provider === 'azure'">
             <div v-if="showsKubernetesPackaging" ref="packagingSectionEl">
               <KubernetesPackagingPicker
                 v-model:packaging="form.kubernetes_packaging"
                 v-model:options="form.kubernetes_options"
+                :allow-none="false"
+              />
+              <WorkloadDependenciesPicker
+                v-model:dependencies="form.dependencies"
+                provider="azure"
+                :azure-cosmos-db="form.azure.cosmos_db"
+                :azure-redis-cache="form.azure.redis_cache"
+                class="mt-4"
+                :disabled="loadingConfig"
               />
               <CostOptimizationCard
                 v-model:cost="form.cost_optimization"
@@ -1246,34 +1400,7 @@ async function onPrimaryAction() {
             </div>
           </template>
 
-          <template v-else>
-            <label class="block space-y-2">
-              <span class="lp-label">Account ID</span>
-              <input v-model="form.cloudflare.account_id" class="lp-input">
-            </label>
-            <label class="block space-y-2">
-              <span class="lp-label">Zone name (optional)</span>
-              <input v-model="form.cloudflare.zone_name" class="lp-input" placeholder="example.com">
-            </label>
-            <div class="grid gap-2 sm:grid-cols-3">
-              <label
-                v-for="opt in [
-                  { key: 'workers', title: 'Workers' },
-                  { key: 'r2', title: 'R2' },
-                  { key: 'dns_records', title: 'DNS' },
-                  { key: 'pages', title: 'Pages' },
-                  { key: 'kv', title: 'KV' },
-                  { key: 'd1', title: 'D1' },
-                  { key: 'tunnels', title: 'Tunnel' },
-                  { key: 'queues', title: 'Queues' },
-                ] as const"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input v-model="form.cloudflare[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
-            </div>
+          <template v-if="form.provider === 'cloudflare'">
             <label class="block space-y-2">
               <span class="lp-label">API token</span>
               <input

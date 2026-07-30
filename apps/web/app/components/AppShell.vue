@@ -12,10 +12,10 @@ const navItems = [
   { label: 'Environments', to: '/', icon: 'dashboard', match: (path: string) => path === '/' || path.startsWith('/environments') },
   { label: 'Launch', to: '/launch', icon: 'rocket_launch', match: (path: string) => path.startsWith('/launch') },
   { label: 'Workspaces', to: '/workspaces', icon: 'layers', match: (path: string) => path.startsWith('/workspaces') },
-  { label: 'Dockerfiles', to: '/dockerfiles', icon: 'deployed_code', match: (path: string) => path.startsWith('/dockerfiles') },
-  { label: 'Organization', to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
   { label: 'Provision', to: '/provision', icon: 'schema', match: (path: string) => path.startsWith('/provision') },
+  // { label: 'Scaffold', to: '/dockerfiles', icon: 'deployed_code', match: (path: string) => path.startsWith('/dockerfiles') },
   { label: 'GitHub', to: '/integrations/github', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
+  { label: 'Organization', to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
   { label: 'Docs', to: '/docs', icon: 'menu_book', match: (path: string) => path.startsWith('/docs') },
 ] as const
 

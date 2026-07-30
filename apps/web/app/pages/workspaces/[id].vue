@@ -21,8 +21,12 @@ const runInit = ref(false)
 const advancedMode = useState('lp-workspace-advanced', () => false)
 const detailsOpen = ref(false)
 const selectedInfraFile = ref<string | null>(null)
+const infraFilesKey = ref(0)
 const audits = ref<AuditLogEntry[]>([])
 const auditsLoading = ref(false)
+const showPush = ref(false)
+const formStatusMessage = ref<string | null>(null)
+const formErrorMessage = ref<string | null>(null)
 
 const stackParts = computed(() =>
   workspace.value ? workspaceStackParts(workspace.value) : null,
@@ -101,11 +105,29 @@ function onRunCommand(command: string) {
 
 function onSetupError(message: string) {
   loadError.value = message
+  formErrorMessage.value = message
 }
 
 function onConfiguratorSaved() {
-  // Avoid full workspace reload: remounting the form after save re-fetches and
-  // re-parses files for no benefit.
+  formStatusMessage.value = 'Form changes saved'
+  infraFilesKey.value += 1
+}
+
+function onConfiguratorDeleted(path: string) {
+  if (selectedInfraFile.value === path) {
+    selectedInfraFile.value = null
+  }
+  formStatusMessage.value = `Deleted ${path}`
+  infraFilesKey.value += 1
+}
+
+function onPushSuccess(fullName: string) {
+  formStatusMessage.value = `Published to ${fullName}`
+  formErrorMessage.value = null
+}
+
+function onPushError(message: string) {
+  formErrorMessage.value = message
 }
 
 onMounted(async () => {
@@ -190,6 +212,15 @@ watch(advancedMode, async (enabled) => {
               {{ advancedMode ? 'Interface form' : 'Advanced IDE' }}
             </button>
             <button
+              v-if="!advancedMode"
+              type="button"
+              class="lp-btn-primary whitespace-nowrap text-xs uppercase tracking-wide"
+              @click="showPush = true"
+            >
+              <span class="material-symbols-outlined text-base">publish</span>
+              Publish to GitHub
+            </button>
+            <button
               type="button"
               class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-medium uppercase tracking-wide text-[var(--lp-danger)] transition hover:bg-[var(--lp-danger)]/10 disabled:opacity-60"
               :disabled="destroying"
@@ -242,12 +273,20 @@ watch(advancedMode, async (enabled) => {
         </div>
       </section>
 
+      <p v-if="formStatusMessage && !advancedMode" class="text-sm text-[var(--lp-ok)]">
+        {{ formStatusMessage }}
+      </p>
+      <p v-if="formErrorMessage && !advancedMode" class="text-sm text-[var(--lp-danger)]">
+        {{ formErrorMessage }}
+      </p>
+
       <section
         v-if="!advancedMode"
         class="lp-glass overflow-hidden rounded-xl"
       >
-        <div class="grid min-h-[78vh] gap-0 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <div class="grid min-h-[78vh] grid-cols-1 gap-0 lg:grid-cols-[280px_minmax(0,1fr)]">
           <InfraFileSelector
+            :key="infraFilesKey"
             v-model="selectedInfraFile"
             :workspace-id="workspace.workspace_id"
           />
@@ -255,6 +294,7 @@ watch(advancedMode, async (enabled) => {
             :workspace-id="workspace.workspace_id"
             :selected-path="selectedInfraFile"
             @saved="onConfiguratorSaved"
+            @deleted="onConfiguratorDeleted"
             @error="onSetupError"
           />
         </div>
@@ -311,6 +351,7 @@ watch(advancedMode, async (enabled) => {
       </section>
 
       <AuditTimeline
+        title="Execution pipeline"
         :entries="audits"
         :loading="auditsLoading"
         empty-label="No control-plane audit events for this workspace yet."
@@ -324,6 +365,14 @@ watch(advancedMode, async (enabled) => {
         cancel-label="No"
         :busy="destroying"
         @confirm="onDestroy"
+      />
+
+      <WorkspaceGithubPushModal
+        :open="showPush"
+        :workspace-id="workspace.workspace_id"
+        @update:open="(value) => { showPush = value }"
+        @pushed="onPushSuccess"
+        @error="onPushError"
       />
     </template>
   </div>

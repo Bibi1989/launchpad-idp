@@ -741,6 +741,7 @@ onMounted(() => {
       </section>
 
       <AuditTimeline
+        title="Execution pipeline"
         :entries="audits"
         :loading="auditsLoading"
         empty-label="No control-plane audit events for this preview yet."

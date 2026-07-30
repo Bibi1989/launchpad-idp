@@ -73,7 +73,7 @@ watch(
 </script>
 
 <template>
-  <aside class="flex h-full w-[280px] shrink-0 flex-col border-r border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50">
+  <aside class="flex min-h-[78vh] h-full w-[280px] shrink-0 flex-col border-r border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50">
     <div class="flex items-center justify-between border-b border-[var(--lp-line)] px-4 py-3">
       <div class="min-w-0">
         <h2 class="lp-label">Explorer</h2>

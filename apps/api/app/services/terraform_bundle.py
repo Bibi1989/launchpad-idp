@@ -1677,6 +1677,39 @@ def _root_outputs(cloud: CloudConfig) -> str:
                 "}",
                 "",
             ]
+        if r.cloud_sql:
+            lines += [
+                'output "managed_postgres_host" {',
+                "  value = google_sql_database_instance.primary.private_ip_address",
+                "}",
+                "",
+                'output "managed_postgres_connection_url" {',
+                '  value     = format("postgresql://launchpad:change-me@%s:5432/app", google_sql_database_instance.primary.private_ip_address)',
+                "  sensitive = true",
+                "}",
+                "",
+                'output "managed_mysql_host" {',
+                "  value = google_sql_database_instance.primary.private_ip_address",
+                "}",
+                "",
+                'output "managed_mysql_connection_url" {',
+                '  value     = format("mysql://launchpad:change-me@%s:3306/app", google_sql_database_instance.primary.private_ip_address)',
+                "  sensitive = true",
+                "}",
+                "",
+            ]
+        if r.memorystore:
+            lines += [
+                'output "managed_redis_host" {',
+                "  value = google_redis_instance.cache.host",
+                "}",
+                "",
+                'output "managed_redis_connection_url" {',
+                '  value     = format("redis://%s:6379/0", google_redis_instance.cache.host)',
+                "  sensitive = true",
+                "}",
+                "",
+            ]
         if r.secret_backend == SecretBackend.SECRET_MANAGER:
             lines += [
                 'output "secret_id" {',
@@ -1710,6 +1743,39 @@ def _root_outputs(cloud: CloudConfig) -> str:
                 "}",
                 "",
             ]
+        if r.rds:
+            lines += [
+                'output "managed_postgres_host" {',
+                "  value = aws_db_instance.primary.address",
+                "}",
+                "",
+                'output "managed_postgres_connection_url" {',
+                '  value     = format("postgresql://launchpad:change-me@%s:5432/app", aws_db_instance.primary.address)',
+                "  sensitive = true",
+                "}",
+                "",
+                'output "managed_mysql_host" {',
+                "  value = aws_db_instance.primary.address",
+                "}",
+                "",
+                'output "managed_mysql_connection_url" {',
+                '  value     = format("mysql://launchpad:change-me@%s:3306/app", aws_db_instance.primary.address)',
+                "  sensitive = true",
+                "}",
+                "",
+            ]
+        if r.elasticache:
+            lines += [
+                'output "managed_redis_host" {',
+                "  value = aws_elasticache_cluster.redis.cache_nodes[0].address",
+                "}",
+                "",
+                'output "managed_redis_connection_url" {',
+                '  value     = format("redis://%s:6379/0", aws_elasticache_cluster.redis.cache_nodes[0].address)',
+                "  sensitive = true",
+                "}",
+                "",
+            ]
     elif isinstance(cloud, AzureCloudConfig):
         r = cloud.resources
         lines += [
@@ -1736,6 +1802,30 @@ def _root_outputs(cloud: CloudConfig) -> str:
             lines += [
                 'output "key_vault_uri" {',
                 "  value = module.secrets.key_vault_uri",
+                "}",
+                "",
+            ]
+        if r.cosmos_db:
+            lines += [
+                'output "managed_mongodb_host" {',
+                "  value = azurerm_cosmosdb_account.app.name",
+                "}",
+                "",
+                'output "managed_mongodb_connection_url" {',
+                '  value     = format("mongodb://launchpad:change-me@%s:10255/app", azurerm_cosmosdb_account.app.name)',
+                "  sensitive = true",
+                "}",
+                "",
+            ]
+        if r.redis_cache:
+            lines += [
+                'output "managed_redis_host" {',
+                "  value = azurerm_redis_cache.cache.hostname",
+                "}",
+                "",
+                'output "managed_redis_connection_url" {',
+                '  value     = format("redis://%s:6380/0", azurerm_redis_cache.cache.hostname)',
+                "  sensitive = true",
                 "}",
                 "",
             ]

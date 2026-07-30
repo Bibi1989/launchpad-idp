@@ -3,17 +3,26 @@ import type {
   CicdPlatform,
   CicdSecurityConfig,
   ContainerScaffoldConfig,
+  ContainerScanToolId,
   FrameworkOption,
   InfraGenerationConfig,
   K8sScaffoldMode,
   ProjectStackOption,
   ProvisionEngine,
   SastLanguage,
+  SastToolId,
   ScanFindingAction,
   ScanSeverityThreshold,
 } from '~/types/provisioning'
 import { defaultCicdSecurityConfig, renderCicdWorkflow } from '~/utils/cicdWorkflowGenerator'
+import {
+  containerScanToolsForPlatform,
+  normalizeContainerScanToolId,
+  normalizeSastToolId,
+  sastToolsForPlatform,
+} from '~/utils/cicdSecurityTools'
 import { copyTextToClipboard, downloadTextFile } from '~/utils/clipboardFile'
+import { dockerfileContentForStack } from '~/utils/workspaceInfraScaffold'
 
 const props = withDefaults(
   defineProps<{
@@ -84,43 +93,29 @@ const selectedDockerFrameworks = computed({
   set: (val: FrameworkOption[]) => setDockerFrameworks(val),
 })
 
-const selectedCicdFrameworks = ref<FrameworkOption[]>([])
+const selectedCicdFrameworks = computed({
+  get: () => config.value.cicd.frameworks ?? [],
+  set: (val: FrameworkOption[]) => {
+    config.value = {
+      ...config.value,
+      cicd: {
+        ...ensureCicd(),
+        frameworks: val,
+      },
+    }
+  },
+})
 
 const copiedDockerfile = ref(false)
 let copiedDockerfileTimer: ReturnType<typeof setTimeout> | null = null
 
 function generateDockerScaffoldPreview(cfg: ContainerScaffoldConfig): string {
-  const stack = (cfg.frameworks && cfg.frameworks.length > 0) ? cfg.frameworks[0] : (cfg.stack || 'node')
+  const stack = (cfg.frameworks && cfg.frameworks.length > 0)
+    ? cfg.frameworks[0]
+    : (cfg.stack || 'node')
   const name = cfg.app_name || 'app'
   const port = cfg.listen_port || 8080
-
-  const footer = `USER 10001:10001\nEXPOSE ${port}\nHEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\\n  CMD wget -qO- http://127.0.0.1:${port}/health || exit 1\n`
-
-  if (stack === 'fastapi') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage FastAPI image (non-root USER 10001).\nFROM python:3.12-alpine AS builder\nWORKDIR /src\nRUN apk add --no-cache build-base libffi-dev\nCOPY requirements.txt pyproject.toml poetry.lock* ./\nRUN python -m venv /opt/venv\nENV PATH="/opt/venv/bin:$PATH"\nRUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; elif [ -f pyproject.toml ]; then pip install --no-cache-dir .; else pip install --no-cache-dir uvicorn fastapi pydantic; fi\n\nFROM python:3.12-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=builder /opt/venv /opt/venv\nCOPY --chown=10001:10001 . .\nENV PATH="/opt/venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=${port}\n${footer}CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${port}"]`
-  }
-  if (stack === 'react_vite' || stack === 'vuejs' || stack === 'svelte') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage static web app image with non-root Nginx.\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci; else npm install; fi\nCOPY . .\nRUN npm run build || pnpm run build || yarn build\n\nFROM nginxinc/nginx-unprivileged:alpine AS runtime\nCOPY --from=build --chown=101:101 /src/dist /usr/share/nginx/html\nEXPOSE 8080\nHEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\\n  CMD wget -qO- http://127.0.0.1:8080/ || exit 1\nCMD ["nginx", "-g", "daemon off;"]`
-  }
-  if (stack === 'nextjs') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Next.js image (standalone mode, USER 10001).\nFROM node:22-alpine AS deps\nWORKDIR /src\nRUN apk add --no-cache libc6-compat\nCOPY package.json package-lock.json* pnpm-lock.yaml* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; else npm ci; fi\n\nFROM node:22-alpine AS builder\nWORKDIR /src\nCOPY --from=deps /src/node_modules ./node_modules\nCOPY . .\nENV NEXT_TELEMETRY_DISABLED=1 NODE_ENV=production\nRUN npm run build\n\nFROM node:22-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S nodejs && adduser -u 10001 -S -G nextjs nextjs && apk add --no-cache ca-certificates wget\nCOPY --from=builder /src/public ./public\nCOPY --from=builder --chown=10001:10001 /src/.next/standalone ./\nCOPY --from=builder --chown=10001:10001 /src/.next/static ./.next/static\nENV NODE_ENV=production PORT=${port}\n${footer}CMD ["node", "server.js"]`
-  }
-  if (stack === 'nestjs') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage NestJS image (non-root USER 10001).\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY package.json package-lock.json* pnpm-lock.yaml* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; else npm ci; fi\nCOPY . .\nRUN npm run build\n\nFROM node:22-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=build --chown=10001:10001 /src/dist ./dist\nCOPY --from=build --chown=10001:10001 /src/node_modules ./node_modules\nCOPY --from=build --chown=10001:10001 /src/package.json ./package.json\nENV NODE_ENV=production PORT=${port}\n${footer}CMD ["node", "dist/main.js"]`
-  }
-  if (stack === 'springboot' || stack === 'java') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Spring Boot image (non-root USER 10001).\nFROM eclipse-temurin:21-jdk-alpine AS build\nWORKDIR /src\nCOPY . .\nRUN if [ -f mvnw ]; then chmod +x mvnw && ./mvnw -q -DskipTests clean package; elif [ -f gradlew ]; then chmod +x gradlew && ./gradlew -q bootJar; else mvn -q -DskipTests package; fi\n\nFROM eclipse-temurin:21-jre-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=build --chown=10001:10001 /src/target/*.jar /app/app.jar\nENV PORT=${port}\n${footer}CMD ["java", "-jar", "/app/app.jar"]`
-  }
-  if (stack === 'python' || stack === 'flask' || stack === 'django') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Python image (non-root USER 10001).\nFROM python:3.12-alpine AS builder\nWORKDIR /src\nRUN apk add --no-cache build-base libffi-dev\nCOPY requirements.txt pyproject.toml poetry.lock* ./\nRUN python -m venv /opt/venv\nENV PATH="/opt/venv/bin:$PATH"\nRUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; elif [ -f pyproject.toml ]; then pip install --no-cache-dir .; else pip install --no-cache-dir uvicorn fastapi; fi\n\nFROM python:3.12-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=builder /opt/venv /opt/venv\nCOPY --chown=10001:10001 . .\nENV PATH="/opt/venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=${port}\n${footer}CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${port}"]`
-  }
-  if (stack === 'go') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Go image (non-root USER 10001).\nFROM golang:1.23-alpine AS build\nWORKDIR /src\nRUN apk add --no-cache git ca-certificates\nCOPY go.mod go.sum* ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/${name} .\n\nFROM alpine:3.21 AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=build --chown=10001:10001 /out/${name} /app/${name}\nENV PORT=${port}\n${footer}CMD ["/app/${name}"]`
-  }
-  if (stack === 'rust') {
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Rust image (non-root USER 10001).\nFROM rust:1.83-alpine AS build\nWORKDIR /src\nRUN apk add --no-cache musl-dev\nCOPY Cargo.toml Cargo.lock* ./\nRUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src\nCOPY . .\nRUN cargo build --release\n\nFROM alpine:3.21 AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=build --chown=10001:10001 /src/target/release/${name} /app/${name}\nENV PORT=${port}\n${footer}CMD ["/app/${name}"]`
-  }
-  return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Node.js image (non-root USER 10001).\nFROM node:22-alpine AS deps\nWORKDIR /src\nRUN apk add --no-cache libc6-compat\nCOPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci; else npm install; fi\n\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY --from=deps /src/node_modules ./node_modules\nCOPY . .\nENV NODE_ENV=production\nRUN if [ -f package.json ] && grep -q '"build"' package.json; then npm run build || yarn build || pnpm build; fi\n\nFROM node:22-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=build --chown=10001:10001 /src ./\nENV NODE_ENV=production PORT=${port}\n${footer}CMD ["node", "server.js"]`
+  return dockerfileContentForStack(stack, name, port)
 }
 
 async function copyDockerfileContent() {
@@ -149,15 +144,18 @@ const sastLanguageOptions: { value: SastLanguage; label: string }[] = [
 ]
 
 function ensureSecurity(): CicdSecurityConfig {
-  return config.value.cicd?.security ?? defaultCicdSecurityConfig()
+  const platform = ensureCicd().platform
+  return config.value.cicd?.security ?? defaultCicdSecurityConfig(platform)
 }
 
 function ensureCicd(): InfraGenerationConfig['cicd'] {
   const cicd = config.value.cicd
+  const platform = cicd?.platform ?? 'github'
   return {
     enabled: cicd?.enabled ?? false,
-    platform: cicd?.platform ?? 'github',
-    security: cicd?.security ?? defaultCicdSecurityConfig(),
+    platform,
+    security: cicd?.security ?? defaultCicdSecurityConfig(platform),
+    frameworks: cicd?.frameworks ?? [],
   }
 }
 
@@ -213,9 +211,24 @@ function setK8sMode(mode: K8sScaffoldMode) {
 }
 
 function setCiCdPlatform(platform: CicdPlatform) {
+  const security = ensureSecurity()
   config.value = {
     ...config.value,
-    cicd: { ...ensureCicd(), platform, security: ensureSecurity() },
+    cicd: {
+      ...ensureCicd(),
+      platform,
+      security: {
+        ...security,
+        containerScan: {
+          ...security.containerScan,
+          tool: normalizeContainerScanToolId(security.containerScan.tool, platform),
+        },
+        sastGuardrails: {
+          ...security.sastGuardrails,
+          sastTool: normalizeSastToolId(security.sastGuardrails.sastTool, platform),
+        },
+      },
+    },
   }
 }
 
@@ -240,6 +253,22 @@ function setFindingAction(onFinding: ScanFindingAction) {
   patchSecurity({
     ...security,
     containerScan: { ...security.containerScan, onFinding },
+  })
+}
+
+function setContainerScanTool(tool: ContainerScanToolId) {
+  const security = ensureSecurity()
+  patchSecurity({
+    ...security,
+    containerScan: { ...security.containerScan, tool },
+  })
+}
+
+function setSastTool(sastTool: SastToolId) {
+  const security = ensureSecurity()
+  patchSecurity({
+    ...security,
+    sastGuardrails: { ...security.sastGuardrails, sastTool },
   })
 }
 
@@ -288,6 +317,9 @@ function setPrimarySastLanguage(language: SastLanguage) {
 
 const security = computed(() => ensureSecurity())
 const cicd = computed(() => ensureCicd())
+const cicdPlatform = computed(() => cicd.value.platform)
+const sastToolOptions = computed(() => sastToolsForPlatform(cicdPlatform.value))
+const containerScanToolOptions = computed(() => containerScanToolsForPlatform(cicdPlatform.value))
 const pipelineSummary = computed(() => {
   const a = security.value.containerScan.enabled
   const b = security.value.sastGuardrails.enabled
@@ -436,7 +468,7 @@ function downloadWorkflowYaml() {
             </label>
           </div>
           <p class="text-xs leading-relaxed text-[var(--lp-muted)]">
-            Scaffold raw manifests or Helm chart under <code class="font-mono text-xs text-[var(--lp-accent)]">infra/</code>.
+            Scaffold raw manifests, Helm chart, or Kustomize layout under <code class="font-mono text-xs text-[var(--lp-accent)]">infra/</code>.
           </p>
           <p v-if="kubernetesDisabled" class="text-xs text-[var(--lp-muted)] italic">
             Enable a Kubernetes runtime (GKE, EKS, AKS, Cloud Run, or Container Apps) first.
@@ -452,6 +484,7 @@ function downloadWorkflowYaml() {
           >
             <option value="k8s">K8s manifests</option>
             <option value="helm">Helm chart</option>
+            <option value="kustomize">Kustomize</option>
           </select>
 
           <div v-if="mode === 'execution'" class="flex items-center gap-2">
@@ -704,6 +737,26 @@ function downloadWorkflowYaml() {
             class="space-y-3 border-t border-[var(--lp-line)] pt-3"
           >
             <label class="block space-y-1.5">
+              <span class="lp-label">Security scanner</span>
+              <select
+                :value="security.containerScan.tool"
+                class="lp-input font-mono text-xs"
+                :disabled="disabled"
+                @change="setContainerScanTool(($event.target as HTMLSelectElement).value as ContainerScanToolId)"
+              >
+                <option
+                  v-for="opt in containerScanToolOptions"
+                  :key="opt.id"
+                  :value="opt.id"
+                >
+                  {{ opt.label }}
+                </option>
+              </select>
+              <span class="block font-mono text-[10px] text-[var(--lp-muted)]">
+                {{ containerScanToolOptions.find((o) => o.id === security.containerScan.tool)?.hint }}
+              </span>
+            </label>
+            <label class="block space-y-1.5">
               <span class="lp-label">Severity threshold</span>
               <select
                 :value="security.containerScan.severityThreshold"
@@ -766,7 +819,30 @@ function downloadWorkflowYaml() {
               v-if="security.sastGuardrails.enableSast"
               class="block space-y-1.5"
             >
-              <span class="lp-label">Primary language pack</span>
+              <span class="lp-label">SAST scanner</span>
+              <select
+                :value="security.sastGuardrails.sastTool"
+                class="lp-input font-mono text-xs"
+                :disabled="disabled"
+                @change="setSastTool(($event.target as HTMLSelectElement).value as SastToolId)"
+              >
+                <option
+                  v-for="opt in sastToolOptions"
+                  :key="opt.id"
+                  :value="opt.id"
+                >
+                  {{ opt.label }}
+                </option>
+              </select>
+              <span class="block font-mono text-[10px] text-[var(--lp-muted)]">
+                {{ sastToolOptions.find((o) => o.id === security.sastGuardrails.sastTool)?.hint }}
+              </span>
+            </label>
+            <label
+              v-if="security.sastGuardrails.enableSast && security.sastGuardrails.sastTool === 'codeql-v3.28.10'"
+              class="block space-y-1.5"
+            >
+              <span class="lp-label">CodeQL language pack</span>
               <select
                 :value="security.sastGuardrails.sastLanguages[0] ?? 'javascript-typescript'"
                 class="lp-input"

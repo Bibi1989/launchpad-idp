@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import {
   provisioningWizardSchema,
+  containerScaffoldSchema,
+  defaultContainerScaffold,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
   CloudProvider,
+  ContainerScaffoldConfig,
   CostOptimizationConfig,
+  FrameworkOption,
   IaCEngine,
   InfraGenerationConfig,
   KubernetesPackaging,
@@ -19,9 +23,11 @@ import {
 import {
   artifactModeToInfraConfig,
   buildCiCdScaffold,
+  buildDockerScaffold,
   infraConfigToArtifactMode,
   infraConfigToKubernetesPackaging,
 } from '~/utils/workspaceInfraScaffold'
+import { AWS_REGIONS, AZURE_LOCATIONS, GCP_REGIONS } from '~/utils/cloudRegions'
 
 const props = defineProps<{
   workspaceId: string
@@ -49,14 +55,7 @@ const form = reactive({
   run_init: true,
   kubernetes_packaging: 'none' as KubernetesPackaging,
   cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
-  container_scaffold: {
-    enabled: false,
-    generate_dockerfile: true,
-    generate_docker_compose: true,
-    stack: 'node' as const,
-    app_name: 'app',
-    listen_port: 8080,
-  },
+  container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
   local: {
     cluster_name: 'launchpad',
     context: 'kind-launchpad',
@@ -140,13 +139,17 @@ const infraGeneration = ref<InfraGenerationConfig>(
 
 const progressPct = computed(() => (currentStep.value / TOTAL_STEPS) * 100)
 const isLocalProvider = computed(() => provider.value === 'local')
-const showsKubernetesPackaging = computed(() => {
+const hasKubernetesRuntime = computed(() => {
   if (provider.value === 'local') return true
-  if (!infraGeneration.value.kubernetes.enabled) return false
   if (provider.value === 'gcp') return form.gcp.gke || form.gcp.cloud_run
   if (provider.value === 'aws') return form.aws.eks
   if (provider.value === 'azure') return form.azure.aks || form.azure.container_apps
   return false
+})
+const showsKubernetesPackaging = computed(() => {
+  if (!hasKubernetesRuntime.value) return false
+  if (provider.value === 'local') return true
+  return infraGeneration.value.kubernetes.enabled
 })
 
 const stepTitle = computed(() => {
@@ -288,7 +291,7 @@ function buildPayload(): ProvisioningWizardInput {
     kubernetes_packaging: infraConfigToKubernetesPackaging(infraGeneration.value),
     kubernetes_options,
     cost_optimization: form.cost_optimization,
-    container_scaffold: form.container_scaffold,
+    container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
   }
   const artifact_mode = infraConfigToArtifactMode(infraGeneration.value)
 
@@ -338,10 +341,20 @@ async function onSave() {
     }
 
     await updateWorkspace(props.workspaceId, parsed.data)
+    const dockerTargets = buildDockerScaffold(form.container_scaffold)
+    for (const target of dockerTargets) {
+      await writeWorkspaceFile(props.workspaceId, target.path, target.content)
+    }
     if (infraGeneration.value.cicd.enabled) {
+      const frameworks =
+        infraGeneration.value.cicd.frameworks.length > 0
+          ? infraGeneration.value.cicd.frameworks
+          : (form.container_scaffold.frameworks ?? [])
       const targets = buildCiCdScaffold(
         infraGeneration.value.cicd.platform,
         infraGeneration.value.cicd.security,
+        frameworks,
+        form.container_scaffold.app_name || workspaceName.value || 'app',
       )
       for (const target of targets) {
         await writeWorkspaceFile(props.workspaceId, target.path, target.content)
@@ -405,7 +418,7 @@ onMounted(async () => {
           v-model:container-scaffold="form.container_scaffold"
           mode="selection"
           :provision-disabled="isLocalProvider"
-          :kubernetes-disabled="!showsKubernetesPackaging"
+          :kubernetes-disabled="!hasKubernetesRuntime"
           :disabled="saving"
         />
         <ContainerScaffoldCard
@@ -448,7 +461,11 @@ onMounted(async () => {
           </label>
           <label class="block space-y-2">
             <span class="lp-label">Region</span>
-            <input v-model="form.gcp.region" class="lp-input">
+            <select v-model="form.gcp.region" class="lp-input">
+              <option v-for="region in GCP_REGIONS" :key="region.value" :value="region.value">
+                {{ region.label }}
+              </option>
+            </select>
           </label>
           <label class="block space-y-2">
             <span class="lp-label">GCP SA key JSON</span>
@@ -459,7 +476,11 @@ onMounted(async () => {
         <template v-else-if="provider === 'aws'">
           <label class="block space-y-2">
             <span class="lp-label">Region</span>
-            <input v-model="form.aws.region" class="lp-input">
+            <select v-model="form.aws.region" class="lp-input">
+              <option v-for="region in AWS_REGIONS" :key="region.value" :value="region.value">
+                {{ region.label }}
+              </option>
+            </select>
           </label>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">

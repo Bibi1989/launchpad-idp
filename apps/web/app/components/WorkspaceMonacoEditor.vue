@@ -29,6 +29,7 @@ function languageFromPath(path: string | null): string {
   if (lower.endsWith('.js')) return 'javascript'
   if (lower.endsWith('.md')) return 'markdown'
   if (lower.endsWith('.sh')) return 'shell'
+  if (lower.includes('dockerfile') || lower.endsWith('containerfile')) return 'dockerfile'
   return 'plaintext'
 }
 

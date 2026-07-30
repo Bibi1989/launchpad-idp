@@ -19,6 +19,13 @@ from app.schemas.cloud import (
     KubernetesPackaging,
     KubernetesWorkloadOptions,
     SpotProvisionerStrategy,
+    WorkloadDependenciesConfig,
+)
+from app.services.workload_dependencies import (
+    dependency_secret_string_data,
+    in_cluster_manifest_files,
+    init_container_wait_blocks,
+    _in_cluster_kinds,
 )
 from app.services.cost_optimization import (
     cluster_autoscaler_notes_yaml,
@@ -48,17 +55,24 @@ def write_kubernetes_layout(
     packaging: KubernetesPackaging,
     options: KubernetesWorkloadOptions | None = None,
     cost_optimization: CostOptimizationConfig | None = None,
+    dependencies: WorkloadDependenciesConfig | None = None,
+    cloud: object | None = None,
 ) -> list[str]:
     """Writes the selected Kubernetes packaging layout; returns relative paths."""
     opts = options or KubernetesWorkloadOptions()
     cost = cost_optimization or CostOptimizationConfig()
+    deps = dependencies or WorkloadDependenciesConfig()
+    if deps.any_enabled() and not opts.secret:
+        opts = opts.model_copy(update={"secret": True})
     if packaging == KubernetesPackaging.NONE:
         return []
     written: list[str] = []
     if packaging == KubernetesPackaging.RAW_MANIFESTS:
-        written.extend(_write_raw_manifests(workspace_dir, name, opts, cost))
+        written.extend(_write_raw_manifests(workspace_dir, name, opts, cost, deps, cloud))
     elif packaging == KubernetesPackaging.HELM:
-        written.extend(_write_helm_chart(workspace_dir, name, opts, cost))
+        written.extend(_write_helm_chart(workspace_dir, name, opts, cost, deps, cloud))
+    elif packaging == KubernetesPackaging.KUSTOMIZE:
+        written.extend(_write_kustomize_layout(workspace_dir, name, opts, cost, deps, cloud))
     else:
         raise ValueError(f"Unsupported Kubernetes packaging: {packaging!r}")
 
@@ -117,14 +131,21 @@ def _write_raw_manifests(
     name: str,
     options: KubernetesWorkloadOptions,
     cost: CostOptimizationConfig,
+    dependencies: WorkloadDependenciesConfig,
+    cloud: object | None,
 ) -> list[str]:
     ns = _namespace_name(name)
     app = "app"
+    in_cluster = _in_cluster_kinds(dependencies)
     files: dict[str, str] = {
         "namespace.yaml": _namespace_yaml(ns, name),
     }
+    for filename, content in in_cluster_manifest_files(ns=ns, name=name, kinds=in_cluster).items():
+        files[filename] = content
     if options.deployment:
-        files["deployment.yaml"] = _deployment_yaml(ns, name, app, options, cost)
+        files["deployment.yaml"] = _deployment_yaml(
+            ns, name, app, options, cost, dependencies=dependencies
+        )
     if options.service:
         files["service.yaml"] = _service_yaml(ns, name, app)
     if options.pod:
@@ -141,8 +162,8 @@ def _write_raw_manifests(
         files["serviceaccount.yaml"] = _serviceaccount_yaml(ns, name, app)
     if options.config_map:
         files["configmap.yaml"] = _configmap_yaml(ns, name, app)
-    if options.secret:
-        files["secret.yaml"] = _secret_yaml(ns, name, app)
+    if options.secret or dependencies.any_enabled():
+        files["secret.yaml"] = _secret_yaml(ns, name, app, dependencies, cloud)
     if options.ingress:
         files["ingress.yaml"] = _ingress_yaml(ns, name, app, options.ingress_class)
     if options.pvc:
@@ -234,7 +255,25 @@ data:
 """
 
 
-def _secret_yaml(ns: str, name: str, app: str) -> str:
+def _secret_yaml(
+    ns: str,
+    name: str,
+    app: str,
+    dependencies: WorkloadDependenciesConfig | None = None,
+    cloud: object | None = None,
+) -> str:
+    deps = dependencies or WorkloadDependenciesConfig()
+    dep_data = dependency_secret_string_data(deps, name=name, cloud=cloud if isinstance(cloud, object) else None)
+    string_lines = [
+        "  # Replace placeholders before applying to a shared cluster.",
+        "  APP_API_KEY: \"change-me\"",
+    ]
+    if not dep_data:
+        string_lines.append(f'  DATABASE_URL: "postgres://user:pass@db:5432/{name}"')
+    else:
+        for key, value in dep_data.items():
+            string_lines.append(f'  {key}: "{value}"')
+    string_data = "\n".join(string_lines)
     return f"""\
 apiVersion: v1
 kind: Secret
@@ -245,9 +284,7 @@ metadata:
 {_common_labels(name, app).rstrip()}
 type: Opaque
 stringData:
-  # Replace placeholders before applying to a shared cluster.
-  APP_API_KEY: "change-me"
-  DATABASE_URL: "postgres://user:pass@db:5432/{name}"
+{string_data}
 """
 
 
@@ -257,8 +294,12 @@ def _deployment_yaml(
     app: str,
     options: KubernetesWorkloadOptions,
     cost: CostOptimizationConfig | None = None,
+    dependencies: WorkloadDependenciesConfig | None = None,
 ) -> str:
     cost = cost or CostOptimizationConfig()
+    deps = dependencies or WorkloadDependenciesConfig()
+    in_cluster = _in_cluster_kinds(deps)
+    init_block = init_container_wait_blocks(in_cluster)
     sa_block = f"\n      serviceAccountName: {app}" if options.service_account else ""
     env_from_items: list[str] = []
     if options.config_map:
@@ -267,7 +308,7 @@ def _deployment_yaml(
             - configMapRef:
                 name: {app}-config"""
         )
-    if options.secret:
+    if options.secret or deps.any_enabled():
         env_from_items.append(
             f"""\
             - secretRef:
@@ -290,6 +331,8 @@ def _deployment_yaml(
         idle_annotation = (
             '\n        downscaler/uptime: "Mon-Fri 07:00-19:00 Europe/Amsterdam"'
         )
+
+    init_containers_section = f"\n      initContainers:{init_block}" if init_block else ""
 
     return f"""\
 {cost_marker_comment(cost)}\
@@ -320,6 +363,7 @@ spec:
         runAsGroup: 101
         seccompProfile:
           type: RuntimeDefault
+{init_containers_section}
       containers:
         - name: {app}
           image: nginx:1.27-alpine
@@ -819,6 +863,69 @@ defaultBackend:
 
 
 # --------------------------------------------------------------------------- #
+# Kustomize layout
+# --------------------------------------------------------------------------- #
+
+KUSTOMIZE_BASE_ROOT = Path("infra") / "kustomize" / "base"
+KUSTOMIZE_OVERLAY_ROOT = Path("infra") / "kustomize" / "overlays" / "prod"
+
+
+def _write_kustomize_layout(
+    workspace_dir: Path,
+    name: str,
+    options: KubernetesWorkloadOptions,
+    cost: CostOptimizationConfig,
+    dependencies: WorkloadDependenciesConfig,
+    cloud: object | None,
+) -> list[str]:
+    ns = _namespace_name(name)
+    in_cluster = _in_cluster_kinds(dependencies)
+    base_resources = ["namespace.yaml", "deployment.yaml", "service.yaml"]
+    for filename in in_cluster_manifest_files(ns=ns, name=name, kinds=in_cluster):
+        base_resources.append(filename.replace(".yaml", ".yaml"))
+    kustomization_resources = "\n".join(f"  - {r}" for r in base_resources)
+    if dependencies.any_enabled():
+        base_resources.append("secret.yaml")
+        kustomization_resources = "\n".join(f"  - {r}" for r in base_resources)
+    files: dict[Path, str] = {
+        KUSTOMIZE_BASE_ROOT / "kustomization.yaml": "\n".join(
+            [
+                "apiVersion: kustomize.config.k8s.io/v1beta1",
+                "kind: Kustomization",
+                "resources:",
+                kustomization_resources,
+                "",
+            ]
+        ),
+        KUSTOMIZE_BASE_ROOT / "namespace.yaml": _namespace_yaml(ns, name),
+        KUSTOMIZE_BASE_ROOT / "deployment.yaml": _deployment_yaml(
+            ns, name, "app", options, cost, dependencies=dependencies
+        ),
+        KUSTOMIZE_BASE_ROOT / "service.yaml": _service_yaml(ns, name, "app"),
+    }
+    for filename, content in in_cluster_manifest_files(ns=ns, name=name, kinds=in_cluster).items():
+        files[KUSTOMIZE_BASE_ROOT / filename] = content
+    if dependencies.any_enabled() or options.secret:
+        files[KUSTOMIZE_BASE_ROOT / "secret.yaml"] = _secret_yaml(
+            ns, name, "app", dependencies, cloud
+        )
+    files[KUSTOMIZE_OVERLAY_ROOT / "kustomization.yaml"] = "\n".join(
+        [
+            "apiVersion: kustomize.config.k8s.io/v1beta1",
+            "kind: Kustomization",
+            "resources:",
+            "  - ../../base",
+            "namePrefix: prod-",
+            "",
+        ]
+    )
+    written: list[str] = []
+    for rel_path, content in files.items():
+        written.append(_write_relative(workspace_dir, rel_path, content))
+    return written
+
+
+# --------------------------------------------------------------------------- #
 # Helm chart
 # --------------------------------------------------------------------------- #
 
@@ -828,7 +935,11 @@ def _write_helm_chart(
     name: str,
     options: KubernetesWorkloadOptions,
     cost: CostOptimizationConfig,
+    dependencies: WorkloadDependenciesConfig,
+    cloud: object | None,
 ) -> list[str]:
+    ns = _namespace_name(name)
+    in_cluster = _in_cluster_kinds(dependencies)
     files: dict[Path, str] = {
         HELM_CHART_ROOT / "Chart.yaml": _helm_chart_yaml(name),
         HELM_CHART_ROOT / "values.yaml": _helm_values_yaml(name, options, cost),
@@ -842,8 +953,10 @@ def _write_helm_chart(
         files[HELM_CHART_ROOT / "templates" / "serviceaccount.yaml"] = _helm_serviceaccount_yaml()
     if options.config_map:
         files[HELM_CHART_ROOT / "templates" / "configmap.yaml"] = _helm_configmap_yaml()
-    if options.secret:
+    if options.secret or dependencies.any_enabled():
         files[HELM_CHART_ROOT / "templates" / "secret.yaml"] = _helm_secret_yaml()
+    for filename, content in in_cluster_manifest_files(ns=ns, name=name, kinds=in_cluster).items():
+        files[HELM_CHART_ROOT / "templates" / filename] = content
     if options.ingress:
         files[HELM_CHART_ROOT / "templates" / "ingress.yaml"] = _helm_ingress_yaml()
     if options.hpa:

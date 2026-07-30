@@ -70,6 +70,20 @@ export const dockerfilePushResponseSchema = z.object({
   installation_id: z.number().int(),
 })
 
+export const repoScaffoldFileSchema = z.object({
+  path: z.string(),
+  content: z.string(),
+})
+
+export const repoPushBundleResponseSchema = z.object({
+  full_name: z.string(),
+  html_url: z.string(),
+  default_branch: z.string(),
+  paths: z.array(z.string()),
+  commit_message: z.string(),
+  installation_id: z.number().int(),
+})
+
 export const dockerfileBuildJobStatusSchema = z.enum([
   'queued',
   'running',
@@ -102,6 +116,7 @@ export type DockerfileScanResponse = z.infer<typeof dockerfileScanResponseSchema
 export type DockerfileScaffoldResponse = z.infer<typeof dockerfileScaffoldResponseSchema>
 export type DockerfileReviewResponse = z.infer<typeof dockerfileReviewResponseSchema>
 export type DockerfilePushResponse = z.infer<typeof dockerfilePushResponseSchema>
+export type RepoPushBundleResponse = z.infer<typeof repoPushBundleResponseSchema>
 export type DockerfileBuildJobStatus = z.infer<typeof dockerfileBuildJobStatusSchema>
 export type DockerfileBuildEnqueueResponse = z.infer<typeof dockerfileBuildEnqueueResponseSchema>
 export type DockerfileBuildJobResponse = z.infer<typeof dockerfileBuildJobResponseSchema>
