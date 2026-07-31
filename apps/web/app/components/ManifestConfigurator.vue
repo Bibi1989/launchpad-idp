@@ -16,6 +16,7 @@ import {
   serviceUsesNodePort,
 } from '~/utils/infraManifestMapper'
 import { copyTextToClipboard, downloadTextFile } from '~/utils/clipboardFile'
+import { INSTANCE_SIZE_OPTIONS } from '~/utils/cloudRegions'
 
 const WorkspaceMonacoEditor = defineAsyncComponent(
   () => import('~/components/WorkspaceMonacoEditor.vue'),
@@ -37,6 +38,7 @@ const { readWorkspaceFile, writeWorkspaceFile, deleteWorkspacePath, inspectImage
 const loading = ref(false)
 const saving = ref(false)
 const linking = ref(false)
+const confirmDeleteOpen = ref(false)
 const inspectingImage = ref(false)
 const rawContent = ref('')
 const originalRawContent = ref('')
@@ -47,6 +49,7 @@ const statusMessage = ref<string | null>(null)
 const syncServiceOnSave = ref(true)
 const autoSavePortsFromImage = ref(true)
 const showAiAnalysis = ref(false)
+const actionsMenuOpen = ref(false)
 let loadToken = 0
 let loadAbortController: AbortController | null = null
 let loadTimeoutHandle: ReturnType<typeof setTimeout> | null = null
@@ -443,6 +446,14 @@ async function saveChanges(opts: { quiet?: boolean } = {}) {
   }
 }
 
+function closeActionsMenu() {
+  actionsMenuOpen.value = false
+}
+
+function toggleActionsMenu() {
+  actionsMenuOpen.value = !actionsMenuOpen.value
+}
+
 function discardChanges() {
   if (isRawEditor.value) {
     rawContent.value = originalRawContent.value
@@ -461,21 +472,43 @@ function discardChanges() {
   })
 }
 
-function applyAiImprovedContent(content: string) {
-  if (!props.selectedPath) return
+async function applyAiImprovedContent(payload: { path: string; content: string }) {
+  const path = payload.path || props.selectedPath
+  const content = payload.content
+  if (!path || !content?.trim()) {
+    throw new Error('AI fix is empty')
+  }
+
+  // Only apply when the drawer targets the open file (interactive configurator is single-file).
+  if (props.selectedPath && path !== props.selectedPath) {
+    throw new Error(`AI fix targets ${path}, but ${props.selectedPath} is open`)
+  }
+
+  await writeWorkspaceFile(props.workspaceId, path, content)
   if (isRawEditor.value) {
     rawContent.value = content
-  } else if (model.value) {
-    model.value = parseInfraManifest(props.selectedPath, content)
+    originalRawContent.value = content
+  } else {
+    const next = parseInfraManifest(path, content)
+    model.value = next
+    originalModel.value = JSON.parse(JSON.stringify(next)) as InfraManifestModel
+    rawContent.value = content
+    originalRawContent.value = content
   }
   showAiAnalysis.value = false
-  statusMessage.value = 'Applied AI suggestion — save to persist'
+  statusMessage.value = `Applied AI fix to ${path}`
+  emit('saved')
+}
+
+function requestDeleteSelectedFile() {
+  if (!props.selectedPath || deleting.value) return
+  confirmDeleteOpen.value = true
 }
 
 async function deleteSelectedFile() {
   if (!props.selectedPath || deleting.value) return
   const path = props.selectedPath
-  if (!window.confirm(`Delete “${path}” from this workspace?`)) return
+  confirmDeleteOpen.value = false
   deleting.value = true
   statusMessage.value = null
   try {
@@ -508,7 +541,12 @@ watch(
   },
 )
 
+onMounted(() => {
+  document.addEventListener('click', closeActionsMenu)
+})
+
 onBeforeUnmount(() => {
+  document.removeEventListener('click', closeActionsMenu)
   if (loadTimeoutHandle) {
     clearTimeout(loadTimeoutHandle)
     loadTimeoutHandle = null
@@ -560,48 +598,12 @@ onBeforeUnmount(() => {
       <div class="flex shrink-0 flex-wrap items-center gap-2">
         <button
           type="button"
-          class="lp-btn-ghost py-2 text-xs uppercase tracking-wide"
-          :disabled="!activeFileContent"
-          @click="copyActiveFile"
-        >
-          <span class="material-symbols-outlined text-sm">
-            {{ copiedFile ? 'check' : 'content_copy' }}
-          </span>
-          {{ copiedFile ? 'Copied' : 'Copy' }}
-        </button>
-        <button
-          type="button"
-          class="lp-btn-ghost py-2 text-xs uppercase tracking-wide"
-          :disabled="!activeFileContent"
-          @click="downloadActiveFile"
-        >
-          <span class="material-symbols-outlined text-sm">download</span>
-          Download
-        </button>
-        <button
-          type="button"
           class="lp-btn-ghost py-2 text-xs uppercase tracking-wide disabled:opacity-40"
           :disabled="!selectedPath || !rawContent.trim() || loading"
           @click="showAiAnalysis = true"
         >
           <span class="material-symbols-outlined text-sm">auto_awesome</span>
           AI analyze
-        </button>
-        <button
-          type="button"
-          class="px-2 py-2 text-xs font-medium uppercase tracking-wide text-[var(--lp-danger)] transition hover:bg-[var(--lp-danger)]/10 disabled:opacity-40"
-          :disabled="!selectedPath || deleting"
-          @click="deleteSelectedFile"
-        >
-          {{ deleting ? 'Deleting…' : 'Delete file' }}
-        </button>
-        <button
-          type="button"
-          class="px-2 py-2 text-xs font-medium uppercase tracking-wide text-[var(--lp-muted)] transition hover:text-[var(--lp-text)] disabled:opacity-40"
-          :disabled="!hasChanges || saving"
-          @click="discardChanges"
-        >
-          Discard
         </button>
         <button
           type="button"
@@ -612,6 +614,67 @@ onBeforeUnmount(() => {
           <span class="material-symbols-outlined text-sm">save</span>
           {{ saving ? 'Saving…' : 'Save changes' }}
         </button>
+        <div class="relative" @click.stop>
+          <button
+            type="button"
+            class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/25 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
+            :aria-expanded="actionsMenuOpen"
+            aria-haspopup="menu"
+            aria-label="More file actions"
+            @click="toggleActionsMenu"
+          >
+            <span class="material-symbols-outlined text-xl">more_vert</span>
+          </button>
+          <div
+            v-if="actionsMenuOpen"
+            role="menu"
+            class="absolute right-0 top-full z-30 mt-1.5 min-w-[200px] overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] py-1 shadow-xl"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-40"
+              :disabled="!activeFileContent"
+              @click="copyActiveFile(); closeActionsMenu()"
+            >
+              <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">
+                {{ copiedFile ? 'check' : 'content_copy' }}
+              </span>
+              {{ copiedFile ? 'Copied' : 'Copy' }}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-40"
+              :disabled="!activeFileContent"
+              @click="downloadActiveFile(); closeActionsMenu()"
+            >
+              <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">download</span>
+              Download
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-40"
+              :disabled="!hasChanges || saving"
+              @click="discardChanges(); closeActionsMenu()"
+            >
+              <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">undo</span>
+              Discard
+            </button>
+            <div class="my-1 border-t border-[var(--lp-line)]" role="separator" />
+            <button
+              type="button"
+              role="menuitem"
+              class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-danger)] transition hover:bg-[var(--lp-danger)]/10 disabled:opacity-40"
+              :disabled="!selectedPath || deleting"
+              @click="requestDeleteSelectedFile(); closeActionsMenu()"
+            >
+              <span class="material-symbols-outlined text-base">delete</span>
+              {{ deleting ? 'Deleting…' : 'Delete file' }}
+            </button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -1043,7 +1106,7 @@ onBeforeUnmount(() => {
                   NodePort: <code class="text-[var(--lp-text)]">port</code>,
                   <code class="text-[var(--lp-text)]">targetPort</code>, and optional
                   <code class="text-[var(--lp-text)]">nodePort</code>
-                  (kind local range 30080–30084; leave empty to auto-assign).
+                  (kind local range 30080–30089; leave empty to auto-assign).
                 </template>
                 <template v-else>
                   LoadBalancer: same port fields as NodePort; cloud LB may allocate externally.
@@ -1169,7 +1232,16 @@ onBeforeUnmount(() => {
             </label>
             <label class="block space-y-2">
               <span class="lp-label">Instance size</span>
-              <input v-model="model.instanceSize" placeholder="e2-medium" class="lp-input">
+              <select v-model="model.instanceSize" class="lp-input font-mono text-xs">
+                <option value="" disabled>Select instance type</option>
+                <option
+                  v-for="opt in INSTANCE_SIZE_OPTIONS"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </option>
+              </select>
             </label>
             <label class="block space-y-2">
               <span class="lp-label">Cluster size</span>
@@ -1368,9 +1440,19 @@ onBeforeUnmount(() => {
       :workspace-id="workspaceId"
       :path="selectedPath"
       :content="analysisContent"
+      :persist-fix="applyAiImprovedContent"
       @update:open="(value) => { showAiAnalysis = value }"
-      @apply="applyAiImprovedContent"
       @error="onAiError"
+    />
+
+    <ConfirmDialog
+      v-model:open="confirmDeleteOpen"
+      title="Delete file?"
+      :message="selectedPath ? `Delete “${selectedPath}” from this workspace? This cannot be undone.` : ''"
+      confirm-label="Yes, delete"
+      cancel-label="No"
+      :busy="deleting"
+      @confirm="deleteSelectedFile"
     />
   </section>
 </template>

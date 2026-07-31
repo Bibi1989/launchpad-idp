@@ -13,8 +13,8 @@ const error = ref<string | null>(null)
 
 function postAuthPath(): string {
   const next = route.query.next
-  if (typeof next === 'string' && next.startsWith('/')) return next
-  return '/'
+  if (typeof next === 'string' && next.startsWith('/') && next !== '/') return next
+  return '/home'
 }
 
 const loginForm = reactive({

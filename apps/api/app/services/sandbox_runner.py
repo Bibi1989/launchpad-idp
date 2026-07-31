@@ -8,6 +8,7 @@ import pty
 import select
 import signal
 import struct
+import tempfile
 import termios
 import uuid
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ from app.models.domain import ExecutionStage
 logger = get_logger(__name__)
 
 OutputCallback = Callable[[bytes], None]
+
+_CONTAINER_OIDC_ROOT = "/tmp/launchpad-oidc"
 
 _TF_DIR = Path("infra") / "terraform"
 _K8S_MANIFESTS_DIR = Path("infra") / "k8s" / "manifests"
@@ -201,8 +204,9 @@ class SandboxRunner:
         rows: int = 40,
     ) -> SandboxSession:
         session_id = str(uuid.uuid4())
-        env = credentials_to_env(credentials)
+        env = credentials_to_env(credentials, workspace_id=workspace_id)
         env_keys = set(env.keys())
+
 
         logger.info(
             "sandbox_session_create",
@@ -356,18 +360,24 @@ class SandboxRunner:
 
         client = docker.from_env()
         image = self._settings.sandbox_image
+        environment, oidc_volumes = self._docker_oidc_env(env, workspace_id)
         environment = {
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "PS1": _SANDBOX_PS1,
-            **env,
+            **environment,
         }
-        if "GCP_SA_KEY" in env:
+        if "GCP_SA_KEY" in environment and "GOOGLE_APPLICATION_CREDENTIALS" not in environment:
             environment["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp-sa.json"
+
+        volumes: dict[str, dict[str, str]] = {
+            str(workspace_path.resolve()): {"bind": "/workspace", "mode": "rw"},
+            **oidc_volumes,
+        }
 
         # Interactive shell only — provision bootstrap is injected from read_loop
         # so terraform/kubectl/helm output streams on the attached PTY channel.
-        shell_cmd = self._interactive_shell_command(env, docker=True)
+        shell_cmd = self._interactive_shell_command(environment, docker=True)
         container = client.containers.run(
             image,
             command=["bash", "-lc", shell_cmd],
@@ -375,7 +385,7 @@ class SandboxRunner:
             tty=True,
             stdin_open=True,
             working_dir="/workspace",
-            volumes={str(workspace_path.resolve()): {"bind": "/workspace", "mode": "rw"}},
+            volumes=volumes,
             environment=environment,
             network_mode=self._settings.sandbox_network_mode,
             mem_limit=self._settings.sandbox_memory_limit,
@@ -464,7 +474,7 @@ class SandboxRunner:
             child_env["COLORTERM"] = "truecolor"
             # Full path (\w) so cwd remains visible after cd into infra/, etc.
             child_env["PS1"] = _SANDBOX_PS1
-            if "GCP_SA_KEY" in env:
+            if "GCP_SA_KEY" in env and "GOOGLE_APPLICATION_CREDENTIALS" not in env:
                 key_path = workspace_path / ".launchpad" / "gcp-sa.json"
                 key_path.parent.mkdir(parents=True, exist_ok=True)
                 key_path.write_text(env["GCP_SA_KEY"], encoding="utf-8")
@@ -499,6 +509,60 @@ class SandboxRunner:
             rows=rows,
         )
 
+    @staticmethod
+    def _docker_oidc_env(
+        env: dict[str, str],
+        workspace_id: str,
+    ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+        """Remap host OIDC files into the container and mount the workdir."""
+        environment = dict(env)
+        volumes: dict[str, dict[str, str]] = {}
+        host_root = Path(tempfile.gettempdir()) / "launchpad-oidc" / workspace_id
+        if not host_root.is_dir():
+            return environment, volumes
+
+        volumes[str(host_root.resolve())] = {
+            "bind": _CONTAINER_OIDC_ROOT,
+            "mode": "ro",
+        }
+
+        gac = environment.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if gac:
+            host_cfg = Path(gac)
+            if host_cfg.is_file():
+                try:
+                    data = json.loads(host_cfg.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    data = None
+                if isinstance(data, dict):
+                    cred_src = data.get("credential_source")
+                    if isinstance(cred_src, dict) and isinstance(cred_src.get("file"), str):
+                        token_name = Path(cred_src["file"]).name
+                        data = {
+                            **data,
+                            "credential_source": {
+                                **cred_src,
+                                "file": f"{_CONTAINER_OIDC_ROOT}/{token_name}",
+                            },
+                        }
+                    docker_cfg = host_root / "gcp_credential_config.docker.json"
+                    docker_cfg.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                    try:
+                        os.chmod(docker_cfg, 0o600)
+                    except OSError:
+                        pass
+                    environment["GOOGLE_APPLICATION_CREDENTIALS"] = (
+                        f"{_CONTAINER_OIDC_ROOT}/gcp_credential_config.docker.json"
+                    )
+
+        aws_token = environment.get("AWS_WEB_IDENTITY_TOKEN_FILE")
+        if aws_token:
+            environment["AWS_WEB_IDENTITY_TOKEN_FILE"] = (
+                f"{_CONTAINER_OIDC_ROOT}/{Path(aws_token).name}"
+            )
+
+        return environment, volumes
+
     def _interactive_shell_command(
         self,
         env: dict[str, str],
@@ -506,7 +570,11 @@ class SandboxRunner:
         docker: bool,
     ) -> str:
         parts: list[str] = []
-        if docker and "GCP_SA_KEY" in env:
+        if (
+            docker
+            and "GCP_SA_KEY" in env
+            and env.get("GOOGLE_APPLICATION_CREDENTIALS") == "/tmp/gcp-sa.json"
+        ):
             parts.append('printf "%s" "$GCP_SA_KEY" > /tmp/gcp-sa.json && chmod 600 /tmp/gcp-sa.json')
         parts.append(f"export PS1={self._shell_quote(_SANDBOX_PS1)}")
         parts.append("echo '[launchpad] interactive sandbox ready'")

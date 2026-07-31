@@ -21,13 +21,24 @@ const statusLabel = ref('idle')
 const startedForPath = ref<string | null>(null)
 
 const { connected, error, connect, sendInput, resize, kill, disconnect } = useTerminalSession()
+const { ingestTerminalOutput, setConnected } = useGuardedTerminalCommand()
+
+watch(
+  connected,
+  (isConnected) => {
+    setConnected(isConnected)
+  },
+  { immediate: true },
+)
 
 function handleServerMessage(msg: TerminalServerMessage) {
   if (!term.value) return
   if (msg.type === 'output') {
     term.value.write(msg.data)
+    ingestTerminalOutput(msg.data)
   } else if (msg.type === 'ready') {
     statusLabel.value = `connected (${msg.mode}) — type to interact`
+    setConnected(true)
     emit('ready', msg.session_id)
     focusTerminal()
     if (term.value && fitAddon.value) {
@@ -37,9 +48,11 @@ function handleServerMessage(msg: TerminalServerMessage) {
   } else if (msg.type === 'error') {
     term.value.writeln(`\r\n\x1b[31m[error] ${msg.message}\x1b[0m`)
     statusLabel.value = 'error'
+    ingestTerminalOutput(`\n[error] ${msg.message}\n__LP_EXIT_CODE:1__\n`)
   } else if (msg.type === 'status') {
     statusLabel.value = msg.status
     if (msg.status === 'killed') {
+      setConnected(false)
       emit('exit')
     }
   }
@@ -178,6 +191,7 @@ watch(
 
 onUnmounted(() => {
   window.removeEventListener('resize', onWindowResize)
+  setConnected(false)
   disconnect()
   term.value?.dispose()
   term.value = null

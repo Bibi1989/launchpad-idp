@@ -114,7 +114,7 @@ onMounted(refresh)
               Open
             </NuxtLink>
             <NuxtLink
-              :to="`/?workspace=${ws.id}`"
+              :to="`/launch?workspace=${ws.id}`"
               class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
             >
               <span class="material-symbols-outlined text-sm">deployed_code</span>

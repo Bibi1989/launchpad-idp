@@ -26,6 +26,28 @@ _FALLBACK_WORKFLOW_PATHS = (
     ".github/workflows/launchpad-infra.yml",
 )
 
+def _workspace_has_dockerfile(files: dict[str, str]) -> bool:
+    for path in files:
+        name = path.rsplit("/", 1)[-1].lower()
+        if name == "dockerfile" or name.startswith("dockerfile."):
+            return True
+        if "/dockers/" in f"/{path}" and "dockerfile" in name:
+            return True
+    return False
+
+
+def _workspace_has_ci_workflow(files: dict[str, str]) -> bool:
+    return any(
+        path.startswith(".github/workflows/")
+        or path.startswith("ci/github/workflows/")
+        or path.endswith("/.gitlab-ci.yml")
+        or path == ".gitlab-ci.yml"
+        or path.startswith("ci/gitlab/")
+        for path in files
+    )
+
+
+
 
 class GitHubProvisioningService:
     """Creates or opens repos, sets encrypted CI secrets, and commits infra/workflows."""
@@ -80,15 +102,11 @@ class GitHubProvisioningService:
             root_dir=root_dir,
         )
 
-        commit_payload: dict[str, str] = {}
-        infra_files = {
-            (path if path.startswith("infra/") else f"infra/{path}"): content
-            for path, content in files.items()
-        }
-        commit_payload.update(infra_files)
+        # Mirror workspace paths exactly — never rewrite under infra/.
+        commit_payload: dict[str, str] = dict(files)
 
         workflow_path: str | None = None
-        if request.include_workflow:
+        if request.include_workflow and not _workspace_has_ci_workflow(files):
             workflow_path = self._allocate_workflow_path(repo)
             workflow = _render_workflow(
                 provider=provider,
@@ -97,7 +115,7 @@ class GitHubProvisioningService:
             )
             commit_payload[workflow_path] = workflow
 
-        if getattr(request, "include_dockerfiles", False):
+        if getattr(request, "include_dockerfiles", False) and not _workspace_has_dockerfile(files):
             from app.services.dockerfile_scaffold import (
                 default_dockerfile_path,
                 detect_stack,
@@ -109,7 +127,9 @@ class GitHubProvisioningService:
             dockerfile_content = scaffold_dockerfile(stack, app_name=repo.name)
             commit_payload[default_dockerfile_path()] = dockerfile_content
 
-        if created or not self._path_exists(repo, "README.md"):
+        if "README.md" not in commit_payload and (
+            created or not self._path_exists(repo, "README.md")
+        ):
             commit_payload["README.md"] = _readme(
                 repo.full_name,
                 provider,
@@ -366,9 +386,15 @@ class GitHubProvisioningService:
     ) -> list[str]:
         mapping = {
             "GCP_SA_KEY": credentials.gcp_sa_key_json,
+            "GCP_WIF_PROJECT_NUMBER": credentials.gcp_wif_project_number,
+            "GCP_WIF_POOL_ID": credentials.gcp_wif_pool_id,
+            "GCP_WIF_PROVIDER_ID": credentials.gcp_wif_provider_id,
+            "GCP_WIF_TARGET_SA_EMAIL": credentials.gcp_wif_target_sa_email,
             "AWS_ACCESS_KEY_ID": credentials.aws_access_key_id,
             "AWS_SECRET_ACCESS_KEY": credentials.aws_secret_access_key,
             "AWS_SESSION_TOKEN": credentials.aws_session_token,
+            "AWS_ROLE_ARN": credentials.aws_role_arn,
+            "AWS_ROLE_SESSION_NAME": credentials.aws_role_session_name,
             "AZURE_CLIENT_ID": credentials.azure_client_id,
             "AZURE_CLIENT_SECRET": credentials.azure_client_secret,
             "AZURE_TENANT_ID": credentials.azure_tenant_id,
@@ -479,30 +505,11 @@ class GitHubProvisioningService:
         use_provider = provider or detected_provider
         use_engine = engine or detected_engine
 
-        root_keep = {
-            "Pulumi.yaml",
-            "Pulumi.dev.yaml",
-            "package.json",
-            "tsconfig.json",
-            "index.ts",
-            ".gitignore",
-            "README.md",
-        }
-        commit_payload: dict[str, str] = {}
-        for path, content in files.items():
-            if (
-                path.startswith("infra/")
-                or path.startswith("ci/")
-                or path.startswith(".github/")
-                or path in root_keep
-            ):
-                commit_path = path
-            else:
-                commit_path = f"infra/{path}"
-            commit_payload[commit_path] = content
+        # Mirror workspace paths exactly — never rewrite under infra/.
+        commit_payload: dict[str, str] = dict(files)
 
         workflow_path: str | None = None
-        if include_workflow:
+        if include_workflow and not _workspace_has_ci_workflow(files):
             workflow_path = self._allocate_workflow_path(repo)
             commit_payload[workflow_path] = _render_workflow(
                 provider=use_provider,
@@ -510,7 +517,7 @@ class GitHubProvisioningService:
                 workflow_path=workflow_path,
             )
 
-        if include_dockerfiles:
+        if include_dockerfiles and not _workspace_has_dockerfile(files):
             from app.services.dockerfile_scaffold import (
                 default_dockerfile_path,
                 detect_stack,

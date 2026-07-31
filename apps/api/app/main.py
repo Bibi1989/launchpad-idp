@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -17,19 +18,54 @@ from app.routers.orgs import router as orgs_router
 from app.routers.provisioning import router as provisioning_router
 from app.routers.terminal_ws import router as terminal_ws_router
 from app.routers.webhooks import router as webhooks_router
+from app.routers.catalog import router as catalog_router
+
+from app.routers.well_known import router as well_known_router
+from app.routers.k8s import router as k8s_router
+from app.routers.user_credentials import router as user_credentials_router
 
 configure_logging()
 logger = get_logger(__name__)
 
 
+
+async def _ttl_reaper_loop(stop: asyncio.Event) -> None:
+    """Pause TTL-expired environments in-process so pause works without Celery beat."""
+    settings = get_settings()
+    interval = max(30.0, float(settings.ttl_reaper_interval_seconds))
+    while not stop.is_set():
+        try:
+            from app.workers.tasks import _run_ttl_reaper
+
+            reaped = await _run_ttl_reaper()
+            if reaped:
+                logger.info("in_process_ttl_reaper", reaped=reaped)
+        except Exception as exc:  # noqa: BLE001 — never crash the API loop
+            logger.error("in_process_ttl_reaper_failed", error=str(exc))
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("api_startup", service="launchpad-api")
-    yield
-    from app.core.events import close_redis
+    stop = asyncio.Event()
+    reaper_task = asyncio.create_task(_ttl_reaper_loop(stop), name="ttl-reaper")
+    try:
+        yield
+    finally:
+        stop.set()
+        reaper_task.cancel()
+        try:
+            await reaper_task
+        except asyncio.CancelledError:
+            pass
+        from app.core.events import close_redis
 
-    await close_redis()
-    logger.info("api_shutdown", service="launchpad-api")
+        await close_redis()
+        logger.info("api_shutdown", service="launchpad-api")
 
 
 def create_app() -> FastAPI:
@@ -57,7 +93,12 @@ def create_app() -> FastAPI:
     app.include_router(dockerfiles_router, prefix="/api/v1")
     app.include_router(terminal_ws_router, prefix="/api/v1")
     app.include_router(webhooks_router, prefix="/api/v1")
+    app.include_router(catalog_router, prefix="/api/v1")
+    app.include_router(k8s_router, prefix="/api/v1")
+    app.include_router(user_credentials_router, prefix="/api/v1")
+    app.include_router(well_known_router)
     return app
+
 
 
 app = create_app()

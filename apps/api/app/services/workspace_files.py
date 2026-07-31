@@ -15,7 +15,38 @@ logger = get_logger(__name__)
 
 _SAFE_RELATIVE = re.compile(r"^[A-Za-z0-9_./@+-]+$")
 _MAX_FILE_BYTES = 2_000_000
-_DENIED_PATH_SEGMENTS = frozenset({".launchpad", ".git"})
+_DENIED_PATH_SEGMENTS = frozenset(
+    {
+        ".launchpad",
+        ".git",
+        ".terraform",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "coverage",
+        ".turbo",
+        ".next",
+        ".nuxt",
+        ".output",
+        "dist",
+        "build",
+        "bin",
+    }
+)
+_DENIED_SUFFIXES = (
+    ".tfstate",
+    ".tfstate.backup",
+    ".pyc",
+    ".pyo",
+    ".so",
+    ".dylib",
+    ".o",
+)
 
 
 class WorkspaceFileError(ValueError):
@@ -24,6 +55,9 @@ class WorkspaceFileError(ValueError):
 
 def is_denied_workspace_path(relative: Path) -> bool:
     """Return True when a relative path must not be exposed via the IDE or bundles."""
+    name = relative.name
+    if name.endswith(_DENIED_SUFFIXES) or name.endswith(".tfstate"):
+        return True
     for part in relative.parts:
         if part in _DENIED_PATH_SEGMENTS:
             return True

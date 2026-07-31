@@ -7,7 +7,7 @@ CLUSTER_NAME="${KIND_CLUSTER_NAME:-launchpad}"
 CONTEXT="kind-${CLUSTER_NAME}"
 # Keep this range small — Docker Desktop + many hostPort maps often breaks kubeadm init.
 PORT_MIN="${PREVIEW_NODE_PORT_MIN:-30080}"
-PORT_MAX="${PREVIEW_NODE_PORT_MAX:-30084}"
+PORT_MAX="${PREVIEW_NODE_PORT_MAX:-30089}"
 # Optional pin, e.g. kindest/node:v1.32.2 — empty uses kind's default.
 NODE_IMAGE="${KIND_NODE_IMAGE:-}"
 PRELOAD_IMAGE="${KIND_PRELOAD_IMAGE:-1}"
@@ -41,7 +41,7 @@ fi
 
 PORT_COUNT=$((PORT_MAX - PORT_MIN + 1))
 if [[ "${PORT_COUNT}" -gt 10 ]]; then
-  echo "Warning: mapping ${PORT_COUNT} host ports can fail on Docker Desktop. Prefer <=10 (e.g. 30080-30084)." >&2
+  echo "Warning: mapping ${PORT_COUNT} host ports can fail on Docker Desktop. Prefer <=10 (e.g. 30080-30089)." >&2
 fi
 
 acquire_lock() {
@@ -115,7 +115,7 @@ EOF
     echo "  1. make kind-down && sleep 3 && make kind-up" >&2
     echo "  2. Quit other kind clusters: kind get clusters && kind delete cluster --name <name>" >&2
     echo "  3. Give Docker more CPUs/RAM, then retry" >&2
-    echo "  4. Narrow ports: PREVIEW_NODE_PORT_MAX=30084" >&2
+    echo "  4. Narrow ports: PREVIEW_NODE_PORT_MAX=30089" >&2
     exit 1
   fi
 fi

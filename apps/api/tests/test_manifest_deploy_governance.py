@@ -848,3 +848,18 @@ def test_patch_manifest_documents_sets_if_not_present_for_tagged_custom_image() 
     assert container["image"] == "bibi1989/afroshopclient:1.0"
     assert container["imagePullPolicy"] == "IfNotPresent"
 
+
+def test_ensure_workspace_k8s_manifests_scaffolds_when_missing(tmp_path: Path) -> None:
+    from app.services.manifest_deploy import (
+        ensure_workspace_k8s_manifests,
+        workspace_has_deployable_k8s,
+    )
+
+    assert workspace_has_deployable_k8s(tmp_path) is False
+    ensure_workspace_k8s_manifests(tmp_path, image="custom-app:v1")
+    assert workspace_has_deployable_k8s(tmp_path) is True
+    deploy_file = tmp_path / "infra" / "k8s" / "manifests" / "deployment.yaml"
+    assert deploy_file.is_file()
+    assert "custom-app:v1" in deploy_file.read_text(encoding="utf-8")
+
+

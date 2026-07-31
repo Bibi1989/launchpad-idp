@@ -11,6 +11,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.config import get_settings
 from app.core.database import get_db_session
 from app.core.logging import sanitize_log_message
 from app.core.security import create_access_token, hash_password
@@ -257,7 +258,8 @@ async def test_provision_task_marks_running_and_emits_logs(
         lambda: session_factory,
     )
 
-    await _run_provision(env_id, "corr-worker")
+    with patch("app.workers.tasks._maybe_build_preview_image", return_value=(None, None)):
+        await _run_provision(env_id, "corr-worker")
 
     async with session_factory() as session:
         env_repo = EnvironmentRepository(session)
@@ -298,16 +300,16 @@ async def test_ttl_reaper_queues_teardown(
 
     monkeypatch.setattr("app.workers.tasks._session_factory", lambda: session_factory)
 
-    with patch("app.workers.tasks.enqueue_teardown_environment") as enqueue:
+    with patch("app.workers.tasks.KubernetesProvisioner.scale_deployment") as mock_scale:
         reaped = await _run_ttl_reaper()
-        enqueue.assert_called_once()
+        mock_scale.assert_called_once_with(namespace="launchpad-env-expired", replicas=0)
         assert reaped == 1
 
     async with session_factory() as session:
         env_repo = EnvironmentRepository(session)
         environment = await env_repo.get_by_id(env_id)
         assert environment is not None
-        assert environment.status == EnvironmentStatus.TEARDOWN_PENDING
+        assert environment.status == EnvironmentStatus.PAUSED
 
 
 def test_kubernetes_simulate_mode_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -563,10 +565,11 @@ async def test_auto_pause_oldest_when_exceeding_max_concurrent_limit(
     session_factory: async_sessionmaker[AsyncSession],
     test_user: User,
 ) -> None:
+    limit = get_settings().max_concurrent_environments
     async with session_factory() as session:
         repo = EnvironmentRepository(session)
         created_envs = []
-        for i in range(4):
+        for i in range(limit):
             env = await repo.create(
                 owner_id=test_user.id,
                 name=f"app-env-{i+1}",
@@ -585,7 +588,7 @@ async def test_auto_pause_oldest_when_exceeding_max_concurrent_limit(
             with patch("app.services.environment.KubernetesProvisioner"):
                 new_env = await service.enqueue_provision(
                     EnvironmentCreate(
-                        name="app-env-5",
+                        name=f"app-env-{limit+1}",
                         git_branch="main",
                         git_repo_url="https://github.com/acme/app.git",
                         ttl_hours=24,
@@ -597,5 +600,5 @@ async def test_auto_pause_oldest_when_exceeding_max_concurrent_limit(
         oldest = created_envs[0]
         await session.refresh(oldest)
         assert oldest.status == EnvironmentStatus.PAUSED
-        assert new_env.name == "app-env-5"
+        assert new_env.name == f"app-env-{limit+1}"
 

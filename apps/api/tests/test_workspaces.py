@@ -66,16 +66,20 @@ async def test_list_and_destroy_workspace(
     test_user: User,
     tmp_path: Path,
 ) -> None:
+    from app.services.orgs import OrganizationService
+
     workspace_id = uuid4()
     root = tmp_path / str(workspace_id)
     root.mkdir()
     (root / "main.tf").write_text("resource \"null_resource\" \"x\" {}", encoding="utf-8")
 
     async with session_factory() as session:
+        personal = await OrganizationService(session).ensure_personal_org(test_user)
         session.add(
             ProvisioningWorkspace(
                 id=workspace_id,
                 owner_id=test_user.id,
+                org_id=personal.id,
                 name="demo-ws",
                 engine="terraform",
                 provider="gcp",
@@ -110,9 +114,16 @@ async def test_get_workspace_when_files_missing_on_disk(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
     test_user: User,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.core.config import get_settings
+
     workspace_id = uuid4()
     missing_root = f"/tmp/launchpad-workspaces/missing-{workspace_id}"
+    durable = tmp_path / "workspaces"
+    monkeypatch.setenv("IAC_WORKSPACE_ROOT", str(durable))
+    get_settings.cache_clear()
 
     async with session_factory() as session:
         session.add(
@@ -142,8 +153,84 @@ async def test_get_workspace_when_files_missing_on_disk(
         f"/api/v1/provisioning/workspaces/{workspace_id}/files/tree",
         headers=auth_header(test_user),
     )
-    assert files_response.status_code == 404
-    assert files_response.json()["error"]["code"] == "workspace_files_missing"
+    assert files_response.status_code == 200
+    assert len(files_response.json()) > 0
+    restored = await client.get(
+        f"/api/v1/provisioning/workspaces/{workspace_id}",
+        headers=auth_header(test_user),
+    )
+    assert restored.status_code == 200
+    restored_root = Path(restored.json()["root_dir"])
+    assert restored_root.is_dir()
+    assert durable.resolve() in restored_root.resolve().parents
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_restore_local_workspace_from_wizard_snapshot(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from app.core.config import get_settings
+    from app.core.secrets import encrypt_secret
+
+    workspace_id = uuid4()
+    missing_root = tmp_path / "gone" / "django"
+    durable = tmp_path / "durable"
+    monkeypatch.setenv("IAC_WORKSPACE_ROOT", str(durable))
+    get_settings.cache_clear()
+
+    snapshot = {
+        "name": "django",
+        "iac_engine": "terraform",
+        "cloud": {
+            "provider": "local",
+            "resources": {"cluster_name": "launchpad"},
+        },
+        "run_init": True,
+        "artifact_mode": "manifest_only",
+        "kubernetes_packaging": "raw_manifests",
+        "kubernetes_options": {},
+        "cost_optimization": {},
+        "container_scaffold": {},
+        "dependencies": {},
+    }
+
+    async with session_factory() as session:
+        session.add(
+            ProvisioningWorkspace(
+                id=workspace_id,
+                owner_id=test_user.id,
+                name="django",
+                engine="terraform",
+                provider="local",
+                root_dir=str(missing_root),
+                status="ready",
+                encrypted_credentials=encrypt_secret("{}"),
+                wizard_config_json=json.dumps(snapshot),
+            )
+        )
+        await session.commit()
+
+    with patch(
+        "app.services.provisioning.ensure_kind_cluster",
+        return_value={"status": "ready"},
+    ):
+        restore = await client.post(
+            f"/api/v1/provisioning/workspaces/{workspace_id}/restore-files",
+            headers=auth_header(test_user),
+        )
+    assert restore.status_code == 200
+    body = restore.json()
+    assert body["files"]
+    assert Path(body["root_dir"]).is_dir()
+    assert any("infra/k8s" in f or f.endswith(".yaml") for f in body["files"])
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

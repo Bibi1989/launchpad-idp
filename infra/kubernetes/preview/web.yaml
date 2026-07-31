@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: pr-${PR_NUMBER}
+  labels:
+    app: web
+    EnvironmentId: pr-${PR_NUMBER}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: ${WEB_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NUXT_PUBLIC_API_BASE
+              value: https://pr-${PR_NUMBER}.preview.mydomain.com/api/v1
+            - name: NUXT_PUBLIC_WS_BASE
+              value: wss://pr-${PR_NUMBER}.preview.mydomain.com
+            - name: PORT
+              value: "3000"
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: pr-${PR_NUMBER}
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+  selector:
+    app: web

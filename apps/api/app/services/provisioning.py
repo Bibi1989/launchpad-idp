@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.core.secrets import decrypt_secret, encrypt_secret
+from app.core.secrets import decrypt_secret, encrypt_secret, project_id_from_gcp_sa_json
+from app.services.gcp_api_enablement import (
+    GcpApiEnablementError,
+    enable_gcp_apis,
+)
+from app.services.terraform_bundle import _apis_tf, gcp_required_apis
 from app.models.domain import ProvisioningWorkspace, TerminalSessionRecord, User
 from app.schemas.cloud import (
     AwsCloudConfig,
@@ -42,6 +48,7 @@ from app.schemas.cloud import (
     WorkspaceTemplateInfo,
     WorkspaceWizardConfig,
     WorkspaceArtifactsMode,
+    GcpApiEnablementResponse,
 )
 from app.services.github_service import GitHubProvisioningService
 from app.services.iac_generator import IaCGenerator
@@ -83,6 +90,8 @@ class ProvisioningService:
                     },
                 ) from exc
 
+        request = await self._with_account_credentials(request, owner)
+        request = self._with_gcp_project_from_sa(request)
         bundle = self._iac.generate(request)
         encrypted = encrypt_secret(request.credentials.model_dump_json())
         from app.services.orgs import OrganizationService
@@ -98,6 +107,7 @@ class ProvisioningService:
             root_dir=bundle.root_dir,
             status="ready",
             encrypted_credentials=encrypted,
+            wizard_config_json=self._wizard_config_json(request),
         )
         self._session.add(row)
         await self._session.commit()
@@ -218,7 +228,11 @@ class ProvisioningService:
         root = Path(row.root_dir)
         files: list[str] = []
         if root.exists():
-            files = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+            files = sorted(
+                str(p.relative_to(root)).replace("\\", "/")
+                for p in root.rglob("*")
+                if p.is_file() and not ws_files.is_denied_workspace_path(p.relative_to(root))
+            )
         return IaCBundleSummary(
             workspace_id=str(row.id),
             engine=IaCEngine(row.engine),
@@ -231,6 +245,74 @@ class ProvisioningService:
             created_at=row.created_at,
         )
 
+    @staticmethod
+    def _credential_display_label(
+        encrypted: str | None,
+        provider: str,
+    ) -> str | None:
+        """Derive a safe UI label from stored credentials (never return secret material)."""
+        if not encrypted:
+            return None
+        try:
+            creds = CloudCredentials.model_validate_json(decrypt_secret(encrypted))
+        except Exception:
+            return "Stored cloud credentials"
+
+        if provider == CloudProvider.GCP.value:
+            if creds.gcp_wif_pool_id and creds.gcp_wif_provider_id:
+                return f"GCP Keyless OIDC (WIF pool: {creds.gcp_wif_pool_id})"
+            if creds.gcp_sa_key_json:
+                try:
+                    data = json.loads(creds.gcp_sa_key_json)
+                    email = data.get("client_email")
+                    if isinstance(email, str) and email.strip():
+                        return email.strip()
+                    project = data.get("project_id")
+                    if isinstance(project, str) and project.strip():
+                        return f"GCP service account ({project.strip()})"
+                except Exception:
+                    pass
+                return "GCP service account key"
+
+        if provider == CloudProvider.AWS.value:
+            if creds.aws_role_arn:
+                return f"AWS Keyless OIDC ({creds.aws_role_arn})"
+            if creds.aws_access_key_id:
+                key = creds.aws_access_key_id.strip()
+                suffix = key[-4:] if len(key) >= 4 else key
+                return f"AWS access key ···{suffix}"
+
+        if provider == CloudProvider.AZURE.value and (
+            creds.azure_client_id or creds.azure_subscription_id
+        ):
+            client = (creds.azure_client_id or "").strip()
+            if len(client) >= 8:
+                return f"Azure app ···{client[-4:]}"
+            sub = (creds.azure_subscription_id or "").strip()
+            if len(sub) >= 8:
+                return f"Azure subscription ···{sub[-4:]}"
+            return "Azure service principal"
+
+        if provider == CloudProvider.CLOUDFLARE.value and creds.cloudflare_api_token:
+            return "Cloudflare API token"
+
+        if any(
+            getattr(creds, field, None)
+            for field in (
+                "gcp_sa_key_json",
+                "gcp_wif_pool_id",
+                "aws_access_key_id",
+                "aws_secret_access_key",
+                "aws_role_arn",
+                "azure_client_id",
+                "azure_client_secret",
+                "cloudflare_api_token",
+            )
+        ):
+            return "Stored cloud credentials"
+        return None
+
+
     async def get_wizard_config(
         self,
         workspace_id: UUID,
@@ -238,12 +320,23 @@ class ProvisioningService:
     ) -> WorkspaceWizardConfig:
         row = await self.get_workspace_for_owner(workspace_id, owner)
         has_credentials = bool(row.encrypted_credentials)
-        root = Path(row.root_dir)
-        snapshot = self._iac.read_wizard_snapshot(root) if root.is_dir() else None
+        credential_label = self._credential_display_label(
+            row.encrypted_credentials,
+            row.provider,
+        )
+        # Empty encrypted blob still counts as "has credentials" only if decrypt yields usable keys.
+        if has_credentials and credential_label is None:
+            has_credentials = False
+
+        snapshot = self._load_wizard_snapshot(row)
         if snapshot is not None:
             try:
                 config = WorkspaceWizardConfig.model_validate(
-                    {**snapshot, "has_credentials": has_credentials}
+                    {
+                        **snapshot,
+                        "has_credentials": has_credentials,
+                        "credential_label": credential_label,
+                    }
                 )
                 return config
             except Exception:
@@ -264,9 +357,117 @@ class ProvisioningService:
                 if provider == CloudProvider.LOCAL
                 else WorkspaceArtifactsMode.IAC_ONLY
             ),
-            kubernetes_packaging=KubernetesPackaging.NONE,
+            kubernetes_packaging=(
+                KubernetesPackaging.RAW_MANIFESTS
+                if provider == CloudProvider.LOCAL
+                else KubernetesPackaging.NONE
+            ),
             kubernetes_options=KubernetesWorkloadOptions(),
             has_credentials=has_credentials,
+            credential_label=credential_label,
+        )
+
+    async def enable_required_cloud_apis(
+        self,
+        workspace_id: UUID,
+        owner: User,
+    ) -> GcpApiEnablementResponse:
+        """Enable required cloud APIs (GCP Service Usage) before Terraform provision."""
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        config = await self.get_wizard_config(workspace_id, owner)
+        if not isinstance(config.cloud, GcpCloudConfig):
+            return GcpApiEnablementResponse(
+                project_id="",
+                message="No GCP APIs to enable for this provider",
+            )
+
+        raw = row.encrypted_credentials
+        if not raw:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "credentials_required",
+                    "message": "Save GCP credentials (WIF or service account JSON) before enabling APIs",
+                },
+            )
+        credentials = CloudCredentials.model_validate_json(decrypt_secret(raw))
+        sa_json = credentials.gcp_sa_key_json
+        if not sa_json or not sa_json.strip():
+            from app.core.secrets import gcp_wif_complete
+
+            if gcp_wif_complete(credentials):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "credentials_required",
+                        "message": (
+                            "Keyless WIF is configured for the sandbox, but the control-plane "
+                            "'enable APIs' step still needs a one-time GCP service account JSON "
+                            "(or enable APIs manually / via terraform apply with WIF)."
+                        ),
+                    },
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "credentials_required",
+                    "message": "GCP service account JSON is missing from stored credentials",
+                },
+            )
+
+        project_id = (
+            project_id_from_gcp_sa_json(sa_json)
+            or config.cloud.resources.project_id
+        )
+        apis = gcp_required_apis(config.cloud.resources)
+
+        # Keep apis.tf in sync so later terraform apply can manage the same set.
+        try:
+            workspace_path = self._workspace_root(row)
+            apis_tf = _apis_tf(config.cloud)
+            if apis_tf:
+                target = workspace_path / "infra" / "terraform" / "apis.tf"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(apis_tf, encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "gcp_apis_tf_write_failed",
+                workspace_id=str(workspace_id),
+                error=str(exc),
+            )
+
+        try:
+            result = await asyncio.to_thread(
+                enable_gcp_apis,
+                sa_json=sa_json,
+                project_id=project_id,
+                apis=apis,
+            )
+        except GcpApiEnablementError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "gcp_api_enable_failed", "message": str(exc)},
+            ) from exc
+
+        newly = result.newly_enabled
+        already = result.already_enabled
+        if newly:
+            message = (
+                f"Enabled {len(newly)} API(s) on {result.project_id} "
+                f"(waited {result.waited_seconds}s). "
+                f"{len(already)} already enabled."
+            )
+        else:
+            message = (
+                f"All {len(already)} required API(s) already enabled on {result.project_id}."
+            )
+        return GcpApiEnablementResponse(
+            project_id=result.project_id,
+            required=result.required,
+            already_enabled=already,
+            newly_enabled=newly,
+            waited_seconds=result.waited_seconds,
+            message=message,
         )
 
     async def update_workspace(
@@ -312,12 +513,17 @@ class ProvisioningService:
                     "message": "Unable to prepare workspace directory for regeneration",
                 },
             ) from exc
-        files = self._iac.regenerate(workspace_path, request)
 
         merged = self._merge_credentials(row.encrypted_credentials, request.credentials)
-        row.engine = request.iac_engine.value
-        row.provider = request.cloud.provider.value
+        merged = await self._fill_from_account_vault(merged, owner.id)
+        effective = request.model_copy(update={"credentials": merged})
+        effective = self._with_gcp_project_from_sa(effective)
+        files = self._iac.regenerate(workspace_path, effective)
+
+        row.engine = effective.iac_engine.value
+        row.provider = effective.cloud.provider.value
         row.encrypted_credentials = encrypt_secret(merged.model_dump_json())
+        row.wizard_config_json = self._wizard_config_json(effective)
         row.status = "ready"
         await self._session.commit()
 
@@ -332,15 +538,34 @@ class ProvisioningService:
         )
         return IaCBundleSummary(
             workspace_id=str(row.id),
-            engine=request.iac_engine,
-            provider=request.cloud.provider,
+            engine=effective.iac_engine,
+            provider=effective.cloud.provider,
             root_dir=row.root_dir,
             files=files,
-            artifact_mode=request.artifact_mode,
+            artifact_mode=effective.artifact_mode,
             name=row.name,
             status=row.status,
             created_at=row.created_at,
         )
+
+    @staticmethod
+    def _with_gcp_project_from_sa(
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningWizardRequest:
+        """Prefer project_id from the GCP service-account JSON over the wizard form value."""
+        if not isinstance(request.cloud, GcpCloudConfig):
+            return request
+        project_id = project_id_from_gcp_sa_json(request.credentials.gcp_sa_key_json)
+        if not project_id or project_id == request.cloud.resources.project_id:
+            return request
+        resources = request.cloud.resources.model_copy(update={"project_id": project_id})
+        cloud = request.cloud.model_copy(update={"resources": resources})
+        logger.info(
+            "gcp_project_id_synced_from_sa",
+            project_id=project_id,
+            previous=request.cloud.resources.project_id,
+        )
+        return request.model_copy(update={"cloud": cloud})
 
     @staticmethod
     def _merge_credentials(
@@ -357,6 +582,55 @@ class ProvisioningService:
             if value is not None and str(value).strip()
         }
         return existing.model_copy(update=updates)
+
+    async def _with_account_credentials(
+        self,
+        request: ProvisioningWizardRequest,
+        owner: User,
+    ) -> ProvisioningWizardRequest:
+        filled = await self._fill_from_account_vault(request.credentials, owner.id)
+        if filled == request.credentials:
+            return request
+        return request.model_copy(update={"credentials": filled})
+
+    async def _fill_from_account_vault(
+        self,
+        credentials: CloudCredentials,
+        user_id: UUID,
+    ) -> CloudCredentials:
+        """Fill blank credential fields from the user's account vault."""
+        from app.core.secrets import has_aws_auth, has_gcp_auth
+        from app.services.user_credentials import UserCloudCredentialsService
+
+        vault = await UserCloudCredentialsService(self._session).get_credentials(user_id)
+        updates: dict[str, str | None] = {}
+        data = credentials.model_dump()
+        vault_data = vault.model_dump()
+
+        gcp_ok = has_gcp_auth(credentials)
+        aws_ok = has_aws_auth(credentials)
+        azure_ok = bool(
+            credentials.azure_client_id
+            and credentials.azure_client_secret
+            and credentials.azure_tenant_id
+            and credentials.azure_subscription_id
+        )
+        cf_ok = bool(credentials.cloudflare_api_token)
+
+        for key, value in vault_data.items():
+            if not value or not str(value).strip():
+                continue
+            if key.startswith("gcp_") and gcp_ok:
+                continue
+            if key.startswith("aws_") and aws_ok:
+                continue
+            if key.startswith("azure_") and azure_ok:
+                continue
+            if key.startswith("cloudflare_") and cf_ok:
+                continue
+            if not data.get(key):
+                updates[key] = value
+        return credentials.model_copy(update=updates) if updates else credentials
 
     async def destroy_workspace(self, workspace_id: UUID, owner: User) -> None:
         row = await self.get_workspace_for_owner(workspace_id, owner)
@@ -414,6 +688,7 @@ class ProvisioningService:
             credentials = CloudCredentials.model_validate_json(decrypt_secret(raw))
         else:
             credentials = CloudCredentials()
+        credentials = await self._fill_from_account_vault(credentials, owner.id)
 
         workspace_path = self._iac.get_workspace(workspace.root_dir)
 
@@ -449,17 +724,9 @@ class ProvisioningService:
                     },
                 )
 
-        cred_map = {
-            "GCP_SA_KEY": credentials.gcp_sa_key_json,
-            "AWS_ACCESS_KEY_ID": credentials.aws_access_key_id,
-            "AWS_SECRET_ACCESS_KEY": credentials.aws_secret_access_key,
-            "AWS_SESSION_TOKEN": credentials.aws_session_token,
-            "AZURE_CLIENT_ID": credentials.azure_client_id,
-            "AZURE_CLIENT_SECRET": credentials.azure_client_secret,
-            "AZURE_TENANT_ID": credentials.azure_tenant_id,
-            "AZURE_SUBSCRIPTION_ID": credentials.azure_subscription_id,
-            "CLOUDFLARE_API_TOKEN": credentials.cloudflare_api_token,
-        }
+        from app.core.secrets import cloud_credentials_to_map
+
+        cred_map = cloud_credentials_to_map(credentials)
 
         session = await self._sandbox.create_session(
             workspace_id=str(workspace.id),
@@ -517,19 +784,179 @@ class ProvisioningService:
                 "code": "workspace_files_missing",
                 "message": (
                     "Workspace files are unavailable on disk. "
-                    "Re-provision this workspace or destroy it and create a new one."
+                    "Use Restore files, or destroy this workspace and create a new one."
                 ),
             },
         )
+
+    @staticmethod
+    def _wizard_config_json(request: ProvisioningWizardRequest) -> str:
+        payload = {
+            "name": request.name,
+            "iac_engine": request.iac_engine.value,
+            "cloud": request.cloud.model_dump(mode="json"),
+            "run_init": request.run_init,
+            "artifact_mode": request.artifact_mode.value,
+            "kubernetes_packaging": request.kubernetes_packaging.value,
+            "kubernetes_options": request.kubernetes_options.model_dump(mode="json"),
+            "cost_optimization": request.cost_optimization.model_dump(mode="json"),
+            "container_scaffold": request.container_scaffold.model_dump(mode="json"),
+            "dependencies": request.dependencies.model_dump(mode="json"),
+        }
+        return json.dumps(payload)
+
+    def _load_wizard_snapshot(
+        self,
+        row: ProvisioningWorkspace,
+    ) -> dict[str, object] | None:
+        if row.wizard_config_json:
+            try:
+                raw = json.loads(row.wizard_config_json)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "wizard_config_json_invalid",
+                    workspace_id=str(row.id),
+                )
+            else:
+                if isinstance(raw, dict):
+                    return raw
+        root = Path(row.root_dir)
+        if root.is_dir():
+            return self._iac.read_wizard_snapshot(root)
+        return None
+
+    def _relocate_ephemeral_root(self, row: ProvisioningWorkspace) -> Path:
+        """Move workspaces off /tmp onto the durable iac_workspace_root when needed."""
+        from app.core.config import get_settings
+
+        root = Path(row.root_dir)
+        settings_root = Path(get_settings().iac_workspace_root).expanduser().resolve()
+        try:
+            resolved = root.expanduser().resolve()
+        except OSError:
+            resolved = root
+        tmp_roots = (Path("/tmp").resolve(), Path("/var/tmp").resolve())
+        under_tmp = any(
+            resolved == tmp or tmp in resolved.parents for tmp in tmp_roots
+        )
+        settings_under_tmp = any(
+            settings_root == tmp or tmp in settings_root.parents for tmp in tmp_roots
+        )
+        if not under_tmp or settings_under_tmp:
+            return root
+        candidate = settings_root / root.name
+        if candidate.exists():
+            candidate = settings_root / f"{root.name}-{row.id.hex[:8]}"
+        row.root_dir = str(candidate)
+        logger.info(
+            "workspace_root_relocated",
+            workspace_id=str(row.id),
+            from_dir=str(root),
+            to_dir=str(candidate),
+        )
+        return candidate
+
+    def _request_from_wizard_config(
+        self,
+        config: WorkspaceWizardConfig,
+        credentials: CloudCredentials,
+    ) -> ProvisioningWizardRequest:
+        return ProvisioningWizardRequest(
+            name=config.name,
+            iac_engine=config.iac_engine,
+            cloud=config.cloud,
+            credentials=credentials,
+            run_init=config.run_init,
+            artifact_mode=config.artifact_mode,
+            kubernetes_packaging=config.kubernetes_packaging,
+            kubernetes_options=config.kubernetes_options,
+            cost_optimization=config.cost_optimization,
+            container_scaffold=config.container_scaffold,
+            dependencies=config.dependencies,
+        )
+
+    async def restore_workspace_files(
+        self,
+        workspace_id: UUID,
+        owner: User,
+    ) -> IaCBundleSummary:
+        """Recreate missing on-disk workspace files from the DB wizard snapshot."""
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        root = self._relocate_ephemeral_root(row)
+        config = await self.get_wizard_config(workspace_id, owner)
+
+        credentials = CloudCredentials()
+        if row.encrypted_credentials:
+            try:
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(row.encrypted_credentials)
+                )
+            except Exception:
+                logger.warning(
+                    "workspace_restore_credentials_unreadable",
+                    workspace_id=str(workspace_id),
+                )
+
+        request = self._request_from_wizard_config(config, credentials)
+        if isinstance(request.cloud, LocalCloudConfig):
+            try:
+                await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
+            except Exception as exc:
+                logger.warning(
+                    "workspace_restore_kind_skipped",
+                    workspace_id=str(workspace_id),
+                    error=str(exc),
+                )
+
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "workspace_path_unavailable",
+                    "message": "Unable to prepare workspace directory for restore",
+                },
+            ) from exc
+
+        files = self._iac.regenerate(root, request)
+        row.wizard_config_json = self._wizard_config_json(request)
+        row.status = "ready"
+        await self._session.commit()
+
+        logger.info(
+            "workspace_files_restored",
+            workspace_id=str(workspace_id),
+            root_dir=row.root_dir,
+            file_count=len(files),
+        )
+        return IaCBundleSummary(
+            workspace_id=str(row.id),
+            engine=request.iac_engine,
+            provider=request.cloud.provider,
+            root_dir=row.root_dir,
+            files=files,
+            artifact_mode=request.artifact_mode,
+            name=row.name,
+            status=row.status,
+            created_at=row.created_at,
+        )
+
+    async def _ensure_workspace_on_disk(
+        self,
+        workspace: ProvisioningWorkspace,
+        owner: User,
+    ) -> ProvisioningWorkspace:
+        if self._workspace_root(workspace).is_dir():
+            return workspace
+        await self.restore_workspace_files(workspace.id, owner)
+        return await self.get_workspace_for_owner(workspace.id, owner)
 
     def get_workspace_kubernetes_packaging(
         self,
         workspace: ProvisioningWorkspace,
     ) -> KubernetesPackaging | None:
-        root = self._workspace_root(workspace)
-        if not root.is_dir():
-            return None
-        snapshot = self._iac.read_wizard_snapshot(root)
+        snapshot = self._load_wizard_snapshot(workspace)
         if snapshot and snapshot.get("kubernetes_packaging"):
             raw = str(snapshot["kubernetes_packaging"])
             try:
@@ -544,6 +971,13 @@ class ProvisioningService:
             else:
                 if packaging != KubernetesPackaging.NONE:
                     return packaging
+
+        root = self._workspace_root(workspace)
+        if not root.is_dir():
+            if workspace.provider == CloudProvider.LOCAL.value:
+                return KubernetesPackaging.RAW_MANIFESTS
+            return None
+
         from app.services.manifest_deploy import (
             workspace_has_helm_chart,
             workspace_has_raw_manifests,
@@ -559,13 +993,7 @@ class ProvisioningService:
         self,
         workspace: ProvisioningWorkspace,
     ) -> WorkspaceArtifactsMode:
-        root = self._workspace_root(workspace)
-        if not root.is_dir():
-            if workspace.provider == CloudProvider.LOCAL.value:
-                return WorkspaceArtifactsMode.MANIFEST_ONLY
-            return WorkspaceArtifactsMode.IAC_ONLY
-
-        snapshot = self._iac.read_wizard_snapshot(root)
+        snapshot = self._load_wizard_snapshot(workspace)
         if snapshot and snapshot.get("artifact_mode"):
             try:
                 return WorkspaceArtifactsMode(str(snapshot["artifact_mode"]))
@@ -575,6 +1003,12 @@ class ProvisioningService:
                     workspace_id=str(workspace.id),
                     artifact_mode=snapshot.get("artifact_mode"),
                 )
+
+        root = self._workspace_root(workspace)
+        if not root.is_dir():
+            if workspace.provider == CloudProvider.LOCAL.value:
+                return WorkspaceArtifactsMode.MANIFEST_ONLY
+            return WorkspaceArtifactsMode.IAC_ONLY
 
         has_manifests = self.get_workspace_kubernetes_packaging(workspace) is not None
         has_iac = (root / "infra" / "terraform").is_dir() or (root / "Pulumi.yaml").is_file()
@@ -588,6 +1022,7 @@ class ProvisioningService:
         self, workspace_id: UUID, owner: User
     ) -> list[WorkspaceFileNode]:
         workspace = await self.get_workspace_for_owner(workspace_id, owner)
+        workspace = await self._ensure_workspace_on_disk(workspace, owner)
         nodes = ws_files.list_file_tree(self._workspace_path(workspace))
         return [WorkspaceFileNode.model_validate(node) for node in nodes]
 
@@ -595,6 +1030,7 @@ class ProvisioningService:
         self, workspace_id: UUID, owner: User, relative_path: str
     ) -> WorkspaceFileContent:
         workspace = await self.get_workspace_for_owner(workspace_id, owner)
+        workspace = await self._ensure_workspace_on_disk(workspace, owner)
         try:
             content = ws_files.read_file(self._workspace_path(workspace), relative_path)
         except ws_files.WorkspaceFileError as exc:
@@ -761,6 +1197,100 @@ class ProvisioningService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "github_push_failed", "message": str(exc)},
             ) from exc
+
+    async def _gitlab_credentials(self, owner: User) -> tuple[str, str]:
+        from app.services.gitlab_service import GitLabAuthError, GitLabAuthService
+
+        auth = GitLabAuthService(self._session)
+        row = await auth.get_connection(owner.id)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "gitlab_not_connected",
+                    "message": "Connect GitLab under Integrations before pushing",
+                },
+            )
+        try:
+            return row.base_url, auth.decrypt_token(row)
+        except Exception as exc:  # noqa: BLE001
+            raise GitLabAuthError("Stored GitLab token could not be decrypted") from exc
+
+    async def list_gitlab_projects(self, *, owner: User):
+        from app.schemas.cloud import GitlabProjectItem
+        from app.services.gitlab_service import (
+            GitLabAuthError,
+            GitLabProvisioningService,
+            http_error_from_gitlab,
+        )
+
+        base_url, token = await self._gitlab_credentials(owner)
+        try:
+            rows = await asyncio.to_thread(
+                GitLabProvisioningService(self._iac).list_projects,
+                base_url=base_url,
+                token=token,
+            )
+        except GitLabAuthError as exc:
+            raise http_error_from_gitlab(exc) from exc
+        return [GitlabProjectItem.model_validate(item) for item in rows]
+
+    async def create_gitlab_repo(self, request, *, owner: User):
+        from app.schemas.cloud import GitlabRepoResult
+        from app.services.gitlab_service import (
+            GitLabAuthError,
+            GitLabProvisioningService,
+            http_error_from_gitlab,
+        )
+
+        base_url, token = await self._gitlab_credentials(owner)
+        root_dir: str | None = None
+        if request.workspace_id:
+            row = await self.get_workspace_for_owner(UUID(request.workspace_id), owner)
+            root_dir = row.root_dir
+        try:
+            result = await asyncio.to_thread(
+                GitLabProvisioningService(self._iac).create_or_open_project,
+                base_url=base_url,
+                token=token,
+                name=request.name,
+                description=request.description,
+                private=request.private,
+                existing_path=request.existing_path,
+                root_dir=root_dir,
+                include_ci=request.include_ci,
+            )
+        except GitLabAuthError as exc:
+            raise http_error_from_gitlab(exc) from exc
+        return GitlabRepoResult.model_validate(result)
+
+    async def push_workspace_to_gitlab(
+        self,
+        workspace_id: UUID,
+        owner: User,
+        request,
+    ):
+        from app.schemas.cloud import GitlabRepoResult
+        from app.services.gitlab_service import (
+            GitLabAuthError,
+            GitLabProvisioningService,
+            http_error_from_gitlab,
+        )
+
+        workspace = await self.get_workspace_for_owner(workspace_id, owner)
+        base_url, token = await self._gitlab_credentials(owner)
+        try:
+            result = await asyncio.to_thread(
+                GitLabProvisioningService(self._iac).push_workspace_files,
+                base_url=base_url,
+                token=token,
+                project_path=request.project_path,
+                root_dir=workspace.root_dir,
+                commit_message=request.commit_message,
+            )
+        except GitLabAuthError as exc:
+            raise http_error_from_gitlab(exc) from exc
+        return GitlabRepoResult.model_validate(result)
 
 
 def _default_cloud_for_provider(provider: CloudProvider):

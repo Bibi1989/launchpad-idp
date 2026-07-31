@@ -1,5 +1,8 @@
 .PHONY: up down api worker beat web test migrate kind-up kind-down oci-up oci-down oci-logs
 
+# Repo-root shared libs (`pkg/`) must be importable when cwd is apps/api.
+export PYTHONPATH := $(CURDIR)$(if $(PYTHONPATH),:$(PYTHONPATH),)
+
 up:
 	docker compose up -d postgres redis adminer
 

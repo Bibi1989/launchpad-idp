@@ -28,6 +28,11 @@ class WorkspaceFileAnalyzeRequest(BaseModel):
     path: str = Field(min_length=1, max_length=512)
     content: str = Field(min_length=1, max_length=400_000)
     kind: WorkspaceAnalysisKind | Literal["auto"] = "auto"
+    error_context: str | None = Field(
+        default=None,
+        max_length=20_000,
+        description="Optional sandbox/CLI error output to guide a targeted fix",
+    )
 
 
 class WorkspaceFileAnalyzeResponse(BaseModel):
@@ -39,6 +44,7 @@ class WorkspaceFileAnalyzeResponse(BaseModel):
     analysisSource: Literal["gemini", "heuristic"] = "heuristic"
 
 
+# Gemini Schema rejects OpenAPI union types like ["string","null"]; use nullable.
 _REPORT_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -52,13 +58,13 @@ _REPORT_JSON_SCHEMA: dict[str, Any] = {
                     "title": {"type": "string"},
                     "description": {"type": "string"},
                     "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
-                    "ruleId": {"type": ["string", "null"]},
+                    "ruleId": {"type": "string", "nullable": True},
                 },
                 "required": ["title", "description", "severity"],
             },
         },
         "suggestions": {"type": "array", "items": {"type": "string"}},
-        "improvedContent": {"type": ["string", "null"]},
+        "improvedContent": {"type": "string", "nullable": True},
     },
     "required": ["kind", "summary", "issues", "suggestions", "improvedContent"],
 }
@@ -77,6 +83,13 @@ Rules:
 - When proposing improvedContent, return a full revised file (not a diff).
 - Do not invent CVEs or secrets. Do not include real credentials.
 - Keep improvedContent null when the file is already solid and only suggestions apply.
+- If a sandbox/CLI error_context is provided, prioritize diagnosing and fixing that failure
+  (syntax, missing providers, invalid arguments, auth/config issues reflected in the file).
+  Put the root cause in summary/issues and return fixed improvedContent when a file change helps.
+- For Launchpad Terraform roots: providers.tf is the canonical place for provider
+  "google" / "kubernetes" / "aws" / "azurerm" blocks and terraform.required_providers.
+  Never duplicate those blocks into main.tf. If main.tf has provider blocks, remove them
+  from main.tf (keep modules/resources only).
 """
 
 
@@ -143,6 +156,7 @@ class WorkspaceFileAnalyzerService:
         path: str,
         content: str,
         kind: WorkspaceAnalysisKind | Literal["auto"] = "auto",
+        error_context: str | None = None,
         correlation_id: str | None = None,
     ) -> WorkspaceFileAnalyzeResponse:
         text = content.strip()
@@ -152,6 +166,7 @@ class WorkspaceFileAnalyzerService:
         resolved: WorkspaceAnalysisKind = (
             detect_kind_from_path(path) if kind == "auto" else kind  # type: ignore[assignment]
         )
+        err_ctx = (error_context or "").strip() or None
 
         if self.gemini_configured:
             try:
@@ -160,6 +175,7 @@ class WorkspaceFileAnalyzerService:
                     path,
                     text,
                     resolved,
+                    err_ctx,
                     correlation_id,
                 )
                 return report.model_copy(update={"analysisSource": "gemini", "kind": resolved})
@@ -172,7 +188,7 @@ class WorkspaceFileAnalyzerService:
                 if not self._settings.preview_analyzer_heuristic_fallback:
                     raise WorkspaceFileAnalyzerError("Gemini analysis failed") from None
 
-        report = self._heuristic_report(path, text, resolved)
+        report = self._heuristic_report(path, text, resolved, err_ctx)
         return report.model_copy(update={"analysisSource": "heuristic"})
 
     def _analyze_with_gemini(
@@ -180,6 +196,7 @@ class WorkspaceFileAnalyzerService:
         path: str,
         content: str,
         kind: WorkspaceAnalysisKind,
+        error_context: str | None,
         correlation_id: str | None,
     ) -> WorkspaceFileAnalyzeResponse:
         from google import genai
@@ -190,11 +207,19 @@ class WorkspaceFileAnalyzerService:
             raise WorkspaceFileAnalyzerError("GEMINI_API_KEY is not configured")
 
         client = genai.Client(api_key=api_key)
+        error_block = ""
+        if error_context:
+            error_block = (
+                f"\n----- SANDBOX / CLI ERROR CONTEXT -----\n"
+                f"{error_context[:12_000]}\n"
+                f"----- END ERROR CONTEXT -----\n"
+            )
         prompt = (
             f"Analyze this Launchpad workspace file.\n"
             f"path: {path}\n"
             f"kind: {kind}\n"
-            f"correlation_id: {correlation_id or 'n/a'}\n\n"
+            f"correlation_id: {correlation_id or 'n/a'}\n"
+            f"{error_block}\n"
             f"----- FILE START -----\n{content}\n----- FILE END -----\n"
         )
         response = client.models.generate_content(
@@ -202,12 +227,14 @@ class WorkspaceFileAnalyzerService:
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=_SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=_REPORT_JSON_SCHEMA,
                 temperature=0.2,
+                response_mime_type="application/json",
+                response_json_schema=_REPORT_JSON_SCHEMA,
             ),
         )
-        raw = getattr(response, "text", None) or ""
+        raw = (getattr(response, "text", None) or "").strip()
+        if not raw:
+            raise WorkspaceFileAnalyzerError("Gemini returned an empty response")
         payload = json.loads(raw)
         return WorkspaceFileAnalyzeResponse.model_validate(payload)
 
@@ -216,6 +243,7 @@ class WorkspaceFileAnalyzerService:
         path: str,
         content: str,
         kind: WorkspaceAnalysisKind,
+        error_context: str | None = None,
     ) -> WorkspaceFileAnalyzeResponse:
         if kind == "docker":
             return self._heuristic_docker(path, content)
@@ -223,7 +251,7 @@ class WorkspaceFileAnalyzerService:
             return self._heuristic_cicd(path, content)
         if kind == "kubernetes":
             return self._heuristic_kubernetes(path, content)
-        return self._heuristic_iac(path, content)
+        return self._heuristic_iac(path, content, error_context)
 
     def _heuristic_docker(self, path: str, content: str) -> WorkspaceFileAnalyzeResponse:
         issues: list[WorkspaceFileIssue] = []
@@ -337,10 +365,192 @@ class WorkspaceFileAnalyzerService:
             improvedContent=None,
         )
 
-    def _heuristic_iac(self, path: str, content: str) -> WorkspaceFileAnalyzeResponse:
+    def _heuristic_iac(
+        self,
+        path: str,
+        content: str,
+        error_context: str | None = None,
+    ) -> WorkspaceFileAnalyzeResponse:
         issues: list[WorkspaceFileIssue] = []
         suggestions: list[str] = []
+        improved: str | None = None
         lower = content.lower()
+        err = (error_context or "").strip()
+        if err:
+            snippet = err[-500:].replace("\n", " ")
+            issues.append(
+                WorkspaceFileIssue(
+                    title="Sandbox command failed",
+                    description=(
+                        "A guided IaC step exited non-zero. Review the error and fix providers, "
+                        f"syntax, or required variables. Last output: {snippet}"
+                    ),
+                    severity="critical",
+                    ruleId="SANDBOX_STEP_FAILED",
+                )
+            )
+            suggestions.append(
+                "Fix the IaC file (or credentials) based on the sandbox error, then retry the step."
+            )
+            if "no such file" in err.lower() or "directory not found" in err.lower():
+                suggestions.append("Confirm terraform/pulumi files exist under infra/ and paths match.")
+            if "authentication" in err.lower() or "credentials" in err.lower() or "unauthorized" in err.lower():
+                suggestions.append("Re-enter cloud credentials in the guided wizard, then retry.")
+            if (
+                "accessnotconfigured" in err.lower()
+                or "has not been used" in err.lower()
+                or "api has not been enabled" in err.lower()
+                or ("is disabled" in err.lower() and "googleapis.com" in err.lower())
+            ):
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Required Google API not enabled",
+                        description=(
+                            "Terraform cannot manage google_project_service or call Google APIs "
+                            "until Cloud Resource Manager + Service Usage are enabled on the "
+                            "project. The failing API (often container.googleapis.com) is a "
+                            "downstream symptom of cloudresourcemanager.googleapis.com being off."
+                        ),
+                        severity="critical",
+                        ruleId="GCP_API_NOT_ENABLED",
+                    )
+                )
+                suggestions.append(
+                    "In the workspace Provision wizard, run the 'enable APIs' step first "
+                    "(before terraform apply). Or open Google Cloud Console and enable "
+                    "Cloud Resource Manager API, then Service Usage, Compute, and "
+                    "Kubernetes Engine APIs for this project."
+                )
+                suggestions.append(
+                    "CLI: gcloud services enable cloudresourcemanager.googleapis.com "
+                    "serviceusage.googleapis.com compute.googleapis.com "
+                    "container.googleapis.com --project=<your-project-id>"
+                )
+            if (
+                "already exists" in err.lower()
+                and ("secret" in err.lower() or "kubernetes_secret" in err.lower())
+            ):
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Kubernetes secret already exists",
+                        description=(
+                            "A kubernetes_secret create failed because the name already exists in the "
+                            "target cluster (often local kind via ~/.kube/config). With GKE enabled, "
+                            "regenerate so the kubernetes provider targets the GKE cluster instead."
+                        ),
+                        severity="critical",
+                        ruleId="K8S_SECRET_ALREADY_EXISTS",
+                    )
+                )
+                suggestions.append(
+                    "Either: Update workspace (native K8s + GKE wires the provider to GKE), "
+                    "delete the leftover secret "
+                    "(kubectl delete secret lp-<env>-secrets -n default), "
+                    "or import it into state."
+                )
+            if (
+                "badrequest" in err.lower()
+                and "international characters are allowed" in err.lower()
+                and (
+                    "google_container_cluster" in err.lower()
+                    or "resource_labels" in err.lower()
+                    or "labels" in err.lower()
+                )
+            ):
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Invalid GCP label keys on GKE cluster",
+                        description=(
+                            "GCP resource_labels keys must be lowercase "
+                            "([a-z][a-z0-9_-]*). PascalCase keys like EnvironmentId / "
+                            "TTL_Expiration are rejected by the GKE API even when the "
+                            "cluster name itself is valid."
+                        ),
+                        severity="critical",
+                        ruleId="GCP_LABEL_KEY_CASE",
+                    )
+                )
+                suggestions.append(
+                    "Update/regenerate the workspace so resource_labels use "
+                    "environment_id, owner, created_by, ttl_expiration (lowercase), "
+                    "then re-run terraform apply."
+                )
+            if (
+                "unsupported argument" in err.lower()
+                and "labels" in err.lower()
+                and (
+                    "google_compute_network" in err.lower()
+                    or "google_compute_subnetwork" in err.lower()
+                )
+            ):
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Unsupported labels on VPC compute resources",
+                        description=(
+                            "google_compute_network and google_compute_subnetwork do not accept "
+                            "labels. Remove labels blocks from those resources."
+                        ),
+                        severity="critical",
+                        ruleId="GCP_VPC_UNSUPPORTED_LABELS",
+                    )
+                )
+        vpc_fix = _strip_gcp_vpc_unsupported_labels(content)
+        if vpc_fix is not None:
+            improved = vpc_fix
+            if not any(i.ruleId == "GCP_VPC_UNSUPPORTED_LABELS" for i in issues):
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Unsupported labels on VPC compute resources",
+                        description=(
+                            "google_compute_network and google_compute_subnetwork do not accept "
+                            "labels in the GCP provider. Remove those labels blocks."
+                        ),
+                        severity="critical",
+                        ruleId="GCP_VPC_UNSUPPORTED_LABELS",
+                    )
+                )
+            suggestions.append(
+                "Remove labels from VPC network/subnet resources; keep governance labels on "
+                "GKE, Cloud Run, Artifact Registry, and other label-capable resources."
+            )
+
+        providers_fix = _strip_duplicate_root_provider_blocks(path, content if improved is None else improved)
+        if providers_fix is not None:
+            improved = providers_fix
+            if not any(i.ruleId == "DUPLICATE_TF_PROVIDERS" for i in issues):
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Duplicate Terraform provider configurations",
+                        description=(
+                            "provider blocks belong in providers.tf only. Duplicate google/"
+                            "kubernetes (or other) providers in main.tf cause Terraform CLI errors."
+                        ),
+                        severity="critical",
+                        ruleId="DUPLICATE_TF_PROVIDERS",
+                    )
+                )
+            suggestions.append(
+                "Keep provider and required_providers blocks in providers.tf; main.tf should "
+                "only declare modules and resources."
+            )
+        elif err and "duplicate provider configuration" in err.lower():
+            if not any(i.ruleId == "DUPLICATE_TF_PROVIDERS" for i in issues):
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Duplicate Terraform provider configurations",
+                        description=(
+                            "Terraform reported duplicate provider configurations. Remove "
+                            "provider blocks from main.tf and keep providers.tf as the source."
+                        ),
+                        severity="critical",
+                        ruleId="DUPLICATE_TF_PROVIDERS",
+                    )
+                )
+            suggestions.append(
+                "Open infra/terraform/main.tf and delete any provider \"google\" / "
+                "provider \"kubernetes\" blocks (and duplicate terraform.required_providers)."
+            )
+
         if "password" in lower or "secret" in lower:
             if "var." not in lower and "config.get" not in lower and "os.getenv" not in lower:
                 issues.append(
@@ -353,14 +563,154 @@ class WorkspaceFileAnalyzerService:
                 )
         if path.endswith(".tf") and "backend " not in lower and "terraform {" in lower:
             suggestions.append("Configure a remote state backend for team collaboration.")
-        if "tags" not in lower and "labels" not in lower:
+        if "tags" not in lower and "labels" not in lower and improved is None:
             suggestions.append("Stamp EnvironmentId / Owner / TTL tags for governance.")
         if not issues and not suggestions:
             suggestions.append("IaC looks clean; keep credentials out of VCS and use remote state.")
+        summary = (
+            "Heuristic IaC review with sandbox error context."
+            if err
+            else "Heuristic IaC review completed."
+        )
+        if improved is not None:
+            if "DUPLICATE_TF_PROVIDERS" in {i.ruleId for i in issues}:
+                summary = (
+                    "Removed duplicate provider blocks from main.tf (providers.tf is canonical). "
+                    + summary
+                )
+            elif "GCP_VPC_UNSUPPORTED_LABELS" in {i.ruleId for i in issues}:
+                summary = (
+                    "Removed unsupported labels from VPC network/subnet resources. "
+                    + summary
+                )
         return WorkspaceFileAnalyzeResponse(
             kind="iac",
-            summary="Heuristic IaC review completed.",
+            summary=summary,
             issues=issues,
             suggestions=suggestions,
-            improvedContent=None,
+            improvedContent=improved,
         )
+
+
+_GCP_VPC_RESOURCES_WITHOUT_LABELS = (
+    "google_compute_network",
+    "google_compute_subnetwork",
+)
+_LABELS_BLOCK_RE = re.compile(
+    r'\n[ \t]*labels\s*=\s*\{[^{}]*\}',
+    re.DOTALL,
+)
+
+_PROVIDER_BLOCK_RE = re.compile(
+    r'(?m)^[ \t]*provider\s+"(?:google|kubernetes|aws|azurerm|cloudflare)"\s*\{',
+)
+_TERRAFORM_REQUIRED_PROVIDERS_RE = re.compile(
+    r'(?ms)^[ \t]*terraform\s*\{[^{}]*required_providers\s*\{.*?^[ \t]*\}[ \t]*\n[ \t]*\}[ \t]*\n?',
+)
+_GOOGLE_CLIENT_CONFIG_DATA_RE = re.compile(
+    r'(?ms)^[ \t]*data\s+"google_client_config"\s+"[^"]+"\s*\{[^{}]*\}[ \t]*\n?',
+)
+
+
+def _extract_hcl_brace_block(content: str, start: int) -> tuple[str, int] | None:
+    """Return (block_text, end_index) for an HCL `{...}` starting at `start` (`{` index)."""
+    if start < 0 or start >= len(content) or content[start] != "{":
+        return None
+    depth = 0
+    i = start
+    while i < len(content):
+        ch = content[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start : i + 1], i + 1
+        i += 1
+    return None
+
+
+def _strip_duplicate_root_provider_blocks(path: str, content: str) -> str | None:
+    """Remove provider/required_providers from root main.tf (providers.tf owns them)."""
+    normalized = path.replace("\\", "/").lower()
+    if not normalized.endswith("/main.tf") and not normalized.endswith("main.tf"):
+        return None
+    # Only rewrite Launchpad root main (modules live under modules/*/main.tf).
+    if "/modules/" in normalized:
+        return None
+    if 'provider "' not in content and "required_providers" not in content:
+        return None
+    if 'module "' not in content and 'resource "' not in content:
+        return None
+
+    fixed = content
+    # Drop standalone terraform { required_providers { ... } } blocks (providers.tf has these).
+    fixed2, n_tf = _TERRAFORM_REQUIRED_PROVIDERS_RE.subn("\n", fixed)
+    fixed = fixed2
+
+    # Drop provider "…" { … } with brace matching.
+    removed_providers = 0
+    while True:
+        match = _PROVIDER_BLOCK_RE.search(fixed)
+        if not match:
+            break
+        brace_at = fixed.find("{", match.start())
+        extracted = _extract_hcl_brace_block(fixed, brace_at)
+        if extracted is None:
+            break
+        _, end = extracted
+        # Include leading whitespace/newlines before provider keyword.
+        line_start = fixed.rfind("\n", 0, match.start()) + 1
+        fixed = fixed[:line_start] + fixed[end:].lstrip("\n")
+        removed_providers += 1
+
+    fixed2, n_data = _GOOGLE_CLIENT_CONFIG_DATA_RE.subn("", fixed)
+    fixed = fixed2
+
+    # Collapse excessive blank lines.
+    fixed = re.sub(r"\n{3,}", "\n\n", fixed).strip() + "\n"
+
+    if n_tf == 0 and removed_providers == 0 and n_data == 0:
+        return None
+    if fixed == content:
+        return None
+    return fixed
+
+
+def _strip_gcp_vpc_unsupported_labels(content: str) -> str | None:
+    """Remove labels from VPC resources that do not support them; else None."""
+    if "labels" not in content:
+        return None
+    if not any(f'resource "{name}"' in content for name in _GCP_VPC_RESOURCES_WITHOUT_LABELS):
+        return None
+
+    changed = False
+    fixed = content
+    for resource_type in _GCP_VPC_RESOURCES_WITHOUT_LABELS:
+        pattern = re.compile(
+            rf'(resource\s+"{resource_type}"\s+"[^"]+"\s*\{{)'
+            r'(.*?)'
+            r'(\n\})',
+            re.DOTALL,
+        )
+        flag = [False]
+
+        def _fix_resource(match: re.Match[str], *, _flag: list[bool] = flag) -> str:
+            header, body, closing = match.group(1), match.group(2), match.group(3)
+            new_body, n = _LABELS_BLOCK_RE.subn("", body, count=1)
+            if n:
+                _flag[0] = True
+            return header + new_body + closing
+
+        fixed = pattern.sub(_fix_resource, fixed)
+        if flag[0]:
+            changed = True
+
+    if not changed:
+        return None
+    return fixed
+
+
+# Back-compat alias used by tests / older call sites.
+def _strip_google_compute_network_labels(content: str) -> str | None:
+    return _strip_gcp_vpc_unsupported_labels(content)

@@ -5,7 +5,10 @@ import type {
   WorkspaceTemplateInfo,
 } from '~/types/provisioning'
 import type { WorkspaceTreeNodeModel } from '~/utils/workspaceFileTree'
+import { collectAnalyzablePaths } from '~/utils/workspaceFileAnalysis'
 import { buildWorkspaceFileTree } from '~/utils/workspaceFileTree'
+import { iacRunShortcuts } from '~/utils/workspaceInfraScaffold'
+import { ApiError } from '~/composables/useApi'
 
 const props = defineProps<{
   workspaceId: string
@@ -18,6 +21,7 @@ const emit = defineEmits<{
 
 const {
   listWorkspaceFiles,
+  restoreWorkspaceFiles,
   readWorkspaceFile,
   writeWorkspaceFile,
   mkdirWorkspace,
@@ -50,6 +54,8 @@ const contextTargetPath = ref<string | null>(null)
 const editorContent = ref('')
 const savedContent = ref('')
 const loadingTree = ref(false)
+const restoringFiles = ref(false)
+const filesMissing = ref(false)
 const loadingFile = ref(false)
 const saving = ref(false)
 const statusMessage = ref<string | null>(null)
@@ -63,7 +69,11 @@ const showRename = ref(false)
 const showTemplates = ref<'kubernetes' | 'terraform' | null>(null)
 const showPush = ref(false)
 const showAiAnalysis = ref(false)
+const aiAnalysisTargets = ref<Array<{ path: string; content: string }>>([])
+const aiAnalysisLoading = ref(false)
 const confirmIacDestroy = ref<{ title: string; message: string; command: string } | null>(null)
+const pendingDeletePath = ref<string | null>(null)
+const deletingPath = ref(false)
 const newName = ref('')
 const openDropdown = ref<'k8s' | 'terraform' | 'pulumi' | null>(null)
 const contextMenu = ref<ContextMenuState | null>(null)
@@ -73,9 +83,20 @@ const hasK8sFiles = computed(() =>
   nodes.value.some((n) => n.path.includes('/k8s/') || n.path.includes('/helm/')),
 )
 const fileName = computed(() => selectedPath.value?.split('/').pop() || 'Untitled')
+const isDirectorySelected = computed(() => {
+  if (!selectedPath.value) return false
+  return nodes.value.some((n) => n.path === selectedPath.value && n.type === 'directory')
+})
 const isEditorOpen = computed(() => {
   if (!selectedPath.value) return false
-  return !nodes.value.some((n) => n.path === selectedPath.value && n.type === 'directory')
+  return !isDirectorySelected.value
+})
+const canAiAnalyze = computed(() => {
+  if (!selectedPath.value || aiAnalysisLoading.value) return false
+  if (isDirectorySelected.value) {
+    return collectAnalyzablePaths(nodes.value, selectedPath.value).length > 0
+  }
+  return Boolean(editorContent.value.trim())
 })
 
 const k8sMenu = computed<DropdownItem[]>(() => [
@@ -89,34 +110,40 @@ const k8sMenu = computed<DropdownItem[]>(() => [
 
 const terraformMenu = computed<DropdownItem[]>(() => [
   { label: 'Add TF file…', action: () => { void openTemplates('terraform') } },
-  { label: 'terraform init', action: () => runCmd('cd infra/terraform && terraform init') },
-  { label: 'terraform plan', action: () => runCmd('cd infra/terraform && terraform plan') },
-  { label: 'terraform apply', action: () => runCmd('cd infra/terraform && terraform apply') },
-  {
-    label: 'terraform destroy',
-    action: () => requestIacDestroy(
-      'Run terraform destroy?',
-      'This will destroy cloud resources managed by Terraform in this workspace sandbox.',
-      'cd infra/terraform && terraform destroy',
-    ),
-    danger: true,
-  },
+  ...iacRunShortcuts('terraform').map((item) => ({
+    label: item.opensInitWizard ? `terraform ${item.label}…` : `terraform ${item.label}`,
+    action: () => {
+      if (item.danger) {
+        requestIacDestroy(
+          'Run terraform destroy?',
+          'This will destroy cloud resources managed by Terraform in this workspace sandbox.',
+          item.command,
+        )
+        return
+      }
+      runCmd(item.command)
+    },
+    danger: item.danger,
+  })),
 ])
 
-const pulumiMenu = computed<DropdownItem[]>(() => [
-  { label: 'pulumi preview', action: () => runCmd('pulumi preview') },
-  { label: 'pulumi up', action: () => runCmd('pulumi up') },
-  { label: 'pulumi refresh', action: () => runCmd('pulumi refresh') },
-  {
-    label: 'pulumi destroy',
-    action: () => requestIacDestroy(
-      'Run pulumi destroy?',
-      'This will destroy cloud resources managed by Pulumi in this workspace sandbox.',
-      'pulumi destroy',
-    ),
-    danger: true,
-  },
-])
+const pulumiMenu = computed<DropdownItem[]>(() =>
+  iacRunShortcuts('pulumi').map((item) => ({
+    label: item.opensInitWizard ? `pulumi ${item.label}…` : `pulumi ${item.label}`,
+    action: () => {
+      if (item.danger) {
+        requestIacDestroy(
+          'Run pulumi destroy?',
+          'This will destroy cloud resources managed by Pulumi in this workspace sandbox.',
+          item.command,
+        )
+        return
+      }
+      runCmd(item.command)
+    },
+    danger: item.danger,
+  })),
+)
 
 function requestIacDestroy(title: string, message: string, command: string) {
   openDropdown.value = null
@@ -137,13 +164,34 @@ function buildTree(flat: WorkspaceFileNode[]): TreeNode[] {
 async function refreshTree() {
   loadingTree.value = true
   errorMessage.value = null
+  filesMissing.value = false
   try {
     nodes.value = await listWorkspaceFiles(props.workspaceId)
     tree.value = buildTree(nodes.value)
   } catch (err) {
+    const code = err instanceof ApiError ? err.code : null
+    filesMissing.value = code === 'workspace_files_missing'
     errorMessage.value = err instanceof Error ? err.message : 'Failed to load files'
+    nodes.value = []
+    tree.value = []
   } finally {
     loadingTree.value = false
+  }
+}
+
+async function restoreFiles() {
+  if (restoringFiles.value) return
+  restoringFiles.value = true
+  errorMessage.value = null
+  try {
+    await restoreWorkspaceFiles(props.workspaceId)
+    filesMissing.value = false
+    statusMessage.value = 'Workspace files restored'
+    await refreshTree()
+  } catch (err) {
+    errorMessage.value = err instanceof Error ? err.message : 'Restore failed'
+  } finally {
+    restoringFiles.value = false
   }
 }
 
@@ -326,9 +374,16 @@ async function renameSelected() {
   }
 }
 
-async function deletePath(path: string | null) {
+function requestDeletePath(path: string | null) {
   if (!path) return
-  if (!window.confirm(`Delete ${path}?`)) return
+  pendingDeletePath.value = path
+  contextMenu.value = null
+}
+
+async function confirmDeletePath() {
+  const path = pendingDeletePath.value
+  if (!path || deletingPath.value) return
+  deletingPath.value = true
   try {
     await deleteWorkspacePath(props.workspaceId, path)
     if (selectedPath.value === path || selectedPath.value?.startsWith(`${path}/`)) {
@@ -336,10 +391,12 @@ async function deletePath(path: string | null) {
       editorContent.value = ''
       savedContent.value = ''
     }
-    contextMenu.value = null
+    pendingDeletePath.value = null
     await refreshTree()
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : 'Delete failed'
+  } finally {
+    deletingPath.value = false
   }
 }
 
@@ -434,10 +491,42 @@ async function openPush() {
   openDropdown.value = null
 }
 
-function openAiAnalysis() {
-  if (!selectedPath.value || !editorContent.value) return
-  showAiAnalysis.value = true
+async function openAiAnalysis() {
+  if (!selectedPath.value || aiAnalysisLoading.value) return
   openDropdown.value = null
+  const paths = collectAnalyzablePaths(nodes.value, selectedPath.value)
+  if (!paths.length) {
+    if (isEditorOpen.value && editorContent.value.trim()) {
+      aiAnalysisTargets.value = [{ path: selectedPath.value, content: editorContent.value }]
+      showAiAnalysis.value = true
+      return
+    }
+    errorMessage.value = 'No analyzable files in the selection'
+    return
+  }
+  aiAnalysisLoading.value = true
+  errorMessage.value = null
+  try {
+    const targets: Array<{ path: string; content: string }> = []
+    for (const path of paths) {
+      if (path === selectedPath.value && isEditorOpen.value) {
+        targets.push({ path, content: editorContent.value })
+        continue
+      }
+      const file = await readWorkspaceFile(props.workspaceId, path)
+      if (file.content.trim()) targets.push({ path: file.path, content: file.content })
+    }
+    if (!targets.length) {
+      errorMessage.value = 'Selected files are empty'
+      return
+    }
+    aiAnalysisTargets.value = targets
+    showAiAnalysis.value = true
+  } catch (err) {
+    errorMessage.value = err instanceof Error ? err.message : 'Failed to load files for AI analysis'
+  } finally {
+    aiAnalysisLoading.value = false
+  }
 }
 
 function onPushSuccess(fullName: string) {
@@ -448,10 +537,14 @@ function onPushError(message: string) {
   errorMessage.value = message
 }
 
-async function applyAiImprovedContent(content: string) {
-  editorContent.value = content
-  showAiAnalysis.value = false
-  statusMessage.value = 'Applied AI suggestion — save to persist'
+async function applyAiImprovedContent(payload: { path: string; content: string }) {
+  await writeWorkspaceFile(props.workspaceId, payload.path, payload.content)
+  if (selectedPath.value === payload.path) {
+    editorContent.value = payload.content
+    savedContent.value = payload.content
+  }
+  statusMessage.value = `Applied AI fix to ${payload.path}`
+  await refreshTree()
 }
 
 function onGlobalClick() {
@@ -528,18 +621,19 @@ onUnmounted(() => {
       <button
         type="button"
         class="lp-btn-ghost px-2 py-1 text-[12px] disabled:opacity-40"
-        :disabled="!selectedPath || !editorContent"
+        :disabled="!canAiAnalyze"
+        :title="isDirectorySelected ? 'Analyze all files in folder' : 'Analyze selected file'"
         @click="openAiAnalysis"
       >
         <span class="material-symbols-outlined !text-[13px] mr-1">auto_awesome</span>
-        AI analyze
+        {{ aiAnalysisLoading ? 'Loading…' : isDirectorySelected ? 'AI analyze folder' : 'AI analyze' }}
       </button>
       <button
         type="button"
         class="lp-btn-primary px-2.5 py-1 text-[12px]"
         @click="openPush"
       >
-        Push to GitHub
+        Publish
       </button>
     </div>
 
@@ -632,9 +726,18 @@ onUnmounted(() => {
 
     <p
       v-if="errorMessage"
-      class="border-b border-[var(--lp-line)] bg-[var(--lp-danger)]/15 px-3 py-1.5 text-[12px] text-[var(--lp-danger)]"
+      class="flex flex-wrap items-center gap-3 border-b border-[var(--lp-line)] bg-[var(--lp-danger)]/15 px-3 py-1.5 text-[12px] text-[var(--lp-danger)]"
     >
-      {{ errorMessage }}
+      <span class="min-w-0 flex-1">{{ errorMessage }}</span>
+      <button
+        v-if="filesMissing"
+        type="button"
+        class="shrink-0 rounded-md border border-[var(--lp-danger)]/40 bg-[var(--lp-panel)] px-2.5 py-1 font-mono text-[11px] text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-50"
+        :disabled="restoringFiles"
+        @click="restoreFiles"
+      >
+        {{ restoringFiles ? 'Restoring…' : 'Restore files' }}
+      </button>
     </p>
     <p
       v-else-if="statusMessage"
@@ -705,7 +808,7 @@ onUnmounted(() => {
             <span v-if="dirty" class="text-[var(--lp-muted)]">●</span>
           </div>
           <div v-else class="px-3 py-1.5 text-[12px] text-[var(--lp-muted)]">
-            No file open
+            {{ isDirectorySelected ? `Folder: ${selectedPath}` : 'No file open' }}
           </div>
           <span v-if="loadingFile" class="ml-auto px-3 py-1.5 text-[11px] text-[var(--lp-muted)]">
             Loading…
@@ -776,7 +879,7 @@ onUnmounted(() => {
           v-if="contextMenu.path"
           type="button"
           class="block w-full px-3 py-1.5 text-left text-[12px] text-[var(--lp-danger)] transition hover:bg-[var(--lp-danger)]/20"
-          @click="deletePath(contextMenu.path)"
+          @click="requestDeletePath(contextMenu.path)"
         >
           Delete
         </button>
@@ -858,16 +961,16 @@ onUnmounted(() => {
       :workspace-id="workspaceId"
       @update:open="(value) => { showPush = value }"
       @pushed="onPushSuccess"
+      @converted="(message) => { statusMessage = message }"
       @error="onPushError"
     />
 
     <WorkspaceAiAnalysisDrawer
       :open="showAiAnalysis"
       :workspace-id="workspaceId"
-      :path="selectedPath"
-      :content="editorContent"
+      :targets="aiAnalysisTargets"
+      :persist-fix="applyAiImprovedContent"
       @update:open="(value) => { showAiAnalysis = value }"
-      @apply="applyAiImprovedContent"
       @error="onPushError"
     />
 
@@ -879,6 +982,17 @@ onUnmounted(() => {
       cancel-label="No"
       @update:open="(value) => { if (!value) confirmIacDestroy = null }"
       @confirm="confirmIacDestroyRun"
+    />
+
+    <ConfirmDialog
+      :open="pendingDeletePath !== null"
+      title="Delete path?"
+      :message="pendingDeletePath ? `Delete “${pendingDeletePath}” from this workspace? This cannot be undone.` : ''"
+      confirm-label="Yes, delete"
+      cancel-label="No"
+      :busy="deletingPath"
+      @update:open="(value) => { if (!value) pendingDeletePath = null }"
+      @confirm="confirmDeletePath"
     />
   </section>
 </template>

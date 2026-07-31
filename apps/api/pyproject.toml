@@ -46,6 +46,8 @@ packages = ["app"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# Repo-root shared package (`pkg/`) lives two levels up from apps/api.
+pythonpath = [".", "../.."]
 
 [tool.ruff]
 line-length = 100

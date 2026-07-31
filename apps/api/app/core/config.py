@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -64,8 +65,8 @@ class Settings(BaseSettings):
     # Secrets encryption (Fernet key material — prefer 32+ char random string)
     secrets_encryption_key: str | None = None
 
-    # Ephemeral IaC workspaces
-    iac_workspace_root: str = "/tmp/launchpad-workspaces"
+    # Ephemeral IaC workspaces (durable path — /tmp is wiped on reboot/cleanup)
+    iac_workspace_root: str = str(Path.home() / ".launchpad" / "workspaces")
 
     # Sandbox execution
     sandbox_docker_enabled: bool = False
@@ -85,6 +86,12 @@ class Settings(BaseSettings):
 
     # Deprecated: long-lived PAT fallback (prefer GitHub App)
     github_pat: str | None = None
+
+    # GitLab — OAuth Application and/or per-user PAT (stored encrypted)
+    gitlab_base_url: str = "https://gitlab.com"
+    gitlab_oauth_client_id: str | None = None
+    gitlab_oauth_client_secret: str | None = None
+    gitlab_oauth_redirect_uri: str = "http://localhost:3000/integrations/gitlab"
 
     # GitHub webhook (GitOps rebuild) — HMAC SHA-256 shared secret
     webhook_secret: str | None = None
@@ -109,6 +116,15 @@ class Settings(BaseSettings):
     oidc_group_role_map: dict[str, str] = Field(default_factory=dict)
     # Target org slug for global OIDC map (required when map is non-empty)
     oidc_default_org_slug: str | None = None
+
+    # Launchpad OIDC Issuer (Keyless Workload Identity for GCP & AWS)
+    launchpad_oidc_issuer_url: str = "https://api.launchpad.yourdomain.com"
+    launchpad_oidc_private_key: str | None = None
+    launchpad_oidc_private_key_path: str | None = None
+    launchpad_oidc_key_id: str = "launchpad-key-1"
+    launchpad_oidc_token_ttl_seconds: int = 900
+
+
 
     # Invite + transactional email
     invite_base_url: str = "http://localhost:3000/invite"
@@ -139,12 +155,18 @@ class Settings(BaseSettings):
 
     # Portal status page base (simulate mode + /p/{id} deep links)
     preview_public_base_url: str = "http://localhost:3000"
+    # Stable PR preview URL template. Use {pr} placeholder, e.g.
+    # "https://pr-{pr}.preview.example.com". Empty → portal path /pr/{pr}.
+    preview_pr_hostname_template: str | None = None
+    # Smoke-test the preview URL before marking GitHub status success.
+    preview_smoke_enabled: bool = True
+    preview_smoke_timeout_seconds: float = 8.0
 
     # When kubernetes_enabled, Open Preview uses NodePort on this host.
     # Keep the range small (≤10 ports) — large maps often break kind on Docker Desktop.
     preview_node_host: str = "127.0.0.1"
     preview_node_port_min: int = 30080
-    preview_node_port_max: int = 30084
+    preview_node_port_max: int = 30089
 
     # Optional Ingress host template when kubernetes_enabled (e.g. "{name}.localtest.me")
     preview_ingress_host_template: str | None = None
@@ -174,6 +196,8 @@ class Settings(BaseSettings):
         "github_app_private_key_path",
         "github_app_slug",
         "github_pat",
+        "gitlab_oauth_client_id",
+        "gitlab_oauth_client_secret",
         "webhook_secret",
         "kubernetes_kubeconfig_path",
         "kubernetes_context",
@@ -184,9 +208,12 @@ class Settings(BaseSettings):
         "smtp_password",
         "smtp_from",
         "oidc_default_org_slug",
+        "launchpad_oidc_private_key",
+        "launchpad_oidc_private_key_path",
         "gemini_api_key",
         mode="before",
     )
+
     @classmethod
     def empty_str_to_none(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():

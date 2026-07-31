@@ -209,6 +209,17 @@ export interface WorkspaceWizardConfig {
   container_scaffold: ContainerScaffoldConfig
   dependencies: WorkloadDependenciesConfig
   has_credentials: boolean
+  /** Safe display name for the stored cloud key (never the secret). */
+  credential_label?: string | null
+}
+
+export interface GcpApiEnablementResult {
+  project_id: string
+  required: string[]
+  already_enabled: string[]
+  newly_enabled: string[]
+  waited_seconds: number
+  message: string
 }
 
 export interface WorkspaceFileNode {
@@ -255,6 +266,51 @@ export interface GitHubRepoResult {
   installation_id?: number | null
   auth_method?: string
   created?: boolean
+}
+
+export interface GitlabStatus {
+  connected: boolean
+  oauth_configured: boolean
+  authorize_url: string | null
+  base_url: string
+  username: string | null
+  token_type: string | null
+  message: string
+}
+
+export interface GitlabProjectItem {
+  id: number
+  name: string
+  path_with_namespace: string
+  http_url_to_repo: string
+  web_url: string
+  visibility: string
+  default_branch: string
+}
+
+export interface GitlabRepoResult {
+  id: number
+  path_with_namespace: string
+  web_url: string
+  http_url_to_repo: string
+  default_branch: string
+  visibility: string
+  created: boolean
+  files_committed: number
+}
+
+export interface GitlabPushRequest {
+  project_path: string
+  commit_message?: string
+}
+
+export interface GitlabRepoInput {
+  name: string
+  description?: string
+  private?: boolean
+  workspace_id?: string | null
+  existing_path?: string | null
+  include_ci?: boolean
 }
 
 export interface GitHubInstallationItem {
@@ -319,6 +375,13 @@ export const FRAMEWORK_OPTIONS: FrameworkItem[] = [
   { id: 'generic', label: 'Generic (Alpine)', category: 'backend' },
 ]
 
+export interface ContainerServiceItem {
+  name: string
+  stack: ProjectStackOption
+  listen_port: number
+  dockerfile_path?: string | null
+}
+
 export interface ContainerScaffoldConfig {
   enabled: boolean
   generate_dockerfile: boolean
@@ -327,6 +390,7 @@ export interface ContainerScaffoldConfig {
   frameworks: FrameworkOption[]
   app_name: string
   listen_port: number
+  services?: ContainerServiceItem[]
 }
 
 export interface GitHubRepositorySearchItem {

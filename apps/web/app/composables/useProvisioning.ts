@@ -5,6 +5,10 @@ import type {
   GitHubRepositoryItem,
   GitHubRepositorySearchResponse,
   GitHubRepoResult,
+  GitlabProjectItem,
+  GitlabRepoInput,
+  GitlabRepoResult,
+  GitlabStatus,
   IaCBundleSummary,
   ImageInspectResult,
   TerminalSessionResponse,
@@ -14,6 +18,7 @@ import type {
   WorkspacePushRequest,
   WorkspaceTemplateInfo,
   WorkspaceWizardConfig,
+  GcpApiEnablementResult,
 } from '~/types/provisioning'
 import type { GitHubRepoInput, ProvisioningWizardInput } from '~/utils/cloudValidation'
 import { costOptimizationToApi } from '~/utils/costOptimization'
@@ -95,6 +100,16 @@ export function useProvisioning() {
     return apiFetch<WorkspaceWizardConfig>(`/provisioning/workspaces/${workspaceId}/config`)
   }
 
+  async function enableCloudApis(workspaceId: string): Promise<GcpApiEnablementResult> {
+    return apiFetch<GcpApiEnablementResult>(
+      `/provisioning/workspaces/${workspaceId}/enable-cloud-apis`,
+      {
+        method: 'POST',
+        timeoutMs: PROVISION_TIMEOUT_MS * 3,
+      },
+    )
+  }
+
   async function destroyWorkspace(workspaceId: string): Promise<void> {
     await apiFetch<void>(`/provisioning/workspaces/${workspaceId}`, {
       method: 'DELETE',
@@ -118,6 +133,12 @@ export function useProvisioning() {
 
   async function listWorkspaceFiles(workspaceId: string): Promise<WorkspaceFileNode[]> {
     return apiFetch<WorkspaceFileNode[]>(`/provisioning/workspaces/${workspaceId}/files/tree`)
+  }
+
+  async function restoreWorkspaceFiles(workspaceId: string): Promise<IaCBundleSummary> {
+    return apiFetch<IaCBundleSummary>(`/provisioning/workspaces/${workspaceId}/restore-files`, {
+      method: 'POST',
+    })
   }
 
   async function readWorkspaceFile(
@@ -219,6 +240,7 @@ export function useProvisioning() {
       path: string
       content: string
       kind?: 'auto' | 'cicd' | 'docker' | 'iac' | 'kubernetes'
+      error_context?: string | null
     },
   ): Promise<import('~/utils/workspaceFileAnalysis').WorkspaceFileAnalysisReport> {
     return apiFetch(`/provisioning/workspaces/${workspaceId}/analyze-file`, {
@@ -227,6 +249,7 @@ export function useProvisioning() {
         path: payload.path,
         content: payload.content,
         kind: payload.kind ?? 'auto',
+        error_context: payload.error_context ?? null,
       }),
       timeoutMs: 90_000,
     })
@@ -248,6 +271,54 @@ export function useProvisioning() {
 
   async function getGithubAppStatus(): Promise<GitHubAppStatus> {
     return apiFetch<GitHubAppStatus>('/provisioning/github/status')
+  }
+
+  async function getGitlabStatus(): Promise<GitlabStatus> {
+    return apiFetch<GitlabStatus>('/provisioning/gitlab/status')
+  }
+
+  async function connectGitlabPat(token: string, baseUrl?: string): Promise<GitlabStatus> {
+    return apiFetch<GitlabStatus>('/provisioning/gitlab/connect/pat', {
+      method: 'POST',
+      body: JSON.stringify({
+        token,
+        base_url: baseUrl || null,
+      }),
+    })
+  }
+
+  async function completeGitlabOAuth(code: string, state: string): Promise<GitlabStatus> {
+    return apiFetch<GitlabStatus>('/provisioning/gitlab/oauth/callback', {
+      method: 'POST',
+      body: JSON.stringify({ code, state }),
+    })
+  }
+
+  async function disconnectGitlab(): Promise<void> {
+    await apiFetch('/provisioning/gitlab/connection', { method: 'DELETE' })
+  }
+
+  async function listGitlabProjects(): Promise<GitlabProjectItem[]> {
+    return apiFetch<GitlabProjectItem[]>('/provisioning/gitlab/projects')
+  }
+
+  async function createGitlabRepo(input: GitlabRepoInput): Promise<GitlabRepoResult> {
+    return apiFetch<GitlabRepoResult>('/provisioning/gitlab/repositories', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      timeoutMs: GITHUB_TIMEOUT_MS,
+    })
+  }
+
+  async function pushWorkspaceToGitlab(
+    workspaceId: string,
+    payload: { project_path: string; commit_message?: string },
+  ): Promise<GitlabRepoResult> {
+    return apiFetch<GitlabRepoResult>(`/provisioning/workspaces/${workspaceId}/gitlab/push`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: GITHUB_TIMEOUT_MS,
+    })
   }
 
   async function listGithubInstallations(): Promise<GitHubInstallationItem[]> {
@@ -290,9 +361,11 @@ export function useProvisioning() {
     getWorkspace,
     listAudits,
     getWizardConfig,
+    enableCloudApis,
     destroyWorkspace,
     openTerminal,
     listWorkspaceFiles,
+    restoreWorkspaceFiles,
     readWorkspaceFile,
     writeWorkspaceFile,
     mkdirWorkspace,
@@ -302,9 +375,16 @@ export function useProvisioning() {
     listTemplates,
     applyTemplate,
     pushWorkspaceToGithub,
+    pushWorkspaceToGitlab,
     analyzeWorkspaceFile,
     createGithubRepo,
+    createGitlabRepo,
     getGithubAppStatus,
+    getGitlabStatus,
+    connectGitlabPat,
+    completeGitlabOAuth,
+    disconnectGitlab,
+    listGitlabProjects,
     listGithubInstallations,
     listGithubRepositories,
     searchGithubRepositories,

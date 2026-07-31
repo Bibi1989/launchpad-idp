@@ -33,7 +33,6 @@ import {
 } from '~/utils/costOptimization'
 import {
   artifactModeToInfraConfig,
-  buildCiCdScaffold,
   buildDockerScaffold,
   defaultInfraGenerationConfig,
   infraConfigToArtifactMode,
@@ -43,7 +42,7 @@ import {
   detectRepoStackForScaffold,
   enhanceDockerScaffoldTargets,
 } from '~/utils/workspaceRepoScaffold'
-import { AWS_REGIONS, AZURE_LOCATIONS, GCP_REGIONS } from '~/utils/cloudRegions'
+import { AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, AWS_INSTANCE_TYPES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
 
 const {
   createWorkspace,
@@ -54,7 +53,10 @@ const {
   getWizardConfig,
   getWorkspace,
   listWorkspaces,
+  listWorkspaceFiles,
+  readWorkspaceFile,
   writeWorkspaceFile,
+  deleteWorkspacePath,
   analyzeWorkspaceFile,
 } = useProvisioning()
 const { scanRepo } = useDockerfiles()
@@ -92,6 +94,7 @@ const form = reactive({
   gcp: {
     vpc: true,
     subnets: true,
+    network_topology: 'simple' as 'simple' | 'standard',
     gke: false,
     artifact_registry: false,
     secret_backend: 'secret_manager' as 'secret_manager' | 'native_k8s',
@@ -103,11 +106,13 @@ const form = reactive({
     memorystore: false,
     bigquery: false,
     region: 'us-central1',
+    machine_type: 'e2-standard-4',
     project_id: '',
   },
   aws: {
     vpc: true,
     subnets: true,
+    network_topology: 'simple' as 'simple' | 'standard',
     ec2: false,
     s3: false,
     eks: false,
@@ -120,11 +125,13 @@ const form = reactive({
     sqs: false,
     alb: false,
     region: 'us-east-1',
+    instance_type: 't3.medium',
     account_alias: '',
   },
   azure: {
     vnet: true,
     subnets: true,
+    network_topology: 'simple' as 'simple' | 'standard',
     aks: false,
     key_vault: true,
     container_apps: false,
@@ -135,6 +142,7 @@ const form = reactive({
     app_service: false,
     log_analytics: false,
     location: 'eastus',
+    vm_size: 'Standard_D2_v2',
     resource_group: '',
   },
   cloudflare: {
@@ -151,9 +159,15 @@ const form = reactive({
   },
   credentials: {
     gcp_sa_key_json: '',
+    gcp_wif_project_number: '',
+    gcp_wif_pool_id: '',
+    gcp_wif_provider_id: '',
+    gcp_wif_target_sa_email: '',
     aws_access_key_id: '',
     aws_secret_access_key: '',
     aws_session_token: '',
+    aws_role_arn: '',
+    aws_role_session_name: '',
     azure_client_id: '',
     azure_client_secret: '',
     azure_tenant_id: '',
@@ -178,6 +192,21 @@ const fieldError = ref<string | null>(null)
 const githubError = ref<string | null>(null)
 const githubStatus = ref<string | null>(null)
 const submitting = ref(false)
+const creationStep = ref(1)
+const creationStepLabel = computed(() => {
+  if (creationStep.value === 1) return 'Validating cloud configuration & dependencies…'
+  if (creationStep.value === 2) return 'Generating IaC & container scaffolds…'
+  if (creationStep.value === 3) return 'Scaffolding Kubernetes workload manifests…'
+  if (creationStep.value === 4) return isLocalProvider.value ? 'Starting kind cluster & terminal sandbox…' : 'Opening terminal sandbox…'
+  return 'Workspace ready!'
+})
+const creationProgressPercent = computed(() => Math.min(creationStep.value * 25, 100))
+const creationSteps = computed(() => [
+  { key: 1, label: 'Validate cloud configuration' },
+  { key: 2, label: 'Generate IaC & container scaffolds' },
+  { key: 3, label: 'Scaffold Kubernetes workload manifests' },
+  { key: 4, label: isLocalProvider.value ? 'Start kind cluster & sandbox' : 'Initialize terminal sandbox' },
+])
 const bundle = ref<IaCBundleSummary | null>(null)
 const wsPath = ref<string | null>(null)
 const githubResult = ref<GitHubRepoResult | null>(null)
@@ -374,9 +403,15 @@ const stepTitle = computed(() => {
 
 function clearCredentials() {
   form.credentials.gcp_sa_key_json = ''
+  form.credentials.gcp_wif_project_number = ''
+  form.credentials.gcp_wif_pool_id = ''
+  form.credentials.gcp_wif_provider_id = ''
+  form.credentials.gcp_wif_target_sa_email = ''
   form.credentials.aws_access_key_id = ''
   form.credentials.aws_secret_access_key = ''
   form.credentials.aws_session_token = ''
+  form.credentials.aws_role_arn = ''
+  form.credentials.aws_role_session_name = ''
   form.credentials.azure_client_id = ''
   form.credentials.azure_client_secret = ''
   form.credentials.azure_tenant_id = ''
@@ -427,6 +462,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
     Object.assign(form.gcp, {
       vpc: true,
       subnets: true,
+      network_topology: 'simple',
       gke: false,
       artifact_registry: false,
       secret_backend: 'secret_manager',
@@ -438,6 +474,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       memorystore: false,
       bigquery: false,
       region: 'us-central1',
+      machine_type: 'e2-standard-4',
       project_id: '',
       ...resources,
     })
@@ -446,6 +483,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
     Object.assign(form.aws, {
       vpc: true,
       subnets: true,
+      network_topology: 'simple',
       ec2: false,
       s3: false,
       eks: false,
@@ -458,6 +496,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       sqs: false,
       alb: false,
       region: 'us-east-1',
+      instance_type: 't3.medium',
       ...resources,
       account_alias: accountAlias,
     })
@@ -465,6 +504,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
     Object.assign(form.azure, {
       vnet: true,
       subnets: true,
+      network_topology: 'simple',
       aks: false,
       key_vault: true,
       container_apps: false,
@@ -475,6 +515,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       app_service: false,
       log_analytics: false,
       location: 'eastus',
+      vm_size: 'Standard_D2_v2',
       resource_group: '',
       ...resources,
     })
@@ -655,15 +696,22 @@ async function scaffoldCiCdFiles(workspaceId: string) {
     infraGeneration.value.cicd.frameworks.length > 0
       ? infraGeneration.value.cicd.frameworks
       : (form.container_scaffold.frameworks ?? [])
-  const targets = buildCiCdScaffold(
+  const { syncWorkspaceCicdToPlatform } = await import('~/utils/syncWorkspaceCicd')
+  await syncWorkspaceCicdToPlatform(
+    {
+      listWorkspaceFiles,
+      readWorkspaceFile,
+      writeWorkspaceFile,
+      deleteWorkspacePath,
+    },
+    workspaceId,
     infraGeneration.value.cicd.platform,
-    infraGeneration.value.cicd.security,
-    frameworks,
-    form.container_scaffold.app_name || form.name || 'app',
+    {
+      appName: form.container_scaffold.app_name || form.name || 'app',
+      frameworks,
+      security: infraGeneration.value.cicd.security,
+    },
   )
-  for (const target of targets) {
-    await writeWorkspaceFile(workspaceId, target.path, target.content)
-  }
 }
 
 async function scaffoldDockerFiles(
@@ -734,6 +782,7 @@ async function onGenerate() {
       return
     }
 
+    creationStep.value = 1
     const reuseId =
       (!isNewWorkspace.value && selectedExisting.value?.id) ||
       sessionCreatedWorkspaceId.value ||
@@ -741,10 +790,12 @@ async function onGenerate() {
 
     if (reuseId) {
       workspaceId = reuseId
+      creationStep.value = 2
       bundle.value = await updateWorkspace(workspaceId, parsed.data)
       await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
       await refreshBundle(workspaceId)
+      creationStep.value = 3
       const terminal = await openTerminal(workspaceId, {
         run_init: form.run_init,
       })
@@ -755,15 +806,18 @@ async function onGenerate() {
         selectedWorkspaceId.value = workspaceId
       }
     } else {
+      creationStep.value = 2
       bundle.value = await createWorkspace(parsed.data)
       workspaceId = bundle.value.workspace_id
       sessionCreatedWorkspaceId.value = workspaceId
+      creationStep.value = 3
       await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
       await refreshBundle(workspaceId)
       if (!form.github.name.trim()) {
         form.github.name = `launchpad-${parsed.data.name}`
       }
+      creationStep.value = 4
       const terminal = await openTerminal(workspaceId, {
         run_init: form.run_init,
       })
@@ -779,6 +833,12 @@ async function onGenerate() {
     }
     hasStoredCredentials.value = true
     clearCredentials()
+
+    if (workspaceId) {
+      setTimeout(() => {
+        void navigateTo(`/workspaces/${workspaceId}`)
+      }, 1200)
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Provisioning failed'
     const timedOut = message.toLowerCase().includes('timed out')
@@ -1031,6 +1091,21 @@ async function onPrimaryAction() {
                 </option>
               </select>
             </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Instance / machine type</span>
+              <select v-model="form.gcp.machine_type" class="lp-input font-mono text-xs">
+                <option v-for="opt in GCP_MACHINE_TYPES" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </label>
+            <label v-if="form.gcp.vpc && form.gcp.subnets" class="block space-y-2">
+              <span class="lp-label">Network topology</span>
+              <select v-model="form.gcp.network_topology" class="lp-input">
+                <option value="simple">Simple — one subnet (demos / previews)</option>
+                <option value="standard">Standard — public + private with Cloud NAT</option>
+              </select>
+            </label>
             <div class="space-y-2">
               <label
                 v-for="opt in [
@@ -1070,6 +1145,21 @@ async function onPrimaryAction() {
                 </option>
               </select>
             </label>
+            <label class="block space-y-2">
+              <span class="lp-label">Instance type</span>
+              <select v-model="form.aws.instance_type" class="lp-input font-mono text-xs">
+                <option v-for="opt in AWS_INSTANCE_TYPES" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </label>
+            <label v-if="form.aws.vpc && form.aws.subnets" class="block space-y-2">
+              <span class="lp-label">Network topology</span>
+              <select v-model="form.aws.network_topology" class="lp-input">
+                <option value="simple">Simple — one public subnet + IGW</option>
+                <option value="standard">Standard — public + private with NAT Gateway</option>
+              </select>
+            </label>
             <div class="grid gap-2 sm:grid-cols-2">
               <label
                 v-for="opt in [
@@ -1107,6 +1197,21 @@ async function onPrimaryAction() {
                 <option v-for="loc in AZURE_LOCATIONS" :key="loc.value" :value="loc.value">
                   {{ loc.label }}
                 </option>
+              </select>
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">VM size</span>
+              <select v-model="form.azure.vm_size" class="lp-input font-mono text-xs">
+                <option v-for="opt in AZURE_VM_SIZES" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </label>
+            <label v-if="form.azure.vnet && form.azure.subnets" class="block space-y-2">
+              <span class="lp-label">Network topology</span>
+              <select v-model="form.azure.network_topology" class="lp-input">
+                <option value="simple">Simple — one subnet</option>
+                <option value="standard">Standard — public + private with NAT Gateway</option>
               </select>
             </label>
             <div class="grid gap-2 sm:grid-cols-2">
@@ -1282,15 +1387,11 @@ async function onPrimaryAction() {
                 <option value="native_k8s">Native K8s Secret</option>
               </select>
             </label>
-            <label class="block space-y-2">
-              <span class="lp-label">GCP SA key JSON</span>
-              <textarea
-                v-model="form.credentials.gcp_sa_key_json"
-                rows="3"
-                class="lp-input"
-                :placeholder="hasStoredCredentials ? 'Leave blank to keep stored credentials' : 'Paste service account JSON (encrypted at rest)'"
-              />
-            </label>
+            <CloudCredentialsFields
+              v-model:credentials="form.credentials"
+              provider="gcp"
+              :sa-placeholder="hasStoredCredentials ? 'Leave blank to keep stored credentials' : 'Paste service account JSON (encrypted at rest)'"
+            />
           </template>
 
           <template v-if="form.provider === 'aws'">
@@ -1314,28 +1415,7 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
             </div>
-            <div class="grid gap-4 sm:grid-cols-2">
-              <label class="block space-y-2">
-                <span class="lp-label">Access key</span>
-                <input
-                  v-model="form.credentials.aws_access_key_id"
-                  class="lp-input"
-                  type="password"
-                  autocomplete="off"
-                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
-                >
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">Secret key</span>
-                <input
-                  v-model="form.credentials.aws_secret_access_key"
-                  class="lp-input"
-                  type="password"
-                  autocomplete="off"
-                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
-                >
-              </label>
-            </div>
+            <CloudCredentialsFields v-model:credentials="form.credentials" provider="aws" />
           </template>
 
           <template v-if="form.provider === 'azure'">
@@ -1359,58 +1439,11 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
             </div>
-            <div class="grid gap-4 sm:grid-cols-2">
-              <label class="block space-y-2">
-                <span class="lp-label">Client ID</span>
-                <input
-                  v-model="form.credentials.azure_client_id"
-                  class="lp-input"
-                  autocomplete="off"
-                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
-                >
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">Client secret</span>
-                <input
-                  v-model="form.credentials.azure_client_secret"
-                  class="lp-input"
-                  type="password"
-                  autocomplete="off"
-                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
-                >
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">Tenant ID</span>
-                <input
-                  v-model="form.credentials.azure_tenant_id"
-                  class="lp-input"
-                  autocomplete="off"
-                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
-                >
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">Subscription ID</span>
-                <input
-                  v-model="form.credentials.azure_subscription_id"
-                  class="lp-input"
-                  autocomplete="off"
-                  :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
-                >
-              </label>
-            </div>
+            <CloudCredentialsFields v-model:credentials="form.credentials" provider="azure" />
           </template>
 
           <template v-if="form.provider === 'cloudflare'">
-            <label class="block space-y-2">
-              <span class="lp-label">API token</span>
-              <input
-                v-model="form.credentials.cloudflare_api_token"
-                class="lp-input"
-                type="password"
-                autocomplete="off"
-                :placeholder="hasStoredCredentials ? 'Keep stored' : ''"
-              >
-            </label>
+            <CloudCredentialsFields v-model:credentials="form.credentials" provider="cloudflare" />
           </template>
         </div>
 
@@ -1584,15 +1617,68 @@ async function onPrimaryAction() {
             {{ githubResult.full_name }}<template v-if="githubResult.workflow_path"> · {{ githubResult.workflow_path }}</template>
           </a>
 
+          <!-- Graphical Creation Progress Card -->
+          <div v-if="submitting || bundle" class="mt-4 space-y-4 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/90 p-5 shadow-2xl animate-fade-up">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]">
+                  <span v-if="submitting" class="material-symbols-outlined animate-spin text-lg">sync</span>
+                  <span v-else class="material-symbols-outlined text-lg text-[var(--lp-ok)]">check_circle</span>
+                </div>
+                <div>
+                  <h3 class="text-sm font-semibold text-[var(--lp-text)]">
+                    {{ submitting ? creationStepLabel : 'Workspace ready' }}
+                  </h3>
+                  <p class="text-xs text-[var(--lp-muted)]">
+                    {{ submitting ? 'Configuring files, container scaffolds, and sandbox' : `Opening workspace details (${bundle?.workspace_id})…` }}
+                  </p>
+                </div>
+              </div>
+              <span v-if="submitting" class="rounded-full border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/10 px-3 py-1 font-mono text-xs text-[var(--lp-accent)]">
+                {{ creationProgressPercent }}%
+              </span>
+              <span v-else class="rounded-full border border-[var(--lp-ok)]/30 bg-[var(--lp-ok)]/10 px-3 py-1 font-mono text-xs text-[var(--lp-ok)]">
+                Ready 🚀
+              </span>
+            </div>
+
+            <!-- Animated Progress Bar -->
+            <div class="h-1.5 w-full overflow-hidden rounded-full bg-[var(--lp-line)]">
+              <div
+                class="h-full bg-gradient-to-r from-[var(--lp-accent)] to-[var(--lp-ok)] transition-all duration-500"
+                :style="{ width: `${submitting ? creationProgressPercent : 100}%` }"
+              />
+            </div>
+
+            <!-- Realtime Graphical Step List -->
+            <div class="grid gap-2 text-xs font-mono">
+              <div
+                v-for="(st, idx) in creationSteps"
+                :key="st.key"
+                class="flex items-center gap-2.5 rounded-lg border px-3 py-2 transition-all"
+                :class="{
+                  'border-[var(--lp-accent)]/40 bg-[var(--lp-accent)]/5 text-[var(--lp-text)]': creationStep === idx + 1 && submitting,
+                  'border-[var(--lp-ok)]/30 bg-[var(--lp-ok)]/5 text-[var(--lp-ok)]': creationStep > idx + 1 || !submitting,
+                  'border-[var(--lp-line)] opacity-40 text-[var(--lp-muted)]': creationStep < idx + 1 && submitting
+                }"
+              >
+                <span v-if="creationStep > idx + 1 || !submitting" class="material-symbols-outlined text-sm text-[var(--lp-ok)]">check</span>
+                <span v-else-if="creationStep === idx + 1 && submitting" class="material-symbols-outlined animate-spin text-sm text-[var(--lp-accent)]">sync</span>
+                <span v-else class="material-symbols-outlined text-sm text-[var(--lp-muted)]">radio_button_unchecked</span>
+                <span>{{ st.label }}</span>
+              </div>
+            </div>
+          </div>
+
           <div v-if="bundle" class="space-y-3 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4 font-mono text-xs text-[var(--lp-muted)]">
             <p class="text-[var(--lp-ok)]">Workspace ready</p>
             <p>workspace {{ bundle.workspace_id }}</p>
             <p>{{ bundle.engine }} / {{ bundle.provider }} · {{ bundle.files.length }} files</p>
             <NuxtLink
-              :to="`/launch?workspace=${bundle.workspace_id}`"
+              :to="`/workspaces/${bundle.workspace_id}`"
               class="inline-block rounded border border-[var(--lp-accent)]/50 px-3 py-1.5 text-[var(--lp-accent)] transition hover:bg-[var(--lp-accent)]/10"
             >
-              Launch environment from this workspace
+              Open workspace details
             </NuxtLink>
           </div>
 

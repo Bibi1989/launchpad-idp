@@ -276,6 +276,92 @@ class KubernetesProvisioner:
         )
         return resources
 
+    def apply_ephemeral_datastores(
+        self,
+        *,
+        namespace: str,
+        name: str,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
+    ) -> None:
+        """Provision opt-in ephemeral Postgres and/or Redis in-cluster workloads with connection secret."""
+        if not (enable_postgres or enable_redis):
+            return
+
+        from app.schemas.cloud import (
+            DependencyPlacement,
+            PostgresDependency,
+            RedisDependency,
+            WorkloadDependenciesConfig,
+        )
+        from app.services.workload_dependencies import (
+            DataStoreKind,
+            dependency_secret_string_data,
+            in_cluster_manifest_files,
+        )
+
+        kinds: list[DataStoreKind] = []
+        deps = WorkloadDependenciesConfig()
+        if enable_postgres:
+            kinds.append(DataStoreKind.POSTGRES)
+            deps.postgres = PostgresDependency(enabled=True, placement=DependencyPlacement.IN_CLUSTER)
+        if enable_redis:
+            kinds.append(DataStoreKind.REDIS)
+            deps.redis = RedisDependency(enabled=True, placement=DependencyPlacement.IN_CLUSTER)
+
+        if not self._settings.kubernetes_enabled:
+            logger.info(
+                "kubernetes_simulate_datastores",
+                namespace=namespace,
+                postgres=enable_postgres,
+                redis=enable_redis,
+            )
+            return
+
+        secret_data = dependency_secret_string_data(deps, name=name)
+        if secret_data:
+            self._apply_secret_dict(namespace=namespace, secret_name="app-secrets", data=secret_data)
+
+        manifests = in_cluster_manifest_files(ns=namespace, name=name, kinds=kinds)
+        import yaml
+        from kubernetes import utils
+
+        for filename, content in manifests.items():
+            try:
+                docs = list(yaml.safe_load_all(content))
+                for doc in docs:
+                    if isinstance(doc, dict) and doc.get("kind"):
+                        utils.create_from_dict(self._core.api_client, doc, namespace=namespace)
+            except Exception as exc:
+                logger.warning("apply_datastore_manifest_failed", filename=filename, error=str(exc))
+
+    def _apply_secret_dict(
+        self,
+        *,
+        namespace: str,
+        secret_name: str,
+        data: dict[str, str],
+    ) -> None:
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        assert self._core is not None
+        body = client.V1Secret(
+            api_version="v1",
+            kind="Secret",
+            metadata=client.V1ObjectMeta(name=secret_name, namespace=namespace),
+            string_data=data,
+        )
+        try:
+            self._core.read_namespaced_secret(secret_name, namespace)
+            self._core.patch_namespaced_secret(secret_name, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self._core.create_namespaced_secret(namespace, body)
+            else:
+                raise
+
+
     def apply_governance(
         self,
         *,
@@ -621,32 +707,41 @@ class KubernetesProvisioner:
                 error=str(exc),
             )
 
-    def scale_deployment(self, *, namespace: str, replicas: int = 1) -> None:
-        """Scale deployment replicas in namespace (0 to pause, 1 to resume)."""
+    def scale_deployment(self, *, namespace: str, replicas: int = 1) -> bool:
+        """Scale deployment replicas in namespace (0 to pause, 1 to resume).
+
+        Returns True when scaling succeeded or Kubernetes is disabled (simulate mode).
+        Returns False when a non-404 API error prevented scaling.
+        """
         if not self._settings.kubernetes_enabled or self._apps is None:
-            return
+            return True
         from kubernetes.client.rest import ApiException
 
         try:
             deployments = self._apps.list_namespaced_deployment(namespace)
+            scaled = 0
             for dep in deployments.items or []:
                 dep_name = dep.metadata.name if dep.metadata else "app"
                 body = {"spec": {"replicas": replicas}}
                 self._apps.patch_namespaced_deployment(dep_name, namespace, body)
+                scaled += 1
                 logger.info(
                     "kubernetes_deployment_scaled",
                     namespace=namespace,
                     name=dep_name,
                     replicas=replicas,
                 )
+            return True
         except ApiException as exc:
-            if getattr(exc, "status", None) != 404:
-                logger.warning(
-                    "kubernetes_scale_deployment_failed",
-                    namespace=namespace,
-                    replicas=replicas,
-                    error=str(exc),
-                )
+            if getattr(exc, "status", None) == 404:
+                return True
+            logger.warning(
+                "kubernetes_scale_deployment_failed",
+                namespace=namespace,
+                replicas=replicas,
+                error=str(exc),
+            )
+            return False
 
     def _first_pod_image_error(self, *, namespace: str) -> str | None:
         if self._core is None:

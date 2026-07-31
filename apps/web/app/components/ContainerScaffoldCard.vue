@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ContainerScaffoldConfig, ProjectStackOption } from '~/types/provisioning'
+import type { ContainerScaffoldConfig, ContainerServiceItem, ProjectStackOption } from '~/types/provisioning'
 
 const props = withDefaults(
   defineProps<{
@@ -32,6 +32,28 @@ const stacks: Array<{ id: ProjectStackOption; label: string; icon: string }> = [
   { id: 'generic', label: 'Generic (Alpine)', icon: 'data_object' },
 ]
 
+const servicesList = ref<ContainerServiceItem[]>(
+  props.modelValue.services && props.modelValue.services.length > 0
+    ? [...props.modelValue.services]
+    : [
+        {
+          name: props.modelValue.app_name || 'app',
+          stack: props.modelValue.stack || 'node',
+          listen_port: props.modelValue.listen_port || 8080,
+        },
+      ],
+)
+
+watch(
+  () => props.modelValue.services,
+  (newSvcs) => {
+    if (newSvcs && newSvcs.length > 0) {
+      servicesList.value = [...newSvcs]
+    }
+  },
+  { deep: true },
+)
+
 function updateField<K extends keyof ContainerScaffoldConfig>(key: K, val: ContainerScaffoldConfig[K]) {
   emit('update:modelValue', {
     ...props.modelValue,
@@ -39,11 +61,42 @@ function updateField<K extends keyof ContainerScaffoldConfig>(key: K, val: Conta
   })
 }
 
+function emitServices() {
+  emit('update:modelValue', {
+    ...props.modelValue,
+    services: servicesList.value,
+    app_name: servicesList.value[0]?.name || props.modelValue.app_name,
+    stack: servicesList.value[0]?.stack || props.modelValue.stack,
+    listen_port: servicesList.value[0]?.listen_port || props.modelValue.listen_port,
+  })
+}
+
+function addService() {
+  const nextNum = servicesList.value.length + 1
+  servicesList.value.push({
+    name: `service-${nextNum}`,
+    stack: 'node',
+    listen_port: 8080 + nextNum,
+  })
+  emitServices()
+}
+
+function removeService(index: number) {
+  if (servicesList.value.length <= 1) return
+  servicesList.value.splice(index, 1)
+  emitServices()
+}
+
 // Client-side preview generators
 const previewDockerfile = computed(() => {
-  const stack = config.value.stack || 'node'
-  const name = config.value.app_name || 'app'
-  const port = config.value.listen_port || 8080
+  const primary = servicesList.value[0] || {
+    stack: config.value.stack || 'node',
+    name: config.value.app_name || 'app',
+    listen_port: config.value.listen_port || 8080,
+  }
+  const stack = primary.stack || 'node'
+  const name = primary.name || 'app'
+  const port = primary.listen_port || 8080
 
   const footer = `USER 10001:10001
 EXPOSE ${port}
@@ -200,28 +253,23 @@ ${footer}CMD ["node", "server.js"]
 })
 
 const previewDockerCompose = computed(() => {
-  const name = config.value.app_name || 'app'
-  const port = config.value.listen_port || 8080
-  return `services:
-  ${name}:
+  const lines: string[] = ['services:']
+  for (const svc of servicesList.value) {
+    const sName = svc.name || 'app'
+    const sPort = svc.listen_port || 8080
+    lines.push(`  ${sName}:
     build:
       context: .
-      dockerfile: dockers/Dockerfile
-    image: \${APP_IMAGE:-${name}:latest}
-    container_name: ${name}
+      dockerfile: dockers/${sName}/Dockerfile
+    image: \${APP_IMAGE:-${sName}:latest}
+    container_name: ${sName}
     ports:
-      - "${port}:${port}"
+      - "${sPort}:${sPort}"
     environment:
-      - PORT=${port}
-      - NODE_ENV=production
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${port}/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-`
+      - PORT=${sPort}
+    restart: unless-stopped`)
+  }
+  return lines.join('\n')
 })
 
 const activeContent = computed(() =>
@@ -266,7 +314,7 @@ function downloadFile() {
         </span>
         <div>
           <h3 class="text-base font-semibold text-[var(--lp-text)]">
-            Multi-Stage Dockerfile & Docker Compose
+            Multi-Stage Dockerfile &amp; Container Services
           </h3>
           <p class="text-xs text-[var(--lp-muted)]">
             Generate hardened multi-stage Dockerfiles (USER 10001) and docker-compose.yml into workspace
@@ -288,43 +336,71 @@ function downloadFile() {
     </div>
 
     <div v-if="config.enabled" class="space-y-4 pt-2 border-t border-[var(--lp-line)]">
-      <!-- Options -->
-      <div class="grid gap-4 sm:grid-cols-3">
-        <div class="block space-y-1.5">
-          <span class="lp-label">Technology Stacks &amp; Frameworks</span>
-          <FrameworkMultiSelectDropdown
-            :model-value="config.frameworks && config.frameworks.length > 0 ? config.frameworks : [config.stack as any]"
+      <!-- Multi-Service / Deployment Configurations -->
+      <div class="space-y-3">
+        <div class="flex items-center justify-between">
+          <span class="lp-label">Services / Deployments Scaffolded</span>
+          <button
+            type="button"
+            class="lp-btn-ghost text-xs text-[var(--lp-accent)] py-1 px-2.5 inline-flex items-center gap-1"
             :disabled="disabled"
-            placeholder="Select Frameworks"
-            @update:model-value="(val) => {
-              updateField('frameworks', val)
-              if (val.length > 0) updateField('stack', val[0] as any)
-            }"
-          />
+            @click="addService"
+          >
+            <span class="material-symbols-outlined text-sm">add</span>
+            Add Service
+          </button>
         </div>
 
-        <label class="block space-y-1.5">
-          <span class="lp-label">App Name</span>
-          <input
-            :value="config.app_name"
-            class="lp-input"
-            placeholder="app"
-            :disabled="disabled"
-            @input="updateField('app_name', ($event.target as HTMLInputElement).value)"
+        <div class="space-y-2">
+          <div
+            v-for="(svc, idx) in servicesList"
+            :key="idx"
+            class="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/30 p-3"
           >
-        </label>
-
-        <label class="block space-y-1.5">
-          <span class="lp-label">Exposed Port</span>
-          <input
-            :value="config.listen_port"
-            type="number"
-            class="lp-input"
-            placeholder="8080"
-            :disabled="disabled"
-            @input="updateField('listen_port', Number(($event.target as HTMLInputElement).value) || 8080)"
-          >
-        </label>
+            <div class="flex-1 min-w-[120px]">
+              <span class="lp-label text-[10px]">Service Name</span>
+              <input
+                v-model="svc.name"
+                class="lp-input py-1 text-xs"
+                placeholder="app"
+                :disabled="disabled"
+                @input="emitServices"
+              >
+            </div>
+            <div class="w-36">
+              <span class="lp-label text-[10px]">Stack</span>
+              <select
+                v-model="svc.stack"
+                class="lp-input py-1 text-xs"
+                :disabled="disabled"
+                @change="emitServices"
+              >
+                <option v-for="st in stacks" :key="st.id" :value="st.id">
+                  {{ st.label }}
+                </option>
+              </select>
+            </div>
+            <div class="w-24">
+              <span class="lp-label text-[10px]">Port</span>
+              <input
+                v-model.number="svc.listen_port"
+                type="number"
+                class="lp-input py-1 text-xs"
+                placeholder="8080"
+                :disabled="disabled"
+                @input="emitServices"
+              >
+            </div>
+            <button
+              type="button"
+              class="lp-btn-danger text-xs p-1.5 self-end"
+              :disabled="disabled || servicesList.length <= 1"
+              @click="removeService(idx)"
+            >
+              <span class="material-symbols-outlined text-sm">delete</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="flex flex-wrap gap-4 pt-1">
@@ -336,7 +412,7 @@ function downloadFile() {
             :disabled="disabled"
             @change="updateField('generate_dockerfile', ($event.target as HTMLInputElement).checked)"
           >
-          Generate Multi-Stage Dockerfile (USER 10001)
+          Generate Multi-Stage Dockerfiles (USER 10001)
         </label>
         <label class="flex items-center gap-2 text-xs text-[var(--lp-text)]">
           <input

@@ -56,16 +56,26 @@ const audits = ref<AuditLogEntry[]>([])
 const auditsLoading = ref(false)
 const actionsMenuOpen = ref(false)
 
-const promoteForm = reactive({
-  provider: 'gcp' as CloudProvider,
+const promoteCredentials = reactive({
   gcp_sa_key_json: '',
+  gcp_wif_project_number: '',
+  gcp_wif_pool_id: '',
+  gcp_wif_provider_id: '',
+  gcp_wif_target_sa_email: '',
   aws_access_key_id: '',
   aws_secret_access_key: '',
+  aws_session_token: '',
+  aws_role_arn: '',
+  aws_role_session_name: '',
   azure_client_id: '',
   azure_client_secret: '',
   azure_tenant_id: '',
   azure_subscription_id: '',
   cloudflare_api_token: '',
+})
+
+const promoteForm = reactive({
+  provider: 'gcp' as CloudProvider,
 })
 
 const { lines, connected, done, connect } = useEnvironmentLogStream(environmentId)
@@ -238,23 +248,9 @@ async function onPromote() {
   promoting.value = true
   loadError.value = null
   try {
-    const credentials: Record<string, string> = {}
-    if (promoteForm.provider === 'gcp') {
-      credentials.gcp_sa_key_json = promoteForm.gcp_sa_key_json
-    } else if (promoteForm.provider === 'aws') {
-      credentials.aws_access_key_id = promoteForm.aws_access_key_id
-      credentials.aws_secret_access_key = promoteForm.aws_secret_access_key
-    } else if (promoteForm.provider === 'azure') {
-      credentials.azure_client_id = promoteForm.azure_client_id
-      credentials.azure_client_secret = promoteForm.azure_client_secret
-      credentials.azure_tenant_id = promoteForm.azure_tenant_id
-      credentials.azure_subscription_id = promoteForm.azure_subscription_id
-    } else {
-      credentials.cloudflare_api_token = promoteForm.cloudflare_api_token
-    }
     const created = await promoteToCloud(environment.value.id, {
       provider: promoteForm.provider,
-      credentials,
+      credentials: { ...promoteCredentials },
     })
     showPromote.value = false
     await navigateTo(`/environments/${created.id}`)
@@ -333,7 +329,7 @@ onMounted(() => {
 <template>
   <div class="space-y-8 animate-fade-up">
     <NuxtLink
-      to="/"
+      to="/environments"
       class="inline-flex items-center gap-2 font-mono text-xs uppercase tracking-wide text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
     >
       <span class="material-symbols-outlined text-sm">arrow_back</span>
@@ -559,44 +555,10 @@ onMounted(() => {
               {{ p }}
             </button>
           </div>
-          <label v-if="promoteForm.provider === 'gcp'" class="block space-y-2">
-            <span class="lp-label">Service account JSON</span>
-            <textarea v-model="promoteForm.gcp_sa_key_json" rows="4" class="lp-input font-mono text-xs" />
-          </label>
-          <template v-else-if="promoteForm.provider === 'aws'">
-            <label class="block space-y-2">
-              <span class="lp-label">Access key ID</span>
-              <input v-model="promoteForm.aws_access_key_id" class="lp-input">
-            </label>
-            <label class="block space-y-2">
-              <span class="lp-label">Secret access key</span>
-              <input v-model="promoteForm.aws_secret_access_key" type="password" class="lp-input">
-            </label>
-          </template>
-          <template v-else-if="promoteForm.provider === 'azure'">
-            <div class="grid gap-3 sm:grid-cols-2">
-              <label class="block space-y-2">
-                <span class="lp-label">Client ID</span>
-                <input v-model="promoteForm.azure_client_id" class="lp-input">
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">Client secret</span>
-                <input v-model="promoteForm.azure_client_secret" type="password" class="lp-input">
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">Tenant ID</span>
-                <input v-model="promoteForm.azure_tenant_id" class="lp-input">
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">Subscription ID</span>
-                <input v-model="promoteForm.azure_subscription_id" class="lp-input">
-              </label>
-            </div>
-          </template>
-          <label v-else class="block space-y-2">
-            <span class="lp-label">API token</span>
-            <input v-model="promoteForm.cloudflare_api_token" type="password" class="lp-input">
-          </label>
+          <CloudCredentialsFields
+            v-model:credentials="promoteCredentials"
+            :provider="promoteForm.provider"
+          />
           <button
             type="button"
             class="lp-btn-primary"
@@ -656,6 +618,17 @@ onMounted(() => {
           <div>
             <p class="lp-label">Git branch</p>
             <p class="mt-1 font-mono text-sm">{{ environment.git_branch }}</p>
+          </div>
+          <div v-if="environment.stable_pr_url">
+            <p class="lp-label">Stable PR URL</p>
+            <a
+              :href="environment.stable_pr_url"
+              class="mt-1 block break-all font-mono text-sm text-[var(--lp-accent)] hover:underline"
+              target="_blank"
+              rel="noreferrer"
+            >
+              {{ environment.stable_pr_url }}
+            </a>
           </div>
           <div v-if="environment.github_pr_number">
             <p class="lp-label">Linked PR</p>

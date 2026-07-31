@@ -8,11 +8,19 @@ import type {
   ProvisionEngine,
   WorkspaceArtifactsMode,
 } from '~/types/provisioning'
+import { FRAMEWORK_OPTIONS } from '~/types/provisioning'
 import {
   defaultCicdSecurityConfig,
   renderCicdWorkflow,
   type CicdSecurityConfig,
 } from '~/utils/cicdWorkflowGenerator'
+
+const FRAMEWORK_IDS_BY_LENGTH: FrameworkOption[] = [
+  ...FRAMEWORK_OPTIONS.map((item) => item.id),
+  'node',
+  'python',
+  'java',
+].sort((a, b) => b.length - a.length)
 
 const DEFAULT_LISTEN_PORTS: Partial<Record<FrameworkOption, number>> = {
   react_vite: 80,
@@ -364,9 +372,17 @@ export function dockerfileContentForStack(
   if (stack === 'fastapi') {
     return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage FastAPI image (non-root USER 10001).\nFROM python:3.12-alpine AS builder\nWORKDIR /src\nRUN apk add --no-cache build-base libffi-dev\nCOPY requirements.txt pyproject.toml poetry.lock* ./\nRUN python -m venv /opt/venv\nENV PATH="/opt/venv/bin:$PATH"\nRUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; elif [ -f pyproject.toml ]; then pip install --no-cache-dir .; else pip install --no-cache-dir uvicorn fastapi pydantic; fi\n\nFROM python:3.12-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=builder /opt/venv /opt/venv\nCOPY --chown=10001:10001 . .\nENV PATH="/opt/venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=${port}\n${footer}CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${port}"]\n`
   }
-  if (stack === 'react_vite' || stack === 'vuejs' || stack === 'svelte' || stack === 'nuxtjs') {
-    const distDir = stack === 'nuxtjs' ? '.output/public' : 'dist'
-    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage static web app image with non-root Nginx.\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci; else npm install; fi\nCOPY . .\nRUN npm run build || pnpm run build || yarn build\n\nFROM nginxinc/nginx-unprivileged:alpine AS runtime\nCOPY --from=build --chown=101:101 /src/${distDir} /usr/share/nginx/html\nEXPOSE 8080\nHEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\\n  CMD wget -qO- http://127.0.0.1:8080/ || exit 1\nCMD ["nginx", "-g", "daemon off;"]\n`
+  if (stack === 'react_vite') {
+    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage React (Vite) image with non-root Nginx.\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci; else npm install; fi\nCOPY . .\nRUN npm run build || pnpm run build || yarn build\n\nFROM nginxinc/nginx-unprivileged:alpine AS runtime\nCOPY --from=build --chown=101:101 /src/dist /usr/share/nginx/html\nEXPOSE 8080\nHEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\\n  CMD wget -qO- http://127.0.0.1:8080/ || exit 1\nCMD ["nginx", "-g", "daemon off;"]\n`
+  }
+  if (stack === 'vuejs') {
+    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Vue SPA image (Caddy static server).\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci; else npm install; fi\nCOPY . .\nRUN npm run build || pnpm run build || yarn build\n\nFROM caddy:2.8-alpine AS runtime\nCOPY --from=build /src/dist /usr/share/caddy\nEXPOSE 80\nHEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\\n  CMD wget -qO- http://127.0.0.1:80/ || exit 1\nCMD ["caddy", "file-server", "--root", "/usr/share/caddy", "--listen", ":80"]\n`
+  }
+  if (stack === 'svelte') {
+    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Svelte SPA image (BusyBox httpd).\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci; else npm install; fi\nCOPY . .\nRUN npm run build || pnpm run build || yarn build\n\nFROM busybox:1.36-uclibc AS runtime\nCOPY --from=build /src/dist /www\nEXPOSE 8080\nHEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\\n  CMD wget -qO- http://127.0.0.1:8080/ || exit 1\nCMD ["httpd", "-f", "-p", "8080", "-h", "/www"]\n`
+  }
+  if (stack === 'nuxtjs') {
+    return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Nuxt SSR image (Node runtime, USER 10001).\nFROM node:22-alpine AS build\nWORKDIR /src\nCOPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci; else npm install; fi\nCOPY . .\nRUN npm run build || pnpm run build || yarn build\n\nFROM node:22-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app && apk add --no-cache ca-certificates wget\nCOPY --from=build --chown=10001:10001 /src/.output ./.output\nENV NODE_ENV=production HOST=0.0.0.0 PORT=${port} NITRO_PORT=${port} NITRO_HOST=0.0.0.0\n${footer}CMD ["node", ".output/server/index.mjs"]\n`
   }
   if (stack === 'nextjs') {
     return `# syntax=docker/dockerfile:1.7\n# Launchpad hardened multi-stage Next.js image (standalone mode, USER 10001).\nFROM node:22-alpine AS deps\nWORKDIR /src\nRUN apk add --no-cache libc6-compat\nCOPY package.json package-lock.json* pnpm-lock.yaml* ./\nRUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; else npm ci; fi\n\nFROM node:22-alpine AS builder\nWORKDIR /src\nCOPY --from=deps /src/node_modules ./node_modules\nCOPY . .\nENV NEXT_TELEMETRY_DISABLED=1 NODE_ENV=production\nRUN npm run build\n\nFROM node:22-alpine AS runtime\nWORKDIR /app\nRUN addgroup -g 10001 -S nodejs && adduser -u 10001 -S -G nextjs nextjs && apk add --no-cache ca-certificates wget\nCOPY --from=builder /src/public ./public\nCOPY --from=builder --chown=10001:10001 /src/.next/standalone ./\nCOPY --from=builder --chown=10001:10001 /src/.next/static ./.next/static\nENV NODE_ENV=production PORT=${port}\n${footer}CMD ["node", "server.js"]\n`
@@ -501,14 +517,14 @@ export function buildCiCdScaffold(
   }
 
   // GitLab: one include-root plus one job file per framework (or a single root pipeline).
+  // Also write root `.gitlab-ci.yml` so GitLab picks it up without extra config.
   if (!multi) {
+    const content = renderCicdWorkflow(platform, security, {
+      dockerfilePath: dockerfilePathForService(resolvedAppName),
+    })
     return [
-      {
-        path: 'ci/gitlab/.gitlab-ci.yml',
-        content: renderCicdWorkflow(platform, security, {
-          dockerfilePath: dockerfilePathForService(resolvedAppName),
-        }),
-      },
+      { path: 'ci/gitlab/.gitlab-ci.yml', content },
+      { path: '.gitlab-ci.yml', content },
     ]
   }
 
@@ -522,26 +538,530 @@ export function buildCiCdScaffold(
     }),
   }))
 
-  const root = {
-    path: 'ci/gitlab/.gitlab-ci.yml',
-    content: [
-      '# Generated by Launchpad — includes one pipeline fragment per framework',
-      'include:',
-      ...frameworks.map((stack) => `  - local: ci/gitlab/${stack}.yml`),
-      '',
-    ].join('\n'),
+  const includeRootContent = [
+    '# Generated by Launchpad — includes one pipeline fragment per framework',
+    'include:',
+    ...frameworks.map((stack) => `  - local: ci/gitlab/${stack}.yml`),
+    '',
+  ].join('\n')
+
+  return [
+    { path: 'ci/gitlab/.gitlab-ci.yml', content: includeRootContent },
+    { path: '.gitlab-ci.yml', content: includeRootContent },
+    ...includes,
+  ]
+}
+
+/** Detect which CI platform is present in a workspace file tree. */
+export function detectCicdPlatformFromPaths(paths: string[]): CicdPlatform | null {
+  const hasGithub = paths.some(
+    (p) => p.startsWith('ci/github/') || p.startsWith('.github/workflows/'),
+  )
+  const hasGitlab = paths.some(
+    (p) =>
+      p.startsWith('ci/gitlab/')
+      || p === '.gitlab-ci.yml'
+      || p.endsWith('/.gitlab-ci.yml'),
+  )
+  if (hasGithub && !hasGitlab) return 'github'
+  if (hasGitlab && !hasGithub) return 'gitlab'
+  if (hasGithub) return 'github'
+  if (hasGitlab) return 'gitlab'
+  return null
+}
+
+/** Paths belonging to a CI platform (for cleanup when switching). */
+export function cicdFilePathsForPlatform(platform: CicdPlatform, paths: string[]): string[] {
+  if (platform === 'github') {
+    return paths.filter(
+      (p) => p.startsWith('ci/github/') || p.startsWith('.github/workflows/'),
+    )
   }
-  return [root, ...includes]
+  return paths.filter(
+    (p) =>
+      p.startsWith('ci/gitlab/')
+      || p === '.gitlab-ci.yml'
+      || p.endsWith('/.gitlab-ci.yml'),
+  )
+}
+
+export function oppositeCicdFilePaths(platform: CicdPlatform, paths: string[]): string[] {
+  return cicdFilePathsForPlatform(platform === 'github' ? 'gitlab' : 'github', paths)
+}
+
+export type DetectedWorkspaceInfra = {
+  provision: { enabled: boolean; engine: ProvisionEngine }
+  kubernetes: { enabled: boolean; mode: K8sScaffoldMode }
+  cicd: {
+    enabled: boolean
+    platform: CicdPlatform
+    frameworks: FrameworkOption[]
+    samplePath: string | null
+  }
+  container: {
+    enabled: boolean
+    generate_dockerfile: boolean
+    generate_docker_compose: boolean
+    frameworks: FrameworkOption[]
+  }
+  summary: string[]
+}
+
+/** Map path slug (`nuxtjs`, `react-vite`) back to a FrameworkOption. */
+export function matchFrameworkSlug(raw: string): FrameworkOption | null {
+  const cleaned = raw.trim().toLowerCase()
+  if (!cleaned) return null
+  const underscored = cleaned.replace(/-/g, '_')
+  const dashed = cleaned.replace(/_/g, '-')
+  for (const id of FRAMEWORK_IDS_BY_LENGTH) {
+    if (id === cleaned || id === underscored || sanitizeServiceSlug(id) === dashed) {
+      return id
+    }
+  }
+  return null
+}
+
+function uniqueFrameworks(items: FrameworkOption[]): FrameworkOption[] {
+  return [...new Set(items)]
+}
+
+function frameworksFromPaths(paths: string[]): FrameworkOption[] {
+  const found: FrameworkOption[] = []
+
+  for (const path of paths) {
+    const dockerMatch = path.match(/^dockers\/Dockerfile\.[^/]+-(.+)$/i)
+    if (dockerMatch?.[1]) {
+      const fw = matchFrameworkSlug(dockerMatch[1])
+      if (fw) found.push(fw)
+      continue
+    }
+
+    const githubMatch = path.match(/^ci\/github\/workflows\/(.+)-deploy\.ya?ml$/i)
+    if (githubMatch?.[1] && githubMatch[1].toLowerCase() !== 'deploy') {
+      const fw = matchFrameworkSlug(githubMatch[1])
+      if (fw) found.push(fw)
+      continue
+    }
+
+    const gitlabMatch = path.match(/^ci\/gitlab\/([^/]+)\.ya?ml$/i)
+    if (gitlabMatch?.[1] && gitlabMatch[1].toLowerCase() !== '.gitlab-ci') {
+      const name = gitlabMatch[1]
+      if (name !== '.gitlab-ci') {
+        const fw = matchFrameworkSlug(name)
+        if (fw) found.push(fw)
+      }
+    }
+  }
+
+  return uniqueFrameworks(found)
+}
+
+/**
+ * Infer provision / kubernetes / CI / docker toggles from workspace file paths
+ * so the interactive update form mirrors what is already on disk.
+ */
+export function detectWorkspaceInfraFromPaths(paths: string[]): DetectedWorkspaceInfra {
+  const filePaths = paths.filter(Boolean)
+  const summary: string[] = []
+
+  const hasPulumi = filePaths.some(
+    (p) => p.startsWith('infra/pulumi/') || /(^|\/)Pulumi(\.[^/]+)?\.ya?ml$/i.test(p),
+  )
+  const hasTerraform = filePaths.some(
+    (p) =>
+      p.startsWith('infra/terraform/')
+      || /\.tf$/i.test(p)
+      || p.endsWith('opentofu.tf')
+      || p.includes('/.terraform/'),
+  )
+  const provisionEnabled = hasPulumi || hasTerraform
+  const provisionEngine: ProvisionEngine = hasPulumi && !hasTerraform ? 'pulumi' : 'terraform'
+  if (provisionEnabled) {
+    summary.push(`Provision (${provisionEngine})`)
+  }
+
+  const hasHelm = filePaths.some(
+    (p) => p.startsWith('infra/helm/') || /(^|\/)Chart\.ya?ml$/i.test(p),
+  )
+  const hasKustomize = filePaths.some(
+    (p) =>
+      p.startsWith('infra/kustomize/')
+      || /(^|\/)kustomization\.ya?ml$/i.test(p),
+  )
+  const hasRawK8s = filePaths.some(
+    (p) =>
+      p.startsWith('infra/k8s/')
+      || p.startsWith('infra/manifests/')
+      || p.startsWith('k8s/')
+      || p.startsWith('manifests/'),
+  )
+  const kubernetesEnabled = hasHelm || hasKustomize || hasRawK8s
+  const kubernetesMode: K8sScaffoldMode = hasHelm
+    ? 'helm'
+    : hasKustomize
+      ? 'kustomize'
+      : 'k8s'
+  if (kubernetesEnabled) {
+    summary.push(`Kubernetes (${kubernetesMode})`)
+  }
+
+  const cicdPlatform = detectCicdPlatformFromPaths(filePaths)
+  const cicdEnabled = cicdPlatform !== null
+  const cicdFrameworks = cicdEnabled ? frameworksFromPaths(filePaths) : []
+  const cicdSample =
+    cicdPlatform === 'github'
+      ? filePaths.find(
+          (p) => p.startsWith('ci/github/') || p.startsWith('.github/workflows/'),
+        ) ?? null
+      : cicdPlatform === 'gitlab'
+        ? filePaths.find(
+            (p) =>
+              p.startsWith('ci/gitlab/')
+              || p === '.gitlab-ci.yml'
+              || p.endsWith('/.gitlab-ci.yml'),
+          ) ?? null
+        : null
+  if (cicdEnabled && cicdPlatform) {
+    const stacks =
+      cicdFrameworks.length > 0 ? ` · ${cicdFrameworks.join(', ')}` : ''
+    summary.push(`CI/CD (${cicdPlatform}${stacks})`)
+  }
+
+  const hasDockerfile = filePaths.some(
+    (p) =>
+      /(^|\/)Dockerfile(\.[^/]+)?$/i.test(p)
+      || p.startsWith('dockers/'),
+  )
+  const hasCompose = filePaths.some(
+    (p) =>
+      /(^|\/)docker-compose(\.[^/]+)?\.ya?ml$/i.test(p)
+      || /(^|\/)compose(\.[^/]+)?\.ya?ml$/i.test(p),
+  )
+  const containerFrameworks = frameworksFromPaths(filePaths)
+  const containerEnabled = hasDockerfile || hasCompose
+  if (containerEnabled) {
+    const stacks =
+      containerFrameworks.length > 0 ? ` · ${containerFrameworks.join(', ')}` : ''
+    summary.push(`Docker${stacks}`)
+  }
+
+  return {
+    provision: { enabled: provisionEnabled, engine: provisionEngine },
+    kubernetes: { enabled: kubernetesEnabled, mode: kubernetesMode },
+    cicd: {
+      enabled: cicdEnabled,
+      platform: cicdPlatform ?? 'github',
+      frameworks: cicdFrameworks,
+      samplePath: cicdSample,
+    },
+    container: {
+      enabled: containerEnabled,
+      generate_dockerfile: hasDockerfile,
+      generate_docker_compose: hasCompose,
+      frameworks: containerFrameworks,
+    },
+    summary,
+  }
+}
+
+/** Overlay disk detection onto wizard-derived infra + container scaffold. */
+export function applyDetectedWorkspaceInfra(
+  base: InfraGenerationConfig,
+  container: ContainerScaffoldConfig,
+  detected: DetectedWorkspaceInfra,
+  security?: CicdSecurityConfig,
+): { infra: InfraGenerationConfig; container: ContainerScaffoldConfig } {
+  const frameworks =
+    detected.cicd.frameworks.length > 0
+      ? detected.cicd.frameworks
+      : detected.container.frameworks.length > 0
+        ? detected.container.frameworks
+        : container.frameworks.length > 0
+          ? container.frameworks
+          : []
+
+  const infra: InfraGenerationConfig = {
+    provision: {
+      enabled: base.provision.enabled || detected.provision.enabled,
+      engine: detected.provision.enabled ? detected.provision.engine : base.provision.engine,
+    },
+    kubernetes: {
+      enabled: base.kubernetes.enabled || detected.kubernetes.enabled,
+      mode: detected.kubernetes.enabled ? detected.kubernetes.mode : base.kubernetes.mode,
+    },
+    cicd: {
+      enabled: base.cicd.enabled || detected.cicd.enabled,
+      platform: detected.cicd.enabled ? detected.cicd.platform : base.cicd.platform,
+      security:
+        security
+        ?? (detected.cicd.enabled
+          ? defaultCicdSecurityConfig(detected.cicd.platform)
+          : base.cicd.security),
+      frameworks: detected.cicd.enabled
+        ? (detected.cicd.frameworks.length > 0 ? detected.cicd.frameworks : frameworks)
+        : base.cicd.frameworks,
+    },
+  }
+
+  const nextContainer: ContainerScaffoldConfig = {
+    ...container,
+    enabled: container.enabled || detected.container.enabled,
+    generate_dockerfile:
+      container.generate_dockerfile || detected.container.generate_dockerfile,
+    generate_docker_compose:
+      container.generate_docker_compose || detected.container.generate_docker_compose,
+    frameworks:
+      frameworks.length > 0 ? frameworks : container.frameworks,
+    stack:
+      frameworks[0]
+      ?? container.stack
+      ?? 'generic',
+  }
+
+  return { infra, container: nextContainer }
 }
 
 export function provisionRunCommands(engine: ProvisionEngine): string[] {
+  return iacRunShortcuts(engine)
+    .filter((item) => !item.danger)
+    .slice(0, 2)
+    .map((item) => item.command)
+}
+
+export type IacRunShortcut = {
+  id: string
+  label: string
+  command: string
+  description?: string
+  danger?: boolean
+  /** Opens the stepped provision/destroy wizard instead of running immediately. */
+  opensInitWizard?: boolean
+  /**
+   * How the wizard executes this step.
+   * - terminal: run `command` in the sandbox (default)
+   * - enable_gcp_apis: call control-plane Service Usage enablement
+   */
+  action?: 'terminal' | 'enable_gcp_apis'
+}
+
+/**
+ * Shell prefix that cds into the IaC dir only when needed.
+ * Works from workspace root or when already inside infra/terraform|pulumi.
+ */
+export function iacEnsureDirPrefix(engine: ProvisionEngine): string {
+  if (engine === 'pulumi') {
+    return [
+      'if [ -f Pulumi.yaml ] || [ -f Pulumi.yml ]; then :;',
+      'elif [ -d infra/pulumi ]; then cd infra/pulumi;',
+      'else echo "Pulumi directory not found (expected infra/pulumi or Pulumi.yaml)" >&2; exit 1; fi;',
+    ].join(' ')
+  }
+  // terraform + opentofu share infra/terraform
+  return [
+    'if ls ./*.tf >/dev/null 2>&1 || [ -d .terraform ]; then :;',
+    'elif [ -d infra/terraform ]; then cd infra/terraform;',
+    'else echo "Terraform directory not found (expected infra/terraform or *.tf here)" >&2; exit 1; fi;',
+  ].join(' ')
+}
+
+function iacCmd(engine: ProvisionEngine, binaryCmd: string): string {
+  return `${iacEnsureDirPrefix(engine)} ${binaryCmd}`
+}
+
+/** Primary toolbar actions: provision wizard + destroy wizard. */
+export function iacToolbarActions(engine: ProvisionEngine): {
+  provision: IacRunShortcut
+  destroy: IacRunShortcut
+} {
+  return {
+    provision: {
+      id: `${engine}-provision`,
+      label: 'Provision stack',
+      command: '',
+      description: `Run ${iacEngineLabel(engine)} init → validate → plan → apply in the sandbox`,
+      opensInitWizard: true,
+    },
+    destroy: {
+      id: `${engine}-destroy`,
+      label: 'Destroy',
+      command: iacDestroyCommand(engine),
+      description: `Tear down ${iacEngineLabel(engine)}-managed cloud resources`,
+      danger: true,
+      opensInitWizard: true,
+    },
+  }
+}
+
+/** Auto-approved destroy (UI confirms first; no interactive yes prompt in the terminal). */
+export function iacDestroyCommand(engine: ProvisionEngine): string {
+  if (engine === 'pulumi') {
+    return iacCmd(engine, 'pulumi destroy --yes')
+  }
+  const bin = engine === 'opentofu' ? 'tofu' : 'terraform'
+  return iacCmd(engine, `${bin} destroy -auto-approve`)
+}
+
+/** Terminal shortcuts for Terraform / OpenTofu / Pulumi on the Advanced IDE menus. */
+export function iacRunShortcuts(engine: ProvisionEngine): IacRunShortcut[] {
   if (engine === 'terraform') {
-    return ['cd infra/terraform && terraform init', 'cd infra/terraform && terraform plan']
+    return [
+      {
+        id: 'tf-init',
+        label: 'init',
+        command: iacCmd(engine, 'terraform init'),
+        opensInitWizard: true,
+      },
+      { id: 'tf-validate', label: 'validate', command: iacCmd(engine, 'terraform validate') },
+      { id: 'tf-plan', label: 'plan', command: iacCmd(engine, 'terraform plan') },
+      {
+        id: 'tf-apply',
+        label: 'apply',
+        command: iacCmd(engine, 'terraform apply -auto-approve'),
+        opensInitWizard: true,
+      },
+      {
+        id: 'tf-destroy',
+        label: 'destroy',
+        command: iacDestroyCommand(engine),
+        danger: true,
+      },
+    ]
   }
   if (engine === 'opentofu') {
-    return ['cd infra/terraform && tofu init', 'cd infra/terraform && tofu plan']
+    return [
+      {
+        id: 'tofu-init',
+        label: 'init',
+        command: iacCmd(engine, 'tofu init'),
+        opensInitWizard: true,
+      },
+      { id: 'tofu-validate', label: 'validate', command: iacCmd(engine, 'tofu validate') },
+      { id: 'tofu-plan', label: 'plan', command: iacCmd(engine, 'tofu plan') },
+      {
+        id: 'tofu-apply',
+        label: 'apply',
+        command: iacCmd(engine, 'tofu apply -auto-approve'),
+        opensInitWizard: true,
+      },
+      {
+        id: 'tofu-destroy',
+        label: 'destroy',
+        command: iacDestroyCommand(engine),
+        danger: true,
+      },
+    ]
   }
-  return ['cd infra/pulumi && npm install', 'cd infra/pulumi && pulumi preview']
+  return [
+    { id: 'pu-install', label: 'npm install', command: iacCmd(engine, 'npm install') },
+    {
+      id: 'pu-preview',
+      label: 'preview',
+      command: iacCmd(engine, 'pulumi preview'),
+    },
+    {
+      id: 'pu-up',
+      label: 'up',
+      command: iacCmd(engine, 'pulumi up --yes'),
+      opensInitWizard: true,
+    },
+    { id: 'pu-refresh', label: 'refresh', command: iacCmd(engine, 'pulumi refresh') },
+    {
+      id: 'pu-down',
+      label: 'down',
+      command: iacDestroyCommand(engine),
+      danger: true,
+    },
+  ]
+}
+
+/** Ordered guided steps for the provision wizard (after credentials). */
+export function iacInitWizardSteps(
+  engine: ProvisionEngine,
+  opts: { enableGcpApis?: boolean } = {},
+): IacRunShortcut[] {
+  const enableApisStep: IacRunShortcut | null = opts.enableGcpApis
+    ? {
+        id: 'gcp-enable-apis',
+        label: 'enable APIs',
+        description:
+          'Enable required Google APIs (Compute, GKE, …) on the project before Terraform runs',
+        command: '',
+        action: 'enable_gcp_apis',
+      }
+    : null
+
+  if (engine === 'pulumi') {
+    const pulumiSteps: IacRunShortcut[] = [
+      {
+        id: 'pu-install',
+        label: 'npm install',
+        description: 'Install Pulumi program dependencies',
+        command: iacCmd(engine, 'npm install'),
+      },
+      {
+        id: 'pu-preview',
+        label: 'preview',
+        description: 'Show the planned resource changes without applying',
+        command: iacCmd(engine, 'pulumi preview'),
+      },
+      {
+        id: 'pu-up',
+        label: 'up',
+        description: 'Create or update stack resources (auto-approved)',
+        command: iacCmd(engine, 'pulumi up --yes'),
+      },
+    ]
+    return enableApisStep ? [enableApisStep, ...pulumiSteps] : pulumiSteps
+  }
+  const bin = engine === 'opentofu' ? 'tofu' : 'terraform'
+  const label = engine === 'opentofu' ? 'OpenTofu' : 'Terraform'
+  const tfSteps: IacRunShortcut[] = [
+    {
+      id: `${bin}-init`,
+      label: 'init',
+      description: `Download providers and initialize the ${label} working directory`,
+      command: iacCmd(engine, `${bin} init`),
+    },
+    {
+      id: `${bin}-validate`,
+      label: 'validate',
+      description: 'Check configuration syntax and provider arguments',
+      command: iacCmd(engine, `${bin} validate`),
+    },
+    {
+      id: `${bin}-plan`,
+      label: 'plan',
+      description: 'Preview create/update/destroy actions before applying',
+      command: iacCmd(engine, `${bin} plan`),
+    },
+    {
+      id: `${bin}-apply`,
+      label: 'apply',
+      description: `Apply the plan to your cloud project (auto-approved — no yes prompt)`,
+      command: iacCmd(engine, `${bin} apply -auto-approve`),
+    },
+  ]
+  return enableApisStep ? [enableApisStep, ...tfSteps] : tfSteps
+}
+
+/** Single destroy step for the destroy wizard. */
+export function iacDestroyWizardSteps(engine: ProvisionEngine): IacRunShortcut[] {
+  const label = iacEngineLabel(engine)
+  return [
+    {
+      id: `${engine}-destroy`,
+      label: 'destroy',
+      description: `Destroy ${label}-managed resources (auto-approved after you confirm)`,
+      command: iacDestroyCommand(engine),
+      danger: true,
+    },
+  ]
+}
+
+export function iacEngineLabel(engine: ProvisionEngine): string {
+  if (engine === 'opentofu') return 'OpenTofu'
+  if (engine === 'pulumi') return 'Pulumi'
+  return 'Terraform'
 }
 
 export function kubernetesRunCommands(mode: K8sScaffoldMode): string[] {

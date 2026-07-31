@@ -19,6 +19,7 @@ def test_create_repo_uses_github_app_auth() -> None:
     )
 
     fake_repo = MagicMock()
+    fake_repo.name = "launchpad-demo"
     fake_repo.full_name = "acme/launchpad-demo"
     fake_repo.html_url = "https://github.com/acme/launchpad-demo"
     fake_repo.private = True
@@ -55,7 +56,8 @@ def test_create_repo_uses_github_app_auth() -> None:
     commit.assert_called_once()
     committed = commit.call_args.args[1]
     assert ".github/workflows/deploy.yml" in committed
-    assert "infra/main.tf" in committed
+    assert "main.tf" in committed
+    assert "infra/main.tf" not in committed
 
 
 def test_create_repo_requires_app_when_no_pat() -> None:
@@ -86,6 +88,7 @@ def test_create_repo_on_personal_account_reuses_existing() -> None:
     )
 
     fake_repo = MagicMock()
+    fake_repo.name = "demo"
     fake_repo.full_name = "Bibi1989/demo"
     fake_repo.html_url = "https://github.com/Bibi1989/demo"
     fake_repo.private = True
@@ -158,6 +161,7 @@ def test_import_existing_repo_pushes_infra_and_new_workflow_file() -> None:
     )
 
     fake_repo = MagicMock()
+    fake_repo.name = "demo"
     fake_repo.full_name = "acme/demo"
     fake_repo.html_url = "https://github.com/acme/demo"
     fake_repo.private = True
@@ -196,11 +200,71 @@ def test_import_existing_repo_pushes_infra_and_new_workflow_file() -> None:
     assert result.workflow_path == ".github/workflows/launchpad-deploy.yml"
     fake_client.get_repo.assert_called_once_with("acme/demo")
     committed = commit.call_args.args[1]
-    assert "infra/main.tf" in committed
+    assert "main.tf" in committed
+    assert "infra/main.tf" not in committed
     assert ".github/workflows/launchpad-deploy.yml" in committed
-    assert "dockers/Dockerfile" in committed
+    assert any(path.startswith("dockers/Dockerfile") for path in committed)
     assert ".github/workflows/deploy.yml" not in committed
     assert "README.md" not in committed
+
+
+def test_create_does_not_remap_or_duplicate_existing_scaffold() -> None:
+    service = GitHubProvisioningService()
+    request = GitHubRepoRequest(
+        name="demo",
+        installation_id=42,
+        organization="acme",
+        set_cloud_secrets=False,
+        include_workflow=True,
+        include_dockerfiles=True,
+    )
+
+    fake_repo = MagicMock()
+    fake_repo.name = "demo"
+    fake_repo.full_name = "acme/demo"
+    fake_repo.html_url = "https://github.com/acme/demo"
+    fake_repo.private = True
+    fake_repo.default_branch = "main"
+    fake_repo.get_contents.side_effect = GithubException(404, {"message": "Not Found"}, None)
+
+    fake_org = MagicMock()
+    fake_org.create_repo.return_value = fake_repo
+    fake_client = MagicMock()
+    fake_client.get_organization.return_value = fake_org
+
+    workspace_files = {
+        "dockers/Dockerfile.app": "FROM node:22-alpine\n",
+        "ci/github/workflows/deploy.yml": "name: deploy\n",
+        "infra/terraform/main.tf": 'resource "null_resource" "x" {}',
+        "docker-compose.yml": "services: {}\n",
+    }
+
+    with (
+        patch("app.services.github_service.is_github_app_configured", return_value=True),
+        patch(
+            "app.services.github_service.get_installation_client",
+            return_value=(fake_client, 42, "acme", "Organization"),
+        ),
+        patch.object(service, "_commit_files") as commit,
+        patch.object(
+            service,
+            "_resolve_bundle",
+            return_value=(CloudProvider.GCP, IaCEngine.TERRAFORM, workspace_files),
+        ),
+    ):
+        service.create_repository_with_workflow(request)
+
+    committed = commit.call_args.args[1]
+    assert committed["dockers/Dockerfile.app"].startswith("FROM node")
+    assert committed["ci/github/workflows/deploy.yml"].startswith("name:")
+    assert committed["infra/terraform/main.tf"]
+    assert committed["docker-compose.yml"]
+    assert "infra/dockers/Dockerfile.app" not in committed
+    assert "infra/docker-compose.yml" not in committed
+    assert "dockers/Dockerfile" not in committed
+    assert not any(
+        path.startswith(".github/workflows/") for path in committed
+    ), "must not invent a second workflow when workspace already has CI"
 
 
 def test_skip_workflow_still_pushes_infra() -> None:
@@ -247,6 +311,7 @@ def test_skip_workflow_still_pushes_infra() -> None:
 
     assert result.workflow_path is None
     committed = commit.call_args.args[1]
-    assert "infra/main.tf" in committed
+    assert "main.tf" in committed
+    assert "infra/main.tf" not in committed
     assert not any(path.startswith(".github/workflows/") for path in committed)
     assert "dockers/Dockerfile" not in committed

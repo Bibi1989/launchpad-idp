@@ -2,10 +2,12 @@
 const sections = [
   { id: 'overview', label: 'How it works' },
   { id: 'getting-started', label: 'Getting started' },
+  { id: 'home-settings', label: 'Home & settings' },
   { id: 'environments', label: 'Launch an environment' },
   { id: 'rebuild', label: 'Git push rebuilds' },
   { id: 'manifest', label: 'Apply manifests' },
   { id: 'provision', label: 'Provision cloud infra' },
+  { id: 'network', label: 'Network topology' },
   { id: 'credentials', label: 'Cloud credentials' },
   { id: 'github', label: 'GitHub Connect' },
   { id: 'workspaces', label: 'Workspaces & terminal' },
@@ -74,8 +76,8 @@ const sections = [
           <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
           for a one-click preview — Local kind (single screen) or cloud, catalog template or your
           own repo. Use
-          <NuxtLink to="/" class="text-[var(--lp-accent)] hover:underline">Environments</NuxtLink>
-          for the classic git form.
+          <NuxtLink to="/environments" class="text-[var(--lp-accent)] hover:underline">Environments</NuxtLink>
+          to manage running previews.
           Use
           <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">Provision</NuxtLink>
           to create a new cloud stack, and
@@ -93,10 +95,28 @@ const sections = [
             <strong class="text-[var(--lp-text)]">Dev login</strong> when that option is available.
           </li>
           <li>
-            You land on the Environments dashboard — from there you can launch a preview app or
-            navigate to Provision / Workspaces / GitHub.
+            You land on the
+            <NuxtLink to="/home" class="text-[var(--lp-accent)] hover:underline">Home</NuxtLink>
+            hub — from there open Environments, Provision, or Settings. The public product page is
+            <NuxtLink to="/" class="text-[var(--lp-accent)] hover:underline">/</NuxtLink>.
+          </li>
+          <li>
+            Optionally add GCP / AWS / Azure / Cloudflare keys under
+            <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">Settings</NuxtLink>
+            so workspaces can reuse them.
           </li>
         </ol>
+      </section>
+
+      <section id="home-settings" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">Home & settings</h2>
+        <p class="text-sm leading-7 text-[var(--lp-muted)]">
+          <NuxtLink to="/home" class="text-[var(--lp-accent)] hover:underline">Home</NuxtLink>
+          shows active environment and workspace counts plus whether account cloud keys are configured.
+          <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">Settings</NuxtLink>
+          stores encrypted cloud credentials for your user (SA JSON, WIF, AWS keys/roles, Azure SP,
+          Cloudflare token). Blank credential fields in Provision fall back to this vault.
+        </p>
       </section>
 
       <section id="environments" class="scroll-mt-28 space-y-3">
@@ -239,14 +259,47 @@ const sections = [
         </ol>
       </section>
 
+      <section id="network" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">Network topology</h2>
+        <p class="text-sm leading-7 text-[var(--lp-muted)]">
+          When VPC/VNet and Subnets are enabled, choose a topology in Provision:
+        </p>
+        <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>
+            <strong class="text-[var(--lp-text)]">Simple</strong> — one subnet (plus an internet
+            gateway on AWS). Best for demos and ephemeral stacks. CIDRs are auto-generated per
+            environment so parallel stacks do not collide.
+          </li>
+          <li>
+            <strong class="text-[var(--lp-text)]">Standard</strong> — public + private subnets with
+            managed NAT egress (Cloud NAT on GCP, NAT Gateway on AWS/Azure). Clusters attach to the
+            private subnet. Prefer this for production-ish golden paths.
+          </li>
+        </ul>
+      </section>
+
       <section id="credentials" class="scroll-mt-28 space-y-6">
         <div class="space-y-3">
           <h2 class="text-xl font-semibold">Cloud credentials</h2>
           <p class="text-sm leading-7 text-[var(--lp-muted)]">
-            Cloud access is attached
-            <strong class="text-[var(--lp-text)]">per workspace</strong>
-            in the Provision wizard — there is no permanent cloud OAuth login. Use credentials with
-            only the permissions needed for the resources you selected.
+            You can store credentials in two places:
+          </p>
+          <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+            <li>
+              <strong class="text-[var(--lp-text)]">Account Settings</strong>
+              (
+              <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">/settings</NuxtLink>
+              ) — encrypted vault for GCP (SA JSON or WIF), AWS (keys or role ARN), Azure SP, and
+              Cloudflare. Used as a fallback when workspace fields are blank.
+            </li>
+            <li>
+              <strong class="text-[var(--lp-text)]">Per workspace</strong>
+              in the Provision wizard — overrides or fills that workspace only.
+            </li>
+          </ul>
+          <p class="text-sm leading-7 text-[var(--lp-muted)]">
+            Prefer short-lived credentials or keyless OIDC. Use least privilege for the resources
+            you selected.
           </p>
         </div>
 

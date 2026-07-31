@@ -48,6 +48,7 @@ from app.schemas.environment import (
 from app.schemas.k8s import DeployMode
 from app.schemas.orgs import OrgCostEnvironmentItem, OrgCostSummary
 from app.services.audit import AuditService
+from app.services.preview_urls import stable_pr_preview_url
 from app.services.drift_scanner import record_drift_if_changed, scan_environment
 from app.services.kubernetes import KubernetesProvisioner
 from app.services.orgs import OrganizationService, role_at_least
@@ -79,6 +80,24 @@ class EnvironmentService:
         self._environments = EnvironmentRepository(session)
         self._logs = DeploymentLogRepository(session)
 
+    async def _pause_expired_rows(self, rows: list) -> None:
+        """Pause any returned environments that are past TTL (eager, no Celery required)."""
+        from app.workers.tasks import pause_expired_environment
+
+        paused_any = False
+        for row in rows:
+            did = await pause_expired_environment(
+                self._session,
+                row,
+                actor_id="system:ttl-eager",
+                settings=self._settings,
+            )
+            if did:
+                paused_any = True
+                logger.info("environment_ttl_eager_paused", environment_id=str(row.id))
+        if paused_any:
+            await self._session.commit()
+
     async def list_environments(
         self,
         owner: User,
@@ -94,12 +113,14 @@ class EnvironmentService:
             rows = await self._environments.list_for_org(org.id)
             if not rows:
                 rows = await self._environments.list_for_owner(owner.id)
+        await self._pause_expired_rows(rows)
         active = await self._environments.count_active_for_owner(owner.id)
         reads = [self._to_read(row, concurrent_active_count=active) for row in rows]
         return await self._enrich_drift(reads, [row.id for row in rows])
 
     async def get_environment(self, environment_id: UUID, owner: User) -> EnvironmentRead:
         environment = await self._require_access(environment_id, owner, mutate=False)
+        await self._pause_expired_rows([environment])
         active = await self._environments.count_active_for_owner(owner.id)
         read = self._to_read(environment, concurrent_active_count=active)
         enriched = await self._enrich_drift([read], [environment.id])
@@ -332,6 +353,8 @@ class EnvironmentService:
             workload_image=workload_image,
             github_pr_number=payload.github_pr_number,
             github_pr_url=payload.github_pr_url,
+            enable_postgres=payload.enable_postgres,
+            enable_redis=payload.enable_redis,
         )
         result = await self.enqueue_provision(
             create_payload,
@@ -437,6 +460,8 @@ class EnvironmentService:
             github_pr_url=payload.github_pr_url,
             deploy_mode=deploy_mode.value,
             manifest_packaging=manifest_packaging,
+            enable_postgres=payload.enable_postgres,
+            enable_redis=payload.enable_redis,
         )
         environment.namespace_name = f"launchpad-env-{environment.id}"
         await self._session.flush()
@@ -885,6 +910,11 @@ class EnvironmentService:
         read = EnvironmentRead.model_validate(environment)
         base = self._settings.preview_public_base_url.rstrip("/")
         read.portal_url = f"{base}/p/{environment.id}"
+        if environment.github_pr_number is not None:
+            read.stable_pr_url = stable_pr_preview_url(
+                environment.github_pr_number,
+                settings=self._settings,
+            )
         read.gitops_rebuild_enabled = bool((self._settings.webhook_secret or "").strip())
         read.app_ready = bool(environment.preview_url) and environment.status in {
             EnvironmentStatus.RUNNING,
@@ -974,23 +1004,29 @@ class EnvironmentService:
         return f"https://launchpad.local/workspaces/{workspace_id}", "main"
 
     def _require_inline_cloud_credentials(self, payload: PreviewLaunchRequest) -> None:
+        from app.core.secrets import has_aws_auth, has_gcp_auth
+
         creds = payload.credentials
-        if payload.provider == PreviewProvider.GCP and not creds.gcp_sa_key_json:
+        if payload.provider == PreviewProvider.GCP and not has_gcp_auth(creds):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": "credentials_required",
-                    "message": "GCP service account JSON is required",
+                    "message": (
+                        "GCP credentials required: paste a service account JSON, or configure "
+                        "Workload Identity Federation (project number, pool, provider, SA email)"
+                    ),
                 },
             )
-        if payload.provider == PreviewProvider.AWS and (
-            not creds.aws_access_key_id or not creds.aws_secret_access_key
-        ):
+        if payload.provider == PreviewProvider.AWS and not has_aws_auth(creds):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": "credentials_required",
-                    "message": "AWS access key and secret are required",
+                    "message": (
+                        "AWS credentials required: access key + secret, or an IAM role ARN "
+                        "for keyless OIDC web identity"
+                    ),
                 },
             )
         if payload.provider == PreviewProvider.AZURE and (

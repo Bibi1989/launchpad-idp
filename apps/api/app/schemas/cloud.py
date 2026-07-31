@@ -27,6 +27,17 @@ class SecretBackend(str, Enum):
     NATIVE_K8S = "native_k8s"
 
 
+class NetworkTopology(str, Enum):
+    """VPC/subnet layout when networking resources are enabled.
+
+    - simple: one subnet (fast demos / ephemeral stacks)
+    - standard: public + private with NAT/egress for production-ish golden paths
+    """
+
+    SIMPLE = "simple"
+    STANDARD = "standard"
+
+
 class KubernetesPackaging(str, Enum):
     """Workload packaging layout written under ``infra/`` when a cluster is selected."""
 
@@ -263,6 +274,7 @@ class LocalCloudConfig(BaseModel):
 class GcpResources(BaseModel):
     vpc: bool = True
     subnets: bool = True
+    network_topology: NetworkTopology = NetworkTopology.SIMPLE
     gke: bool = False
     artifact_registry: bool = False
     secret_backend: SecretBackend = SecretBackend.SECRET_MANAGER
@@ -274,6 +286,7 @@ class GcpResources(BaseModel):
     memorystore: bool = False
     bigquery: bool = False
     region: str = Field(default="us-central1", min_length=2, max_length=64)
+    machine_type: str = Field(default="e2-standard-4", min_length=3, max_length=64)
     project_id: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
 
 
@@ -283,6 +296,7 @@ class GcpResources(BaseModel):
 class AwsResources(BaseModel):
     vpc: bool = True
     subnets: bool = True
+    network_topology: NetworkTopology = NetworkTopology.SIMPLE
     ec2: bool = False
     s3: bool = False
     eks: bool = False
@@ -295,6 +309,7 @@ class AwsResources(BaseModel):
     sqs: bool = False
     alb: bool = False
     region: str = Field(default="us-east-1", min_length=2, max_length=32)
+    instance_type: str = Field(default="t3.medium", min_length=3, max_length=64)
     account_alias: str | None = Field(default=None, max_length=64)
 
 
@@ -304,6 +319,7 @@ class AwsResources(BaseModel):
 class AzureResources(BaseModel):
     vnet: bool = True
     subnets: bool = True
+    network_topology: NetworkTopology = NetworkTopology.SIMPLE
     aks: bool = False
     key_vault: bool = True
     container_apps: bool = False
@@ -314,6 +330,7 @@ class AzureResources(BaseModel):
     app_service: bool = False
     log_analytics: bool = False
     location: str = Field(default="eastus", min_length=2, max_length=64)
+    vm_size: str = Field(default="Standard_D2_v2", min_length=3, max_length=64)
     resource_group: str = Field(min_length=3, max_length=90, pattern=r"^[-\w\._\(\)]+$")
 
 
@@ -373,9 +390,19 @@ class CloudCredentials(BaseModel):
     """Ephemeral credentials injected into the sandbox — never logged in plaintext."""
 
     gcp_sa_key_json: str | None = None
+    # GCP Workload Identity Federation (Keyless OIDC)
+    gcp_wif_project_number: str | None = None
+    gcp_wif_pool_id: str | None = None
+    gcp_wif_provider_id: str | None = None
+    gcp_wif_target_sa_email: str | None = None
+
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
+    # AWS IAM Roles with Web Identity (Keyless OIDC)
+    aws_role_arn: str | None = None
+    aws_role_session_name: str | None = None
+
     azure_client_id: str | None = None
     azure_client_secret: str | None = None
     azure_tenant_id: str | None = None
@@ -384,9 +411,15 @@ class CloudCredentials(BaseModel):
 
     @field_validator(
         "gcp_sa_key_json",
+        "gcp_wif_project_number",
+        "gcp_wif_pool_id",
+        "gcp_wif_provider_id",
+        "gcp_wif_target_sa_email",
         "aws_access_key_id",
         "aws_secret_access_key",
         "aws_session_token",
+        "aws_role_arn",
+        "aws_role_session_name",
         "azure_client_id",
         "azure_client_secret",
         "azure_tenant_id",
@@ -402,6 +435,14 @@ class CloudCredentials(BaseModel):
         return value
 
 
+
+class ContainerServiceSpec(BaseModel):
+    name: str = Field(default="app", min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
+    stack: str = Field(default="node", max_length=50)
+    listen_port: int = Field(default=8080, ge=1, le=65535)
+    dockerfile_path: str | None = None
+
+
 class ContainerScaffoldConfig(BaseModel):
     """Options for generating multi-stage Dockerfile and docker-compose.yml."""
 
@@ -412,6 +453,8 @@ class ContainerScaffoldConfig(BaseModel):
     frameworks: list[str] = Field(default_factory=list)
     app_name: str = Field(default="app", max_length=100)
     listen_port: int = Field(default=8080, ge=1, le=65535)
+    services: list[ContainerServiceSpec] = Field(default_factory=list)
+
 
 
 class ProvisioningWizardRequest(BaseModel):
@@ -607,6 +650,19 @@ class WorkspaceWizardConfig(BaseModel):
         default_factory=WorkloadDependenciesConfig
     )
     has_credentials: bool = False
+    """Safe display name for the stored cloud key (never the secret itself)."""
+    credential_label: str | None = None
+
+
+class GcpApiEnablementResponse(BaseModel):
+    """Result of enabling required Google APIs before provision."""
+
+    project_id: str
+    required: list[str] = Field(default_factory=list)
+    already_enabled: list[str] = Field(default_factory=list)
+    newly_enabled: list[str] = Field(default_factory=list)
+    waited_seconds: float = 0.0
+    message: str = ""
 
 
 class WorkspaceListItem(BaseModel):
@@ -714,4 +770,83 @@ class GitHubAppStatusResponse(BaseModel):
     default_installation_id: int | None = None
     message: str
     installations: list[GitHubInstallationItem] = Field(default_factory=list)
+
+
+class GitlabStatusResponse(BaseModel):
+    connected: bool
+    oauth_configured: bool
+    authorize_url: str | None = None
+    base_url: str
+    username: str | None = None
+    token_type: str | None = None
+    message: str
+
+
+class GitlabPatConnectRequest(BaseModel):
+    token: str = Field(min_length=8, max_length=512)
+    base_url: str | None = Field(default=None, max_length=256)
+
+
+class GitlabOAuthCallbackRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=256)
+    state: str = Field(min_length=8, max_length=2048)
+
+
+class GitlabProjectItem(BaseModel):
+    id: int
+    name: str
+    path_with_namespace: str
+    http_url_to_repo: str
+    web_url: str
+    visibility: str
+    default_branch: str
+
+
+class GitlabRepoRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    description: str = Field(default="", max_length=350)
+    private: bool = True
+    workspace_id: str | None = None
+    existing_path: str | None = Field(
+        default=None,
+        max_length=200,
+        description="group/project path when importing an existing project",
+    )
+    include_ci: bool = False
+
+    @field_validator("existing_path")
+    @classmethod
+    def normalize_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().strip("/")
+        return cleaned or None
+
+
+class GitlabRepoResult(BaseModel):
+    id: int
+    path_with_namespace: str
+    web_url: str
+    http_url_to_repo: str
+    default_branch: str
+    visibility: str
+    created: bool
+    files_committed: int = 0
+
+
+class GitlabPushRequest(BaseModel):
+    project_path: str = Field(min_length=3, max_length=200)
+    commit_message: str = Field(
+        default="chore: update Launchpad workspace files",
+        min_length=1,
+        max_length=200,
+    )
+
+    @field_validator("project_path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        cleaned = value.strip().strip("/")
+        if cleaned.count("/") < 1:
+            raise ValueError("project_path must be namespace/project")
+        return cleaned
 

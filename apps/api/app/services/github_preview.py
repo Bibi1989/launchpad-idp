@@ -15,6 +15,13 @@ from app.services.github_app import (
     get_installation_client,
     is_github_app_configured,
 )
+from app.services.preview_smoke import run_preview_smoke_check
+from app.services.preview_urls import (
+    portal_environment_url,
+    portal_status_url,
+    resolve_public_preview_url,
+    stable_pr_preview_url,
+)
 
 logger = get_logger(__name__)
 
@@ -23,6 +30,7 @@ logger = get_logger(__name__)
 class PreviewPrNotifyResult:
     commented: bool
     status_set: bool
+    smoke_ok: bool
     message: str
 
 
@@ -31,32 +39,54 @@ def notify_preview_ready(
     *,
     settings: Settings | None = None,
 ) -> PreviewPrNotifyResult:
-    """Comment on the linked PR and set a commit status when GitHub App is configured."""
+    """Comment on the linked PR and set a commit status when GitHub App is configured.
+
+    Runs an optional HTTP smoke check against the preview URL before marking the
+    status green. Status ``target_url`` points at the Launchpad environment page
+    ("Open in Launchpad"); the comment includes app URL + stable PR URL + portal.
+    """
     cfg = settings or get_settings()
     if environment.github_pr_number is None:
-        return PreviewPrNotifyResult(False, False, "no_pr_linked")
+        return PreviewPrNotifyResult(False, False, True, "no_pr_linked")
     if not is_github_app_configured(cfg):
-        return PreviewPrNotifyResult(False, False, "github_app_not_configured")
+        return PreviewPrNotifyResult(False, False, True, "github_app_not_configured")
 
     full_name = normalize_git_repo_full_name(environment.git_repo_url)
     if full_name is None or "/" not in full_name:
-        return PreviewPrNotifyResult(False, False, "invalid_repo")
+        return PreviewPrNotifyResult(False, False, True, "invalid_repo")
 
     owner, repo_name = full_name.split("/", 1)
     app_url = environment.preview_url
-    portal_base = cfg.preview_public_base_url.rstrip("/")
-    portal_url = f"{portal_base}/p/{environment.id}"
+    portal_url = portal_status_url(environment.id, settings=cfg)
+    launchpad_url = portal_environment_url(environment.id, settings=cfg)
+    pr_stable = stable_pr_preview_url(environment.github_pr_number, settings=cfg)
+    public_url = resolve_public_preview_url(
+        app_url=app_url,
+        pr_number=environment.github_pr_number,
+        environment_id=environment.id,
+        settings=cfg,
+    )
+
+    smoke_target = app_url or pr_stable
+    smoke = run_preview_smoke_check(smoke_target, settings=cfg) if smoke_target else (
+        type("S", (), {"ok": False, "message": "no_url", "status_code": None})()
+    )
+
     body = (
         f"### Launchpad preview ready\n\n"
         f"| | |\n|---|---|\n"
         f"| Environment | `{environment.name}` |\n"
         f"| Status | `{environment.status.value}` |\n"
+        f"| Smoke check | `{'pass' if smoke.ok else 'fail'} ({smoke.message})` |\n"
     )
     if app_url:
         body += f"| **Open app** | {app_url} |\n"
+    body += f"| **Stable PR URL** | {pr_stable} |\n"
+    body += f"| **Open in Launchpad** | {launchpad_url} |\n"
     body += f"| Status page | {portal_url} |\n"
     body += (
-        f"\nPush to `{environment.git_branch}` rebuilds this preview while it is active.\n"
+        f"\nPush to `{environment.git_branch}` rebuilds this preview while it is active. "
+        f"Closing or merging the PR tears it down automatically.\n"
     )
 
     try:
@@ -68,14 +98,31 @@ def notify_preview_ready(
 
         status_set = False
         sha = environment.latest_commit_sha or pull.head.sha
-        if sha and app_url:
-            # Commit status (checks:status permission) — lightweight vs Checks API.
+        if sha:
+            state = "success" if smoke.ok else "failure"
+            description = (
+                "Launchpad preview is running"
+                if smoke.ok
+                else f"Preview smoke failed: {smoke.message}"[:140]
+            )
             repo.get_commit(sha).create_status(
-                state="success",
-                target_url=app_url,
-                description="Launchpad preview is running",
+                state=state,
+                target_url=launchpad_url,
+                description=description,
                 context="launchpad/preview",
             )
+            # Companion context for the stable/public URL when different from Launchpad deep link.
+            if public_url != launchpad_url:
+                repo.get_commit(sha).create_status(
+                    state=state,
+                    target_url=public_url,
+                    description=(
+                        "Open preview app"
+                        if smoke.ok
+                        else "Preview URL unreachable"
+                    )[:140],
+                    context="launchpad/preview-url",
+                )
             status_set = True
 
         if environment.github_pr_url is None:
@@ -87,11 +134,13 @@ def notify_preview_ready(
             pr=environment.github_pr_number,
             commented=commented,
             status_set=status_set,
+            smoke_ok=smoke.ok,
+            smoke=smoke.message,
         )
-        return PreviewPrNotifyResult(commented, status_set, "ok")
+        return PreviewPrNotifyResult(commented, status_set, smoke.ok, "ok" if smoke.ok else smoke.message)
     except GitHubAppAuthError as exc:
         logger.warning("preview_pr_notify_auth", error=str(exc))
-        return PreviewPrNotifyResult(False, False, str(exc))
+        return PreviewPrNotifyResult(False, False, smoke.ok, str(exc))
     except GithubException as exc:
         logger.warning(
             "preview_pr_notify_failed",
@@ -99,4 +148,4 @@ def notify_preview_ready(
             status=exc.status,
             error=str(exc),
         )
-        return PreviewPrNotifyResult(False, False, f"github_error:{exc.status}")
+        return PreviewPrNotifyResult(False, False, smoke.ok, f"github_error:{exc.status}")

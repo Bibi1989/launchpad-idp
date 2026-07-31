@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pr-${PR_NUMBER}
+  labels:
+    EnvironmentId: pr-${PR_NUMBER}
+    Owner: platform-team
+    CreatedBy: launchpad-preview-ci
+    TTL_Expiration: "${TTL_EXPIRATION}"
+    launchpad.io/environment-id: pr-${PR_NUMBER}
+    launchpad.io/managed-by: launchpad-preview-ci
+    launchpad.io/created-at: "${CREATED_AT}"

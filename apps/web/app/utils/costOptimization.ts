@@ -81,36 +81,39 @@ export function applyCostOptimizationToWorkloadOptions(
   }
 }
 
-/** API uses snake_case; UI uses camelCase. */
+/** API uses snake_case; UI uses camelCase. Accepts either shape (or undefined). */
 export function costOptimizationToApi(
-  cost: CostOptimizationConfig,
+  cost: CostOptimizationConfig | Record<string, unknown> | null | undefined,
 ): Record<string, unknown> {
+  const normalized = costOptimizationFromApi(
+    cost && typeof cost === 'object' ? (cost as Record<string, unknown>) : undefined,
+  )
   return {
     spot_scheduling: {
-      enabled: cost.spotScheduling.enabled,
-      placement: cost.spotScheduling.placement,
-      allocation_percent: cost.spotScheduling.allocationPercent,
-      provisioner: cost.spotScheduling.provisioner,
+      enabled: normalized.spotScheduling.enabled,
+      placement: normalized.spotScheduling.placement,
+      allocation_percent: normalized.spotScheduling.allocationPercent,
+      provisioner: normalized.spotScheduling.provisioner,
     },
     hpa: {
-      enabled: cost.hpa.enabled,
-      min_replicas: cost.hpa.minReplicas,
-      max_replicas: cost.hpa.maxReplicas,
-      target_cpu_utilization: cost.hpa.targetCpuUtilization,
+      enabled: normalized.hpa.enabled,
+      min_replicas: normalized.hpa.minReplicas,
+      max_replicas: normalized.hpa.maxReplicas,
+      target_cpu_utilization: normalized.hpa.targetCpuUtilization,
     },
     vpa: {
-      enabled: cost.vpa.enabled,
+      enabled: normalized.vpa.enabled,
     },
     resources: {
-      preset: cost.resources.preset,
-      cpu_request: cost.resources.cpuRequest,
-      cpu_limit: cost.resources.cpuLimit,
-      memory_request: cost.resources.memoryRequest,
-      memory_limit: cost.resources.memoryLimit,
+      preset: normalized.resources.preset,
+      cpu_request: normalized.resources.cpuRequest,
+      cpu_limit: normalized.resources.cpuLimit,
+      memory_request: normalized.resources.memoryRequest,
+      memory_limit: normalized.resources.memoryLimit,
     },
     idle_shutdown: {
-      enabled: cost.idleShutdown.enabled,
-      schedule: cost.idleShutdown.schedule,
+      enabled: normalized.idleShutdown.enabled,
+      schedule: normalized.idleShutdown.schedule,
     },
   }
 }

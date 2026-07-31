@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { WorkspaceFileNode } from '~/types/provisioning'
+import { ApiError } from '~/composables/useApi'
 import { inferInfraManifestKind } from '~/utils/infraManifestMapper'
 import type { WorkspaceTreeNodeModel } from '~/utils/workspaceFileTree'
 import { buildWorkspaceFileTree } from '~/utils/workspaceFileTree'
@@ -13,8 +14,10 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
 
-const { listWorkspaceFiles } = useProvisioning()
+const { listWorkspaceFiles, restoreWorkspaceFiles } = useProvisioning()
 const loading = ref(false)
+const restoring = ref(false)
+const filesMissing = ref(false)
 const loadError = ref<string | null>(null)
 const nodes = ref<WorkspaceFileNode[]>([])
 const tree = ref<WorkspaceTreeNodeModel[]>([])
@@ -51,15 +54,32 @@ watch(
 async function loadFiles() {
   loading.value = true
   loadError.value = null
+  filesMissing.value = false
   try {
     nodes.value = await listWorkspaceFiles(props.workspaceId)
     tree.value = buildWorkspaceFileTree(nodes.value)
   } catch (err) {
+    filesMissing.value = err instanceof ApiError && err.code === 'workspace_files_missing'
     loadError.value = err instanceof Error ? err.message : 'Failed to list infra files'
     nodes.value = []
     tree.value = []
   } finally {
     loading.value = false
+  }
+}
+
+async function restoreFiles() {
+  if (restoring.value) return
+  restoring.value = true
+  loadError.value = null
+  try {
+    await restoreWorkspaceFiles(props.workspaceId)
+    filesMissing.value = false
+    await loadFiles()
+  } catch (err) {
+    loadError.value = err instanceof Error ? err.message : 'Restore failed'
+  } finally {
+    restoring.value = false
   }
 }
 
@@ -93,7 +113,18 @@ watch(
 
     <div class="flex-1 overflow-y-auto px-2 py-2">
       <p v-if="loading" class="px-2 py-2 font-mono text-xs text-[var(--lp-muted)]">Loading…</p>
-      <p v-else-if="loadError" class="px-2 py-2 font-mono text-xs text-[var(--lp-danger)]">{{ loadError }}</p>
+      <div v-else-if="loadError" class="space-y-2 px-2 py-2">
+        <p class="font-mono text-xs text-[var(--lp-danger)]">{{ loadError }}</p>
+        <button
+          v-if="filesMissing"
+          type="button"
+          class="rounded-md border border-[var(--lp-line)] bg-[var(--lp-panel)] px-2 py-1 font-mono text-[11px] text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-50"
+          :disabled="restoring"
+          @click="restoreFiles"
+        >
+          {{ restoring ? 'Restoring…' : 'Restore files' }}
+        </button>
+      </div>
       <p v-else-if="!tree.length" class="px-2 py-2 font-mono text-xs text-[var(--lp-muted)]">
         No files found in workspace.
       </p>

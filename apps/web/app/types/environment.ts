@@ -37,6 +37,7 @@ export interface Environment {
   node_port?: number | null
   github_pr_number?: number | null
   github_pr_url?: string | null
+  stable_pr_url?: string | null
   ttl_expires_at: string
   cost_estimate_hourly: string
   cost_accrued: string
@@ -55,6 +56,8 @@ export interface Environment {
   runtime_summary?: string | null
   deploy_mode?: 'preview' | 'manifest'
   manifest_packaging?: string | null
+  enable_postgres?: boolean
+  enable_redis?: boolean
   drift_detected?: boolean
   drift_summary?: string | null
 }
@@ -134,6 +137,8 @@ export interface PreviewLaunchPayload {
   workspace_id?: string | null
   github_pr_number?: number | null
   github_pr_url?: string | null
+  enable_postgres?: boolean
+  enable_redis?: boolean
 }
 
 export interface EnvironmentExtendPayload {

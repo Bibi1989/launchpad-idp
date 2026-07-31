@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: preview-reaper
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: preview-reaper-role
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: preview-reaper-binding
+subjects:
+  - kind: ServiceAccount
+    name: preview-reaper
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: preview-reaper-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: preview-reaper
+  namespace: default
+spec:
+  # Run every 30 minutes
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: preview-reaper
+          restartPolicy: OnFailure
+          containers:
+            - name: reaper
+              image: bitnami/kubectl:1.29
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  echo "Starting Preview Environment Reaper at $(date)..."
+                  current_time=$(date +%s)
+
+                  # Get all namespaces starting with "pr-"
+                  namespaces=$(kubectl get ns -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep '^pr-' || true)
+
+                  if [ -z "$namespaces" ]; then
+                    echo "No active preview namespaces found."
+                    exit 0
+                  fi
+
+                  for ns in $namespaces; do
+                    echo "----------------------------------------"
+                    echo "Checking namespace: $ns"
+                    
+                    # 1. Check TTL expiration
+                    # Get the TTL_Expiration label
+                    ttl_exp=$(kubectl get ns "$ns" -o jsonpath='{.metadata.labels.TTL_Expiration}' || echo "")
+                    
+                    # Fallback to creation timestamp if no label exists
+                    if [ -z "$ttl_exp" ] || [ "$ttl_exp" = "null" ]; then
+                      echo "No TTL_Expiration label found. Checking creation time..."
+                      creation_time=$(kubectl get ns "$ns" -o jsonpath='{.metadata.creationTimestamp}')
+                      creation_epoch=$(date -d "$creation_time" +%s)
+                      # 48 hours is 172800 seconds
+                      expiration_epoch=$((creation_epoch + 172800))
+                    else
+                      # Convert ISO 8601 string to epoch
+                      expiration_epoch=$(date -d "$ttl_exp" +%s)
+                    fi
+                    
+                    echo "Current time: $(date -d @$current_time)"
+                    echo "Expiration time: $(date -d @$expiration_epoch)"
+
+                    if [ "$current_time" -gt "$expiration_epoch" ]; then
+                      echo "Namespace $ns has expired. Pausing preview (scaling deployments to 0)..."
+                      kubectl scale deployment --all -n "$ns" --replicas=0
+                      kubectl annotate namespace "$ns" launchpad.io/paused-reason="ttl-expired" --overwrite
+                      continue
+                    fi
+                    
+                    # 2. Scale-to-Zero Strategy (Idle/Off-hours scale down)
+                    # Check if we are in off-hours (8 PM to 8 AM / 20:00 - 08:00) to scale down to 0
+                    current_hour=$(date +%H)
+                    if [ "$current_hour" -ge 20 ] || [ "$current_hour" -lt 8 ]; then
+                      echo "Off-hours detected ($current_hour:00). Scaling down all deployments in namespace $ns to 0..."
+                      # Scale all deployments in the namespace to 0
+                      kubectl scale deployment --all -n "$ns" --replicas=0
+                    fi
+                  done
+                  echo "----------------------------------------"
+                  echo "Reaper run completed."

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,26 @@ from app.services.state_lock import (
 
 logger = get_logger(__name__)
 
+PullRequestAction = Literal[
+    "opened",
+    "reopened",
+    "synchronize",
+    "closed",
+    "edited",
+    "ready_for_review",
+    "converted_to_draft",
+    "labeled",
+    "unlabeled",
+    "assigned",
+    "unassigned",
+    "review_requested",
+    "review_request_removed",
+    "auto_merge_enabled",
+    "auto_merge_disabled",
+    "enqueued",
+    "dequeued",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class PushEventDetails:
@@ -29,6 +49,18 @@ class PushEventDetails:
     branch: str
     commit_sha: str
     full_commit_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestEventDetails:
+    action: str
+    repository_full_name: str
+    pr_number: int
+    pr_url: str
+    head_branch: str
+    head_sha: str
+    short_sha: str
+    merged: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +120,46 @@ class GitHubWebhookService:
             full_commit_sha=after.strip(),
         )
 
+    @staticmethod
+    def parse_pull_request_event(payload: dict[str, Any]) -> PullRequestEventDetails | None:
+        action = payload.get("action")
+        if not isinstance(action, str) or not action:
+            return None
+        repository = payload.get("repository")
+        pull = payload.get("pull_request")
+        if not isinstance(repository, dict) or not isinstance(pull, dict):
+            return None
+        full_name = repository.get("full_name")
+        number = pull.get("number")
+        html_url = pull.get("html_url")
+        head = pull.get("head")
+        if not isinstance(full_name, str) or not full_name.strip():
+            return None
+        if not isinstance(number, int) or number < 1:
+            return None
+        if not isinstance(html_url, str) or not html_url.strip():
+            return None
+        if not isinstance(head, dict):
+            return None
+        head_ref = head.get("ref")
+        head_sha = head.get("sha")
+        if not isinstance(head_ref, str) or not head_ref.strip():
+            return None
+        if not isinstance(head_sha, str) or not head_sha.strip():
+            return None
+        short = short_commit_sha(head_sha) or head_sha[:7]
+        merged = bool(pull.get("merged")) if action == "closed" else False
+        return PullRequestEventDetails(
+            action=action,
+            repository_full_name=full_name.strip(),
+            pr_number=number,
+            pr_url=html_url.strip(),
+            head_branch=head_ref.strip(),
+            head_sha=head_sha.strip(),
+            short_sha=short,
+            merged=merged,
+        )
+
     async def process_event(
         self,
         *,
@@ -95,14 +167,18 @@ class GitHubWebhookService:
         payload: dict[str, Any],
         correlation_id: str,
     ) -> WebhookProcessResult:
-        from app.workers.tasks import enqueue_rebuild_environment
-
         if event_name == "ping":
             return WebhookProcessResult(
                 accepted=True,
                 event=event_name,
                 matched_environment_ids=[],
                 message="pong",
+            )
+
+        if event_name == "pull_request":
+            return await self._process_pull_request(
+                payload=payload,
+                correlation_id=correlation_id,
             )
 
         if event_name != "push":
@@ -113,11 +189,236 @@ class GitHubWebhookService:
                 message=f"Ignored event '{event_name}'",
             )
 
+        return await self._process_push(payload=payload, correlation_id=correlation_id)
+
+    async def _process_pull_request(
+        self,
+        *,
+        payload: dict[str, Any],
+        correlation_id: str,
+    ) -> WebhookProcessResult:
+        details = self.parse_pull_request_event(payload)
+        if details is None:
+            return WebhookProcessResult(
+                accepted=True,
+                event="pull_request",
+                matched_environment_ids=[],
+                message="Pull request event missing repository/PR details",
+            )
+
+        if details.action == "closed":
+            return await self._teardown_pr_environments(details, correlation_id=correlation_id)
+
+        if details.action in {"opened", "reopened", "synchronize", "ready_for_review"}:
+            return await self._rebuild_pr_environments(details, correlation_id=correlation_id)
+
+        return WebhookProcessResult(
+            accepted=True,
+            event="pull_request",
+            matched_environment_ids=[],
+            message=f"Ignored pull_request action '{details.action}'",
+        )
+
+    async def _rebuild_pr_environments(
+        self,
+        details: PullRequestEventDetails,
+        *,
+        correlation_id: str,
+    ) -> WebhookProcessResult:
+        from app.workers.tasks import enqueue_rebuild_environment
+
+        matches = await self._environments.list_active_for_repo_pr(
+            repo_full_name=details.repository_full_name,
+            pr_number=details.pr_number,
+        )
+        if not matches:
+            logger.info(
+                "webhook_pr_no_match",
+                repo=details.repository_full_name,
+                pr=details.pr_number,
+                action=details.action,
+            )
+            return WebhookProcessResult(
+                accepted=True,
+                event="pull_request",
+                matched_environment_ids=[],
+                message=(
+                    f"No active PR preview for {details.repository_full_name}"
+                    f"#{details.pr_number} — launch once from Launchpad with this PR number"
+                ),
+            )
+
+        matched_ids: list[UUID] = []
+        audit = AuditService(self._session)
+        for candidate in matches:
+            if await is_state_locked(candidate.id, scope="environment"):
+                await self._logs.create(
+                    environment_id=candidate.id,
+                    message=PROVISIONING_IN_PROGRESS_MESSAGE,
+                    log_level=LogLevel.WARN,
+                )
+                await audit.record(
+                    action=AuditAction.REBUILD_INITIATED,
+                    actor_id=AuditService.webhook_actor("github"),
+                    status=AuditStatus.REJECTED,
+                    environment_id=candidate.id,
+                    workspace_id=candidate.workspace_id,
+                    commit_sha=details.short_sha,
+                    detail=PROVISIONING_IN_PROGRESS_MESSAGE,
+                )
+                await self._session.commit()
+                continue
+
+            if candidate.github_pr_url is None:
+                candidate.github_pr_url = details.pr_url
+
+            environment = await self._environments.mark_rebuild(
+                candidate.id,
+                commit_sha=details.short_sha,
+            )
+            if environment is None:
+                continue
+
+            await self._logs.create(
+                environment_id=environment.id,
+                message=(
+                    f"PR #{details.pr_number} {details.action}: rebuild queued "
+                    f"({details.short_sha})"
+                ),
+                log_level=LogLevel.INFO,
+            )
+            await audit.record(
+                action=AuditAction.REBUILD_INITIATED,
+                actor_id=AuditService.webhook_actor("github"),
+                status=AuditStatus.PENDING,
+                environment_id=environment.id,
+                workspace_id=environment.workspace_id,
+                commit_sha=details.short_sha,
+                detail=f"pull_request:{details.action}",
+            )
+            await self._session.commit()
+
+            await publish_env_event(
+                environment.id,
+                event_type="STATUS_CHANGE",
+                status=EnvironmentStatus.PROVISIONING.value,
+                commit_sha=details.short_sha,
+                message=f"Rebuild queued from PR #{details.pr_number} {details.action}",
+            )
+            enqueue_rebuild_environment(
+                environment_id=str(environment.id),
+                commit_sha=details.short_sha,
+                correlation_id=correlation_id,
+            )
+            matched_ids.append(environment.id)
+
+        return WebhookProcessResult(
+            accepted=True,
+            event="pull_request",
+            matched_environment_ids=matched_ids,
+            message=f"Queued PR rebuild for {len(matched_ids)} environment(s)",
+        )
+
+    async def _teardown_pr_environments(
+        self,
+        details: PullRequestEventDetails,
+        *,
+        correlation_id: str,
+    ) -> WebhookProcessResult:
+        from app.workers.tasks import enqueue_teardown_environment
+
+        matches = await self._environments.list_active_for_repo_pr(
+            repo_full_name=details.repository_full_name,
+            pr_number=details.pr_number,
+        )
+        if not matches:
+            return WebhookProcessResult(
+                accepted=True,
+                event="pull_request",
+                matched_environment_ids=[],
+                message=f"No active PR preview to destroy for #{details.pr_number}",
+            )
+
+        matched_ids: list[UUID] = []
+        audit = AuditService(self._session)
+        reason = "merged" if details.merged else "closed"
+        for candidate in matches:
+            if candidate.status in {
+                EnvironmentStatus.TEARDOWN_PENDING,
+                EnvironmentStatus.DESTROYED,
+            }:
+                continue
+            if await is_state_locked(candidate.id, scope="environment"):
+                await self._logs.create(
+                    environment_id=candidate.id,
+                    message=(
+                        f"PR #{details.pr_number} {reason}: teardown deferred — "
+                        f"{PROVISIONING_IN_PROGRESS_MESSAGE}"
+                    ),
+                    log_level=LogLevel.WARN,
+                )
+                await self._session.commit()
+                continue
+
+            await self._environments.update_status(candidate, EnvironmentStatus.TEARDOWN_PENDING)
+            await self._logs.create(
+                environment_id=candidate.id,
+                message=(
+                    f"PR #{details.pr_number} {reason}: auto-teardown queued "
+                    f"(correlation_id={correlation_id})"
+                ),
+                log_level=LogLevel.INFO,
+            )
+            await audit.record(
+                action=AuditAction.TEARDOWN_INITIATED,
+                actor_id=AuditService.webhook_actor("github"),
+                status=AuditStatus.PENDING,
+                environment_id=candidate.id,
+                workspace_id=candidate.workspace_id,
+                commit_sha=details.short_sha,
+                detail=f"pull_request:closed:{reason}",
+            )
+            await self._session.commit()
+
+            await publish_env_event(
+                candidate.id,
+                event_type="STATUS_CHANGE",
+                status=EnvironmentStatus.TEARDOWN_PENDING.value,
+                commit_sha=details.short_sha,
+                message=f"Auto-teardown from PR #{details.pr_number} {reason}",
+            )
+            enqueue_teardown_environment(
+                environment_id=str(candidate.id),
+                correlation_id=correlation_id,
+            )
+            matched_ids.append(candidate.id)
+            logger.info(
+                "webhook_pr_teardown_enqueued",
+                environment_id=str(candidate.id),
+                pr=details.pr_number,
+                reason=reason,
+            )
+
+        return WebhookProcessResult(
+            accepted=True,
+            event="pull_request",
+            matched_environment_ids=matched_ids,
+            message=f"Queued teardown for {len(matched_ids)} PR preview(s)",
+        )
+
+    async def _process_push(
+        self,
+        *,
+        payload: dict[str, Any],
+        correlation_id: str,
+    ) -> WebhookProcessResult:
+        from app.workers.tasks import enqueue_rebuild_environment
+
         details = self.parse_push_event(payload)
         if details is None:
             return WebhookProcessResult(
                 accepted=True,
-                event=event_name,
+                event="push",
                 matched_environment_ids=[],
                 message="Push event missing repository/branch/commit details (or tag/delete)",
             )
@@ -135,7 +436,7 @@ class GitHubWebhookService:
             )
             return WebhookProcessResult(
                 accepted=True,
-                event=event_name,
+                event="push",
                 matched_environment_ids=[],
                 message="No active environments matched repository/branch",
             )
@@ -224,7 +525,7 @@ class GitHubWebhookService:
 
         return WebhookProcessResult(
             accepted=True,
-            event=event_name,
+            event="push",
             matched_environment_ids=matched_ids,
             message=f"Queued rebuild for {len(matched_ids)} environment(s)",
         )

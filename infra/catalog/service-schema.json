@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ServiceDescriptor",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "enum": ["launchpad.io/v1alpha1", "launchpad.io/v1"]
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["ServiceDescriptor"]
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "description": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        }
+      },
+      "required": ["name", "repository"]
+    },
+    "spec": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["critical", "tier-1", "tier-2", "tier-3"]
+        },
+        "runbook": {
+          "type": "string",
+          "format": "uri"
+        },
+        "health": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer"
+            }
+          },
+          "required": ["path", "port"]
+        }
+      },
+      "required": ["owner", "tier", "runbook", "health"]
+    },
+    "infrastructure": {
+      "type": "object",
+      "properties": {
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": ["web", "api", "worker", "database", "cache"]
+              },
+              "dockerfile": {
+                "type": "string"
+              },
+              "manifests": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "port": {
+                "type": "integer"
+              }
+            },
+            "required": ["name", "type", "manifests"]
+          }
+        }
+      },
+      "required": ["components"]
+    }
+  },
+  "required": ["apiVersion", "kind", "metadata", "spec", "infrastructure"]
+}

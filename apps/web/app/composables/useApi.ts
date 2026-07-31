@@ -14,9 +14,11 @@ export class ApiError extends Error {
   }
 }
 
-export type ApiFetchInit = RequestInit & {
+export type ApiFetchInit = Omit<RequestInit, 'body'> & {
   /** Override the default request timeout (ms). */
   timeoutMs?: number
+  /** Plain objects are JSON-stringified; strings/Blob/FormData pass through. */
+  body?: BodyInit | Record<string, unknown> | null
 }
 
 export function useApi() {
@@ -33,7 +35,22 @@ export function useApi() {
     const headers = new Headers(requestInit.headers)
     headers.set('Accept', 'application/json')
     headers.set('X-Correlation-ID', correlationId.value)
-    if (requestInit.body && !headers.has('Content-Type')) {
+
+    let body = requestInit.body
+    if (
+      body !== undefined
+      && body !== null
+      && typeof body === 'object'
+      && !(body instanceof Blob)
+      && !(body instanceof ArrayBuffer)
+      && !(body instanceof FormData)
+      && !(body instanceof URLSearchParams)
+      && !(body instanceof ReadableStream)
+      && !ArrayBuffer.isView(body)
+    ) {
+      body = JSON.stringify(body)
+    }
+    if (body && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
     if (token.value) {
@@ -66,6 +83,7 @@ export function useApi() {
     try {
       response = await fetch(`${config.public.apiBase}${path}`, {
         ...requestInit,
+        body,
         headers,
         signal: mergedController.signal,
       })

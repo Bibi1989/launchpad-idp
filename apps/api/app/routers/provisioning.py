@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db_session
 from app.deps.auth import CurrentUser
 from app.deps.org import CurrentOrg
+from app.core.config import get_settings
 from app.schemas.cloud import (
     GitHubAppStatusResponse,
     GitHubInstallationItem,
@@ -18,6 +19,13 @@ from app.schemas.cloud import (
     GitHubRepositoryItem,
     GitHubRepositorySearchItem,
     GitHubRepositorySearchResponse,
+    GitlabOAuthCallbackRequest,
+    GitlabPatConnectRequest,
+    GitlabProjectItem,
+    GitlabPushRequest,
+    GitlabRepoRequest,
+    GitlabRepoResult,
+    GitlabStatusResponse,
     IaCBundleSummary,
     ProvisioningWizardRequest,
     WorkspaceFileContent,
@@ -32,6 +40,7 @@ from app.schemas.cloud import (
     WorkspaceTemplateApplyRequest,
     WorkspaceTemplateInfo,
     WorkspaceWizardConfig,
+    GcpApiEnablementResponse,
 )
 from app.schemas.environment import AuditLogRead
 from app.services.audit import AuditService
@@ -42,6 +51,11 @@ from app.services.github_app import (
     list_installation_repositories,
     list_installations,
     search_all_repositories,
+)
+from app.services.gitlab_service import (
+    GitLabAuthError,
+    GitLabAuthService,
+    http_error_from_gitlab,
 )
 from app.services.manifest_deploy import (
     inspect_image_exposed_ports,
@@ -147,6 +161,19 @@ async def get_workspace_wizard_config(
     return await service.get_wizard_config(workspace_id, user)
 
 
+@router.post(
+    "/workspaces/{workspace_id}/enable-cloud-apis",
+    response_model=GcpApiEnablementResponse,
+)
+async def enable_workspace_cloud_apis(
+    workspace_id: UUID,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> GcpApiEnablementResponse:
+    """Enable required cloud APIs (GCP) before Terraform provision."""
+    return await service.enable_required_cloud_apis(workspace_id, user)
+
+
 @router.put("/workspaces/{workspace_id}", response_model=IaCBundleSummary)
 async def update_workspace(
     workspace_id: UUID,
@@ -155,6 +182,19 @@ async def update_workspace(
     service: ProvisioningService = Depends(get_provisioning_service),
 ) -> IaCBundleSummary:
     return await service.update_workspace(workspace_id, payload, owner=user)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/restore-files",
+    response_model=IaCBundleSummary,
+)
+async def restore_workspace_files(
+    workspace_id: UUID,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> IaCBundleSummary:
+    """Recreate missing on-disk IaC/manifest files from the persisted wizard snapshot."""
+    return await service.restore_workspace_files(workspace_id, user)
 
 
 @router.delete(
@@ -343,6 +383,129 @@ async def push_workspace_github(
 
 
 @router.post(
+    "/workspaces/{workspace_id}/gitlab/push",
+    response_model=GitlabRepoResult,
+)
+async def push_workspace_gitlab(
+    workspace_id: UUID,
+    payload: GitlabPushRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> GitlabRepoResult:
+    return await service.push_workspace_to_gitlab(workspace_id, user, payload)
+
+
+@router.get("/gitlab/status", response_model=GitlabStatusResponse)
+async def gitlab_status(
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db_session),
+) -> GitlabStatusResponse:
+    settings = get_settings()
+    auth = GitLabAuthService(session, settings)
+    row = await auth.get_connection(user.id)
+    authorize_url: str | None = None
+    if auth.oauth_configured():
+        try:
+            authorize_url = auth.authorize_url()
+        except GitLabAuthError:
+            authorize_url = None
+    if row is None:
+        return GitlabStatusResponse(
+            connected=False,
+            oauth_configured=auth.oauth_configured(),
+            authorize_url=authorize_url,
+            base_url=settings.gitlab_base_url.rstrip("/"),
+            username=None,
+            token_type=None,
+            message=(
+                "Connect GitLab with OAuth or a Personal Access Token "
+                "(api + write_repository scopes)."
+            ),
+        )
+    return GitlabStatusResponse(
+        connected=True,
+        oauth_configured=auth.oauth_configured(),
+        authorize_url=authorize_url,
+        base_url=row.base_url,
+        username=row.username,
+        token_type=row.token_type,
+        message=f"Connected as {row.username}",
+    )
+
+
+@router.post("/gitlab/connect/pat", response_model=GitlabStatusResponse)
+async def gitlab_connect_pat(
+    payload: GitlabPatConnectRequest,
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db_session),
+) -> GitlabStatusResponse:
+    auth = GitLabAuthService(session)
+    try:
+        profile = await auth.validate_pat(token=payload.token, base_url=payload.base_url)
+        await auth.upsert_connection(
+            owner=user,
+            token=payload.token,
+            token_type="pat",
+            base_url=payload.base_url,
+            username=str(profile.get("username") or profile.get("name") or "gitlab"),
+        )
+    except GitLabAuthError as exc:
+        raise http_error_from_gitlab(exc) from exc
+    return await gitlab_status(user=user, session=session)
+
+
+@router.post("/gitlab/oauth/callback", response_model=GitlabStatusResponse)
+async def gitlab_oauth_callback(
+    payload: GitlabOAuthCallbackRequest,
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db_session),
+) -> GitlabStatusResponse:
+    auth = GitLabAuthService(session)
+    try:
+        token, profile = await auth.exchange_code(code=payload.code, state=payload.state)
+        await auth.upsert_connection(
+            owner=user,
+            token=token,
+            token_type="oauth",
+            username=str(profile.get("username") or profile.get("name") or "gitlab"),
+        )
+    except GitLabAuthError as exc:
+        raise http_error_from_gitlab(exc) from exc
+    return await gitlab_status(user=user, session=session)
+
+
+@router.delete("/gitlab/connection", status_code=status.HTTP_204_NO_CONTENT)
+async def gitlab_disconnect(
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    auth = GitLabAuthService(session)
+    await auth.delete_connection(user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/gitlab/projects", response_model=list[GitlabProjectItem])
+async def gitlab_list_projects(
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> list[GitlabProjectItem]:
+    return await service.list_gitlab_projects(owner=user)
+
+
+@router.post(
+    "/gitlab/repositories",
+    response_model=GitlabRepoResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_gitlab_repository(
+    payload: GitlabRepoRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> GitlabRepoResult:
+    return await service.create_gitlab_repo(payload, owner=user)
+
+
+@router.post(
     "/workspaces/{workspace_id}/analyze-file",
     response_model=WorkspaceFileAnalyzeResponse,
 )
@@ -360,6 +523,7 @@ async def analyze_workspace_file(
             path=payload.path,
             content=payload.content,
             kind=payload.kind,
+            error_context=payload.error_context,
             correlation_id=str(workspace_id),
         )
     except WorkspaceFileAnalyzerError as exc:

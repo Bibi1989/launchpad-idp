@@ -1,0 +1,37 @@
+apiVersion: launchpad.io/v1
+kind: ServiceDescriptor
+metadata:
+  name: launchpad-app
+  description: "Internal developer platform management interface and provisioning engine"
+  repository: "github.com/Bibi1989/launchpad-idp"
+spec:
+  owner: "platform-team@mydomain.com"
+  tier: "tier-1"
+  runbook: "https://wiki.mydomain.com/runbooks/launchpad"
+  health:
+    path: "/api/v1/health"
+    port: 8000
+infrastructure:
+  components:
+    - name: api
+      type: api
+      dockerfile: "apps/api/Dockerfile"
+      manifests:
+        - "infra/kubernetes/preview/api.yaml"
+      port: 8000
+    - name: web
+      type: web
+      dockerfile: "apps/web/Dockerfile"
+      manifests:
+        - "infra/kubernetes/preview/web.yaml"
+      port: 3000
+    - name: postgres
+      type: database
+      manifests:
+        - "infra/kubernetes/preview/postgres.yaml"
+      port: 5432
+    - name: redis
+      type: cache
+      manifests:
+        - "infra/kubernetes/preview/redis.yaml"
+      port: 6379

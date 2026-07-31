@@ -41,4 +41,14 @@ describe('costOptimization', () => {
     expect(back.spotScheduling.allocationPercent).toBe(40)
     expect(back.hpa.minReplicas).toBe(3)
   })
+
+  it('toApi accepts undefined and API snake_case without throwing', () => {
+    expect(() => costOptimizationToApi(undefined)).not.toThrow()
+    expect(costOptimizationToApi(undefined).spot_scheduling).toMatchObject({ enabled: false })
+    const fromWizard = costOptimizationToApi({
+      spot_scheduling: { enabled: true, allocation_percent: 25 },
+      hpa: { enabled: false },
+    })
+    expect(fromWizard.spot_scheduling).toMatchObject({ enabled: true, allocation_percent: 25 })
+  })
 })

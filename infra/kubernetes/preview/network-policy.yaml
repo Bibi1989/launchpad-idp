@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-cross-namespace
+  namespace: pr-${PR_NUMBER}
+  labels:
+    EnvironmentId: pr-${PR_NUMBER}
+    Owner: platform-team
+    CreatedBy: launchpad-preview-ci
+    launchpad.io/environment-id: pr-${PR_NUMBER}
+    launchpad.io/managed-by: launchpad-preview-ci
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from within the same namespace
+    - from:
+        - podSelector: {}
+    # Allow traffic from ingress controllers (usually in ingress-nginx or similar system namespaces)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+  egress:
+    # Allow all egress to pods in the same namespace
+    - to:
+        - podSelector: {}
+    # Allow egress to DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

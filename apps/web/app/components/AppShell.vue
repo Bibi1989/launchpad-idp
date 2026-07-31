@@ -1,7 +1,14 @@
 <script setup lang="ts">
+import type { Environment } from '~/types/environment'
+import type { CatalogService } from '~/types/catalog'
+import type { WorkspaceListItem } from '~/types/provisioning'
+
 const route = useRoute()
 const { user, logout } = useAuth()
 const { orgs, activeOrgId, setActiveOrg } = useOrgs()
+const { environments, refresh: refreshEnvironments } = useEnvironments()
+const { listWorkspaces } = useProvisioning()
+const { listServices } = useCatalog()
 
 const terminalOpen = useState('lp-terminal-open', () => false)
 const createEnvOpen = useState('lp-create-env-open', () => false)
@@ -9,15 +16,106 @@ const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () =
 const mobileNavOpen = ref(false)
 
 const navItems = [
-  { label: 'Environments', to: '/', icon: 'dashboard', match: (path: string) => path === '/' || path.startsWith('/environments') },
+  { label: 'Home', to: '/home', icon: 'home', match: (path: string) => path === '/home' },
+  { label: 'Environments', to: '/environments', icon: 'dashboard', match: (path: string) => path.startsWith('/environments') },
   { label: 'Launch', to: '/launch', icon: 'rocket_launch', match: (path: string) => path.startsWith('/launch') },
+  { label: 'Catalog', to: '/catalog', icon: 'inventory_2', match: (path: string) => path.startsWith('/catalog') },
   { label: 'Workspaces', to: '/workspaces', icon: 'layers', match: (path: string) => path.startsWith('/workspaces') },
   { label: 'Provision', to: '/provision', icon: 'schema', match: (path: string) => path.startsWith('/provision') },
-  // { label: 'Scaffold', to: '/dockerfiles', icon: 'deployed_code', match: (path: string) => path.startsWith('/dockerfiles') },
-  { label: 'GitHub', to: '/integrations/github', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
+  { label: 'Integrations', to: '/integrations', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
   { label: 'Organization', to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
+  { label: 'Settings', to: '/settings', icon: 'settings', match: (path: string) => path.startsWith('/settings') },
   { label: 'Docs', to: '/docs', icon: 'menu_book', match: (path: string) => path.startsWith('/docs') },
 ] as const
+
+type NavSearchHit = {
+  id: string
+  label: string
+  subtitle: string
+  to: string
+  icon: string
+  group: 'Pages' | 'Environments' | 'Workspaces' | 'Services'
+}
+
+const searchQuery = ref('')
+const searchOpen = ref(false)
+const searchFocused = ref(false)
+const activeHitIndex = ref(0)
+const searchInputRef = ref<HTMLInputElement | null>(null)
+const workspaces = ref<WorkspaceListItem[]>([])
+const catalogServices = ref<CatalogService[]>([])
+const searchIndexReady = ref(false)
+
+const filteredNavItems = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return navItems
+  return navItems.filter((item) => item.label.toLowerCase().includes(q))
+})
+
+const searchHits = computed((): NavSearchHit[] => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return []
+
+  const hits: NavSearchHit[] = []
+
+  for (const item of navItems) {
+    if (item.label.toLowerCase().includes(q) || item.to.toLowerCase().includes(q)) {
+      hits.push({
+        id: `nav-${item.to}`,
+        label: item.label,
+        subtitle: item.to,
+        to: item.to,
+        icon: item.icon,
+        group: 'Pages',
+      })
+    }
+  }
+
+  for (const env of environments.value as Environment[]) {
+    const hay = `${env.name} ${env.git_repo_url} ${env.git_branch} ${env.status}`.toLowerCase()
+    if (!hay.includes(q)) continue
+    hits.push({
+      id: `env-${env.id}`,
+      label: env.name,
+      subtitle: `${env.status} · ${env.git_branch}`,
+      to: `/environments/${env.id}`,
+      icon: 'deployed_code',
+      group: 'Environments',
+    })
+  }
+
+  for (const ws of workspaces.value) {
+    const hay = `${ws.name} ${ws.provider} ${ws.engine} ${ws.status}`.toLowerCase()
+    if (!hay.includes(q)) continue
+    hits.push({
+      id: `ws-${ws.id}`,
+      label: ws.name,
+      subtitle: `${ws.provider} · ${ws.engine}`,
+      to: `/workspaces/${ws.id}`,
+      icon: 'layers',
+      group: 'Workspaces',
+    })
+  }
+
+  for (const svc of catalogServices.value) {
+    const hay = `${svc.name} ${svc.owner} ${svc.tier} ${svc.template_id}`.toLowerCase()
+    if (!hay.includes(q)) continue
+    hits.push({
+      id: `svc-${svc.id}`,
+      label: svc.name,
+      subtitle: `${svc.tier} · ${svc.owner}`,
+      to: `/catalog/${svc.id}`,
+      icon: 'inventory_2',
+      group: 'Services',
+    })
+  }
+
+  return hits.slice(0, 24)
+})
+
+const showSearchPanel = computed(
+  () => searchFocused.value && (searchQuery.value.trim().length > 0 || searchOpen.value),
+)
 
 function isActive(match: (path: string) => boolean): boolean {
   return match(route.path)
@@ -45,10 +143,89 @@ function toggleTerminal() {
   mobileNavOpen.value = false
 }
 
+async function ensureSearchIndex() {
+  if (searchIndexReady.value) return
+  searchIndexReady.value = true
+  try {
+    await Promise.all([
+      refreshEnvironments().catch(() => undefined),
+      listWorkspaces()
+        .then((rows) => {
+          workspaces.value = rows
+        })
+        .catch(() => undefined),
+      listServices()
+        .then((rows) => {
+          catalogServices.value = rows
+        })
+        .catch(() => undefined),
+    ])
+  } catch {
+    // Search still works for nav pages without remote indexes.
+  }
+}
+
+function onSearchFocus() {
+  searchFocused.value = true
+  searchOpen.value = true
+  void ensureSearchIndex()
+}
+
+function onSearchBlur() {
+  // Delay so click on a result registers before panel closes.
+  window.setTimeout(() => {
+    searchFocused.value = false
+    searchOpen.value = false
+  }, 150)
+}
+
+function clearSearch() {
+  searchQuery.value = ''
+  activeHitIndex.value = 0
+}
+
+async function goToHit(hit: NavSearchHit) {
+  clearSearch()
+  searchOpen.value = false
+  mobileNavOpen.value = false
+  await navigateTo(hit.to)
+}
+
+function onSearchKeydown(event: KeyboardEvent) {
+  const hits = searchHits.value
+  if (event.key === 'Escape') {
+    clearSearch()
+    searchInputRef.value?.blur()
+    return
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    if (!hits.length) return
+    activeHitIndex.value = (activeHitIndex.value + 1) % hits.length
+    return
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    if (!hits.length) return
+    activeHitIndex.value = (activeHitIndex.value - 1 + hits.length) % hits.length
+    return
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    const hit = hits[activeHitIndex.value] ?? hits[0]
+    if (hit) void goToHit(hit)
+  }
+}
+
+watch(searchQuery, () => {
+  activeHitIndex.value = 0
+})
+
 watch(
   () => route.fullPath,
   () => {
     mobileNavOpen.value = false
+    clearSearch()
   },
 )
 </script>
@@ -98,9 +275,28 @@ watch(
         </div>
       </div>
 
-      <nav class="flex-1 space-y-1 px-3">
+      <nav class="flex-1 space-y-1 overflow-y-auto px-3">
+        <div class="relative mb-3 sm:hidden">
+          <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[var(--lp-muted)]">
+            search
+          </span>
+          <input
+            v-model="searchQuery"
+            type="search"
+            class="lp-input pl-10"
+            placeholder="Filter menu…"
+            aria-label="Filter navigation"
+            @focus="onSearchFocus"
+          >
+        </div>
+        <p
+          v-if="searchQuery.trim() && !filteredNavItems.length"
+          class="px-3 py-2 text-xs text-[var(--lp-muted)]"
+        >
+          No menu matches
+        </p>
         <NuxtLink
-          v-for="item in navItems"
+          v-for="item in filteredNavItems"
           :key="item.to"
           :to="item.to"
           class="lp-nav-link"
@@ -162,17 +358,56 @@ watch(
             <span class="material-symbols-outlined">menu</span>
           </button>
           <div class="relative hidden w-full max-w-xl sm:block">
-            <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[var(--lp-muted)]">
+            <span class="material-symbols-outlined absolute left-3 top-1/2 z-10 -translate-y-1/2 text-sm text-[var(--lp-muted)]">
               search
             </span>
             <input
+              ref="searchInputRef"
+              v-model="searchQuery"
               type="search"
               class="lp-input pl-10"
-              placeholder="Search environments, workspaces…"
-              readonly
-              tabindex="-1"
+              placeholder="Search pages, environments, workspaces…"
               aria-label="Search"
+              aria-autocomplete="list"
+              :aria-expanded="showSearchPanel"
+              @focus="onSearchFocus"
+              @blur="onSearchBlur"
+              @keydown="onSearchKeydown"
             >
+            <div
+              v-if="showSearchPanel && searchQuery.trim()"
+              class="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-40 max-h-80 overflow-y-auto rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] shadow-2xl"
+              role="listbox"
+            >
+              <p
+                v-if="!searchHits.length"
+                class="px-4 py-3 text-sm text-[var(--lp-muted)]"
+              >
+                No matches for “{{ searchQuery.trim() }}”
+              </p>
+              <template v-else>
+                <button
+                  v-for="(hit, index) in searchHits"
+                  :key="hit.id"
+                  type="button"
+                  role="option"
+                  class="flex w-full items-start gap-3 px-4 py-2.5 text-left transition hover:bg-[var(--lp-panel-2)]"
+                  :class="index === activeHitIndex ? 'bg-[var(--lp-panel-2)]' : ''"
+                  :aria-selected="index === activeHitIndex"
+                  @mousedown.prevent="goToHit(hit)"
+                >
+                  <span class="material-symbols-outlined mt-0.5 text-[1.1rem] text-[var(--lp-accent)]">
+                    {{ hit.icon }}
+                  </span>
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate text-sm font-medium text-[var(--lp-text)]">{{ hit.label }}</span>
+                    <span class="mt-0.5 block truncate font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
+                      {{ hit.group }} · {{ hit.subtitle }}
+                    </span>
+                  </span>
+                </button>
+              </template>
+            </div>
           </div>
         </div>
 

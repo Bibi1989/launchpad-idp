@@ -11,6 +11,7 @@ You must NEVER guess, assume, or fabricate:
 - Framework/Library API signatures or component props.
 - System/API schemas, specs, or configuration fields.
 - Architectural patterns or existing utility signatures in the codebase.
+- Research tools, library from the internet to follow best practices 
 
 ---
 

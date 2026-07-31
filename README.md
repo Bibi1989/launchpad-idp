@@ -13,7 +13,7 @@ Cloud credentials are encrypted at rest and injected into the sandbox for that s
 
 ## Using Launchpad
 
-Open the app and sign in (or use **Dev login** when available). In-product guides live at **/docs**.
+Open the app at **`/`** for the product overview, then sign in (or use **Dev login** when available). You land on **Home** (`/home`); in-product guides live at **/docs**. Store cloud keys under **Settings** (`/settings`). Environments live at `/environments`.
 
 ### One-click preview (recommended)
 
@@ -28,7 +28,7 @@ Open the app and sign in (or use **Dev login** when available). In-product guide
 #### Local kind testing
 
 ```bash
-make kind-down && make kind-up   # NodePorts 30080-30084 → localhost
+make kind-down && make kind-up   # NodePorts 30080-30089 → localhost
 # Then in apps/api/.env:
 #   KUBERNETES_ENABLED=true
 #   KUBERNETES_CONTEXT=kind-launchpad
@@ -43,7 +43,8 @@ With `KUBERNETES_ENABLED=false`, Local still runs the UI in simulate mode (porta
 
 ### Advanced paths
 
-- **Provision** — start with **Dev (kind)**; the API runs `kind-up` for you and `kind-down` when you destroy the last Dev workspace. Switch the wizard to GCP/AWS/Azure/Cloudflare when ready.
+- **Provision** — start with **Dev (kind)**; the API runs `kind-up` for you and `kind-down` when you destroy the last Dev workspace. Switch the wizard to GCP/AWS/Azure/Cloudflare when ready. Choose **Simple** or **Standard** network topology (public+private with NAT) when VPC/subnets are enabled.
+- **Settings** — account-level encrypted GCP/AWS/Azure/Cloudflare credentials (fallback when workspace fields are blank).
 - **Workspaces** — IDE is hidden by default; click **Advanced IDE** to edit files, run kubectl/terraform, push to GitHub.
 - Classic git form remains available from the empty dashboard (“advanced git form”).
 

@@ -8,18 +8,20 @@ export default defineNuxtRouteMiddleware((to) => {
     return
   }
 
-  const isPublicAuth
-    = to.path === '/login'
+  const isPublic
+    = to.path === '/'
+      || to.path === '/login'
+      || to.path === '/docs'
+      || to.path.startsWith('/docs/')
       || to.path.startsWith('/auth/')
       || to.path.startsWith('/invite/')
 
-  if (!token.value && !isPublicAuth) {
-    const next = to.fullPath !== '/' ? `?next=${encodeURIComponent(to.fullPath)}` : ''
-    return navigateTo(`/login${next}`)
+  if (!token.value && !isPublic) {
+    return navigateTo(`/login?next=${encodeURIComponent(to.fullPath)}`)
   }
 
   if (token.value && to.path === '/login') {
-    const next = typeof to.query.next === 'string' ? to.query.next : '/'
-    return navigateTo(next.startsWith('/') ? next : '/')
+    const next = typeof to.query.next === 'string' ? to.query.next : '/home'
+    return navigateTo(next.startsWith('/') ? next : '/home')
   }
 })

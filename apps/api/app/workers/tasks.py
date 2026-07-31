@@ -390,6 +390,10 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             stage=ExecutionStage.APPLY,
                         )
                         await session.commit()
+                        if settings.kubernetes_enabled and (environment.provider == "local" or (settings.kubernetes_context or "").startswith("kind-")):
+                            kind_cluster = (settings.kubernetes_context or "launchpad").removeprefix("kind-")
+                            _build_and_load_kind_docker_images(workspace_root, cluster_name=kind_cluster)
+
                         deployer = ManifestDeployer(settings, provisioner)
                         resources = deployer.deploy(
                             workspace_root=workspace_root,
@@ -412,6 +416,13 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             stage=ExecutionStage.APPLY,
                         )
                         await session.commit()
+                        if getattr(environment, "enable_postgres", False) or getattr(environment, "enable_redis", False):
+                            provisioner.apply_ephemeral_datastores(
+                                namespace=environment.namespace_name,
+                                name=environment.name,
+                                enable_postgres=getattr(environment, "enable_postgres", False),
+                                enable_redis=getattr(environment, "enable_redis", False),
+                            )
                         resources = provisioner.provision(
                             namespace=environment.namespace_name,
                             environment_id=str(environment.id),
@@ -491,12 +502,13 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
 
                         notify = notify_preview_ready(environment, settings=settings)
                         if notify.commented or notify.status_set:
+                            smoke_note = "smoke=pass" if notify.smoke_ok else f"smoke=fail:{notify.message}"
                             await _emit_log(
                                 log_repo,
                                 environment_id=env_uuid,
                                 message=(
                                     f"Posted GitHub PR #{environment.github_pr_number} "
-                                    f"preview notify ({notify.message})"
+                                    f"preview notify ({notify.message}; {smoke_note})"
                                 ),
                                 status=EnvironmentStatus.RUNNING.value,
                                 commit_sha=commit_sha,
@@ -994,6 +1006,65 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
             await session.commit()
 
 
+async def pause_expired_environment(
+    session,
+    environment,
+    *,
+    actor_id: str = "system:ttl-reaper",
+    settings=None,
+) -> bool:
+    """Scale workloads to 0 and mark an expired environment PAUSED.
+
+    Returns True when the environment was paused in this call.
+    """
+    settings = settings or get_settings()
+    if environment.status not in {EnvironmentStatus.RUNNING, EnvironmentStatus.FAILED}:
+        return False
+    expires = environment.ttl_expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    if expires > datetime.now(UTC):
+        return False
+
+    env_repo = EnvironmentRepository(session)
+    log_repo = DeploymentLogRepository(session)
+    scaled_ok = True
+    try:
+        provisioner = KubernetesProvisioner(settings=settings)
+        scaled_ok = bool(
+            provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
+        )
+    except Exception as e:  # noqa: BLE001 — always mark paused; retry scale next cycle
+        scaled_ok = False
+        logger.error("ttl_reaper_scale_failed", environment_id=str(environment.id), error=str(e))
+
+    await env_repo.update_status(environment, EnvironmentStatus.PAUSED)
+    scale_note = "scaled replicas to 0" if scaled_ok else "status paused (scale retry next cycle)"
+    await _emit_log(
+        log_repo,
+        environment_id=environment.id,
+        message=(
+            f"TTL expired — pausing environment ({scale_note}) "
+            f"(expires_at={environment.ttl_expires_at.isoformat()})"
+        ),
+        log_level=LogLevel.WARN,
+        status=EnvironmentStatus.PAUSED.value,
+        commit_sha=environment.latest_commit_sha,
+        stage=ExecutionStage.APPLY,
+    )
+    await _record_audit(
+        session,
+        action=AuditAction.PAUSE_SUCCEEDED,
+        actor_id=actor_id,
+        status=AuditStatus.SUCCESS,
+        environment_id=environment.id,
+        workspace_id=environment.workspace_id,
+        commit_sha=environment.latest_commit_sha,
+        detail="TTL expired" if scaled_ok else "TTL expired (scale pending retry)",
+    )
+    return True
+
+
 async def _run_ttl_reaper() -> int:
     settings = get_settings()
     session_factory = _session_factory()
@@ -1001,46 +1072,28 @@ async def _run_ttl_reaper() -> int:
 
     async with session_factory() as session:
         env_repo = EnvironmentRepository(session)
-        log_repo = DeploymentLogRepository(session)
         expired = await env_repo.list_expired_running(now=datetime.now(UTC))
+        paused: list[tuple] = []
         for environment in expired:
-            await env_repo.update_status(environment, EnvironmentStatus.TEARDOWN_PENDING)
-            await _emit_log(
-                log_repo,
-                environment_id=environment.id,
-                message=(
-                    "TTL expired — transitioning to TEARDOWN_PENDING "
-                    f"(expires_at={environment.ttl_expires_at.isoformat()})"
-                ),
-                log_level=LogLevel.WARN,
-                status=EnvironmentStatus.TEARDOWN_PENDING.value,
-                commit_sha=environment.latest_commit_sha,
-                stage=ExecutionStage.INIT,
-            )
-            await _record_audit(
+            commit_sha = environment.latest_commit_sha
+            did_pause = await pause_expired_environment(
                 session,
-                action=AuditAction.TEARDOWN_INITIATED,
+                environment,
                 actor_id="system:ttl-reaper",
-                status=AuditStatus.PENDING,
-                environment_id=environment.id,
-                workspace_id=environment.workspace_id,
-                commit_sha=environment.latest_commit_sha,
-                detail="TTL expired",
+                settings=settings,
             )
-            reaped += 1
+            if did_pause:
+                reaped += 1
+                paused.append((environment.id, commit_sha))
         await session.commit()
 
-        for environment in expired:
+        for environment_id, commit_sha in paused:
             await _publish_status(
-                environment.id,
-                status=EnvironmentStatus.TEARDOWN_PENDING,
-                commit_sha=environment.latest_commit_sha,
-                message="TTL expired",
-                stage=ExecutionStage.INIT,
-            )
-            enqueue_teardown_environment(
-                environment_id=str(environment.id),
-                correlation_id=f"ttl-reaper-{environment.id}",
+                environment_id,
+                status=EnvironmentStatus.PAUSED,
+                commit_sha=commit_sha,
+                message="TTL expired - paused",
+                stage=ExecutionStage.APPLY,
             )
 
     logger.info("ttl_reaper_complete", reaped=reaped, interval=settings.ttl_reaper_interval_seconds)
@@ -1292,3 +1345,50 @@ def _run_dockerfile_build(job_id: str, request_payload: dict) -> None:
             status=DockerfileBuildJobStatus.FAILED,
             error=sanitize_log_message(str(exc))[:800],
         )
+
+
+def _build_and_load_kind_docker_images(workspace_root: Path, cluster_name: str = "launchpad") -> list[str]:
+    """Build workspace Dockerfile(s) and load into local kind cluster so pods pull cleanly."""
+    import subprocess
+    import shutil
+
+    if not (shutil.which("docker") and shutil.which("kind")):
+        return []
+
+    loaded: list[str] = []
+    dockers_dir = workspace_root / "dockers"
+    dockerfiles: list[Path] = []
+    if dockers_dir.is_dir():
+        dockerfiles.extend(dockers_dir.rglob("Dockerfile*"))
+    root_df = workspace_root / "Dockerfile"
+    if root_df.is_file():
+        dockerfiles.append(root_df)
+
+    for df in dockerfiles:
+        if not df.is_file():
+            continue
+        rel = df.relative_to(workspace_root)
+        svc_name = df.parent.name if df.parent != workspace_root and df.parent.name != "dockers" else "app"
+        image_tag = f"launchpad/{svc_name.lower()}:latest"
+        try:
+            logger.info("building_kind_docker_image", image=image_tag, dockerfile=str(rel))
+            build_res = subprocess.run(
+                ["docker", "build", "-t", image_tag, "-f", str(df), str(workspace_root)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if build_res.returncode == 0:
+                logger.info("loading_kind_docker_image", image=image_tag, cluster=cluster_name)
+                load_res = subprocess.run(
+                    ["kind", "load", "docker-image", image_tag, "--name", cluster_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if load_res.returncode == 0:
+                    loaded.append(image_tag)
+        except Exception as exc:
+            logger.warning("kind_image_build_failed", dockerfile=str(rel), error=str(exc))
+
+    return loaded

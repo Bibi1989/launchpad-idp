@@ -69,6 +69,51 @@ def test_encrypt_decrypt_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     secrets_mod._fernet.cache_clear()
 
 
+def test_sanitize_dns1123_and_gke_cluster_naming() -> None:
+    from app.services.terraform_bundle import sanitize_dns1123_name, write_terraform_bundle
+
+    assert sanitize_dns1123_name("My_Env Name!!", max_len=40, prefix="gke") == "gke-my-env-name"
+    long_name = "preview-pr-12345-" + ("x" * 80)
+    gke = sanitize_dns1123_name(long_name, max_len=40, prefix="gke")
+    assert len(gke) <= 40
+    assert gke.startswith("gke-")
+    assert not gke.endswith("-")
+    assert gke == gke.lower()
+    assert all(ch.isalnum() or ch == "-" for ch in gke)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        write_terraform_bundle(
+            root,
+            long_name[:64],
+            GcpCloudConfig(
+                provider=CloudProvider.GCP,
+                resources=GcpResources(
+                    project_id="my-project",
+                    gke=True,
+                    vpc=True,
+                    subnets=True,
+                    cloud_storage=True,
+                    cloud_sql=True,
+                ),
+            ),
+        )
+        cluster = (root / "infra/terraform/modules/cluster/main.tf").read_text(
+            encoding="utf-8"
+        )
+        assert "name                     = local.gke_cluster_name" in cluster
+        assert "deletion_protection      = false" in cluster
+        assert "depends_on = [google_container_cluster.gke]" in cluster
+        assert "environment_id = var.environment_id" in cluster
+        assert "EnvironmentId" not in cluster
+        vpc = (root / "infra/terraform/modules/vpc/main.tf").read_text(encoding="utf-8")
+        assert "ip_cidr_range = local.gcp_subnet_cidr" in vpc
+        main = (root / "infra/terraform/main.tf").read_text(encoding="utf-8")
+        assert "force_destroy               = true" in main
+        assert "deletion_protection = false" in main
+        assert "local.gcs_bucket_name" in main
+
+
 def test_iac_generator_writes_gcp_terraform_bundle() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         generator = IaCGenerator(workspace_root=Path(tmp))
@@ -106,28 +151,48 @@ def test_iac_generator_writes_gcp_terraform_bundle() -> None:
             "infra/terraform/modules/secrets/outputs.tf",
         }
         assert expected.issubset(set(bundle.files))
+        assert "infra/terraform/apis.tf" in set(bundle.files)
 
         workspace = Path(bundle.root_dir)
+        apis_tf = (workspace / "infra/terraform/apis.tf").read_text(encoding="utf-8")
+        assert "google_project_service" in apis_tf
+        assert "compute.googleapis.com" in apis_tf
+        assert "serviceusage.googleapis.com" in apis_tf
+        assert "cloudresourcemanager.googleapis.com" in apis_tf
+        assert "container.googleapis.com" in apis_tf
+        assert "iam.googleapis.com" in apis_tf
+        assert "disable_on_destroy = false" in apis_tf
+
         root_main = (workspace / "infra/terraform/main.tf").read_text(encoding="utf-8")
         assert 'module "vpc"' in root_main
+        assert "depends_on = [google_project_service.apis]" in root_main
         assert 'source = "./modules/vpc"' in root_main
         assert 'module "cluster"' in root_main
         assert 'source = "./modules/cluster"' in root_main
         assert 'module "secrets"' in root_main
         assert 'source = "./modules/secrets"' in root_main
         assert "google_artifact_registry_repository" in root_main
+        assert "depends_on = [google_project_service.apis, module.vpc]" in root_main
 
         vpc_main = (
             workspace / "infra/terraform/modules/vpc/main.tf"
         ).read_text(encoding="utf-8")
         assert "google_compute_network" in vpc_main
-        assert "EnvironmentId" in vpc_main
+        assert "google_compute_subnetwork" in vpc_main
+        # VPC networks/subnetworks do not support labels in the GCP provider.
+        assert "labels" not in vpc_main
+        assert "local.name_55" in vpc_main
+        assert "local.gcp_subnet_cidr" in vpc_main
 
         cluster_main = (
             workspace / "infra/terraform/modules/cluster/main.tf"
         ).read_text(encoding="utf-8")
         assert "google_container_cluster" in cluster_main
+        assert "local.gke_cluster_name" in cluster_main
+        assert "deletion_protection      = false" in cluster_main
+        assert "local.gke_node_pool_name" in cluster_main
         assert "google_cloud_run_v2_service" in cluster_main
+        assert "gke-" in cluster_main  # naming locals prefix gke-
 
         secrets_main = (
             workspace / "infra/terraform/modules/secrets/main.tf"
@@ -139,6 +204,38 @@ def test_iac_generator_writes_gcp_terraform_bundle() -> None:
         ).read_text(encoding="utf-8")
         assert "module.vpc.vpc_id" in outputs
         assert "module.cluster.gke_cluster_endpoint" in outputs
+
+
+def test_iac_generator_wires_kubernetes_provider_to_gke_for_native_secrets() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        generator = IaCGenerator(workspace_root=Path(tmp))
+        request = ProvisioningWizardRequest(
+            name="demo-gke-secrets",
+            iac_engine=IaCEngine.TERRAFORM,
+            cloud=GcpCloudConfig(
+                provider=CloudProvider.GCP,
+                resources=GcpResources(
+                    project_id="my-project",
+                    gke=True,
+                    secret_backend=SecretBackend.NATIVE_K8S,
+                ),
+            ),
+        )
+        bundle = generator.generate(request)
+        workspace = Path(bundle.root_dir)
+        providers = (workspace / "infra/terraform/providers.tf").read_text(encoding="utf-8")
+        assert "module.cluster.gke_cluster_endpoint" in providers
+        assert "module.cluster.gke_cluster_ca_certificate" in providers
+        assert "~/.kube/config" not in providers
+        apis = (workspace / "infra/terraform/apis.tf").read_text(encoding="utf-8")
+        assert "container.googleapis.com" in apis
+        main = (workspace / "infra/terraform/main.tf").read_text(encoding="utf-8")
+        assert "module.cluster" in main
+        assert "depends_on = [google_project_service.apis, module.cluster]" in main
+        cluster_out = (
+            workspace / "infra/terraform/modules/cluster/outputs.tf"
+        ).read_text(encoding="utf-8")
+        assert "gke_cluster_ca_certificate" in cluster_out
 
 
 def test_iac_generator_writes_pulumi_aws_bundle() -> None:

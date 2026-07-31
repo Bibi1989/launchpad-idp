@@ -18,7 +18,7 @@ async function accept() {
     status.value = 'ok'
     message.value = `Joined as ${member.role}. Redirecting…`
     setTimeout(() => {
-      void navigateTo('/')
+      void navigateTo('/home')
     }, 1200)
   } catch (err) {
     status.value = 'error'

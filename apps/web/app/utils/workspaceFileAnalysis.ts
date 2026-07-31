@@ -94,3 +94,64 @@ export function analysisKindLabel(kind: WorkspaceAnalysisKind): string {
       return kind
   }
 }
+
+const ANALYZABLE_EXT = new Set([
+  '.tf',
+  '.tfvars',
+  '.yml',
+  '.yaml',
+  '.json',
+  '.ts',
+  '.js',
+  '.py',
+  '.toml',
+  '.hcl',
+  '.dockerfile',
+])
+
+const SKIP_DIR_SEGMENTS = new Set([
+  '.terraform',
+  'node_modules',
+  '.git',
+  '__pycache__',
+  'dist',
+  '.pulumi',
+])
+
+/** True when a workspace path is suitable for AI infra analysis. */
+export function isAnalyzableWorkspacePath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '')
+  const parts = normalized.split('/')
+  if (parts.some((p) => SKIP_DIR_SEGMENTS.has(p))) return false
+  const base = parts[parts.length - 1] || ''
+  const lower = base.toLowerCase()
+  if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) return true
+  if (lower === 'pulumi.yaml' || lower === 'pulumi.yml') return true
+  if (lower === '.gitlab-ci.yml' || lower.endsWith('.gitlab-ci.yml')) return true
+  if (lower === 'compose.yml' || lower === 'compose.yaml') return true
+  if (lower.endsWith('docker-compose.yml') || lower.endsWith('docker-compose.yaml')) return true
+  const dot = lower.lastIndexOf('.')
+  if (dot < 0) return false
+  return ANALYZABLE_EXT.has(lower.slice(dot))
+}
+
+/** Collect file paths under a folder (or a single file) for batch AI analysis. */
+export function collectAnalyzablePaths(
+  nodes: Array<{ path: string; type: 'file' | 'directory' }>,
+  selectedPath: string,
+  maxFiles = 20,
+): string[] {
+  const normalized = selectedPath.replace(/\\/g, '/').replace(/\/$/, '')
+  const selected = nodes.find((n) => n.path === normalized || n.path === selectedPath)
+  if (!selected) return []
+  if (selected.type === 'file') {
+    return isAnalyzableWorkspacePath(selected.path) ? [selected.path] : []
+  }
+  const prefix = `${normalized}/`
+  return nodes
+    .filter((n) => n.type === 'file' && (n.path === normalized || n.path.startsWith(prefix)))
+    .map((n) => n.path)
+    .filter(isAnalyzableWorkspacePath)
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, maxFiles)
+}

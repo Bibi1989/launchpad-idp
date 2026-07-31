@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -285,6 +286,8 @@ class Environment(Base):
     github_pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     deploy_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="preview")
     manifest_packaging: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    enable_postgres: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    enable_redis: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ttl_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     cost_estimate_hourly: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -430,6 +433,8 @@ class ProvisioningWorkspace(Base):
     root_dir: Mapped[str] = mapped_column(String(512), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="ready")
     encrypted_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Non-secret wizard snapshot so disk wipe can restore generated files.
+    wizard_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -467,3 +472,103 @@ class TerminalSessionRecord(Base):
     )
 
     workspace: Mapped[ProvisioningWorkspace] = relationship(back_populates="terminal_sessions")
+
+
+class CatalogService(Base):
+    """Org-approved golden-path service catalog entry."""
+
+    __tablename__ = "catalog_services"
+    __table_args__ = (
+        Index("ix_catalog_services_org_id", "org_id"),
+        Index("ix_catalog_services_owner_id", "owner_id"),
+        Index("ix_catalog_services_name", "name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("provisioning_workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    description: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    service_owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    tier: Mapped[str] = mapped_column(String(32), nullable=False, default="tier-2")
+    slo_target: Mapped[str] = mapped_column(String(16), nullable=False, default="99.5")
+    runbook_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    on_call: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    template_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    template_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    repository_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    compliance_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scorecard_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class GitlabConnection(Base):
+    """Per-user GitLab OAuth or PAT connection for project create/push."""
+
+    __tablename__ = "gitlab_connections"
+    __table_args__ = (Index("ix_gitlab_connections_user_id", "user_id", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    base_url: Mapped[str] = mapped_column(String(256), nullable=False, default="https://gitlab.com")
+    username: Mapped[str] = mapped_column(String(128), nullable=False)
+    encrypted_token: Mapped[str] = mapped_column(Text, nullable=False)
+    token_type: Mapped[str] = mapped_column(String(32), nullable=False, default="pat")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class UserCloudCredentialStore(Base):
+    """Per-user encrypted cloud credentials vault (GCP/AWS/Azure/Cloudflare)."""
+
+    __tablename__ = "user_cloud_credentials"
+    __table_args__ = (Index("ix_user_cloud_credentials_user_id", "user_id", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

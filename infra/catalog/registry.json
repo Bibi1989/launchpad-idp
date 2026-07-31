@@ -1,0 +1,10 @@
+[
+  {
+    "name": "launchpad-app",
+    "repository": "github.com/Bibi1989/launchpad-idp",
+    "owner": "platform-team@mydomain.com",
+    "tier": "tier-1",
+    "compliance_score": 62,
+    "last_onboarded": "2026-07-30T12:03:00Z"
+  }
+]

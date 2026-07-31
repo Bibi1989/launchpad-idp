@@ -10,6 +10,7 @@ Renders a root stack that instantiates child modules:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from app.schemas.cloud import (
@@ -21,10 +22,78 @@ from app.schemas.cloud import (
     CloudflareResources,
     GcpCloudConfig,
     GcpResources,
+    NetworkTopology,
     SecretBackend,
 )
 
 TF_ROOT = Path("infra") / "terraform"
+
+# DNS-1123 / RFC 1035: lowercase alnum + hyphens; must start with a letter.
+_DNS1123_RE = re.compile(r"[^a-z0-9]+")
+_MULTI_HYPHEN_RE = re.compile(r"-{2,}")
+
+
+def sanitize_dns1123_name(
+    value: str,
+    *,
+    max_len: int = 63,
+    prefix: str = "",
+) -> str:
+    """Sanitize a string for GCP/AWS/K8s DNS-1123 / RFC 1035 resource names."""
+    slug = _MULTI_HYPHEN_RE.sub("-", _DNS1123_RE.sub("-", value.strip().lower())).strip("-")
+    if not slug:
+        slug = "env"
+    if prefix:
+        candidate = f"{prefix.rstrip('-')}-{slug}"
+    elif not slug[0].isalpha():
+        candidate = f"lp-{slug}"
+    else:
+        candidate = slug
+    candidate = candidate[:max_len].rstrip("-")
+    if not candidate or not candidate[0].isalpha():
+        candidate = f"lp-{candidate}"[:max_len].rstrip("-")
+    return candidate or "lp-env"
+
+
+def _naming_locals_hcl() -> str:
+    """Shared locals: RFC 1035 names, unique buckets, per-env CIDRs."""
+    return """\
+locals {
+  # Lowercase + non-alnum → hyphen; collapse consecutive hyphens; trim edges.
+  _env_raw       = lower(var.environment_id)
+  _env_hyphen    = replace(local._env_raw, "/[^a-z0-9]+/", "-")
+  _env_collapsed = replace(local._env_hyphen, "/-+/", "-")
+  _env_trimmed   = trimsuffix(trimprefix(local._env_collapsed, "-"), "-")
+  env_slug       = local._env_trimmed == "" ? "env" : local._env_trimmed
+  env_hash       = substr(md5(var.environment_id), 0, 8)
+
+  # GKE cluster / node pool: must start with a letter, end alnum, max 40.
+  gke_cluster_name   = trimsuffix(substr(format("gke-%s", local.env_slug), 0, 40), "-")
+  gke_node_pool_name = trimsuffix(substr(format("np-%s", local.env_slug), 0, 40), "-")
+
+  # Generic DNS-1123 resource names (leave headroom for common suffixes).
+  name_40 = trimsuffix(substr(format("lp-%s", local.env_slug), 0, 40), "-")
+  name_55 = trimsuffix(substr(format("lp-%s", local.env_slug), 0, 55), "-")
+  name_63 = trimsuffix(substr(format("lp-%s", local.env_slug), 0, 63), "-")
+
+  # Globally unique object-storage names (lowercase, no underscores).
+  gcs_bucket_name = trimsuffix(substr(format("lp-%s-%s", local.env_slug, local.env_hash), 0, 63), "-")
+  s3_bucket_name  = trimsuffix(substr(format("lp-%s-%s", local.env_slug, local.env_hash), 0, 63), "-")
+
+  # Per-environment RFC1918 third octet (16–239) avoids CIDR collisions across parallel stacks.
+  cidr_octet          = 16 + (parseint(substr(md5(var.environment_id), 0, 2), 16) % 224)
+  gcp_subnet_cidr     = format("10.%d.0.0/20", local.cidr_octet)
+  gcp_public_cidr     = format("10.%d.16.0/20", local.cidr_octet)
+  gcp_private_cidr    = format("10.%d.32.0/20", local.cidr_octet)
+  aws_vpc_cidr        = format("10.%d.0.0/16", local.cidr_octet)
+  aws_public_cidr     = format("10.%d.1.0/24", local.cidr_octet)
+  aws_private_cidr    = format("10.%d.2.0/24", local.cidr_octet)
+  azure_vnet_cidr     = format("10.%d.0.0/16", local.cidr_octet)
+  azure_subnet_cidr   = format("10.%d.1.0/24", local.cidr_octet)
+  azure_public_cidr   = format("10.%d.2.0/24", local.cidr_octet)
+  azure_private_cidr  = format("10.%d.3.0/24", local.cidr_octet)
+}
+"""
 
 _GOVERNANCE_VARS = """\
 variable "environment_id" {
@@ -56,16 +125,34 @@ def _governance_tags_hcl(
     key: str = "tags",
     indent: str = "  ",
     extra: dict[str, str] | None = None,
+    *,
+    gcp: bool = False,
 ) -> str:
+    """Emit governance tags/labels.
+
+    AWS/Azure tags keep PascalCase keys (EnvironmentId, …).
+    GCP labels/resource_labels require lowercase keys and a restricted value charset.
+    """
     inner = indent + "  "
     lines = [indent + key + " = {"]
     if extra:
         for extra_key, expression in extra.items():
-            lines.append(inner + extra_key + " = " + expression)
-    lines.append(inner + "EnvironmentId  = var.environment_id")
-    lines.append(inner + "Owner          = var.owner")
-    lines.append(inner + "CreatedBy      = var.created_by")
-    lines.append(inner + "TTL_Expiration = var.ttl_expiration")
+            out_key = extra_key.lower().replace(" ", "_") if gcp else extra_key
+            lines.append(inner + out_key + " = " + expression)
+    if gcp:
+        # GCP label keys: [a-z][a-z0-9_-]* ; values: [a-z0-9_-]* (no ':').
+        lines.append(inner + "environment_id = var.environment_id")
+        lines.append(inner + "owner          = var.owner")
+        lines.append(inner + "created_by     = var.created_by")
+        lines.append(
+            inner
+            + 'ttl_expiration = replace(lower(var.ttl_expiration), "/[^a-z0-9_-]+/", "-")'
+        )
+    else:
+        lines.append(inner + "EnvironmentId  = var.environment_id")
+        lines.append(inner + "Owner          = var.owner")
+        lines.append(inner + "CreatedBy      = var.created_by")
+        lines.append(inner + "TTL_Expiration = var.ttl_expiration")
     lines.append(indent + "}")
     return "\n".join(lines)
 
@@ -118,7 +205,19 @@ provider "google" {
 }
 """
         if cloud.resources.secret_backend == SecretBackend.NATIVE_K8S:
-            providers += """
+            if cloud.resources.gke:
+                # Target the GKE cluster — not local ~/.kube/config (avoids kind secret clashes).
+                providers += """
+data "google_client_config" "default" {}
+
+provider "kubernetes" {
+  host                   = "https://${module.cluster.gke_cluster_endpoint}"
+  token                  = data.google_client_config.default.access_token
+  cluster_ca_certificate = base64decode(module.cluster.gke_cluster_ca_certificate)
+}
+"""
+            else:
+                providers += """
 provider "kubernetes" {
   config_path = "~/.kube/config"
 }
@@ -176,6 +275,87 @@ terraform {
 provider "cloudflare" {
 }
 """
+
+
+# --------------------------------------------------------------------------- #
+# GCP API enablement (google_project_service)
+# --------------------------------------------------------------------------- #
+
+
+def gcp_required_apis(r: GcpResources) -> list[str]:
+    """APIs required for the selected GCP resource set (stable order, unique)."""
+    apis: list[str] = [
+        # Bootstrap: Terraform google_project_service needs Resource Manager + Service Usage.
+        "cloudresourcemanager.googleapis.com",
+        "serviceusage.googleapis.com",
+        # IAM is required for GKE node service accounts and most project resources.
+        "iam.googleapis.com",
+    ]
+    if r.vpc or r.subnets or r.gke:
+        apis.append("compute.googleapis.com")
+    if r.gke:
+        apis.append("container.googleapis.com")
+    if r.artifact_registry:
+        apis.append("artifactregistry.googleapis.com")
+    if r.cloud_run:
+        apis.append("run.googleapis.com")
+    if r.cloud_functions:
+        apis.extend(
+            [
+                "cloudfunctions.googleapis.com",
+                "cloudbuild.googleapis.com",
+                "artifactregistry.googleapis.com",
+            ]
+        )
+    if r.cloud_sql:
+        apis.append("sqladmin.googleapis.com")
+    if r.cloud_storage:
+        apis.append("storage.googleapis.com")
+    if r.pubsub:
+        apis.append("pubsub.googleapis.com")
+    if r.memorystore:
+        apis.append("redis.googleapis.com")
+    if r.bigquery:
+        apis.append("bigquery.googleapis.com")
+    if r.secret_backend == SecretBackend.SECRET_MANAGER:
+        apis.append("secretmanager.googleapis.com")
+    # Preserve order while uniquing.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for api in apis:
+        if api not in seen:
+            seen.add(api)
+            ordered.append(api)
+    return ordered
+
+
+# Back-compat alias for internal call sites / tests.
+_gcp_required_apis = gcp_required_apis
+
+
+def _apis_tf(cloud: CloudConfig) -> str | None:
+    """Root-level google_project_service resources for GCP; None for other clouds."""
+    if not isinstance(cloud, GcpCloudConfig):
+        return None
+    apis = gcp_required_apis(cloud.resources)
+    lines = [
+        "# Enable required Google APIs before creating project resources.",
+        "# disable_on_destroy=false keeps APIs enabled after terraform destroy.",
+        'resource "google_project_service" "apis" {',
+        "  for_each = toset([",
+    ]
+    for api in apis:
+        lines.append(f'    "{api}",')
+    lines += [
+        "  ])",
+        "",
+        "  project            = var.project_id",
+        "  service            = each.value",
+        "  disable_on_destroy = false",
+        "}",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,100 +492,253 @@ def _vpc_module_main(cloud: CloudConfig) -> str:
 
 
 def _vpc_gcp(r: GcpResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.vpc:
         blocks.append(
             "\n".join(
                 [
                     'resource "google_compute_network" "vpc" {',
-                    '  name                    = "lp-${var.environment_id}-vpc"',
+                    "  name                    = \"${local.name_55}-vpc\"",
                     "  project                 = var.project_id",
                     "  auto_create_subnetworks = false",
-                    "",
-                    _governance_tags_hcl("labels"),
                     "}",
                 ]
             )
         )
     if r.subnets:
         network_ref = "google_compute_network.vpc.id" if r.vpc else '"default"'
-        blocks.append(
-            "\n".join(
-                [
-                    'resource "google_compute_subnetwork" "subnet" {',
-                    '  name          = "lp-${var.environment_id}-subnet"',
-                    "  project       = var.project_id",
-                    "  region        = var.region",
-                    "  network       = " + network_ref,
-                    '  ip_cidr_range = "10.10.0.0/20"',
-                    "",
-                    _governance_tags_hcl("labels"),
-                    "}",
-                ]
+        if r.network_topology == NetworkTopology.STANDARD and r.vpc:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "google_compute_subnetwork" "public" {',
+                        "  name          = \"${local.name_55}-public\"",
+                        "  project       = var.project_id",
+                        "  region        = var.region",
+                        "  network       = " + network_ref,
+                        "  ip_cidr_range = local.gcp_public_cidr",
+                        "}",
+                        "",
+                        'resource "google_compute_subnetwork" "private" {',
+                        "  name                     = \"${local.name_55}-private\"",
+                        "  project                  = var.project_id",
+                        "  region                   = var.region",
+                        "  network                  = " + network_ref,
+                        "  ip_cidr_range            = local.gcp_private_cidr",
+                        "  private_ip_google_access = true",
+                        "  lifecycle {",
+                        "    create_before_destroy = true",
+                        "  }",
+                        "}",
+                        "",
+                        'resource "google_compute_router" "nat" {',
+                        "  name    = \"${local.name_55}-router\"",
+                        "  project = var.project_id",
+                        "  region  = var.region",
+                        "  network = " + network_ref,
+                        "}",
+                        "",
+                        'resource "google_compute_router_nat" "nat" {',
+                        "  name                               = \"${local.name_55}-nat\"",
+                        "  project                            = var.project_id",
+                        "  router                             = google_compute_router.nat.name",
+                        "  region                             = var.region",
+                        "  nat_ip_allocate_option             = \"AUTO_ONLY\"",
+                        "  source_subnetwork_ip_ranges_to_nat = \"LIST_OF_SUBNETWORKS\"",
+                        "  subnetwork {",
+                        "    name                    = google_compute_subnetwork.private.id",
+                        "    source_ip_ranges_to_nat = [\"ALL_IP_RANGES\"]",
+                        "  }",
+                        "}",
+                    ]
+                )
             )
-        )
+        else:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "google_compute_subnetwork" "subnet" {',
+                        "  name          = \"${local.name_55}-subnet\"",
+                        "  project       = var.project_id",
+                        "  region        = var.region",
+                        "  network       = " + network_ref,
+                        "  ip_cidr_range = local.gcp_subnet_cidr",
+                        "  lifecycle {",
+                        "    create_before_destroy = true",
+                        "  }",
+                        "}",
+                    ]
+                )
+            )
+    if len(blocks) == 1:
+        return _join_blocks([], "# No VPC resources selected.")
     return _join_blocks(blocks, "# No VPC resources selected.")
 
 
 def _vpc_aws(r: AwsResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.vpc:
         blocks.append(
             "\n".join(
                 [
                     'resource "aws_vpc" "main" {',
-                    '  cidr_block           = "10.20.0.0/16"',
+                    "  cidr_block           = local.aws_vpc_cidr",
                     "  enable_dns_hostnames = true",
                     "  enable_dns_support   = true",
                     "",
                     _governance_tags_hcl(
-                        "tags", extra={"Name": '"lp-${var.environment_id}-vpc"'}
+                        "tags", extra={"Name": '"${local.name_55}-vpc"'}
                     ),
                     "}",
                 ]
             )
         )
     if r.subnets and r.vpc:
-        blocks.append(
-            "\n".join(
-                [
-                    'resource "aws_subnet" "public" {',
-                    "  vpc_id                  = aws_vpc.main.id",
-                    '  cidr_block              = "10.20.1.0/24"',
-                    '  availability_zone       = "${var.region}a"',
-                    "  map_public_ip_on_launch = true",
-                    "",
-                    _governance_tags_hcl(
-                        "tags", extra={"Name": '"lp-${var.environment_id}-public"'}
-                    ),
-                    "}",
-                    "",
-                    'resource "aws_subnet" "private" {',
-                    "  vpc_id            = aws_vpc.main.id",
-                    '  cidr_block        = "10.20.2.0/24"',
-                    '  availability_zone = "${var.region}a"',
-                    "",
-                    _governance_tags_hcl(
-                        "tags", extra={"Name": '"lp-${var.environment_id}-private"'}
-                    ),
-                    "}",
-                ]
+        if r.network_topology == NetworkTopology.STANDARD:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "aws_subnet" "public" {',
+                        "  vpc_id                  = aws_vpc.main.id",
+                        "  cidr_block              = local.aws_public_cidr",
+                        '  availability_zone       = "${var.region}a"',
+                        "  map_public_ip_on_launch = true",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-public"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_subnet" "private" {',
+                        "  vpc_id            = aws_vpc.main.id",
+                        "  cidr_block        = local.aws_private_cidr",
+                        '  availability_zone = "${var.region}a"',
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-private"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_internet_gateway" "igw" {',
+                        "  vpc_id = aws_vpc.main.id",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-igw"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_eip" "nat" {',
+                        '  domain = "vpc"',
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-nat-eip"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_nat_gateway" "nat" {',
+                        "  allocation_id = aws_eip.nat.id",
+                        "  subnet_id     = aws_subnet.public.id",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-nat"'}
+                        ),
+                        "  depends_on = [aws_internet_gateway.igw]",
+                        "}",
+                        "",
+                        'resource "aws_route_table" "public" {',
+                        "  vpc_id = aws_vpc.main.id",
+                        "  route {",
+                        '    cidr_block = "0.0.0.0/0"',
+                        "    gateway_id = aws_internet_gateway.igw.id",
+                        "  }",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-public-rt"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_route_table" "private" {',
+                        "  vpc_id = aws_vpc.main.id",
+                        "  route {",
+                        '    cidr_block     = "0.0.0.0/0"',
+                        "    nat_gateway_id = aws_nat_gateway.nat.id",
+                        "  }",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-private-rt"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_route_table_association" "public" {',
+                        "  subnet_id      = aws_subnet.public.id",
+                        "  route_table_id = aws_route_table.public.id",
+                        "}",
+                        "",
+                        'resource "aws_route_table_association" "private" {',
+                        "  subnet_id      = aws_subnet.private.id",
+                        "  route_table_id = aws_route_table.private.id",
+                        "}",
+                    ]
+                )
             )
-        )
+        else:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "aws_subnet" "public" {',
+                        "  vpc_id                  = aws_vpc.main.id",
+                        "  cidr_block              = local.aws_public_cidr",
+                        '  availability_zone       = "${var.region}a"',
+                        "  map_public_ip_on_launch = true",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-subnet"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_internet_gateway" "igw" {',
+                        "  vpc_id = aws_vpc.main.id",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-igw"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_route_table" "public" {',
+                        "  vpc_id = aws_vpc.main.id",
+                        "  route {",
+                        '    cidr_block = "0.0.0.0/0"',
+                        "    gateway_id = aws_internet_gateway.igw.id",
+                        "  }",
+                        "",
+                        _governance_tags_hcl(
+                            "tags", extra={"Name": '"${local.name_55}-rt"'}
+                        ),
+                        "}",
+                        "",
+                        'resource "aws_route_table_association" "public" {',
+                        "  subnet_id      = aws_subnet.public.id",
+                        "  route_table_id = aws_route_table.public.id",
+                        "}",
+                    ]
+                )
+            )
+    if len(blocks) == 1:
+        return _join_blocks([], "# No VPC resources selected.")
     return _join_blocks(blocks, "# No VPC resources selected.")
 
 
 def _vpc_azure(r: AzureResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.vnet:
         blocks.append(
             "\n".join(
                 [
                     'resource "azurerm_virtual_network" "vnet" {',
-                    '  name                = "lp-${var.environment_id}-vnet"',
+                    "  name                = \"${local.name_55}-vnet\"",
                     "  resource_group_name = var.resource_group_name",
                     "  location            = var.location",
-                    '  address_space       = ["10.30.0.0/16"]',
+                    "  address_space       = [local.azure_vnet_cidr]",
                     "",
                     _governance_tags_hcl("tags"),
                     "}",
@@ -413,18 +746,70 @@ def _vpc_azure(r: AzureResources) -> str:
             )
         )
     if r.subnets and r.vnet:
-        blocks.append(
-            "\n".join(
-                [
-                    'resource "azurerm_subnet" "primary" {',
-                    '  name                 = "lp-${var.environment_id}-subnet"',
-                    "  resource_group_name  = var.resource_group_name",
-                    "  virtual_network_name = azurerm_virtual_network.vnet.name",
-                    '  address_prefixes     = ["10.30.1.0/24"]',
-                    "}",
-                ]
+        if r.network_topology == NetworkTopology.STANDARD:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "azurerm_subnet" "public" {',
+                        "  name                 = \"${local.name_55}-public\"",
+                        "  resource_group_name  = var.resource_group_name",
+                        "  virtual_network_name = azurerm_virtual_network.vnet.name",
+                        "  address_prefixes     = [local.azure_public_cidr]",
+                        "}",
+                        "",
+                        'resource "azurerm_subnet" "private" {',
+                        "  name                 = \"${local.name_55}-private\"",
+                        "  resource_group_name  = var.resource_group_name",
+                        "  virtual_network_name = azurerm_virtual_network.vnet.name",
+                        "  address_prefixes     = [local.azure_private_cidr]",
+                        "}",
+                        "",
+                        'resource "azurerm_public_ip" "nat" {',
+                        "  name                = \"${local.name_55}-nat-pip\"",
+                        "  resource_group_name = var.resource_group_name",
+                        "  location            = var.location",
+                        '  allocation_method   = "Static"',
+                        '  sku                 = "Standard"',
+                        "",
+                        _governance_tags_hcl("tags"),
+                        "}",
+                        "",
+                        'resource "azurerm_nat_gateway" "nat" {',
+                        "  name                = \"${local.name_55}-nat\"",
+                        "  resource_group_name = var.resource_group_name",
+                        "  location            = var.location",
+                        '  sku_name            = "Standard"',
+                        "",
+                        _governance_tags_hcl("tags"),
+                        "}",
+                        "",
+                        'resource "azurerm_nat_gateway_public_ip_association" "nat" {',
+                        "  nat_gateway_id       = azurerm_nat_gateway.nat.id",
+                        "  public_ip_address_id = azurerm_public_ip.nat.id",
+                        "}",
+                        "",
+                        'resource "azurerm_subnet_nat_gateway_association" "private" {',
+                        "  subnet_id      = azurerm_subnet.private.id",
+                        "  nat_gateway_id = azurerm_nat_gateway.nat.id",
+                        "}",
+                    ]
+                )
             )
-        )
+        else:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "azurerm_subnet" "primary" {',
+                        "  name                 = \"${local.name_55}-subnet\"",
+                        "  resource_group_name  = var.resource_group_name",
+                        "  virtual_network_name = azurerm_virtual_network.vnet.name",
+                        "  address_prefixes     = [local.azure_subnet_cidr]",
+                        "}",
+                    ]
+                )
+            )
+    if len(blocks) == 1:
+        return _join_blocks([], "# No VPC resources selected.")
     return _join_blocks(blocks, "# No VPC resources selected.")
 
 
@@ -453,14 +838,51 @@ def _vpc_module_outputs(cloud: CloudConfig) -> str:
                 "}",
             ]
         if r.subnets:
+            if r.network_topology == NetworkTopology.STANDARD and r.vpc:
+                lines += [
+                    "",
+                    'output "subnet_id" {',
+                    "  value = google_compute_subnetwork.private.id",
+                    "}",
+                    "",
+                    'output "public_subnet_id" {',
+                    "  value = google_compute_subnetwork.public.id",
+                    "}",
+                    "",
+                    'output "private_subnet_id" {',
+                    "  value = google_compute_subnetwork.private.id",
+                    "}",
+                ]
+            else:
+                lines += [
+                    "",
+                    'output "subnet_id" {',
+                    "  value = google_compute_subnetwork.subnet.id",
+                    "}",
+                    "",
+                    'output "public_subnet_id" {',
+                    "  value = google_compute_subnetwork.subnet.id",
+                    "}",
+                    "",
+                    'output "private_subnet_id" {',
+                    "  value = google_compute_subnetwork.subnet.id",
+                    "}",
+                ]
+        else:
             lines += [
                 "",
                 'output "subnet_id" {',
-                "  value = google_compute_subnetwork.subnet.id",
+                "  value = null",
+                "}",
+                "",
+                'output "public_subnet_id" {',
+                "  value = null",
+                "}",
+                "",
+                'output "private_subnet_id" {',
+                "  value = null",
                 "}",
             ]
-        else:
-            lines += ["", 'output "subnet_id" {', "  value = null", "}"]
         return "\n".join(lines) + "\n"
 
     if isinstance(cloud, AwsCloudConfig):
@@ -475,20 +897,36 @@ def _vpc_module_outputs(cloud: CloudConfig) -> str:
         else:
             lines += ['output "vpc_id" {', "  value = null", "}"]
         if r.subnets and r.vpc:
-            lines += [
-                "",
-                'output "public_subnet_id" {',
-                "  value = aws_subnet.public.id",
-                "}",
-                "",
-                'output "private_subnet_id" {',
-                "  value = aws_subnet.private.id",
-                "}",
-                "",
-                'output "subnet_ids" {',
-                "  value = [aws_subnet.public.id, aws_subnet.private.id]",
-                "}",
-            ]
+            if r.network_topology == NetworkTopology.STANDARD:
+                lines += [
+                    "",
+                    'output "public_subnet_id" {',
+                    "  value = aws_subnet.public.id",
+                    "}",
+                    "",
+                    'output "private_subnet_id" {',
+                    "  value = aws_subnet.private.id",
+                    "}",
+                    "",
+                    'output "subnet_ids" {',
+                    "  value = [aws_subnet.public.id, aws_subnet.private.id]",
+                    "}",
+                ]
+            else:
+                lines += [
+                    "",
+                    'output "public_subnet_id" {',
+                    "  value = aws_subnet.public.id",
+                    "}",
+                    "",
+                    'output "private_subnet_id" {',
+                    "  value = aws_subnet.public.id",
+                    "}",
+                    "",
+                    'output "subnet_ids" {',
+                    "  value = [aws_subnet.public.id]",
+                    "}",
+                ]
         else:
             lines += [
                 "",
@@ -530,14 +968,51 @@ def _vpc_module_outputs(cloud: CloudConfig) -> str:
                 "}",
             ]
         if r.subnets and r.vnet:
+            if r.network_topology == NetworkTopology.STANDARD:
+                lines += [
+                    "",
+                    'output "subnet_id" {',
+                    "  value = azurerm_subnet.private.id",
+                    "}",
+                    "",
+                    'output "public_subnet_id" {',
+                    "  value = azurerm_subnet.public.id",
+                    "}",
+                    "",
+                    'output "private_subnet_id" {',
+                    "  value = azurerm_subnet.private.id",
+                    "}",
+                ]
+            else:
+                lines += [
+                    "",
+                    'output "subnet_id" {',
+                    "  value = azurerm_subnet.primary.id",
+                    "}",
+                    "",
+                    'output "public_subnet_id" {',
+                    "  value = azurerm_subnet.primary.id",
+                    "}",
+                    "",
+                    'output "private_subnet_id" {',
+                    "  value = azurerm_subnet.primary.id",
+                    "}",
+                ]
+        else:
             lines += [
                 "",
                 'output "subnet_id" {',
-                "  value = azurerm_subnet.primary.id",
+                "  value = null",
+                "}",
+                "",
+                'output "public_subnet_id" {',
+                "  value = null",
+                "}",
+                "",
+                'output "private_subnet_id" {',
+                "  value = null",
                 "}",
             ]
-        else:
-            lines += ["", 'output "subnet_id" {', "  value = null", "}"]
         return "\n".join(lines) + "\n"
 
     return (
@@ -569,6 +1044,11 @@ def _cluster_module_variables(cloud: CloudConfig) -> str:
             "  type    = string",
             '  default = "default"',
             "}",
+            "",
+            'variable "subnetwork" {',
+            "  type    = string",
+            "  default = null",
+            "}",
         ]
     elif isinstance(cloud, AwsCloudConfig):
         lines += [
@@ -597,6 +1077,11 @@ def _cluster_module_variables(cloud: CloudConfig) -> str:
             'variable "resource_group_name" {',
             "  type = string",
             "}",
+            "",
+            'variable "subnet_id" {',
+            "  type    = string",
+            "  default = null",
+            "}",
         ]
     return "\n".join(lines) + "\n"
 
@@ -612,33 +1097,46 @@ def _cluster_module_main(cloud: CloudConfig) -> str:
 
 
 def _cluster_gcp(r: GcpResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.gke:
         blocks.append(
             "\n".join(
                 [
                     'resource "google_container_cluster" "gke" {',
-                    '  name                     = "lp-${var.environment_id}-gke"',
+                    "  name                     = local.gke_cluster_name",
                     "  project                  = var.project_id",
                     "  location                 = var.region",
                     "  remove_default_node_pool = true",
                     "  initial_node_count       = 1",
                     "  network                  = var.network",
+                    "  subnetwork               = var.subnetwork",
+                    "  # Ephemeral / preview stacks must be destroyable without a second apply.",
+                    "  deletion_protection      = false",
                     "",
-                    _governance_tags_hcl("resource_labels"),
+                    _governance_tags_hcl("resource_labels", gcp=True),
                     "}",
                     "",
                     'resource "google_container_node_pool" "gke_primary" {',
-                    '  name       = "lp-${var.environment_id}-primary"',
+                    "  name       = local.gke_node_pool_name",
                     "  project    = var.project_id",
                     "  location   = var.region",
                     "  cluster    = google_container_cluster.gke.name",
                     "  node_count = 2",
                     "",
-                    "  node_config {",
-                    '    machine_type = "e2-standard-4"',
+                    "  depends_on = [google_container_cluster.gke]",
                     "",
-                    _governance_tags_hcl("labels", "    "),
+                    '  provisioner "local-exec" {',
+                    '    when    = destroy',
+                    '    command = "sleep 30"',
+                    '  }',
+                    "",
+                    "  node_config {",
+                    f'    machine_type = "{r.machine_type}"',
+                    '    oauth_scopes = [',
+                    '      "https://www.googleapis.com/auth/cloud-platform",',
+                    '    ]',
+                    "",
+                    _governance_tags_hcl("labels", "    ", gcp=True),
                     "  }",
                     "}",
                 ]
@@ -649,7 +1147,7 @@ def _cluster_gcp(r: GcpResources) -> str:
             "\n".join(
                 [
                     'resource "google_cloud_run_v2_service" "app" {',
-                    '  name     = "lp-${var.environment_id}-run"',
+                    "  name     = \"${local.name_55}-run\"",
                     "  project  = var.project_id",
                     "  location = var.region",
                     "",
@@ -659,16 +1157,18 @@ def _cluster_gcp(r: GcpResources) -> str:
                     "    }",
                     "  }",
                     "",
-                    _governance_tags_hcl("labels"),
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
         )
+    if len(blocks) == 1:
+        return _join_blocks([], "# No cluster resources selected.")
     return _join_blocks(blocks, "# No cluster resources selected.")
 
 
 def _cluster_aws(r: AwsResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.ec2:
         blocks.append(
             "\n".join(
@@ -685,11 +1185,11 @@ def _cluster_aws(r: AwsResources) -> str:
                     "",
                     'resource "aws_instance" "app" {',
                     "  ami           = data.aws_ami.amazon_linux.id",
-                    '  instance_type = "t3.medium"',
+                    f'  instance_type = "{r.instance_type}"',
                     "  subnet_id     = var.public_subnet_id",
                     "",
                     _governance_tags_hcl(
-                        "tags", extra={"Name": '"lp-${var.environment_id}-ec2"'}
+                        "tags", extra={"Name": '"${local.name_55}-ec2"'}
                     ),
                     "}",
                 ]
@@ -700,7 +1200,7 @@ def _cluster_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_iam_role" "eks_cluster" {',
-                    '  name = "lp-${var.environment_id}-eks-role"',
+                    '  name = "${local.name_55}-eks-role"',
                     "",
                     "  assume_role_policy = jsonencode({",
                     '    Version = "2012-10-17"',
@@ -717,38 +1217,47 @@ def _cluster_aws(r: AwsResources) -> str:
                     "}",
                     "",
                     'resource "aws_eks_cluster" "main" {',
-                    '  name     = "lp-${var.environment_id}-eks"',
+                    '  name     = "${local.name_55}-eks"',
                     "  role_arn = aws_iam_role.eks_cluster.arn",
                     "",
                     "  vpc_config {",
                     "    subnet_ids = var.subnet_ids",
                     "  }",
                     "",
+                    "  depends_on = [aws_iam_role.eks_cluster]",
+                    "",
                     _governance_tags_hcl("tags"),
                     "}",
                 ]
             )
         )
+    if len(blocks) == 1:
+        return _join_blocks([], "# No cluster resources selected.")
     return _join_blocks(blocks, "# No cluster resources selected.")
 
 
 def _cluster_azure(r: AzureResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.aks:
+        node_pool = [
+            "  default_node_pool {",
+            '    name       = "default"',
+            "    node_count = 2",
+            f'    vm_size    = "{r.vm_size}"',
+        ]
+        if r.subnets and r.vnet:
+            node_pool.append("    vnet_subnet_id = var.subnet_id")
+        node_pool.append("  }")
         blocks.append(
             "\n".join(
                 [
                     'resource "azurerm_kubernetes_cluster" "aks" {',
-                    '  name                = "lp-${var.environment_id}-aks"',
+                    '  name                = "${local.name_55}-aks"',
                     "  resource_group_name = var.resource_group_name",
                     "  location            = var.location",
-                    '  dns_prefix          = "lp-${var.environment_id}"',
+                    "  dns_prefix          = local.name_40",
                     "",
-                    "  default_node_pool {",
-                    '    name       = "default"',
-                    "    node_count = 2",
-                    '    vm_size    = "Standard_D2_v2"',
-                    "  }",
+                    *node_pool,
                     "",
                     "  identity {",
                     '    type = "SystemAssigned"',
@@ -764,7 +1273,7 @@ def _cluster_azure(r: AzureResources) -> str:
             "\n".join(
                 [
                     'resource "azurerm_container_app_environment" "main" {',
-                    '  name                = "lp-${var.environment_id}-cae"',
+                    '  name                = "${local.name_55}-cae"',
                     "  resource_group_name = var.resource_group_name",
                     "  location            = var.location",
                     "",
@@ -772,7 +1281,7 @@ def _cluster_azure(r: AzureResources) -> str:
                     "}",
                     "",
                     'resource "azurerm_container_app" "app" {',
-                    '  name                         = "lp-${var.environment_id}-app"',
+                    '  name                         = "${local.name_55}-app"',
                     "  container_app_environment_id = azurerm_container_app_environment.main.id",
                     "  resource_group_name          = var.resource_group_name",
                     '  revision_mode                = "Single"',
@@ -786,11 +1295,15 @@ def _cluster_azure(r: AzureResources) -> str:
                     "    }",
                     "  }",
                     "",
+                    "  depends_on = [azurerm_container_app_environment.main]",
+                    "",
                     _governance_tags_hcl("tags"),
                     "}",
                 ]
             )
         )
+    if len(blocks) == 1:
+        return _join_blocks([], "# No cluster resources selected.")
     return _join_blocks(blocks, "# No cluster resources selected.")
 
 
@@ -802,6 +1315,11 @@ def _cluster_module_outputs(cloud: CloudConfig) -> str:
             lines += [
                 'output "gke_cluster_endpoint" {',
                 "  value     = google_container_cluster.gke.endpoint",
+                "  sensitive = true",
+                "}",
+                "",
+                'output "gke_cluster_ca_certificate" {',
+                "  value     = google_container_cluster.gke.master_auth[0].cluster_ca_certificate",
                 "  sensitive = true",
                 "}",
                 "",
@@ -902,30 +1420,35 @@ def _secrets_module_variables(cloud: CloudConfig) -> str:
 def _secrets_module_main(cloud: CloudConfig) -> str:
     if isinstance(cloud, GcpCloudConfig):
         r = cloud.resources
+        naming = _naming_locals_hcl().rstrip()
         if r.secret_backend == SecretBackend.SECRET_MANAGER:
             return (
-                "\n".join(
+                naming
+                + "\n\n"
+                + "\n".join(
                     [
                         'resource "google_secret_manager_secret" "app_secrets" {',
                         "  project   = var.project_id",
-                        '  secret_id = "lp-${var.environment_id}-secrets"',
+                        '  secret_id = "${local.name_55}-secrets"',
                         "",
                         "  replication {",
                         "    auto {}",
                         "  }",
                         "",
-                        _governance_tags_hcl("labels"),
+                        _governance_tags_hcl("labels", gcp=True),
                         "}",
                     ]
                 )
                 + "\n"
             )
         return (
-            "\n".join(
+            naming
+            + "\n\n"
+            + "\n".join(
                 [
                     'resource "kubernetes_secret" "app_secrets" {',
                     "  metadata {",
-                    '    name      = "lp-${var.environment_id}-secrets"',
+                    '    name      = "${local.name_55}-secrets"',
                     '    namespace = "default"',
                     "",
                     _governance_tags_hcl("labels", "    "),
@@ -942,10 +1465,12 @@ def _secrets_module_main(cloud: CloudConfig) -> str:
         if not cloud.resources.secrets_manager:
             return "# No secrets resources selected.\n"
         return (
-            "\n".join(
+            _naming_locals_hcl().rstrip()
+            + "\n\n"
+            + "\n".join(
                 [
                     'resource "aws_secretsmanager_secret" "app_secrets" {',
-                    '  name = "lp-${var.environment_id}-secrets"',
+                    '  name = "${local.name_55}-secrets"',
                     "",
                     _governance_tags_hcl("tags"),
                     "}",
@@ -958,12 +1483,15 @@ def _secrets_module_main(cloud: CloudConfig) -> str:
         if not cloud.resources.key_vault:
             return "# No secrets resources selected.\n"
         return (
-            "\n".join(
+            _naming_locals_hcl().rstrip()
+            + "\n\n"
+            + "\n".join(
                 [
                     'data "azurerm_client_config" "current" {}',
                     "",
                     'resource "azurerm_key_vault" "main" {',
-                    '  name                = "lp-${var.environment_id}-kv"',
+                    # Key Vault names: 3–24 chars, alphanumeric only.
+                    '  name                = substr(replace(local.name_63, "-", ""), 0, 24)',
                     "  resource_group_name = var.resource_group_name",
                     "  location            = var.location",
                     "  tenant_id           = data.azurerm_client_config.current.tenant_id",
@@ -1057,6 +1585,8 @@ def _module_vpc_block(cloud: CloudConfig) -> str:
         lines += [
             "  project_id = var.project_id",
             "  region     = var.region",
+            "",
+            "  depends_on = [google_project_service.apis]",
         ]
     elif isinstance(cloud, AwsCloudConfig):
         lines += ["  region = var.region"]
@@ -1081,17 +1611,26 @@ def _module_cluster_block(cloud: CloudConfig) -> str:
             "  project_id = var.project_id",
             "  region     = var.region",
             "  network    = module.vpc.network_id",
+            "  subnetwork = module.vpc.subnet_id",
+            "",
+            # APIs before cluster create; VPC before destroy of network-bound cluster.
+            "  depends_on = [google_project_service.apis, module.vpc]",
         ]
     elif isinstance(cloud, AwsCloudConfig):
         lines += [
             "  region           = var.region",
             "  subnet_ids       = module.vpc.subnet_ids",
             "  public_subnet_id = module.vpc.public_subnet_id",
+            "",
+            "  depends_on = [module.vpc]",
         ]
     elif isinstance(cloud, AzureCloudConfig):
         lines += [
             "  location            = azurerm_resource_group.main.location",
             "  resource_group_name = azurerm_resource_group.main.name",
+            "  subnet_id           = module.vpc.subnet_id",
+            "",
+            "  depends_on = [module.vpc]",
         ]
     lines.append("}")
     return "\n".join(lines)
@@ -1106,6 +1645,14 @@ def _module_secrets_block(cloud: CloudConfig) -> str:
     ]
     if isinstance(cloud, GcpCloudConfig):
         lines += ["  project_id = var.project_id"]
+        deps = ["google_project_service.apis"]
+        if (
+            cloud.resources.gke
+            and cloud.resources.secret_backend == SecretBackend.NATIVE_K8S
+        ):
+            # Wait for GKE so the kubernetes provider (wired to the cluster) can create the secret.
+            deps.append("module.cluster")
+        lines += ["", f"  depends_on = [{', '.join(deps)}]"]
     elif isinstance(cloud, AzureCloudConfig):
         lines += [
             "  location            = azurerm_resource_group.main.location",
@@ -1126,7 +1673,7 @@ def _root_extra_resources(cloud: CloudConfig) -> str:
 
 
 def _extras_gcp(r: GcpResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.artifact_registry:
         blocks.append(
             "\n".join(
@@ -1134,10 +1681,12 @@ def _extras_gcp(r: GcpResources) -> str:
                     'resource "google_artifact_registry_repository" "ar" {',
                     "  project       = var.project_id",
                     "  location      = var.region",
-                    '  repository_id = "lp-${var.environment_id}"',
+                    "  repository_id = local.name_63",
                     '  format        = "DOCKER"',
                     "",
-                    _governance_tags_hcl("labels"),
+                    "  depends_on = [google_project_service.apis]",
+                    "",
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
@@ -1147,7 +1696,7 @@ def _extras_gcp(r: GcpResources) -> str:
             "\n".join(
                 [
                     'resource "google_cloudfunctions2_function" "fn" {',
-                    '  name     = "lp-${var.environment_id}-fn"',
+                    '  name     = "${local.name_55}-fn"',
                     "  project  = var.project_id",
                     "  location = var.region",
                     "",
@@ -1157,7 +1706,7 @@ def _extras_gcp(r: GcpResources) -> str:
                     "",
                     "    source {",
                     "      storage_source {",
-                    '        bucket = "lp-${var.environment_id}-fn-source"',
+                    '        bucket = "${local.gcs_bucket_name}-fn"',
                     '        object = "function-source.zip"',
                     "      }",
                     "    }",
@@ -1168,7 +1717,9 @@ def _extras_gcp(r: GcpResources) -> str:
                     '    available_memory   = "256M"',
                     "  }",
                     "",
-                    _governance_tags_hcl("labels"),
+                    "  depends_on = [google_project_service.apis]",
+                    "",
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
@@ -1179,7 +1730,7 @@ def _extras_gcp(r: GcpResources) -> str:
             "\n".join(
                 [
                     'resource "google_sql_database_instance" "primary" {',
-                    '  name             = "lp-${var.environment_id}-sql"',
+                    '  name             = "${local.name_55}-sql"',
                     "  project          = var.project_id",
                     "  region           = var.region",
                     '  database_version = "POSTGRES_15"',
@@ -1189,7 +1740,10 @@ def _extras_gcp(r: GcpResources) -> str:
                     "  }",
                     "",
                     "  deletion_protection = false",
-                    _governance_tags_hcl("labels"),
+                    "",
+                    "  depends_on = [google_project_service.apis]",
+                    "",
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
@@ -1199,13 +1753,17 @@ def _extras_gcp(r: GcpResources) -> str:
             "\n".join(
                 [
                     'resource "google_storage_bucket" "data" {',
-                    '  name     = "lp-${var.environment_id}-data"',
+                    "  name     = local.gcs_bucket_name",
                     "  project  = var.project_id",
                     "  location = var.region",
                     "",
                     "  uniform_bucket_level_access = true",
+                    "  # Ephemeral preview buckets must tear down without leftover objects.",
+                    "  force_destroy               = true",
                     "",
-                    _governance_tags_hcl("labels"),
+                    "  depends_on = [google_project_service.apis]",
+                    "",
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
@@ -1215,10 +1773,12 @@ def _extras_gcp(r: GcpResources) -> str:
             "\n".join(
                 [
                     'resource "google_pubsub_topic" "events" {',
-                    '  name    = "lp-${var.environment_id}-events"',
+                    '  name    = "${local.name_55}-events"',
                     "  project = var.project_id",
                     "",
-                    _governance_tags_hcl("labels"),
+                    "  depends_on = [google_project_service.apis]",
+                    "",
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
@@ -1228,14 +1788,16 @@ def _extras_gcp(r: GcpResources) -> str:
             "\n".join(
                 [
                     'resource "google_redis_instance" "cache" {',
-                    '  name           = "lp-${var.environment_id}-redis"',
+                    '  name           = "${local.name_55}-redis"',
                     "  project        = var.project_id",
                     "  region         = var.region",
                     '  tier           = "BASIC"',
                     "  memory_size_gb = 1",
                     '  redis_version  = "REDIS_7_0"',
                     "",
-                    _governance_tags_hcl("labels"),
+                    "  depends_on = [google_project_service.apis]",
+                    "",
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
@@ -1245,27 +1807,32 @@ def _extras_gcp(r: GcpResources) -> str:
             "\n".join(
                 [
                     'resource "google_bigquery_dataset" "analytics" {',
-                    '  dataset_id = "lp_${replace(var.environment_id, "-", "_")}"',
+                    '  dataset_id = replace(local.name_63, "-", "_")',
                     "  project    = var.project_id",
                     "  location   = var.region",
                     "",
-                    _governance_tags_hcl("labels"),
+                    "  depends_on = [google_project_service.apis]",
+                    "",
+                    _governance_tags_hcl("labels", gcp=True),
                     "}",
                 ]
             )
         )
 
+    if len(blocks) == 1:
+        return ""
     return _join_blocks(blocks, "") if blocks else ""
 
 
 def _extras_aws(r: AwsResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.s3:
         blocks.append(
             "\n".join(
                 [
                     'resource "aws_s3_bucket" "data" {',
-                    '  bucket = "lp-${var.environment_id}-data"',
+                    "  bucket        = local.s3_bucket_name",
+                    "  force_destroy = true",
                     "",
                     _governance_tags_hcl("tags"),
                     "}",
@@ -1285,13 +1852,14 @@ def _extras_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_db_instance" "primary" {',
-                    '  identifier          = "lp-${var.environment_id}-db"',
+                    '  identifier          = "${local.name_55}-db"',
                     '  engine              = "postgres"',
                     '  instance_class      = "db.t3.micro"',
                     "  allocated_storage   = 20",
                     '  username            = "launchpad"',
                     '  password            = "change-me-in-prod"',
                     "  skip_final_snapshot = true",
+                    "  deletion_protection = false",
                     "",
                     _governance_tags_hcl("tags"),
                     "}",
@@ -1303,7 +1871,7 @@ def _extras_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_ecr_repository" "app" {',
-                    '  name = "lp-${var.environment_id}"',
+                    "  name = local.name_63",
                     "",
                     _governance_tags_hcl("tags"),
                     "}",
@@ -1315,7 +1883,7 @@ def _extras_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_elasticache_cluster" "redis" {',
-                    '  cluster_id      = "lp-${var.environment_id}"',
+                    "  cluster_id      = local.name_40",
                     '  engine          = "redis"',
                     '  node_type       = "cache.t3.micro"',
                     "  num_cache_nodes = 1",
@@ -1330,7 +1898,7 @@ def _extras_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_iam_role" "lambda" {',
-                    '  name = "lp-${var.environment_id}-lambda"',
+                    '  name = "${local.name_55}-lambda"',
                     "  assume_role_policy = jsonencode({",
                     '    Version = "2012-10-17"',
                     "    Statement = [{ Action = \"sts:AssumeRole\", Effect = \"Allow\", Principal = { Service = \"lambda.amazonaws.com\" } }]",
@@ -1340,7 +1908,7 @@ def _extras_aws(r: AwsResources) -> str:
                     "}",
                     "",
                     'resource "aws_lambda_function" "app" {',
-                    '  function_name = "lp-${var.environment_id}"',
+                    "  function_name = local.name_63",
                     "  role          = aws_iam_role.lambda.arn",
                     '  handler       = "index.handler"',
                     '  runtime       = "nodejs20.x"',
@@ -1356,7 +1924,7 @@ def _extras_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_dynamodb_table" "app" {',
-                    '  name         = "lp-${var.environment_id}"',
+                    "  name         = local.name_63",
                     '  billing_mode = "PAY_PER_REQUEST"',
                     '  hash_key     = "pk"',
                     "",
@@ -1375,7 +1943,7 @@ def _extras_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_sqs_queue" "events" {',
-                    '  name = "lp-${var.environment_id}-events"',
+                    '  name = "${local.name_55}-events"',
                     "",
                     _governance_tags_hcl("tags"),
                     "}",
@@ -1387,7 +1955,8 @@ def _extras_aws(r: AwsResources) -> str:
             "\n".join(
                 [
                     'resource "aws_lb" "app" {',
-                    '  name               = "lp-${var.environment_id}"',
+                    # ALB names max 32 chars.
+                    "  name               = local.name_40",
                     "  internal           = false",
                     '  load_balancer_type = "application"',
                     "",
@@ -1396,17 +1965,19 @@ def _extras_aws(r: AwsResources) -> str:
                 ]
             )
         )
+    if len(blocks) == 1:
+        return ""
     return _join_blocks(blocks, "") if blocks else ""
 
 
 def _extras_azure(r: AzureResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.acr:
         blocks.append(
             "\n".join(
                 [
                     'resource "azurerm_container_registry" "acr" {',
-                    '  name                = replace("lp${var.environment_id}", "-", "")',
+                    '  name                = substr(replace(local.name_63, "-", ""), 0, 50)',
                     "  resource_group_name = var.resource_group",
                     "  location            = var.location",
                     '  sku                 = "Basic"',
@@ -1422,7 +1993,7 @@ def _extras_azure(r: AzureResources) -> str:
             "\n".join(
                 [
                     'resource "azurerm_storage_account" "data" {',
-                    '  name                     = substr(replace("lp${var.environment_id}", "-", ""), 0, 24)',
+                    '  name                     = substr(replace(local.name_63, "-", ""), 0, 24)',
                     "  resource_group_name      = var.resource_group",
                     "  location                 = var.location",
                     '  account_tier             = "Standard"',
@@ -1438,7 +2009,7 @@ def _extras_azure(r: AzureResources) -> str:
             "\n".join(
                 [
                     'resource "azurerm_cosmosdb_account" "app" {',
-                    '  name                = "lp-${var.environment_id}"',
+                    "  name                = local.name_63",
                     "  resource_group_name = var.resource_group",
                     "  location            = var.location",
                     '  offer_type          = "Standard"',
@@ -1457,7 +2028,7 @@ def _extras_azure(r: AzureResources) -> str:
             "\n".join(
                 [
                     'resource "azurerm_redis_cache" "cache" {',
-                    '  name                = "lp-${var.environment_id}"',
+                    "  name                = local.name_63",
                     "  resource_group_name = var.resource_group",
                     "  location            = var.location",
                     "  capacity            = 0",
@@ -1474,7 +2045,7 @@ def _extras_azure(r: AzureResources) -> str:
             "\n".join(
                 [
                     'resource "azurerm_service_plan" "app" {',
-                    '  name                = "lp-${var.environment_id}-plan"',
+                    '  name                = "${local.name_55}-plan"',
                     "  resource_group_name = var.resource_group",
                     "  location            = var.location",
                     '  os_type             = "Linux"',
@@ -1484,7 +2055,7 @@ def _extras_azure(r: AzureResources) -> str:
                     "}",
                     "",
                     'resource "azurerm_linux_web_app" "app" {',
-                    '  name                = "lp-${var.environment_id}"',
+                    "  name                = local.name_63",
                     "  resource_group_name = var.resource_group",
                     "  location            = var.location",
                     "  service_plan_id     = azurerm_service_plan.app.id",
@@ -1500,7 +2071,7 @@ def _extras_azure(r: AzureResources) -> str:
             "\n".join(
                 [
                     'resource "azurerm_log_analytics_workspace" "logs" {',
-                    '  name                = "lp-${var.environment_id}-logs"',
+                    '  name                = "${local.name_55}-logs"',
                     "  resource_group_name = var.resource_group",
                     "  location            = var.location",
                     '  sku                 = "PerGB2018"',
@@ -1511,18 +2082,20 @@ def _extras_azure(r: AzureResources) -> str:
                 ]
             )
         )
+    if len(blocks) == 1:
+        return ""
     return _join_blocks(blocks, "") if blocks else ""
 
 
 def _extras_cloudflare(r: CloudflareResources) -> str:
-    blocks: list[str] = []
+    blocks: list[str] = [_naming_locals_hcl().rstrip()]
     if r.workers:
         blocks.append(
             "\n".join(
                 [
                     'resource "cloudflare_workers_script" "app" {',
                     "  account_id = var.cloudflare_account_id",
-                    '  name       = "lp-${var.environment_id}"',
+                    "  name       = local.name_63",
                     "  content    = <<-EOT",
                     "    export default {",
                     "      async fetch() {",
@@ -1540,7 +2113,7 @@ def _extras_cloudflare(r: CloudflareResources) -> str:
                 [
                     'resource "cloudflare_r2_bucket" "data" {',
                     "  account_id = var.cloudflare_account_id",
-                    '  name       = "lp-${var.environment_id}-data"',
+                    '  name       = "${local.name_55}-data"',
                     '  location   = "WNAM"',
                     "}",
                 ]
@@ -1557,9 +2130,9 @@ def _extras_cloudflare(r: CloudflareResources) -> str:
                     "",
                     'resource "cloudflare_record" "environment" {',
                     "  zone_id = data.cloudflare_zone.primary.id",
-                    '  name    = "lp-${var.environment_id}"',
+                    "  name    = local.name_63",
                     '  type    = "CNAME"',
-                    '  content = "lp-${var.environment_id}.workers.dev"',
+                    '  content = "${local.name_63}.workers.dev"',
                     "  proxied = true",
                     (
                         '  comment = "EnvironmentId=${var.environment_id} Owner=launchpad '
@@ -1575,7 +2148,7 @@ def _extras_cloudflare(r: CloudflareResources) -> str:
                 [
                     'resource "cloudflare_pages_project" "app" {',
                     "  account_id        = var.cloudflare_account_id",
-                    '  name              = "lp-${var.environment_id}"',
+                    "  name              = local.name_63",
                     '  production_branch = "main"',
                     "}",
                 ]
@@ -1587,7 +2160,7 @@ def _extras_cloudflare(r: CloudflareResources) -> str:
                 [
                     'resource "cloudflare_workers_kv_namespace" "store" {',
                     "  account_id = var.cloudflare_account_id",
-                    '  title      = "lp-${var.environment_id}"',
+                    "  title      = local.name_63",
                     "}",
                 ]
             )
@@ -1598,7 +2171,7 @@ def _extras_cloudflare(r: CloudflareResources) -> str:
                 [
                     'resource "cloudflare_d1_database" "db" {',
                     "  account_id = var.cloudflare_account_id",
-                    '  name       = "lp-${var.environment_id}"',
+                    "  name       = local.name_63",
                     "}",
                 ]
             )
@@ -1609,7 +2182,7 @@ def _extras_cloudflare(r: CloudflareResources) -> str:
                 [
                     'resource "cloudflare_zero_trust_tunnel_cloudflared" "app" {',
                     "  account_id = var.cloudflare_account_id",
-                    '  name       = "lp-${var.environment_id}"',
+                    "  name       = local.name_63",
                     '  secret     = base64encode("change-me")',
                     "}",
                 ]
@@ -1621,11 +2194,13 @@ def _extras_cloudflare(r: CloudflareResources) -> str:
                 [
                     'resource "cloudflare_queue" "events" {',
                     "  account_id = var.cloudflare_account_id",
-                    '  name       = "lp-${var.environment_id}-events"',
+                    '  name       = "${local.name_55}-events"',
                     "}",
                 ]
             )
         )
+    if len(blocks) == 1:
+        return "# No Cloudflare resources selected.\n"
     return _join_blocks(blocks, "# No Cloudflare resources selected.")
 
 
@@ -1887,6 +2462,9 @@ def write_terraform_bundle(workspace_dir: Path, name: str, cloud: CloudConfig) -
     _write(TF_ROOT / "providers.tf", _providers_tf(cloud))
     _write(TF_ROOT / "variables.tf", _root_variables(cloud))
     _write(TF_ROOT / "terraform.tfvars", _root_tfvars(name))
+    apis = _apis_tf(cloud)
+    if apis is not None:
+        _write(TF_ROOT / "apis.tf", apis)
     _write(TF_ROOT / "main.tf", _root_main(name, cloud))
     _write(TF_ROOT / "outputs.tf", _root_outputs(cloud))
     _write(

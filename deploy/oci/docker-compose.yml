@@ -51,8 +51,8 @@ services:
 
   api:
     build:
-      context: ../../apps/api
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     environment: &api_env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-launchpad}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-launchpad}
@@ -97,8 +97,8 @@ services:
 
   worker:
     build:
-      context: ../../apps/api
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: apps/api/Dockerfile
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
     restart: unless-stopped
     environment:
@@ -115,8 +115,8 @@ services:
 
   beat:
     build:
-      context: ../../apps/api
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: apps/api/Dockerfile
     command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
     restart: unless-stopped
     environment:

@@ -46,6 +46,8 @@ class EnvironmentCreate(BaseModel):
     github_pr_number: int | None = Field(default=None, ge=1)
     github_pr_url: str | None = Field(default=None, max_length=512)
     deploy_mode: DeployMode | None = None
+    enable_postgres: bool = False
+    enable_redis: bool = False
 
     @field_validator("name")
     @classmethod
@@ -100,8 +102,11 @@ class EnvironmentRead(BaseModel):
     node_port: int | None = None
     github_pr_number: int | None = None
     github_pr_url: str | None = None
+    stable_pr_url: str | None = None
     deploy_mode: DeployMode = DeployMode.PREVIEW
     manifest_packaging: str | None = None
+    enable_postgres: bool = False
+    enable_redis: bool = False
     ttl_expires_at: datetime
     cost_estimate_hourly: Decimal
     cost_accrued: Decimal = Decimal("0.0000")
@@ -173,6 +178,8 @@ class PreviewLaunchRequest(BaseModel):
     github_pr_number: int | None = Field(default=None, ge=1)
     github_pr_url: str | None = Field(default=None, max_length=512)
     deploy_mode: DeployMode | None = None
+    enable_postgres: bool = False
+    enable_redis: bool = False
 
     @field_validator("name")
     @classmethod
@@ -240,13 +247,17 @@ class PreviewLaunchRequest(BaseModel):
             return self
         if self.workspace_id is not None:
             return self
+        from app.core.secrets import has_aws_auth, has_gcp_auth
+
         creds = self.credentials
-        if self.provider == PreviewProvider.GCP and not creds.gcp_sa_key_json:
-            raise ValueError("GCP service account JSON is required")
-        if self.provider == PreviewProvider.AWS and (
-            not creds.aws_access_key_id or not creds.aws_secret_access_key
-        ):
-            raise ValueError("AWS access key and secret are required")
+        if self.provider == PreviewProvider.GCP and not has_gcp_auth(creds):
+            raise ValueError(
+                "GCP credentials required: service account JSON or complete Workload Identity Federation config"
+            )
+        if self.provider == PreviewProvider.AWS and not has_aws_auth(creds):
+            raise ValueError(
+                "AWS credentials required: access key + secret, or IAM role ARN for keyless OIDC"
+            )
         if self.provider == PreviewProvider.AZURE and (
             not creds.azure_client_id
             or not creds.azure_client_secret
@@ -282,13 +293,17 @@ class EnvironmentPromoteRequest(BaseModel):
     def require_cloud_provider(self) -> EnvironmentPromoteRequest:
         if self.provider == PreviewProvider.LOCAL:
             raise ValueError("Promote target must be a cloud provider")
+        from app.core.secrets import has_aws_auth, has_gcp_auth
+
         creds = self.credentials
-        if self.provider == PreviewProvider.GCP and not creds.gcp_sa_key_json:
-            raise ValueError("GCP service account JSON is required")
-        if self.provider == PreviewProvider.AWS and (
-            not creds.aws_access_key_id or not creds.aws_secret_access_key
-        ):
-            raise ValueError("AWS access key and secret are required")
+        if self.provider == PreviewProvider.GCP and not has_gcp_auth(creds):
+            raise ValueError(
+                "GCP credentials required: service account JSON or complete Workload Identity Federation config"
+            )
+        if self.provider == PreviewProvider.AWS and not has_aws_auth(creds):
+            raise ValueError(
+                "AWS credentials required: access key + secret, or IAM role ARN for keyless OIDC"
+            )
         if self.provider == PreviewProvider.AZURE and (
             not creds.azure_client_id
             or not creds.azure_client_secret

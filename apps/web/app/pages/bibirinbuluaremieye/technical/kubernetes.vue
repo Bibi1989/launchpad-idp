@@ -33,7 +33,7 @@ useHead({
         <li>
           <code class="font-mono text-xs">KUBERNETES_ENABLED=true</code>
           — real apply/delete against the configured context. Local NodePorts sit in a small range
-          (default 30080–30084) so kind on Docker Desktop stays reliable.
+          (default 30080–30089) so kind on Docker Desktop stays reliable.
         </li>
       </ul>
     </section>

@@ -46,7 +46,7 @@ onMounted(async () => {
     token.value = payload.access_token
     const { applyFromTokenResponse } = useOrgs()
     applyFromTokenResponse(payload)
-    await navigateTo('/')
+    await navigateTo('/home')
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'OIDC callback failed'
   } finally {

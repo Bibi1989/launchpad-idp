@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { KindClusterStatus, PreviewAppTemplate, PreviewBuildStatus, PreviewLaunchPayload } from '~/types/environment'
 import type { WorkspaceListItem } from '~/types/provisioning'
+import { hasAwsAuth, hasGcpAuth } from '~/utils/cloudValidation'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
 type SourceMode = 'template' | 'repo'
@@ -37,11 +38,19 @@ const form = reactive({
   git_repo_url: '',
   git_branch: 'main',
   github_pr_number: null as number | null,
+  enable_postgres: false,
+  enable_redis: false,
   credentials: {
     gcp_sa_key_json: '',
+    gcp_wif_project_number: '',
+    gcp_wif_pool_id: '',
+    gcp_wif_provider_id: '',
+    gcp_wif_target_sa_email: '',
     aws_access_key_id: '',
     aws_secret_access_key: '',
     aws_session_token: '',
+    aws_role_arn: '',
+    aws_role_session_name: '',
     azure_client_id: '',
     azure_client_secret: '',
     azure_tenant_id: '',
@@ -54,8 +63,8 @@ const PROVIDER_STORAGE_KEY = 'launchpad.lastPreviewProvider'
 
 const providers: Array<{ id: PreviewTarget; label: string; hint: string }> = [
   { id: 'local', label: 'Local (kind)', hint: 'On your machine — we start kind if needed' },
-  { id: 'gcp', label: 'Google Cloud', hint: 'Service account JSON' },
-  { id: 'aws', label: 'AWS', hint: 'Access key + secret' },
+  { id: 'gcp', label: 'Google Cloud', hint: 'SA JSON or keyless WIF' },
+  { id: 'aws', label: 'AWS', hint: 'Access keys or role ARN' },
   { id: 'azure', label: 'Azure', hint: 'Service principal' },
   { id: 'cloudflare', label: 'Cloudflare', hint: 'API token' },
 ]
@@ -217,6 +226,12 @@ function isPreviewProvider(value: string): value is PreviewTarget {
 function applyWorkspaceSelection(workspaceId: string) {
   const ws = workspaces.value.find((item) => item.id === workspaceId)
   if (!ws) return
+  if (ws.name) {
+    const sanitized = ws.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '')
+    if (sanitized) {
+      form.name = sanitized
+    }
+  }
   if (ws.provider !== 'local' && isPreviewProvider(ws.provider)) {
     form.provider = ws.provider
   }
@@ -272,13 +287,8 @@ watch(sourceMode, (mode) => {
 function canContinueStep1(): boolean {
   if (form.provider === 'local') return true
   if (usesStoredWorkspaceCredentials.value) return true
-  if (form.provider === 'gcp') return form.credentials.gcp_sa_key_json.trim().length > 20
-  if (form.provider === 'aws') {
-    return (
-      form.credentials.aws_access_key_id.trim().length > 0
-      && form.credentials.aws_secret_access_key.trim().length > 0
-    )
-  }
+  if (form.provider === 'gcp') return hasGcpAuth(form.credentials)
+  if (form.provider === 'aws') return hasAwsAuth(form.credentials)
   if (form.provider === 'azure') {
     return Boolean(
       form.credentials.azure_client_id
@@ -359,6 +369,8 @@ async function launch() {
       name,
       provider: form.provider,
       ttl_hours: form.ttl_hours,
+      enable_postgres: form.enable_postgres,
+      enable_redis: form.enable_redis,
     }
     if (!buildsFromRepo.value && !workspaceHasManifests.value) {
       payload.workload_image = form.workload_image.trim() || 'nginx:1.27-alpine'
@@ -589,7 +601,9 @@ async function launch() {
             placeholder="42"
           >
           <p class="text-xs text-[var(--lp-muted)]">
-            When Running, Launchpad posts a PR comment + commit status if the GitHub App is configured.
+            When Running, Launchpad smokes the preview URL, posts a PR comment + commit status
+            (Open in Launchpad), and exposes a stable <code class="font-mono text-[10px]">/pr/{n}</code> URL.
+            Synchronize rebuilds; closing or merging the PR tears it down automatically.
           </p>
         </label>
         <p
@@ -692,52 +706,11 @@ async function launch() {
         </button>
       </div>
 
-      <template v-if="form.provider === 'gcp' && !usesStoredWorkspaceCredentials">
-        <label class="block space-y-2">
-          <span class="lp-label">Service account JSON</span>
-          <textarea
-            v-model="form.credentials.gcp_sa_key_json"
-            rows="5"
-            class="lp-input font-mono text-xs"
-            placeholder='{ "type": "service_account", ... }'
-          />
-        </label>
-      </template>
-      <template v-else-if="form.provider === 'aws' && !usesStoredWorkspaceCredentials">
-        <label class="block space-y-2">
-          <span class="lp-label">Access key ID</span>
-          <input v-model="form.credentials.aws_access_key_id" class="lp-input">
-        </label>
-        <label class="block space-y-2">
-          <span class="lp-label">Secret access key</span>
-          <input v-model="form.credentials.aws_secret_access_key" class="lp-input" type="password">
-        </label>
-      </template>
-      <template v-else-if="form.provider === 'azure' && !usesStoredWorkspaceCredentials">
-        <div class="grid gap-3 sm:grid-cols-2">
-          <label class="block space-y-2">
-            <span class="lp-label">Client ID</span>
-            <input v-model="form.credentials.azure_client_id" class="lp-input">
-          </label>
-          <label class="block space-y-2">
-            <span class="lp-label">Client secret</span>
-            <input v-model="form.credentials.azure_client_secret" class="lp-input" type="password">
-          </label>
-          <label class="block space-y-2">
-            <span class="lp-label">Tenant ID</span>
-            <input v-model="form.credentials.azure_tenant_id" class="lp-input">
-          </label>
-          <label class="block space-y-2">
-            <span class="lp-label">Subscription ID</span>
-            <input v-model="form.credentials.azure_subscription_id" class="lp-input">
-          </label>
-        </div>
-      </template>
-      <template v-else-if="form.provider === 'cloudflare' && !usesStoredWorkspaceCredentials">
-        <label class="block space-y-2">
-          <span class="lp-label">API token</span>
-          <input v-model="form.credentials.cloudflare_api_token" class="lp-input" type="password">
-        </label>
+      <template v-if="form.provider !== 'local' && !usesStoredWorkspaceCredentials">
+        <CloudCredentialsFields
+          v-model:credentials="form.credentials"
+          :provider="(form.provider as 'gcp' | 'aws' | 'azure' | 'cloudflare')"
+        />
       </template>
 
       <div class="flex justify-end">
@@ -828,6 +801,9 @@ async function launch() {
             class="lp-input max-w-xs"
             placeholder="42"
           >
+          <p class="text-xs text-[var(--lp-muted)]">
+            Enables stable /pr/{n} URL, smoke + status checks, sync rebuilds, and auto-destroy on PR close.
+          </p>
         </label>
       </div>
       <div class="flex justify-between">
@@ -862,8 +838,20 @@ async function launch() {
           class="lp-input font-mono text-xs"
           placeholder="nginx:1.27-alpine"
           autocomplete="off"
-        >
       </label>
+      <div class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4">
+        <span class="lp-label">Ephemeral Datastores (opt-in)</span>
+        <div class="grid gap-2 sm:grid-cols-2 pt-1">
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input v-model="form.enable_postgres" type="checkbox" class="accent-[var(--lp-accent)]">
+            <span>Postgres (in-cluster)</span>
+          </label>
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input v-model="form.enable_redis" type="checkbox" class="accent-[var(--lp-accent)]">
+            <span>Redis (in-cluster)</span>
+          </label>
+        </div>
+      </div>
       <dl class="grid gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4 text-sm sm:grid-cols-2">
         <div>
           <dt class="lp-label">Target</dt>

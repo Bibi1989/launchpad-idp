@@ -22,6 +22,14 @@ ACTIVE_REBUILD_STATUSES = (
     EnvironmentStatus.PROVISIONING,
 )
 
+# Used for PR-linked lifecycle (rebuild + destroy-on-close).
+PR_LINKED_ACTIVE_STATUSES = (
+    EnvironmentStatus.RUNNING,
+    EnvironmentStatus.FAILED,
+    EnvironmentStatus.PROVISIONING,
+    EnvironmentStatus.PAUSED,
+)
+
 ACTIVE_CONCURRENCY_STATUSES = (
     EnvironmentStatus.PROVISIONING,
     EnvironmentStatus.RUNNING,
@@ -98,6 +106,30 @@ class EnvironmentRepository:
         )
         return len(list(result.scalars().all()))
 
+    async def list_active_for_repo_pr(
+        self,
+        *,
+        repo_full_name: str,
+        pr_number: int,
+    ) -> list[Environment]:
+        """Active environments linked to a specific GitHub pull request."""
+        normalized_target = normalize_git_repo_full_name(repo_full_name)
+        if normalized_target is None:
+            return []
+
+        result = await self._session.execute(
+            select(Environment).where(
+                Environment.github_pr_number == pr_number,
+                Environment.status.in_(PR_LINKED_ACTIVE_STATUSES),
+            )
+        )
+        matched: list[Environment] = []
+        for environment in result.scalars().all():
+            env_repo = normalize_git_repo_full_name(environment.git_repo_url)
+            if env_repo == normalized_target:
+                matched.append(environment)
+        return matched
+
     async def list_active_for_repo_branch(
         self,
         *,
@@ -142,6 +174,8 @@ class EnvironmentRepository:
         github_pr_url: str | None = None,
         deploy_mode: str = "preview",
         manifest_packaging: str | None = None,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
     ) -> Environment:
         environment = Environment(
             owner_id=owner_id,
@@ -163,6 +197,8 @@ class EnvironmentRepository:
             github_pr_url=github_pr_url,
             deploy_mode=deploy_mode,
             manifest_packaging=manifest_packaging,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
         )
         self._session.add(environment)
         await self._session.flush()
@@ -246,10 +282,21 @@ class EnvironmentRepository:
         return environment
 
     async def list_expired_running(self, *, now: datetime | None = None) -> list[Environment]:
+        """Environments past TTL that still consume cluster capacity.
+
+        Includes RUNNING and FAILED (Failed previews often still have pods / NodePorts).
+        """
         cutoff = now or datetime.now(UTC)
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=UTC)
         result = await self._session.execute(
             select(Environment).where(
-                Environment.status == EnvironmentStatus.RUNNING,
+                Environment.status.in_(
+                    (
+                        EnvironmentStatus.RUNNING,
+                        EnvironmentStatus.FAILED,
+                    )
+                ),
                 Environment.ttl_expires_at <= cutoff,
             )
         )

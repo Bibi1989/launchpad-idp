@@ -57,3 +57,37 @@ export const AZURE_LOCATIONS: CloudRegionOption[] = [
   { value: 'australiaeast', label: 'Australia East' },
   { value: 'japaneast', label: 'Japan East' },
 ]
+
+/** Compute / node pool instance sizes by cloud. */
+export const GCP_MACHINE_TYPES: CloudRegionOption[] = [
+  { value: 'e2-medium', label: 'e2-medium (2 vCPU, 4 GB)' },
+  { value: 'e2-standard-2', label: 'e2-standard-2 (2 vCPU, 8 GB)' },
+  { value: 'e2-standard-4', label: 'e2-standard-4 (4 vCPU, 16 GB)' },
+  { value: 'e2-standard-8', label: 'e2-standard-8 (8 vCPU, 32 GB)' },
+  { value: 'n2-standard-2', label: 'n2-standard-2 (2 vCPU, 8 GB)' },
+  { value: 'n2-standard-4', label: 'n2-standard-4 (4 vCPU, 16 GB)' },
+]
+
+export const AWS_INSTANCE_TYPES: CloudRegionOption[] = [
+  { value: 't3.micro', label: 't3.micro (2 vCPU, 1 GB)' },
+  { value: 't3.small', label: 't3.small (2 vCPU, 2 GB)' },
+  { value: 't3.medium', label: 't3.medium (2 vCPU, 4 GB)' },
+  { value: 't3.large', label: 't3.large (2 vCPU, 8 GB)' },
+  { value: 'm5.large', label: 'm5.large (2 vCPU, 8 GB)' },
+  { value: 'm5.xlarge', label: 'm5.xlarge (4 vCPU, 16 GB)' },
+]
+
+export const AZURE_VM_SIZES: CloudRegionOption[] = [
+  { value: 'Standard_B2s', label: 'Standard_B2s (2 vCPU, 4 GB)' },
+  { value: 'Standard_D2_v2', label: 'Standard_D2_v2 (2 vCPU, 7 GB)' },
+  { value: 'Standard_D2s_v3', label: 'Standard_D2s_v3 (2 vCPU, 8 GB)' },
+  { value: 'Standard_D4s_v3', label: 'Standard_D4s_v3 (4 vCPU, 16 GB)' },
+  { value: 'Standard_E2s_v3', label: 'Standard_E2s_v3 (2 vCPU, 16 GB)' },
+]
+
+/** Union used by the structured IaC editor when provider is unknown. */
+export const INSTANCE_SIZE_OPTIONS: CloudRegionOption[] = [
+  ...GCP_MACHINE_TYPES,
+  ...AWS_INSTANCE_TYPES,
+  ...AZURE_VM_SIZES,
+]

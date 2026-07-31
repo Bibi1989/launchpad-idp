@@ -132,8 +132,10 @@ def test_collect_telemetry_runtime_markers() -> None:
 
 @pytest.mark.asyncio
 async def test_heuristic_analyzer_prefers_trivy() -> None:
+    from app.core.config import Settings
+
     bundle = collect_telemetry(trivy_sarif=TRIVY_SARIF)
-    service = PreviewAnalyzerService()
+    service = PreviewAnalyzerService(settings=Settings(gemini_api_key=None))
     report = await service.analyze(bundle)
     assert report.category == DiagnosticCategory.CONTAINER_VULNERABILITY
     assert report.severity == DiagnosticSeverity.CRITICAL

@@ -6,16 +6,24 @@ import {
   renderCicdWorkflow,
 } from '../app/utils/cicdWorkflowGenerator'
 import {
+  applyDetectedWorkspaceInfra,
   artifactModeToInfraConfig,
   buildCiCdScaffold,
   buildDockerScaffold,
   buildKubernetesScaffold,
   buildProvisionScaffold,
   defaultInfraGenerationConfig,
+  detectWorkspaceInfraFromPaths,
   infraConfigToArtifactMode,
   infraConfigToKubernetesPackaging,
+  matchFrameworkSlug,
   kubernetesRunCommands,
   provisionRunCommands,
+  iacDestroyCommand,
+  iacDestroyWizardSteps,
+  iacInitWizardSteps,
+  iacRunShortcuts,
+  iacToolbarActions,
 } from '../app/utils/workspaceInfraScaffold'
 import { buildRepoScaffoldBundle } from '../app/utils/workspaceRepoScaffold'
 
@@ -173,6 +181,37 @@ describe('workspaceInfraScaffold', () => {
 
   it('returns separate run commands per area', () => {
     expect(provisionRunCommands('terraform')).toHaveLength(2)
+    expect(provisionRunCommands('terraform')[0]).toContain('terraform init')
+    expect(provisionRunCommands('terraform')[0]).toContain('infra/terraform')
+    expect(provisionRunCommands('terraform')[0]).toContain('ls ./*.tf')
+    expect(iacRunShortcuts('pulumi').map((s) => s.label)).toEqual([
+      'npm install',
+      'preview',
+      'up',
+      'refresh',
+      'down',
+    ])
+    expect(iacRunShortcuts('terraform').some((s) => s.id === 'tf-destroy' && s.danger)).toBe(true)
+    expect(iacRunShortcuts('terraform').find((s) => s.id === 'tf-init')?.opensInitWizard).toBe(true)
+    expect(iacDestroyCommand('terraform')).toContain('destroy -auto-approve')
+    expect(iacInitWizardSteps('terraform').map((s) => s.label)).toEqual([
+      'init',
+      'validate',
+      'plan',
+      'apply',
+    ])
+    expect(iacInitWizardSteps('terraform', { enableGcpApis: true }).map((s) => s.label)).toEqual([
+      'enable APIs',
+      'init',
+      'validate',
+      'plan',
+      'apply',
+    ])
+    expect(iacInitWizardSteps('terraform').find((s) => s.id === 'terraform-apply')?.command).toContain(
+      '-auto-approve',
+    )
+    expect(iacDestroyWizardSteps('terraform')).toHaveLength(1)
+    expect(iacToolbarActions('terraform').provision.label).toBe('Provision stack')
     expect(kubernetesRunCommands('helm')).toEqual([
       'helm upgrade --install app-chart infra/helm/app-chart/',
     ])
@@ -296,5 +335,58 @@ describe('cicdWorkflowGenerator', () => {
     security.containerScan.tool = 'trivy-0.57.2'
     const yaml = renderCicdWorkflow('gitlab', security)
     expect(yaml).toContain('aquasec/trivy:0.57.2')
+  })
+
+  it('matches framework slugs from path segments', () => {
+    expect(matchFrameworkSlug('nuxtjs')).toBe('nuxtjs')
+    expect(matchFrameworkSlug('react-vite')).toBe('react_vite')
+    expect(matchFrameworkSlug('springboot')).toBe('springboot')
+    expect(matchFrameworkSlug('deploy')).toBeNull()
+  })
+
+  it('detects provision, k8s, docker and CI stacks from workspace paths', () => {
+    const detected = detectWorkspaceInfraFromPaths([
+      'infra/k8s/manifests/deployment.yaml',
+      'dockers/Dockerfile.paygo-nuxtjs',
+      'dockers/Dockerfile.paygo-fastapi',
+      'docker-compose.yml',
+      'ci/github/workflows/nuxtjs-deploy.yml',
+      'ci/github/workflows/fastapi-deploy.yml',
+      'infra/README.md',
+    ])
+    expect(detected.provision.enabled).toBe(false)
+    expect(detected.kubernetes).toEqual({ enabled: true, mode: 'k8s' })
+    expect(detected.container.enabled).toBe(true)
+    expect(detected.container.generate_docker_compose).toBe(true)
+    expect(detected.container.frameworks).toEqual(['nuxtjs', 'fastapi'])
+    expect(detected.cicd.enabled).toBe(true)
+    expect(detected.cicd.platform).toBe('github')
+    expect(detected.cicd.frameworks).toEqual(['nuxtjs', 'fastapi'])
+    expect(detected.summary.some((s) => s.includes('CI/CD'))).toBe(true)
+  })
+
+  it('overlays detection onto wizard defaults for the interactive form', () => {
+    const base = artifactModeToInfraConfig('manifest_only', 'terraform', 'raw_manifests')
+    const container = {
+      enabled: false,
+      generate_dockerfile: true,
+      generate_docker_compose: false,
+      stack: 'generic' as const,
+      frameworks: [] as const,
+      app_name: 'paygo',
+      listen_port: 8080,
+    }
+    const detected = detectWorkspaceInfraFromPaths([
+      'ci/gitlab/.gitlab-ci.yml',
+      'ci/gitlab/nestjs.yml',
+      'dockers/Dockerfile.paygo-nestjs',
+    ])
+    const merged = applyDetectedWorkspaceInfra(base, { ...container, frameworks: [] }, detected)
+    expect(merged.infra.cicd.enabled).toBe(true)
+    expect(merged.infra.cicd.platform).toBe('gitlab')
+    expect(merged.infra.cicd.frameworks).toEqual(['nestjs'])
+    expect(merged.container.enabled).toBe(true)
+    expect(merged.container.frameworks).toEqual(['nestjs'])
+    expect(merged.container.stack).toBe('nestjs')
   })
 })

@@ -89,6 +89,65 @@ def workspace_has_deployable_k8s(workspace_root: Path) -> bool:
     return workspace_has_raw_manifests(workspace_root) or workspace_has_helm_chart(workspace_root)
 
 
+def ensure_workspace_k8s_manifests(
+    workspace_root: Path,
+    image: str | None = None,
+) -> None:
+    if workspace_has_deployable_k8s(workspace_root):
+        return
+    manifest_dir = workspace_root / K8S_MANIFESTS_DIR
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    target_image = (image or "").strip() or "nginx:1.27-alpine"
+    deployment_yaml = f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  labels:
+    app: app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      containers:
+        - name: app
+          image: {target_image}
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+"""
+    service_yaml = """apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  labels:
+    app: app
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    app: app
+"""
+    (manifest_dir / "deployment.yaml").write_text(deployment_yaml, encoding="utf-8")
+    (manifest_dir / "service.yaml").write_text(service_yaml, encoding="utf-8")
+
+
+
 def load_manifest_documents(workspace_root: Path) -> list[dict[str, Any]]:
     manifest_dir = workspace_root / K8S_MANIFESTS_DIR
     documents: list[dict[str, Any]] = []
@@ -662,11 +721,7 @@ def _patch_deployment(
     container = containers[0]
     container["name"] = container.get("name") or APP_NAME
     container["image"] = image
-    tag = image.rsplit(":", 1)[-1] if ":" in image.split("@", 1)[0] else "latest"
-    if "@" in image or tag == "latest":
-        container["imagePullPolicy"] = "Always"
-    else:
-        container["imagePullPolicy"] = "IfNotPresent"
+    container["imagePullPolicy"] = "IfNotPresent"
     env = {item["name"]: item for item in container.get("env", []) if "name" in item}
     env["GIT_REPO_URL"] = {"name": "GIT_REPO_URL", "value": git_repo_url}
     env["GIT_BRANCH"] = {"name": "GIT_BRANCH", "value": git_branch}
@@ -816,6 +871,8 @@ class ManifestDeployer:
             labels=labels,
             image=workload_image,
         )
+
+        ensure_workspace_k8s_manifests(workspace_root, image=workload_image)
 
         if not workspace_has_deployable_k8s(workspace_root):
             raise FileNotFoundError(

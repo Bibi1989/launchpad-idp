@@ -181,9 +181,12 @@ export const defaultKubernetesWorkloadOptions = (): z.infer<
   limit_range: false,
 })
 
+export const networkTopologySchema = z.enum(['simple', 'standard'])
+
 export const gcpResourcesSchema = z.object({
   vpc: z.boolean().default(true),
   subnets: z.boolean().default(true),
+  network_topology: networkTopologySchema.default('simple'),
   gke: z.boolean().default(false),
   artifact_registry: z.boolean().default(false),
   secret_backend: secretBackendSchema.default('secret_manager'),
@@ -195,6 +198,7 @@ export const gcpResourcesSchema = z.object({
   memorystore: z.boolean().default(false),
   bigquery: z.boolean().default(false),
   region: z.string().min(2).max(64).default('us-central1'),
+  machine_type: z.string().min(3).max(64).default('e2-standard-4'),
   project_id: z
     .string()
     .trim()
@@ -206,6 +210,7 @@ export const gcpResourcesSchema = z.object({
 export const awsResourcesSchema = z.object({
   vpc: z.boolean().default(true),
   subnets: z.boolean().default(true),
+  network_topology: networkTopologySchema.default('simple'),
   ec2: z.boolean().default(false),
   s3: z.boolean().default(false),
   eks: z.boolean().default(false),
@@ -218,12 +223,14 @@ export const awsResourcesSchema = z.object({
   sqs: z.boolean().default(false),
   alb: z.boolean().default(false),
   region: z.string().min(2).max(32).default('us-east-1'),
+  instance_type: z.string().min(3).max(64).default('t3.medium'),
   account_alias: z.string().max(64).optional().nullable(),
 })
 
 export const azureResourcesSchema = z.object({
   vnet: z.boolean().default(true),
   subnets: z.boolean().default(true),
+  network_topology: networkTopologySchema.default('simple'),
   aks: z.boolean().default(false),
   key_vault: z.boolean().default(true),
   container_apps: z.boolean().default(false),
@@ -234,6 +241,7 @@ export const azureResourcesSchema = z.object({
   app_service: z.boolean().default(false),
   log_analytics: z.boolean().default(false),
   location: z.string().min(2).max(64).default('eastus'),
+  vm_size: z.string().min(3).max(64).default('Standard_D2_v2'),
   resource_group: z
     .string()
     .trim()
@@ -267,15 +275,78 @@ export const cloudflareResourcesSchema = z
 
 export const cloudCredentialsSchema = z.object({
   gcp_sa_key_json: z.string().optional().nullable(),
+  gcp_wif_project_number: z.string().optional().nullable(),
+  gcp_wif_pool_id: z.string().optional().nullable(),
+  gcp_wif_provider_id: z.string().optional().nullable(),
+  gcp_wif_target_sa_email: z.string().optional().nullable(),
   aws_access_key_id: z.string().optional().nullable(),
   aws_secret_access_key: z.string().optional().nullable(),
   aws_session_token: z.string().optional().nullable(),
+  aws_role_arn: z.string().optional().nullable(),
+  aws_role_session_name: z.string().optional().nullable(),
   azure_client_id: z.string().optional().nullable(),
   azure_client_secret: z.string().optional().nullable(),
   azure_tenant_id: z.string().optional().nullable(),
   azure_subscription_id: z.string().optional().nullable(),
   cloudflare_api_token: z.string().optional().nullable(),
 })
+
+export type CloudCredentialsForm = {
+  gcp_sa_key_json: string
+  gcp_wif_project_number: string
+  gcp_wif_pool_id: string
+  gcp_wif_provider_id: string
+  gcp_wif_target_sa_email: string
+  aws_access_key_id: string
+  aws_secret_access_key: string
+  aws_session_token: string
+  aws_role_arn: string
+  aws_role_session_name: string
+  azure_client_id: string
+  azure_client_secret: string
+  azure_tenant_id: string
+  azure_subscription_id: string
+  cloudflare_api_token: string
+}
+
+export const emptyCloudCredentials = (): CloudCredentialsForm => ({
+  gcp_sa_key_json: '',
+  gcp_wif_project_number: '',
+  gcp_wif_pool_id: '',
+  gcp_wif_provider_id: '',
+  gcp_wif_target_sa_email: '',
+  aws_access_key_id: '',
+  aws_secret_access_key: '',
+  aws_session_token: '',
+  aws_role_arn: '',
+  aws_role_session_name: '',
+  azure_client_id: '',
+  azure_client_secret: '',
+  azure_tenant_id: '',
+  azure_subscription_id: '',
+  cloudflare_api_token: '',
+})
+
+export function gcpWifComplete(creds: CloudCredentialsForm | Record<string, string | null | undefined>): boolean {
+  return Boolean(
+    (creds.gcp_wif_project_number ?? '').toString().trim()
+    && (creds.gcp_wif_pool_id ?? '').toString().trim()
+    && (creds.gcp_wif_provider_id ?? '').toString().trim()
+    && (creds.gcp_wif_target_sa_email ?? '').toString().trim(),
+  )
+}
+
+export function hasGcpAuth(creds: CloudCredentialsForm | Record<string, string | null | undefined>): boolean {
+  return Boolean((creds.gcp_sa_key_json ?? '').toString().trim()) || gcpWifComplete(creds)
+}
+
+export function hasAwsAuth(creds: CloudCredentialsForm | Record<string, string | null | undefined>): boolean {
+  if ((creds.aws_role_arn ?? '').toString().trim()) return true
+  return Boolean(
+    (creds.aws_access_key_id ?? '').toString().trim()
+    && (creds.aws_secret_access_key ?? '').toString().trim(),
+  )
+}
 
 export const frameworkOptionSchema = z.enum([
   'react_vite',
@@ -318,6 +389,13 @@ export const defaultWorkloadDependencies = (): z.infer<typeof workloadDependenci
   redis: { enabled: false, placement: 'in_cluster' },
 })
 
+export const containerServiceSpecSchema = z.object({
+  name: z.string().trim().min(1).max(64).default('app'),
+  stack: frameworkOptionSchema.default('node'),
+  listen_port: z.number().int().min(1).max(65535).default(8080),
+  dockerfile_path: z.string().nullable().optional(),
+})
+
 export const containerScaffoldSchema = z.object({
   enabled: z.boolean().default(false),
   generate_dockerfile: z.boolean().default(true),
@@ -326,6 +404,7 @@ export const containerScaffoldSchema = z.object({
   frameworks: z.array(frameworkOptionSchema).default([]),
   app_name: z.string().trim().min(1).max(100).default('app'),
   listen_port: z.number().int().min(1).max(65535).default(8080),
+  services: z.array(containerServiceSpecSchema).default([]),
 })
 
 export const defaultContainerScaffold = (): z.infer<typeof containerScaffoldSchema> => ({
@@ -336,6 +415,7 @@ export const defaultContainerScaffold = (): z.infer<typeof containerScaffoldSche
   frameworks: [],
   app_name: 'app',
   listen_port: 8080,
+  services: [],
 })
 
 const wizardNameSchema = z

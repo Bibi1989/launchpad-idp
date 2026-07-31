@@ -556,15 +556,18 @@ function downloadWorkflowYaml() {
             />
           </div>
 
-          <select
-            :value="cicd.platform"
-            class="lp-input w-full text-xs"
-            :disabled="disabled || (mode === 'selection' && !cicd.enabled)"
-            @change="setCiCdPlatform(($event.target as HTMLSelectElement).value as CicdPlatform)"
-          >
-            <option value="github">GitHub Workflow</option>
-            <option value="gitlab">GitLab CI</option>
-          </select>
+          <div class="grid gap-2">
+            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">CI/CD provider</label>
+            <select
+              :value="cicd.platform"
+              class="lp-input w-full text-xs"
+              :disabled="disabled || (mode === 'selection' && !cicd.enabled)"
+              @change="setCiCdPlatform(($event.target as HTMLSelectElement).value as CicdPlatform)"
+            >
+              <option value="github">GitHub Actions only</option>
+              <option value="gitlab">GitLab CI only</option>
+            </select>
+          </div>
 
           <div class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5 text-[11px] text-emerald-400 flex items-center justify-between">
             <span class="flex items-center gap-1 font-medium">
