@@ -86,9 +86,12 @@ services:
       KIND_AUTO_MANAGE: ${KIND_AUTO_MANAGE:-true}
       KIND_CLUSTER_NAME: ${KIND_CLUSTER_NAME:-launchpad}
       KIND_SCRIPTS_DIR: /opt/launchpad/scripts
-      # Reach k3d API from inside api/worker containers
+      # Reach k3d API from inside api/worker containers (client address).
       K3D_API_HOST: ${K3D_API_HOST:-host.docker.internal}
       K3D_API_PORT: ${K3D_API_PORT:-6445}
+      # Host address k3d binds/publishes the apiserver on. Keep 0.0.0.0; never a
+      # gateway alias like host.docker.internal (that address is not bindable).
+      K3D_API_BIND_HOST: ${K3D_API_BIND_HOST:-0.0.0.0}
       PREVIEW_NODE_PORT_MIN: ${PREVIEW_NODE_PORT_MIN:-30080}
       PREVIEW_NODE_PORT_MAX: ${PREVIEW_NODE_PORT_MAX:-30089}
       PREVIEW_NODE_HOST: ${PREVIEW_NODE_HOST:-}

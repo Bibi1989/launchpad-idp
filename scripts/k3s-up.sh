@@ -92,8 +92,21 @@ else
   )
   # When k3d runs inside the api/worker container (Docker socket mount), the
   # kube-apiserver must be reachable via the host gateway name, not 127.0.0.1.
+  #
+  # IMPORTANT: the apiserver PUBLISH/bind address and the CLIENT (kubeconfig)
+  # address are two different things and must not be conflated. host.docker.internal
+  # is a gateway ALIAS (e.g. 192.168.65.254 on Docker Desktop) - reachable *from*
+  # containers, but NOT a real interface address the host can bind a published
+  # port to. Binding it fails with "can't assign requested address".
+  #
+  # So: bind the port on a real, bindable host address (0.0.0.0 works on both
+  # Docker Desktop and Linux), advertise the client-facing name as a TLS SAN, and
+  # rewrite the kubeconfig server to K3D_API_HOST after create (see below).
   if [[ -n "${K3D_API_HOST:-}" ]]; then
-    CREATE_ARGS+=(--api-port "${K3D_API_HOST}:${K3D_API_PORT:-6445}")
+    API_PORT="${K3D_API_PORT:-6445}"
+    API_BIND_HOST="${K3D_API_BIND_HOST:-0.0.0.0}"
+    CREATE_ARGS+=(--api-port "${API_BIND_HOST}:${API_PORT}")
+    CREATE_ARGS+=(--k3s-arg "--tls-san=${K3D_API_HOST}@server:0")
   fi
   if [[ -n "${K3S_IMAGE}" ]]; then
     CREATE_ARGS+=(--image "${K3S_IMAGE}")
@@ -109,6 +122,16 @@ else
     echo "  4. Narrow ports: PREVIEW_NODE_PORT_MAX=30089" >&2
     exit 1
   fi
+fi
+
+# k3d merges + switches kubeconfig context on create. When we bound the apiserver
+# to a generic address (0.0.0.0), k3d writes that unreachable host into the
+# kubeconfig - repoint it at the client-facing gateway name so api/worker
+# containers can actually reach the apiserver (matches the --tls-san above).
+if [[ -n "${K3D_API_HOST:-}" ]]; then
+  echo "Pointing kubeconfig cluster '${CONTEXT}' at ${K3D_API_HOST}:${K3D_API_PORT:-6445}…"
+  kubectl config set-cluster "${CONTEXT}" \
+    --server="https://${K3D_API_HOST}:${K3D_API_PORT:-6445}" >/dev/null
 fi
 
 # k3d merges + switches kubeconfig context on create; make sure it exists.
