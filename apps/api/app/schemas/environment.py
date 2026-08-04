@@ -37,7 +37,8 @@ class EnvironmentCreate(BaseModel):
     name: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     git_branch: str = Field(min_length=1, max_length=256)
     git_repo_url: str = Field(min_length=8, max_length=512)
-    ttl_hours: int = Field(default=72, ge=1, le=720)
+    ttl_hours: int | None = Field(default=None, ge=1, le=720)
+    ttl_minutes: int | None = Field(default=None, ge=1, le=43_200)
     workspace_id: UUID | None = None
     template_id: str | None = Field(default=None, max_length=64)
     cost_estimate_hourly: Decimal | None = Field(default=None, ge=0)
@@ -82,6 +83,14 @@ class EnvironmentCreate(BaseModel):
             raise ValueError("git_repo_url contains invalid characters")
         return cleaned
 
+    @model_validator(mode="after")
+    def resolve_ttl(self) -> EnvironmentCreate:
+        if self.ttl_hours is not None and self.ttl_minutes is not None:
+            raise ValueError("Provide ttl_hours or ttl_minutes, not both")
+        if self.ttl_hours is None and self.ttl_minutes is None:
+            self.ttl_hours = 72
+        return self
+
 
 class EnvironmentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -110,6 +119,8 @@ class EnvironmentRead(BaseModel):
     ttl_expires_at: datetime
     cost_estimate_hourly: Decimal
     cost_accrued: Decimal = Decimal("0.0000")
+    cost_sampled_at: datetime | None = None
+    cost_source: str | None = None
     time_remaining_seconds: int = 0
     error_message: str | None
     created_at: datetime
@@ -129,6 +140,8 @@ class EnvironmentRead(BaseModel):
 
     @model_validator(mode="after")
     def compute_runtime_fields(self) -> EnvironmentRead:
+        from app.services.cost_metering import display_cost_accrued
+
         now = datetime.now(UTC)
         created = self.created_at
         if created.tzinfo is None:
@@ -137,10 +150,14 @@ class EnvironmentRead(BaseModel):
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
 
-        elapsed_hours = max((now - created).total_seconds() / 3600.0, 0.0)
-        self.cost_accrued = (
-            self.cost_estimate_hourly * Decimal(str(round(elapsed_hours, 4)))
-        ).quantize(Decimal("0.0001"))
+        self.cost_accrued = display_cost_accrued(
+            cost_accrued=self.cost_accrued or Decimal("0.0000"),
+            cost_estimate_hourly=self.cost_estimate_hourly,
+            cost_sampled_at=self.cost_sampled_at,
+            created_at=created,
+            status=self.status,
+            now=now,
+        )
         self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
         if not self.app_ready:
             self.app_ready = bool(self.preview_url) and self.status in {
@@ -173,6 +190,7 @@ class PreviewLaunchRequest(BaseModel):
     provider: PreviewProvider = PreviewProvider.LOCAL
     credentials: CloudCredentials = Field(default_factory=CloudCredentials)
     ttl_hours: int | None = Field(default=None, ge=1, le=168)
+    ttl_minutes: int | None = Field(default=None, ge=1, le=10_080)
     workspace_id: UUID | None = None
     workload_image: str | None = Field(default=None, min_length=3, max_length=256)
     github_pr_number: int | None = Field(default=None, ge=1)
@@ -232,6 +250,9 @@ class PreviewLaunchRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_source_and_credentials(self) -> PreviewLaunchRequest:
+        if self.ttl_hours is not None and self.ttl_minutes is not None:
+            raise ValueError("Provide ttl_hours or ttl_minutes, not both")
+
         has_template = bool(self.template_id)
         has_custom = bool(self.git_repo_url)
         has_workspace = self.workspace_id is not None
@@ -272,6 +293,13 @@ class PreviewLaunchRequest(BaseModel):
 
 class EnvironmentExtendRequest(BaseModel):
     hours: int | None = Field(default=None, ge=1, le=72)
+    minutes: int | None = Field(default=None, ge=1, le=4_320)
+
+    @model_validator(mode="after")
+    def resolve_extend_unit(self) -> EnvironmentExtendRequest:
+        if self.hours is not None and self.minutes is not None:
+            raise ValueError("Provide hours or minutes, not both")
+        return self
 
 
 class EnvironmentPromoteRequest(BaseModel):
@@ -281,6 +309,7 @@ class EnvironmentPromoteRequest(BaseModel):
     credentials: CloudCredentials = Field(default_factory=CloudCredentials)
     name: str | None = Field(default=None, min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     ttl_hours: int | None = Field(default=None, ge=1, le=168)
+    ttl_minutes: int | None = Field(default=None, ge=1, le=10_080)
 
     @field_validator("name")
     @classmethod
@@ -291,6 +320,8 @@ class EnvironmentPromoteRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_cloud_provider(self) -> EnvironmentPromoteRequest:
+        if self.ttl_hours is not None and self.ttl_minutes is not None:
+            raise ValueError("Provide ttl_hours or ttl_minutes, not both")
         if self.provider == PreviewProvider.LOCAL:
             raise ValueError("Promote target must be a cloud provider")
         from app.core.secrets import has_aws_auth, has_gcp_auth
@@ -357,10 +388,12 @@ class AuditLogRead(BaseModel):
 
 
 class KindClusterStatus(BaseModel):
-    """Read-only Kind/local cluster preflight for Launch → Local."""
+    """Read-only local cluster preflight for Launch → Local (k3s/k3d or kind)."""
 
     status: str
     cluster: str
+    engine: str = "k3s"
+    tool: str = "k3d"
     context: str
     kind_installed: bool
     kubectl_installed: bool

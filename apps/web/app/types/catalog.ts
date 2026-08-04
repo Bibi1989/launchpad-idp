@@ -17,6 +17,8 @@ export interface GoldenPathTemplate {
   includes_k8s: boolean
   includes_cicd: boolean
   includes_iac: boolean
+  enable_postgres?: boolean
+  enable_redis?: boolean
 }
 
 export interface ScorecardItem {

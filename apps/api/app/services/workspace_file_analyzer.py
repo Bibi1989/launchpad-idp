@@ -97,6 +97,59 @@ class WorkspaceFileAnalyzerError(RuntimeError):
     """Workspace file analysis failed."""
 
 
+def _postgres_needs_pgdata_fix(lower: str) -> bool:
+    """True for a non-root postgres Deployment with a data volume but no PGDATA env.
+
+    Checks specifically for the ``PGDATA`` env var (``name: pgdata``) rather than
+    the bare substring "pgdata", which also appears in ``subPath: pgdata``.
+    """
+    return (
+        "kind: deployment" in lower
+        and "/var/lib/postgresql/data" in lower
+        and ("image: postgres" in lower or "name: postgres" in lower)
+        and "runasuser:" in lower
+        and "runasuser: 0" not in lower
+        and "name: pgdata" not in lower
+    )
+
+
+def _inject_pgdata_env(content: str) -> str | None:
+    """Insert a PGDATA sub-directory env into the postgres container's env block.
+
+    Returns the patched content, or None when no suitable postgres ``env:`` block
+    is found. Indentation is inferred from the first env item so the result stays
+    valid YAML regardless of the manifest's indent width.
+    """
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() != "env:":
+            continue
+        env_indent = len(line) - len(line.lstrip())
+        # Inspect the block that follows to confirm it is the postgres env and to
+        # learn the item indentation.
+        for j in range(i + 1, min(i + 10, len(lines))):
+            item = lines[j]
+            stripped = item.strip()
+            if not stripped:
+                continue
+            item_indent = len(item) - len(item.lstrip())
+            # Dedented past the env block without finding an item -> not it.
+            if item_indent <= env_indent and not stripped.startswith("-"):
+                break
+            if stripped.startswith("- name:"):
+                block_text = "\n".join(lines[i : i + 14]).upper()
+                if "POSTGRES_" not in block_text:
+                    break
+                pad = " " * item_indent
+                vpad = " " * (item_indent + 2)
+                insert = [
+                    f"{pad}- name: PGDATA",
+                    f"{vpad}value: /var/lib/postgresql/data/pgdata",
+                ]
+                return "\n".join(lines[: i + 1] + insert + lines[i + 1 :])
+    return None
+
+
 def detect_kind_from_path(path: str) -> WorkspaceAnalysisKind:
     normalized = path.replace("\\", "/").lower().lstrip("./")
     base = normalized.rsplit("/", 1)[-1]
@@ -331,7 +384,35 @@ class WorkspaceFileAnalyzerService:
     def _heuristic_kubernetes(self, path: str, content: str) -> WorkspaceFileAnalyzeResponse:
         issues: list[WorkspaceFileIssue] = []
         suggestions: list[str] = []
+        improved: str | None = None
         lower = content.lower()
+
+        # Auto-fix: postgres running as a non-root UID with a mounted data volume
+        # but no PGDATA sub-directory. initdb cannot chmod the volume mount point
+        # it does not own, so the pod crashes ("could not change permissions of
+        # directory ... Operation not permitted"). Point PGDATA at a sub-dir.
+        if _postgres_needs_pgdata_fix(lower):
+            issues.append(
+                WorkspaceFileIssue(
+                    title="Postgres crashes as non-root without PGDATA sub-directory",
+                    description=(
+                        "This postgres Deployment runs as a non-root UID with a volume "
+                        "mounted at /var/lib/postgresql/data but no PGDATA env. initdb "
+                        "cannot chmod the mount point it does not own, so the pod fails "
+                        "with 'could not change permissions of directory ... Operation "
+                        "not permitted'. Set PGDATA to a sub-directory of the mount."
+                    ),
+                    severity="critical",
+                    ruleId="POSTGRES_PGDATA_SUBDIR",
+                )
+            )
+            fixed = _inject_pgdata_env(content)
+            if fixed and fixed != content:
+                improved = fixed
+                suggestions.append(
+                    "Set PGDATA=/var/lib/postgresql/data/pgdata on the postgres container."
+                )
+
         if "kind: deployment" in lower:
             if "readinessprobe" not in lower:
                 issues.append(
@@ -359,10 +440,14 @@ class WorkspaceFileAnalyzerService:
             suggestions.append("Manifest looks workable; verify probes match the container listen port.")
         return WorkspaceFileAnalyzeResponse(
             kind="kubernetes",
-            summary="Heuristic Kubernetes review completed.",
+            summary=(
+                "Heuristic Kubernetes review found a pod-crashing issue and proposed a fix."
+                if improved
+                else "Heuristic Kubernetes review completed."
+            ),
             issues=issues,
             suggestions=suggestions,
-            improvedContent=None,
+            improvedContent=improved,
         )
 
     def _heuristic_iac(

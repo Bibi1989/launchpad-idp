@@ -23,6 +23,8 @@ class PreviewAppTemplate:
     hourly_cost_hint: str
     workload_image: str
     tags: tuple[str, ...]
+    enable_postgres: bool = False
+    enable_redis: bool = False
 
 
 PREVIEW_TEMPLATES: tuple[PreviewAppTemplate, ...] = (
@@ -57,6 +59,34 @@ PREVIEW_TEMPLATES: tuple[PreviewAppTemplate, ...] = (
         tags=("api", "backend", "demo"),
     ),
     PreviewAppTemplate(
+        id="fullstack-nextjs-express-postgres",
+        title="Fullstack (Next.js + Express + PostgreSQL)",
+        description="Next.js UI + Express API + PostgreSQL database — dual containers, database provisioning, K8s packaging.",
+        icon="storage",
+        git_repo_url="https://github.com/kubernetes/examples.git",
+        git_branch="master",
+        default_ttl_hours=24,
+        hourly_cost_hint="0.45",
+        workload_image="nginx:1.27-alpine",
+        tags=("fullstack", "nextjs", "express", "postgres", "node", "database"),
+        enable_postgres=True,
+        enable_redis=False,
+    ),
+    PreviewAppTemplate(
+        id="fullstack-nextjs-express-postgres-redis",
+        title="Fullstack (Next.js + Express + PostgreSQL + Redis)",
+        description="Next.js UI + Express API + PostgreSQL + Redis cache — full-stack architecture with database and cache provisioning.",
+        icon="layers",
+        git_repo_url="https://github.com/kubernetes/examples.git",
+        git_branch="master",
+        default_ttl_hours=24,
+        hourly_cost_hint="0.55",
+        workload_image="nginx:1.27-alpine",
+        tags=("fullstack", "nextjs", "express", "postgres", "redis", "node", "cache"),
+        enable_postgres=True,
+        enable_redis=True,
+    ),
+    PreviewAppTemplate(
         id="fullstack-demo",
         title="Fullstack Demo",
         description=(
@@ -68,7 +98,7 @@ PREVIEW_TEMPLATES: tuple[PreviewAppTemplate, ...] = (
         git_branch="master",
         default_ttl_hours=24,
         hourly_cost_hint="0.42",
-        workload_image="nginx:1.27-alpine",
+        workload_image="web-ui:latest",
         tags=("fullstack", "demo", "review"),
     ),
 )

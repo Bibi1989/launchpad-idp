@@ -67,6 +67,16 @@ const remaining = computed(() => {
   }
 })
 
+const displayStatus = computed((): EnvironmentStatus => {
+  if (liveStatus.value === 'EXPIRED') return 'EXPIRED'
+  if (liveStatus.value === 'PAUSED' && remaining.value.expired) return 'EXPIRED'
+  return liveStatus.value
+})
+
+const canResume = computed(
+  () => liveStatus.value === 'PAUSED' && !remaining.value.expired,
+)
+
 const canDestroy = computed(() => {
   const s = liveStatus.value
   return s !== 'DESTROYED' && s !== 'TEARDOWN_PENDING' && s !== 'PROVISIONING'
@@ -89,7 +99,7 @@ const costToDate = computed(() => {
 
 const previewHref = computed(() => {
   if (props.environment.app_ready && props.environment.preview_url) {
-    return props.environment.preview_url
+    return resolvePreviewUrl(props.environment)
   }
   return null
 })
@@ -147,7 +157,7 @@ const repoShort = computed(() => {
           </span>
         </p>
       </div>
-      <StatusBadge :status="liveStatus" :rebuilding="isRebuilding" />
+      <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
     </div>
 
     <div class="flex gap-4 p-4">
@@ -268,7 +278,7 @@ const repoShort = computed(() => {
         Pause
       </button>
       <button
-        v-if="liveStatus === 'PAUSED'"
+        v-if="canResume"
         type="button"
         class="lp-btn-primary inline-flex items-center gap-1 px-3 py-1.5 text-xs uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 text-white"
         @click="emit('resume', environment.id)"
@@ -276,6 +286,14 @@ const repoShort = computed(() => {
         <span class="material-symbols-outlined text-sm">play_arrow</span>
         Resume
       </button>
+      <span
+        v-else-if="displayStatus === 'EXPIRED'"
+        class="inline-flex items-center gap-1 px-3 py-1.5 text-xs uppercase tracking-wide text-[var(--lp-muted)]"
+        title="TTL expired — resume is disabled"
+      >
+        <span class="material-symbols-outlined text-sm">timer_off</span>
+        Expired
+      </span>
       <button
         v-if="canRetry"
         type="button"

@@ -21,6 +21,11 @@ from app.core.secrets import decrypt_secret
 
 logger = get_logger(__name__)
 
+# Kinds that require CRDs a vanilla kind/local cluster does not ship. Applying
+# them aborts the whole `kubectl apply` ("no matches for kind ... ensure CRDs are
+# installed first"), so they are filtered out and reported as skipped instead.
+_LOCAL_UNSUPPORTED_KINDS = frozenset({"VerticalPodAutoscaler"})
+
 
 @dataclass
 class ClusterContextInfo:
@@ -164,8 +169,10 @@ class K8sManager:
         elif provider == "azure":
             rg = cloud_config.get("resource_group") or "rg-launchpad"
             context_name = f"aks_{rg}_{cluster_name}"
-        elif provider == "local" or provider == "kind":
-            context_name = f"kind-{cluster_name}"
+        elif provider in ("local", "k3s", "kind"):
+            engine = getattr(self._settings, "local_k8s_engine", "k3s").lower()
+            prefix = "k3d" if engine == "k3s" else "kind"
+            context_name = f"{prefix}-{cluster_name}"
 
         # Real connection probe attempt via kubectl or in-cluster / kind config
         try:
@@ -377,40 +384,46 @@ class K8sManager:
 
         applied_names: list[str] = []
         apply_error: str | None = None
+        skipped_kinds: list[str] = []
 
         try:
+            # Collect every manifest document (from disk when available, else the
+            # parsed workspace files), drop kinds the local/kind cluster cannot
+            # serve (e.g. VerticalPodAutoscaler needs the autoscaling.k8s.io CRD),
+            # then apply the remainder via stdin so one unsupported object cannot
+            # abort the whole apply.
+            source_docs: list[dict[str, Any]] = []
             if manifest_dir is not None:
-                cmd = [
-                    kubectl_bin,
-                    "apply",
-                    "-f",
-                    str(manifest_dir),
-                    "-R",
-                    "-n",
-                    namespace,
-                ] + context_args
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=90,
-                    check=False,
-                )
+                for path in sorted(manifest_dir.rglob("*.y*ml")):
+                    try:
+                        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                            if isinstance(doc, dict):
+                                source_docs.append(doc)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("manifest_parse_failed", path=str(path), error=str(exc))
             else:
-                raw_yaml_combined = "\n---\n".join(
-                    yaml.dump({k: v for k, v in doc.items() if not str(k).startswith("_")})
-                    for doc in manifests
-                    if isinstance(doc, dict)
-                )
-                cmd = [kubectl_bin, "apply", "-f", "-", "-n", namespace] + context_args
-                proc = subprocess.run(
-                    cmd,
-                    input=raw_yaml_combined,
-                    capture_output=True,
-                    text=True,
-                    timeout=90,
-                    check=False,
-                )
+                source_docs = [d for d in manifests if isinstance(d, dict)]
+
+            docs_to_apply: list[dict[str, Any]] = []
+            for doc in source_docs:
+                if str(doc.get("kind") or "") in _LOCAL_UNSUPPORTED_KINDS:
+                    skipped_kinds.append(str(doc.get("kind")))
+                    continue
+                docs_to_apply.append(doc)
+
+            raw_yaml_combined = "\n---\n".join(
+                yaml.dump({k: v for k, v in doc.items() if not str(k).startswith("_")})
+                for doc in docs_to_apply
+            )
+            cmd = [kubectl_bin, "apply", "-f", "-", "-n", namespace] + context_args
+            proc = subprocess.run(
+                cmd,
+                input=raw_yaml_combined,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
 
             if proc.returncode == 0:
                 for line in (proc.stdout or "").splitlines():
@@ -441,13 +454,28 @@ class K8sManager:
             )
             return
 
+        skip_note = ""
+        if skipped_kinds:
+            unique_skipped = sorted(set(skipped_kinds))
+            skip_note = (
+                f" Skipped {', '.join(unique_skipped)} "
+                "(CRD not installed on this cluster)."
+            )
         yield PipelineStageEvent(
             stage_id="kube_api_accepted",
             stage_name="Kube-API Accepted",
             status="success",
             timestamp=now(),
-            message=f"kubectl apply accepted {len(applied_names)} change(s) on '{ctx.context_name}' in '{namespace}'.",
-            details={"applied": applied_names, "namespace": namespace, "context": ctx.context_name},
+            message=(
+                f"kubectl apply accepted {len(applied_names)} change(s) on "
+                f"'{ctx.context_name}' in '{namespace}'.{skip_note}"
+            ),
+            details={
+                "applied": applied_names,
+                "skipped_kinds": sorted(set(skipped_kinds)),
+                "namespace": namespace,
+                "context": ctx.context_name,
+            },
         )
 
         yield PipelineStageEvent(
@@ -470,43 +498,91 @@ class K8sManager:
                     "--all",
                     "-n",
                     namespace,
-                    "--timeout=60s",
+                    "--timeout=45s",
                 ]
                 + context_args,
                 capture_output=True,
                 text=True,
-                timeout=75,
+                timeout=55,
                 check=False,
             )
-            ready_detail = (roll.stdout or roll.stderr or "").strip()
-            ready_ok = roll.returncode == 0
+            roll_output = (roll.stdout or roll.stderr or "").strip()
+            if roll.returncode == 0:
+                ready_ok = True
+                ready_detail = roll_output or "All deployments rolled out successfully."
+
             if not ready_ok:
-                # No deployments is not always fatal (Job-only workspaces)
-                pods = subprocess.run(
-                    [kubectl_bin, "get", "pods", "-n", namespace, "-o", "json"] + context_args,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                    check=False,
-                )
-                if pods.returncode == 0 and pods.stdout.strip():
-                    pdata = json.loads(pods.stdout)
-                    items = pdata.get("items") or []
-                    if items:
-                        ready_ok = all(
-                            any(
-                                c.get("type") == "Ready" and c.get("status") == "True"
-                                for c in (p.get("status") or {}).get("conditions") or []
-                            )
-                            or (p.get("status") or {}).get("phase") == "Succeeded"
-                            for p in items
-                        )
-                        ready_detail = f"{len(items)} pod(s) observed"
-                    else:
+                # Polling retry loop: check pod status over a grace period
+                # to allow initializing or starting containers time to become Ready.
+                start_time = time.monotonic()
+                max_grace_seconds = 20.0
+                poll_interval = 2.0
+
+                while True:
+                    pods = subprocess.run(
+                        [kubectl_bin, "get", "pods", "-n", namespace, "-o", "json"] + context_args,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+                    if pods.returncode == 0 and pods.stdout.strip():
+                        try:
+                            pdata = json.loads(pods.stdout)
+                            items = pdata.get("items") or []
+                            if not items:
+                                ready_ok = True
+                                ready_detail = "No workload pods in namespace; resources applied cleanly."
+                                break
+
+                            ready_pods = []
+                            non_ready_pods = []
+                            for p in items:
+                                pod_name = p.get("metadata", {}).get("name") or "unknown"
+                                status_obj = p.get("status") or {}
+                                phase = status_obj.get("phase") or "Unknown"
+                                conditions = status_obj.get("conditions") or []
+                                is_ready = any(
+                                    c.get("type") == "Ready" and c.get("status") == "True"
+                                    for c in conditions
+                                ) or phase == "Succeeded"
+
+                                if is_ready:
+                                    ready_pods.append(pod_name)
+                                else:
+                                    container_statuses = (status_obj.get("containerStatuses") or []) + (status_obj.get("initContainerStatuses") or [])
+                                    reasons = []
+                                    for cs in container_statuses:
+                                        state = cs.get("state") or {}
+                                        waiting = state.get("waiting") or {}
+                                        terminated = state.get("terminated") or {}
+                                        if waiting and waiting.get("reason"):
+                                            reasons.append(f"{cs.get('name')}: {waiting.get('reason')}")
+                                        elif terminated and terminated.get("reason") and terminated.get("reason") != "Completed":
+                                            reasons.append(f"{cs.get('name')}: {terminated.get('reason')}")
+                                    reason_str = f" ({', '.join(reasons)})" if reasons else ""
+                                    non_ready_pods.append(f"{pod_name} [{phase}]{reason_str}")
+
+                            if len(ready_pods) == len(items):
+                                ready_ok = True
+                                ready_detail = f"All {len(items)} pod(s) are Ready."
+                                break
+                            else:
+                                ready_detail = (
+                                    f"{len(ready_pods)}/{len(items)} pod(s) ready. "
+                                    f"Non-ready: {', '.join(non_ready_pods[:4])}"
+                                )
+                        except json.JSONDecodeError:
+                            ready_detail = "Failed to parse kubectl pods output"
+                    elif "not found" in roll_output.lower() or "no resources" in roll_output.lower():
                         ready_ok = True
-                        ready_detail = "No pods yet (resources applied; pods may still be creating)"
-                elif "not found" in ready_detail.lower() or "no resources" in ready_detail.lower():
-                    ready_ok = True
+                        ready_detail = "No deployment resources found; applied cleanly."
+                        break
+
+                    elapsed = time.monotonic() - start_time
+                    if elapsed >= max_grace_seconds:
+                        break
+                    time.sleep(poll_interval)
         except Exception as exc:
             ready_detail = str(exc)
             ready_ok = False

@@ -31,7 +31,8 @@ const linkedFromQuery = computed(() => {
 const form = reactive({
   name: '',
   provider: 'local' as PreviewTarget,
-  ttl_hours: 8,
+  ttl_unit: 'hours' as 'hours' | 'minutes',
+  ttl_value: 8,
   workload_image: 'nginx:1.27-alpine',
   workspace_id: null as string | null,
   template_id: '' as string,
@@ -62,7 +63,7 @@ const form = reactive({
 const PROVIDER_STORAGE_KEY = 'launchpad.lastPreviewProvider'
 
 const providers: Array<{ id: PreviewTarget; label: string; hint: string }> = [
-  { id: 'local', label: 'Local (kind)', hint: 'On your machine — we start kind if needed' },
+  { id: 'local', label: 'Local (Sandbox)', hint: 'On your machine — we start the local cluster if needed' },
   { id: 'gcp', label: 'Google Cloud', hint: 'SA JSON or keyless WIF' },
   { id: 'aws', label: 'AWS', hint: 'Access keys or role ARN' },
   { id: 'azure', label: 'Azure', hint: 'Service principal' },
@@ -169,9 +170,24 @@ async function refreshKindStatus() {
     kindStatus.value = await getKindStatus()
   } catch (err) {
     kindStatus.value = null
-    kindStatusError.value = err instanceof Error ? err.message : 'Failed to check kind cluster'
+    kindStatusError.value = err instanceof Error ? err.message : 'Failed to check local cluster'
   } finally {
     kindStatusLoading.value = false
+  }
+}
+
+function selectTemplate(tpl: any) {
+  form.template_id = tpl.id
+  form.ttl_unit = 'hours'
+  form.ttl_value = tpl.default_ttl_hours
+  if (tpl.workload_image) {
+    form.workload_image = tpl.workload_image
+  }
+  if (tpl.enable_postgres !== undefined) {
+    form.enable_postgres = Boolean(tpl.enable_postgres)
+  }
+  if (tpl.enable_redis !== undefined) {
+    form.enable_redis = Boolean(tpl.enable_redis)
   }
 }
 
@@ -200,8 +216,7 @@ onMounted(async () => {
     workspaces.value = workspaceList
     previewBuild.value = buildStatus
     if (templates.value[0]) {
-      form.template_id = templates.value[0].id
-      form.ttl_hours = templates.value[0].default_ttl_hours
+      selectTemplate(templates.value[0])
     }
     if (linkedFromQuery.value) {
       applyWorkspaceSelection(linkedFromQuery.value)
@@ -214,6 +229,8 @@ onMounted(async () => {
   }
   await refreshKindStatus()
 })
+
+const aiDrawerOpen = ref(false)
 
 function isPreviewProvider(value: string): value is PreviewTarget {
   return value === 'local'
@@ -272,15 +289,20 @@ watch(
   (id) => {
     if (sourceMode.value !== 'template') return
     const tpl = templates.value.find((t) => t.id === id)
-    if (tpl) form.ttl_hours = tpl.default_ttl_hours
+    if (tpl) {
+      form.ttl_unit = 'hours'
+      form.ttl_value = tpl.default_ttl_hours
+    }
   },
 )
 
 watch(sourceMode, (mode) => {
   if (mode === 'template' && selectedTemplate.value) {
-    form.ttl_hours = selectedTemplate.value.default_ttl_hours
+    form.ttl_unit = 'hours'
+    form.ttl_value = selectedTemplate.value.default_ttl_hours
   } else if (mode === 'repo') {
-    form.ttl_hours = 24
+    form.ttl_unit = 'hours'
+    form.ttl_value = 24
   }
 })
 
@@ -358,7 +380,7 @@ async function launch() {
     await refreshKindStatus()
     if (localLaunchBlocked.value) {
       errorMessage.value = kindStatus.value?.message
-        || 'Local kind cluster is not ready. Fix tools/cluster before launching.'
+        || 'Local Sandbox cluster is not ready. Fix tools/cluster before launching.'
       return
     }
   }
@@ -368,9 +390,13 @@ async function launch() {
     const payload: PreviewLaunchPayload = {
       name,
       provider: form.provider,
-      ttl_hours: form.ttl_hours,
       enable_postgres: form.enable_postgres,
       enable_redis: form.enable_redis,
+    }
+    if (form.ttl_unit === 'minutes') {
+      payload.ttl_minutes = form.ttl_value
+    } else {
+      payload.ttl_hours = form.ttl_value
     }
     if (!buildsFromRepo.value && !workspaceHasManifests.value) {
       payload.workload_image = form.workload_image.trim() || 'nginx:1.27-alpine'
@@ -407,7 +433,7 @@ async function launch() {
       </p>
       <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">Launch a preview app</h1>
       <p class="max-w-2xl text-sm text-[var(--lp-muted)]">
-        Deploy a catalog demo or your own repo. Local kind is the default happy path.
+        Deploy a catalog demo or your own repo. Local Sandbox is the default happy path.
         Need custom YAML, Helm, or Terraform?
         <NuxtLink to="/provision" class="font-medium text-[var(--lp-accent)] hover:underline">
           Use Provision →
@@ -437,14 +463,30 @@ async function launch() {
       </li>
     </ol>
 
-    <p v-if="errorMessage" class="text-sm text-[var(--lp-danger)]">{{ errorMessage }}</p>
+    <div
+      v-if="errorMessage"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-xs font-mono text-rose-300 shadow-lg backdrop-blur-md"
+    >
+      <div class="flex items-center gap-2.5 min-w-0">
+        <span class="material-symbols-outlined text-lg text-rose-400 shrink-0">error</span>
+        <p class="break-words font-semibold">{{ errorMessage }}</p>
+      </div>
+      <button
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-500/30 transition shadow-md shrink-0"
+        @click="aiDrawerOpen = true"
+      >
+        <span class="material-symbols-outlined text-sm text-amber-400">auto_awesome</span>
+        <span>AI Analyze &amp; Fix</span>
+      </button>
+    </div>
 
     <!-- Local: single screen -->
     <section v-if="isLocal" class="lp-glass space-y-6 rounded-xl p-6">
       <div>
-        <h2 class="text-lg font-semibold">Local (kind)</h2>
+        <h2 class="text-lg font-semibold">Local (Sandbox)</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          Launchpad starts the kind cluster if needed (~1–2 min first time). No cloud credentials.
+          Launchpad starts the local cluster if needed (~1–2 min first time). No cloud credentials.
           Open app uses the NodePort URL once the pod is Ready.
         </p>
       </div>
@@ -460,7 +502,7 @@ async function launch() {
       >
         <div class="flex flex-wrap items-start justify-between gap-2">
           <p>
-            <template v-if="kindStatusLoading">Checking kind cluster…</template>
+            <template v-if="kindStatusLoading">Checking local cluster…</template>
             <template v-else-if="kindStatusError">{{ kindStatusError }}</template>
             <template v-else-if="kindStatus">{{ kindStatus.message }}</template>
             <template v-else>Kind status unavailable.</template>
@@ -567,7 +609,7 @@ async function launch() {
                 ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
                 : 'border-[var(--lp-line)] hover:bg-[var(--lp-panel-2)]'
             "
-            @click="form.template_id = tpl.id"
+            @click="selectTemplate(tpl)"
           >
             <p class="text-sm font-medium">{{ tpl.title }}</p>
             <p class="mt-1 text-xs text-[var(--lp-muted)]">{{ tpl.description }}</p>
@@ -621,8 +663,20 @@ async function launch() {
           <input v-model="form.name" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">TTL (hours)</span>
-          <input v-model.number="form.ttl_hours" type="number" min="1" max="168" class="lp-input">
+          <span class="lp-label">TTL</span>
+          <div class="flex gap-2">
+            <input
+              v-model.number="form.ttl_value"
+              type="number"
+              min="1"
+              :max="form.ttl_unit === 'minutes' ? 10080 : 168"
+              class="lp-input flex-1"
+            >
+            <select v-model="form.ttl_unit" class="lp-input w-28">
+              <option value="hours">Hours</option>
+              <option value="minutes">Minutes</option>
+            </select>
+          </div>
         </label>
         <label v-if="!buildsFromRepo && !workspaceHasManifests" class="block space-y-2 sm:col-span-2">
           <span class="lp-label">Container image</span>
@@ -651,7 +705,7 @@ async function launch() {
           :disabled="submitting || kindStatusLoading || localLaunchBlocked"
           @click="launch"
         >
-          {{ submitting ? 'Starting kind & launching…' : 'Launch preview' }}
+          {{ submitting ? 'Starting cluster & launching…' : 'Launch preview' }}
         </button>
       </div>
     </section>
@@ -825,8 +879,20 @@ async function launch() {
         <input v-model="form.name" class="lp-input" autocomplete="off">
       </label>
       <label class="block space-y-2">
-        <span class="lp-label">TTL (hours)</span>
-        <input v-model.number="form.ttl_hours" type="number" min="1" max="168" class="lp-input">
+        <span class="lp-label">TTL</span>
+        <div class="flex gap-2">
+          <input
+            v-model.number="form.ttl_value"
+            type="number"
+            min="1"
+            :max="form.ttl_unit === 'minutes' ? 10080 : 168"
+            class="lp-input flex-1"
+          >
+          <select v-model="form.ttl_unit" class="lp-input w-28">
+            <option value="hours">Hours</option>
+            <option value="minutes">Minutes</option>
+          </select>
+        </div>
       </label>
       <label
         v-if="!buildsFromRepo && !workspaceHasManifests"
@@ -890,5 +956,11 @@ async function launch() {
         </button>
       </div>
     </section>
+
+    <WorkspaceAiAnalysisDrawer
+      v-model:open="aiDrawerOpen"
+      :workspace-id="form.workspace_id || ''"
+      :error-context="errorMessage"
+    />
   </div>
 </template>

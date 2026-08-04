@@ -22,11 +22,13 @@ from app.schemas.catalog import (
 from app.schemas.cloud import (
     CloudCredentials,
     ContainerScaffoldConfig,
+    DataStoreDependency,
     GitHubRepoRequest,
     IaCEngine,
     KubernetesPackaging,
     LocalCloudConfig,
     ProvisioningWizardRequest,
+    WorkloadDependenciesConfig,
     WorkspaceArtifactsMode,
 )
 from app.services.golden_path_templates import (
@@ -66,6 +68,8 @@ class CatalogServiceManager:
                 includes_k8s=t.includes_k8s,
                 includes_cicd=t.includes_cicd,
                 includes_iac=t.includes_iac,
+                enable_postgres=t.enable_postgres,
+                enable_redis=t.enable_redis,
             )
             for t in list_golden_path_templates()
         ]
@@ -151,6 +155,10 @@ class CatalogServiceManager:
                 frameworks=list(template.frameworks),
                 app_name=payload.name,
                 listen_port=template.listen_port,
+            ),
+            dependencies=WorkloadDependenciesConfig(
+                postgres=DataStoreDependency(enabled=template.enable_postgres),
+                redis=DataStoreDependency(enabled=template.enable_redis),
             ),
         )
 
@@ -360,6 +368,45 @@ class CatalogServiceManager:
         await self._session.refresh(row)
         logger.info("catalog_service_updated", service_id=str(row.id))
         return self._to_read(row)
+
+    async def delete_service(
+        self,
+        service_id: UUID,
+        *,
+        owner: User,
+        org_id: UUID | None,
+    ) -> None:
+        row = await self._get_row(service_id)
+        if row is None or not self._can_view(row, owner=owner, org_id=org_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "service_not_found", "message": "Catalog service not found"},
+            )
+        if row.owner_id != owner.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "Only the service creator can delete it"},
+            )
+        await self._session.delete(row)
+        await self._session.commit()
+        logger.info("catalog_service_deleted", service_id=str(service_id))
+
+    async def delete_services_for_workspace(self, workspace_id: UUID) -> int:
+        """Remove catalog entries linked to a workspace (used on workspace destroy)."""
+        result = await self._session.execute(
+            select(CatalogService).where(CatalogService.workspace_id == workspace_id)
+        )
+        rows = list(result.scalars().all())
+        for row in rows:
+            await self._session.delete(row)
+        if rows:
+            await self._session.flush()
+            logger.info(
+                "catalog_services_deleted_for_workspace",
+                workspace_id=str(workspace_id),
+                count=len(rows),
+            )
+        return len(rows)
 
     def _write_service_descriptor(
         self,

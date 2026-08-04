@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.core.config import Settings
 from app.services.k8s_spec import (
     LIMIT_RANGE_NAME,

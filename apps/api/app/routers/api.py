@@ -379,12 +379,16 @@ async def teardown_environment(
     request: Request,
     user: CurrentUser,
     service: EnvironmentService = Depends(get_environment_service),
+    force: bool = False,
 ) -> EnvironmentRead:
+    """Tear down a preview. ``?force=true`` cancels an in-flight provision and
+    cleans up stranded resources instead of returning 409."""
     correlation_id = getattr(request.state, "correlation_id", "unknown")
     return await service.request_teardown(
         environment_id,
         owner=user,
         correlation_id=correlation_id,
+        force=force,
     )
 
 

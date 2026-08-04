@@ -18,6 +18,7 @@ from app.schemas.cloud import (
 class DataStoreKind(str, Enum):
     POSTGRES = "postgres"
     MYSQL = "mysql"
+    MARIADB = "mariadb"
     MONGODB = "mongodb"
     REDIS = "redis"
 
@@ -64,6 +65,19 @@ def validate_managed_dependencies(
         else:
             raise ValueError("Managed MySQL is not supported for this cloud provider")
 
+    if dependencies.mariadb.enabled and dependencies.mariadb.placement == DependencyPlacement.MANAGED:
+        if isinstance(cloud, GcpCloudConfig):
+            _require(
+                cloud.resources.cloud_sql,
+                "Managed MariaDB requires Cloud SQL (enable in GCP resources)",
+            )
+        elif isinstance(cloud, AwsCloudConfig):
+            _require(cloud.resources.rds, "Managed MariaDB requires RDS (enable in AWS resources)")
+        elif isinstance(cloud, LocalCloudConfig):
+            raise ValueError("Managed MariaDB is not available for local (kind) workspaces")
+        else:
+            raise ValueError("Managed MariaDB is not supported for this cloud provider")
+
     if dependencies.mongodb.enabled and dependencies.mongodb.placement == DependencyPlacement.MANAGED:
         if isinstance(cloud, AzureCloudConfig):
             _require(
@@ -103,6 +117,7 @@ def _in_cluster_kinds(dependencies: WorkloadDependenciesConfig) -> list[DataStor
     mapping = {
         DataStoreKind.POSTGRES: dependencies.postgres,
         DataStoreKind.MYSQL: dependencies.mysql,
+        DataStoreKind.MARIADB: dependencies.mariadb,
         DataStoreKind.MONGODB: dependencies.mongodb,
         DataStoreKind.REDIS: dependencies.redis,
     }
@@ -117,6 +132,7 @@ def _managed_kinds(dependencies: WorkloadDependenciesConfig) -> list[DataStoreKi
     mapping = {
         DataStoreKind.POSTGRES: dependencies.postgres,
         DataStoreKind.MYSQL: dependencies.mysql,
+        DataStoreKind.MARIADB: dependencies.mariadb,
         DataStoreKind.MONGODB: dependencies.mongodb,
         DataStoreKind.REDIS: dependencies.redis,
     }
@@ -166,10 +182,23 @@ def dependency_secret_string_data(
         if dependencies.mysql.placement == DependencyPlacement.IN_CLUSTER:
             data["MYSQL_PASSWORD"] = "changeme"
             data["MYSQL_URL"] = f"mysql://launchpad:changeme@mysql:3306/{app_db}"
+            data.setdefault("DATABASE_URL", data["MYSQL_URL"])
         else:
             data["MYSQL_PASSWORD"] = "change-me-after-terraform-apply"
             data["MYSQL_URL"] = (
                 f"mysql://launchpad:change-me@${{terraform_output:managed_mysql_host}}:3306/{app_db}"
+            )
+
+    if dependencies.mariadb.enabled:
+        # MariaDB is wire-compatible with MySQL; applications use the mysql:// scheme.
+        if dependencies.mariadb.placement == DependencyPlacement.IN_CLUSTER:
+            data["MARIADB_PASSWORD"] = "changeme"
+            data["MARIADB_URL"] = f"mysql://launchpad:changeme@mariadb:3306/{app_db}"
+            data.setdefault("DATABASE_URL", data["MARIADB_URL"])
+        else:
+            data["MARIADB_PASSWORD"] = "change-me-after-terraform-apply"
+            data["MARIADB_URL"] = (
+                f"mysql://launchpad:change-me@${{terraform_output:managed_mariadb_host}}:3306/{app_db}"
             )
 
     if dependencies.mongodb.enabled:
@@ -200,6 +229,7 @@ def init_container_wait_blocks(kinds: list[DataStoreKind]) -> str:
     port_map = {
         DataStoreKind.POSTGRES: ("wait-for-postgres", "postgres", 5432),
         DataStoreKind.MYSQL: ("wait-for-mysql", "mysql", 3306),
+        DataStoreKind.MARIADB: ("wait-for-mariadb", "mariadb", 3306),
         DataStoreKind.MONGODB: ("wait-for-mongodb", "mongodb", 27017),
         DataStoreKind.REDIS: ("wait-for-redis", "redis", 6379),
     }
@@ -213,7 +243,24 @@ def init_container_wait_blocks(kinds: list[DataStoreKind]) -> str:
           command:
             - sh
             - -c
-            - until nc -z {host} {port}; do echo waiting for {host}; sleep 2; done
+            - |
+              count=0
+              until nc -z {host} {port}; do
+                count=$((count+1))
+                if [ $count -ge 30 ]; then
+                  echo "Timed out waiting for {host}:{port} after 60s"
+                  exit 1
+                fi
+                echo "waiting for {host}:{port} ($count/30)..."
+                sleep 2
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -241,6 +288,9 @@ def in_cluster_manifest_files(
         elif kind == DataStoreKind.MYSQL:
             files["mysql-deployment.yaml"] = _mysql_deployment_yaml(ns, name)
             files["mysql-service.yaml"] = _datastore_service_yaml(ns, name, "mysql", 3306)
+        elif kind == DataStoreKind.MARIADB:
+            files["mariadb-deployment.yaml"] = _mariadb_deployment_yaml(ns, name)
+            files["mariadb-service.yaml"] = _datastore_service_yaml(ns, name, "mariadb", 3306)
         elif kind == DataStoreKind.MONGODB:
             files["mongodb-deployment.yaml"] = _mongodb_deployment_yaml(ns, name)
             files["mongodb-service.yaml"] = _datastore_service_yaml(ns, name, "mongodb", 27017)
@@ -318,6 +368,8 @@ spec:
             - name: postgres
               containerPort: 5432
           env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
             - name: POSTGRES_USER
               value: launchpad
             - name: POSTGRES_PASSWORD
@@ -345,6 +397,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+              # subPath keeps PGDATA off the volume root so a PVC's lost+found
+              # never triggers "initdb: directory not empty".
+              subPath: pgdata
       volumes:
         - name: data
           emptyDir: {{}}
@@ -399,6 +454,78 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: MYSQL_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 999
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: data
+          emptyDir: {{}}
+"""
+
+
+def _mariadb_deployment_yaml(ns: str, name: str) -> str:
+    app_db = name.replace("-", "_")
+    return f"""\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mariadb
+  namespace: {ns}
+  labels:
+{_datastore_labels(name, "mariadb").rstrip()}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+      launchpad.io/managed-by: launchpad-idp
+  template:
+    metadata:
+      labels:
+{_datastore_labels(name, "mariadb", indent=8).rstrip()}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: mariadb
+          image: mariadb:11
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mariadb
+              containerPort: 3306
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: MARIADB_PASSWORD
+            - name: MARIADB_DATABASE
+              value: {app_db}
+            - name: MARIADB_USER
+              value: launchpad
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: MARIADB_PASSWORD
           resources:
             requests:
               cpu: 100m
@@ -570,6 +697,8 @@ def managed_connections_readme(
         lines.append("- Postgres: `terraform output -raw managed_postgres_connection_url`")
     if DataStoreKind.MYSQL in kinds:
         lines.append("- MySQL: `terraform output -raw managed_mysql_connection_url`")
+    if DataStoreKind.MARIADB in kinds:
+        lines.append("- MariaDB: `terraform output -raw managed_mariadb_connection_url`")
     if DataStoreKind.MONGODB in kinds:
         lines.append("- MongoDB: `terraform output -raw managed_mongodb_connection_url`")
     if DataStoreKind.REDIS in kinds:

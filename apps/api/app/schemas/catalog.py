@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -27,6 +27,8 @@ class GoldenPathTemplateRead(BaseModel):
     includes_k8s: bool
     includes_cicd: bool
     includes_iac: bool
+    enable_postgres: bool = False
+    enable_redis: bool = False
 
 
 class ScorecardItem(BaseModel):
@@ -64,10 +66,12 @@ class CatalogServiceCreate(BaseModel):
     enforce_scorecard_gate: bool = True
     trigger_initial_preview: bool = False
 
-    @field_validator("name")
+    @field_validator("name", mode="before")
     @classmethod
-    def normalize_name(cls, value: str) -> str:
-        return value.strip().lower()
+    def normalize_name(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().lower().replace("_", "-")
+        return value
 
     @field_validator("owner", "on_call")
     @classmethod

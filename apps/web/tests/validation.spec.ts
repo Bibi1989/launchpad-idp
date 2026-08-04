@@ -3,12 +3,13 @@ import { environmentCreateSchema } from '../app/utils/validation'
 import { loginSchema, registerSchema } from '../app/utils/authValidation'
 
 describe('environmentCreateSchema', () => {
-  it('accepts a valid payload', () => {
+  it('accepts a valid payload in hours', () => {
     const parsed = environmentCreateSchema.parse({
       name: 'Demo-Env',
       git_branch: 'feature/demo',
       git_repo_url: 'https://github.com/acme/demo.git',
-      ttl_hours: '24',
+      ttl_unit: 'hours',
+      ttl_value: '24',
       workspace_id: null,
     })
 
@@ -16,6 +17,20 @@ describe('environmentCreateSchema', () => {
     expect(parsed.git_branch).toBe('feature/demo')
     expect(parsed.git_repo_url).toBe('https://github.com/acme/demo.git')
     expect(parsed.ttl_hours).toBe(24)
+    expect(parsed.ttl_minutes).toBeUndefined()
+  })
+
+  it('accepts TTL in minutes', () => {
+    const parsed = environmentCreateSchema.parse({
+      name: 'demo-env',
+      git_branch: 'main',
+      git_repo_url: 'https://github.com/acme/demo.git',
+      ttl_unit: 'minutes',
+      ttl_value: 45,
+    })
+
+    expect(parsed.ttl_minutes).toBe(45)
+    expect(parsed.ttl_hours).toBeUndefined()
   })
 
   it('rejects invalid names', () => {
@@ -23,7 +38,8 @@ describe('environmentCreateSchema', () => {
       name: '1bad',
       git_branch: 'main',
       git_repo_url: 'https://github.com/acme/demo.git',
-      ttl_hours: 24,
+      ttl_unit: 'hours',
+      ttl_value: 24,
     })
 
     expect(result.success).toBe(false)
@@ -34,7 +50,8 @@ describe('environmentCreateSchema', () => {
       name: 'demo-env',
       git_branch: 'main',
       git_repo_url: 'not-a-url',
-      ttl_hours: 24,
+      ttl_unit: 'hours',
+      ttl_value: 24,
     })
     expect(result.success).toBe(false)
   })

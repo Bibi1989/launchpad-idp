@@ -470,7 +470,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
             <div class="space-y-2">
               <p class="lp-label">Services in selected IaC</p>
               <p v-if="provider === 'local'" class="text-sm text-[var(--lp-muted)]">
-                Local kind — no cloud managed services.
+                Local Sandbox — no cloud managed services.
               </p>
               <p v-else-if="!selectedServices.length" class="text-sm text-[var(--lp-muted)]">
                 No managed cloud services enabled. Add them under Update workspace → Edit service resources.

@@ -4,11 +4,14 @@ import hashlib
 import json
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.services.k8s_spec import (
+    QUOTA_NAME,
     build_preview_labels,
     build_preview_limit_range,
     build_preview_network_policy,
@@ -18,6 +21,10 @@ from app.services.k8s_spec import (
 )
 
 logger = get_logger(__name__)
+
+
+class PreviewCancelled(Exception):
+    """Raised when an in-flight provision is cancelled by a delete request."""
 
 
 # Preferred HTTP ports when an image EXPOSEs several (skip brokers/DBs).
@@ -115,8 +122,13 @@ def _inspect_image_exposed_ports(image: str) -> list[int]:
 
 def _resolve_listen_port_from_image(image: str) -> int:
     """Best-effort resolve the container's HTTP-like listen port."""
-    if "http-echo" in image:
+    image_l = image.lower()
+    if "http-echo" in image_l:
         return 80
+    if "web-ui" in image_l or "frontend" in image_l or "next" in image_l or "nuxt" in image_l:
+        return 3000
+    if "api-server" in image_l or "backend" in image_l or "express" in image_l:
+        return 8080
 
     exposed_ports = _inspect_image_exposed_ports(image)
     for preferred in _HTTP_PORT_PREFERENCE:
@@ -131,12 +143,19 @@ def _resolve_listen_port_from_image(image: str) -> int:
     return 80
 
 
+# Hard wall-clock cap on how long a preview may sit in PROVISIONING before it is
+# failed with diagnostics (3 minutes). Real failures (ImagePullBackOff /
+# CrashLoopBackOff) fast-fail well before this; the cap bounds the pathological
+# "spinning forever" case.
+PREVIEW_READY_TIMEOUT_CAP_SECONDS = 180.0
+
+
 def _workload_ready_timeout_seconds(*, image: str, base_timeout_seconds: float) -> float:
-    # Non-nginx images (pull + cold Node/Vite bind) need more headroom than nginx.
-    # Keep probe windows in sync with the worker's ready timeout.
+    # Non-nginx images (pull + cold Node/Vite bind) need more headroom than nginx,
+    # but never exceed the 3-minute preview cap.
     if not _is_nginx_image(image):
-        return max(base_timeout_seconds, 240.0)
-    return base_timeout_seconds
+        return min(max(base_timeout_seconds, 120.0), PREVIEW_READY_TIMEOUT_CAP_SECONDS)
+    return min(base_timeout_seconds, PREVIEW_READY_TIMEOUT_CAP_SECONDS)
 
 
 @dataclass
@@ -170,19 +189,36 @@ class KubernetesProvisioner:
         from kubernetes import client, config
 
         if self._settings.kubernetes_in_cluster:
-            config.load_incluster_config()
+            try:
+                config.load_incluster_config()
+            except Exception as exc:
+                logger.warning("kubernetes_in_cluster_load_failed", error=str(exc))
+                return
         else:
             load_kwargs: dict[str, str] = {}
             if self._settings.kubernetes_kubeconfig_path:
                 load_kwargs["config_file"] = self._settings.kubernetes_kubeconfig_path
-            if self._settings.kubernetes_context:
-                load_kwargs["context"] = self._settings.kubernetes_context
-            config.load_kube_config(**load_kwargs)
+            ctx = self._settings.resolved_kubernetes_context
+            if ctx:
+                load_kwargs["context"] = ctx
+            try:
+                config.load_kube_config(**load_kwargs)
+            except Exception as exc:
+                logger.warning("kubeconfig_context_load_failed", context=ctx, error=str(exc))
+                load_kwargs.pop("context", None)
+                try:
+                    config.load_kube_config(**load_kwargs)
+                except Exception as exc2:
+                    logger.warning("kubeconfig_fallback_load_failed", error=str(exc2))
+                    return
 
-        self._core = client.CoreV1Api()
-        self._networking = client.NetworkingV1Api()
-        self._apps = client.AppsV1Api()
-        self._autoscaling = client.AutoscalingV2Api()
+        try:
+            self._core = client.CoreV1Api()
+            self._networking = client.NetworkingV1Api()
+            self._apps = client.AppsV1Api()
+            self._autoscaling = client.AutoscalingV2Api()
+        except Exception as exc:
+            logger.warning("kubernetes_client_init_failed", error=str(exc))
 
     def provision(
         self,
@@ -232,6 +268,13 @@ class KubernetesProvisioner:
             resources.preview_url = self._portal_preview_url(environment_id=environment_id)
             return resources
 
+        if self._settings.kubernetes_enabled:
+            from app.services.manifest_deploy import build_and_load_kind_images, _is_image_in_kind
+            ws_root = Path(getattr(self._settings, "workspace_root", "."))
+            build_and_load_kind_images(workspace_root=ws_root, cluster_name=self._settings.kubernetes_context)
+            if workload_image:
+                _is_image_in_kind(workload_image, cluster_name=self._settings.kubernetes_context)
+
         self.apply_governance(namespace=namespace, labels=labels, resources=resources)
 
         used_ports = self._list_allocated_node_ports(exclude_namespace=namespace)
@@ -244,6 +287,7 @@ class KubernetesProvisioner:
             port_min=self._settings.preview_node_port_min,
             port_max=self._settings.preview_node_port_max,
             used_ports=used_ports,
+            cluster_name=self._settings.kubernetes_context,
         )
         node_port = self._apply_workload(
             namespace=namespace,
@@ -289,9 +333,8 @@ class KubernetesProvisioner:
             return
 
         from app.schemas.cloud import (
+            DataStoreDependency,
             DependencyPlacement,
-            PostgresDependency,
-            RedisDependency,
             WorkloadDependenciesConfig,
         )
         from app.services.workload_dependencies import (
@@ -304,10 +347,10 @@ class KubernetesProvisioner:
         deps = WorkloadDependenciesConfig()
         if enable_postgres:
             kinds.append(DataStoreKind.POSTGRES)
-            deps.postgres = PostgresDependency(enabled=True, placement=DependencyPlacement.IN_CLUSTER)
+            deps.postgres = DataStoreDependency(enabled=True, placement=DependencyPlacement.IN_CLUSTER)
         if enable_redis:
             kinds.append(DataStoreKind.REDIS)
-            deps.redis = RedisDependency(enabled=True, placement=DependencyPlacement.IN_CLUSTER)
+            deps.redis = DataStoreDependency(enabled=True, placement=DependencyPlacement.IN_CLUSTER)
 
         if not self._settings.kubernetes_enabled:
             logger.info(
@@ -321,6 +364,8 @@ class KubernetesProvisioner:
         secret_data = dependency_secret_string_data(deps, name=name)
         if secret_data:
             self._apply_secret_dict(namespace=namespace, secret_name="app-secrets", data=secret_data)
+            if name and name != "app":
+                self._apply_secret_dict(namespace=namespace, secret_name=f"{name}-secrets", data=secret_data)
 
         manifests = in_cluster_manifest_files(ns=namespace, name=name, kinds=kinds)
         import yaml
@@ -361,6 +406,73 @@ class KubernetesProvisioner:
             else:
                 raise
 
+
+    def read_namespace_usage(self, namespace: str):
+        """Return CPU/memory usage for cost metering.
+
+        Prefers ResourceQuota ``status.used`` (requests). Falls back to summing
+        pod container resource requests when the quota is missing.
+        """
+        from decimal import Decimal
+
+        from app.services.cost_metering import (
+            NamespaceUsage,
+            parse_cpu_cores,
+            parse_memory_gib,
+        )
+
+        if not self._settings.kubernetes_enabled or self._core is None:
+            return None
+
+        from kubernetes.client.rest import ApiException
+
+        try:
+            quota = self._core.read_namespaced_resource_quota(QUOTA_NAME, namespace)
+            used = getattr(getattr(quota, "status", None), "used", None) or {}
+            cpu = parse_cpu_cores(used.get("requests.cpu") or used.get("cpu"))
+            mem = parse_memory_gib(used.get("requests.memory") or used.get("memory"))
+            if cpu > 0 or mem > 0:
+                return NamespaceUsage(cpu_cores=cpu, memory_gib=mem, source="usage_quota")
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning(
+                    "kubernetes_quota_usage_failed",
+                    namespace=namespace,
+                    status=exc.status,
+                )
+
+        try:
+            pods = self._core.list_namespaced_pod(namespace)
+        except ApiException as exc:
+            logger.warning(
+                "kubernetes_pod_usage_failed",
+                namespace=namespace,
+                status=exc.status,
+            )
+            return None
+
+        cpu_total = Decimal("0")
+        mem_total = Decimal("0")
+        for pod in pods.items or []:
+            phase = (getattr(getattr(pod, "status", None), "phase", None) or "").lower()
+            if phase in {"succeeded", "failed"}:
+                continue
+            for container in getattr(getattr(pod, "spec", None), "containers", None) or []:
+                requests = getattr(getattr(container, "resources", None), "requests", None) or {}
+                cpu_total += parse_cpu_cores(requests.get("cpu"))
+                mem_total += parse_memory_gib(requests.get("memory"))
+
+        if cpu_total <= 0 and mem_total <= 0:
+            return NamespaceUsage(
+                cpu_cores=Decimal("0"),
+                memory_gib=Decimal("0"),
+                source="usage_requests",
+            )
+        return NamespaceUsage(
+            cpu_cores=cpu_total,
+            memory_gib=mem_total,
+            source="usage_requests",
+        )
 
     def apply_governance(
         self,
@@ -540,11 +652,18 @@ class KubernetesProvisioner:
         namespace: str,
         timeout_seconds: float,
         expected_image: str | None = None,
+        cancel_check: "Callable[[], bool] | None" = None,
     ) -> None:
         """Block until the *current* Deployment revision is Ready.
 
         Ready replicas from a previous ReplicaSet (e.g. nginx still serving while a
         new image is ImagePullBackOff) must not count as success.
+
+        Fails fast (``RuntimeError``) on terminal pod states — ImagePullBackOff,
+        CrashLoopBackOff, CreateContainerError — instead of spinning to the
+        deadline. If ``cancel_check`` is provided and returns True (e.g. the user
+        requested force-delete mid-provision), raises ``PreviewCancelled`` so the
+        provision task aborts immediately.
         """
         if not self._settings.kubernetes_enabled:
             return
@@ -558,9 +677,18 @@ class KubernetesProvisioner:
         required_stable_polls = 2
         start_time = time.monotonic()
         while time.monotonic() < deadline:
+            if cancel_check is not None and cancel_check():
+                raise PreviewCancelled(
+                    f"Provisioning of {namespace} cancelled by delete request"
+                )
+
             pull_error = self._first_pod_image_error(namespace=namespace)
             if pull_error:
                 raise RuntimeError(pull_error)
+
+            crash_error = self._first_pod_crash_error(namespace=namespace)
+            if crash_error:
+                raise RuntimeError(crash_error)
 
             snapshot = self._deployment_ready_snapshot(namespace=namespace)
             last_desired = snapshot["desired"]
@@ -574,13 +702,6 @@ class KubernetesProvisioner:
                     raise RuntimeError(cp_stall)
 
             if snapshot["revision_ready"]:
-                if expected_image and not self._ready_pods_match_image(
-                    namespace=namespace,
-                    expected_image=expected_image,
-                ):
-                    stable_ready_polls = 0
-                    time.sleep(self._settings.kubernetes_ready_poll_seconds)
-                    continue
                 stable_ready_polls += 1
                 if stable_ready_polls < required_stable_polls:
                     time.sleep(self._settings.kubernetes_ready_poll_seconds)
@@ -588,6 +709,7 @@ class KubernetesProvisioner:
                 logger.info(
                     "kubernetes_workload_ready",
                     namespace=namespace,
+                    deployment_count=snapshot.get("deployment_count"),
                     ready_replicas=last_ready,
                     updated_replicas=last_updated,
                     image=expected_image,
@@ -597,15 +719,13 @@ class KubernetesProvisioner:
             time.sleep(self._settings.kubernetes_ready_poll_seconds)
 
         # Final check: kind control-plane blips often flip Ready just after the
-        # deadline. Accept success if the current revision is Ready now.
+        # deadline. Accept success if every Deployment is Ready now.
         snapshot = self._deployment_ready_snapshot(namespace=namespace)
-        if snapshot["revision_ready"] and (
-            not expected_image
-            or self._ready_pods_match_image(namespace=namespace, expected_image=expected_image)
-        ):
+        if snapshot["revision_ready"]:
             logger.info(
                 "kubernetes_workload_ready_after_deadline",
                 namespace=namespace,
+                deployment_count=snapshot.get("deployment_count"),
                 ready_replicas=snapshot["ready"],
                 updated_replicas=snapshot["updated"],
                 image=expected_image,
@@ -615,38 +735,73 @@ class KubernetesProvisioner:
         hint = self._first_pod_probe_hint(namespace=namespace)
         control_plane = self._control_plane_stall_hint()
         extras = " ".join(part for part in (hint, control_plane) if part)
+        pending = snapshot.get("pending") or []
+        pending_note = f" Pending: {', '.join(pending)}." if pending else ""
         raise TimeoutError(
-            f"Deployment/app in {namespace} not Ready on current revision "
-            f"(updated={snapshot['updated']}, ready={snapshot['ready']}, "
-            f"unavailable={snapshot['unavailable']}, desired={snapshot['desired']}) "
-            f"within {timeout_seconds:.0f}s"
-            + (f" for image {expected_image}" if expected_image else "")
+            f"Deployments in {namespace} not Ready on current revision "
+            f"(deployments={snapshot.get('deployment_count')}, updated={snapshot['updated']}, "
+            f"ready={snapshot['ready']}, unavailable={snapshot['unavailable']}, "
+            f"desired={snapshot['desired']}) within {timeout_seconds:.0f}s"
+            + pending_note
             + (f". {extras}" if extras else "")
         )
 
-    def _deployment_ready_snapshot(self, *, namespace: str) -> dict[str, int | bool]:
+    def _deployment_ready_snapshot(self, *, namespace: str) -> dict[str, object]:
+        """Aggregate rollout readiness across *all* Deployments in the namespace.
+
+        Workspaces no longer contain a single hardcoded ``app`` Deployment — they
+        may ship ``launch-web``, ``launch-server``, ``postgres``, etc. The preview
+        is Ready only when every Deployment has completed its current-revision
+        rollout (``readyReplicas >= specReplicas`` with no lingering old pods).
+        """
         assert self._apps is not None
-        deployment = self._apps.read_namespaced_deployment("app", namespace)
-        meta = deployment.metadata
-        status = deployment.status
-        desired = (deployment.spec.replicas if deployment.spec else None) or 1
-        ready = (status.ready_replicas if status else None) or 0
-        updated = (status.updated_replicas if status else None) or 0
-        unavailable = (status.unavailable_replicas if status else None) or 0
-        generation = (meta.generation if meta else None) or 0
-        observed = (status.observed_generation if status else None) or 0
-        revision_ready = (
-            observed >= generation
-            and updated >= desired
-            and ready >= desired
-            and unavailable == 0
-        )
+        deployments = list(self._apps.list_namespaced_deployment(namespace).items or [])
+
+        total_desired = total_ready = total_updated = total_unavailable = 0
+        pending: list[str] = []
+        all_ready = bool(deployments)  # an empty namespace is not "ready" yet
+
+        for dep in deployments:
+            meta = dep.metadata
+            spec = dep.spec
+            status = dep.status
+            name = (meta.name if meta else None) or "?"
+            desired = spec.replicas if (spec and spec.replicas is not None) else 1
+            ready = (status.ready_replicas if status else None) or 0
+            updated = (status.updated_replicas if status else None) or 0
+            unavailable = (status.unavailable_replicas if status else None) or 0
+            generation = (meta.generation if meta else None) or 0
+            observed = (status.observed_generation if status else None) or 0
+            total = getattr(status, "replicas", None) if status else None
+
+            total_desired += desired
+            total_ready += ready
+            total_updated += updated
+            total_unavailable += unavailable
+
+            # Intentionally scaled to 0 (paused) counts as complete.
+            if desired == 0:
+                continue
+            dep_ready = (
+                observed >= generation
+                and updated >= desired
+                and ready >= desired
+                and unavailable == 0
+                # No old-revision pods lingering (guards nginx-old-RS false-Ready).
+                and (total is None or total == updated)
+            )
+            if not dep_ready:
+                all_ready = False
+                pending.append(f"{name}({ready}/{desired})")
+
         return {
-            "desired": desired,
-            "ready": ready,
-            "updated": updated,
-            "unavailable": unavailable,
-            "revision_ready": revision_ready,
+            "desired": total_desired,
+            "ready": total_ready,
+            "updated": total_updated,
+            "unavailable": total_unavailable,
+            "revision_ready": all_ready,
+            "deployment_count": len(deployments),
+            "pending": pending,
         }
 
     def _control_plane_stall_hint(self) -> str | None:
@@ -746,11 +901,10 @@ class KubernetesProvisioner:
     def _first_pod_image_error(self, *, namespace: str) -> str | None:
         if self._core is None:
             return None
-        from app.services.k8s_spec import preview_workload_selector
-
-        selector = ",".join(f"{k}={v}" for k, v in preview_workload_selector().items())
+        # Namespace-wide: catch pull errors on any generated workload
+        # (launch-web, launch-server, postgres, …), not just the legacy "app".
         try:
-            pods = self._core.list_namespaced_pod(namespace, label_selector=selector)
+            pods = self._core.list_namespaced_pod(namespace)
         except Exception as exc:
             logger.warning("kubernetes_list_pods_for_image_error_failed", error=str(exc))
             return None
@@ -771,15 +925,56 @@ class KubernetesProvisioner:
                 return f"Failed to pull image {image} for pod {pod_name}: {waiting.reason}"
         return None
 
+    def _first_pod_crash_error(self, *, namespace: str) -> str | None:
+        """Detect terminal crash states so provisioning fails fast (not on deadline).
+
+        - CreateContainer*/RunContainerError: config errors that never self-heal
+          (e.g. runAsNonRoot without a UID) — fail immediately.
+        - CrashLoopBackOff after >= 2 restarts: the container keeps exiting
+          (e.g. "postgres: Error", app crash) — fail with the last exit detail.
+        """
+        if self._core is None:
+            return None
+        try:
+            pods = self._core.list_namespaced_pod(namespace)
+        except Exception as exc:
+            logger.warning("kubernetes_list_pods_for_crash_error_failed", error=str(exc))
+            return None
+        config_reasons = {
+            "CreateContainerConfigError",
+            "CreateContainerError",
+            "RunContainerError",
+        }
+        for pod in pods.items or []:
+            pod_name = pod.metadata.name if pod.metadata else "app"
+            for status in pod.status.container_statuses or []:
+                restarts = status.restart_count or 0
+                waiting = status.state.waiting if status.state else None
+                if waiting and waiting.reason in config_reasons:
+                    detail = (waiting.message or "").strip()
+                    base = (
+                        f"Container {status.name} in pod {pod_name} failed to start: "
+                        f"{waiting.reason}"
+                    )
+                    return f"{base} — {detail}" if detail else base
+                if waiting and waiting.reason == "CrashLoopBackOff" and restarts >= 2:
+                    last = status.last_state.terminated if status.last_state else None
+                    detail = ""
+                    if last:
+                        detail = (last.message or "").strip() or f"exit code {last.exit_code}"
+                    base = (
+                        f"Container {status.name} in pod {pod_name} is crash-looping "
+                        f"(CrashLoopBackOff after {restarts} restarts)"
+                    )
+                    return f"{base} — {detail}" if detail else base
+        return None
+
     def _first_pod_probe_hint(self, *, namespace: str) -> str | None:
         """Best-effort hint from pod conditions / container state for timeouts."""
         if self._core is None:
             return None
-        from app.services.k8s_spec import preview_workload_selector
-
-        selector = ",".join(f"{k}={v}" for k, v in preview_workload_selector().items())
         try:
-            pods = self._core.list_namespaced_pod(namespace, label_selector=selector)
+            pods = self._core.list_namespaced_pod(namespace)
         except Exception:
             return None
         for pod in pods.items or []:
@@ -817,6 +1012,7 @@ class KubernetesProvisioner:
         except Exception:
             return False
         matched = False
+        exp_base = expected_image.split(":")[0].split("/")[-1].lower()
         for pod in pods.items or []:
             phase = pod.status.phase if pod.status else None
             if phase != "Running":
@@ -824,12 +1020,15 @@ class KubernetesProvisioner:
             for status in pod.status.container_statuses or []:
                 if not status.ready:
                     continue
-                if status.image == expected_image or (status.image_id or "").find(
-                    expected_image.split(":")[0]
-                ) >= 0:
+                img_name = (status.image or "").lower()
+                img_id = (status.image_id or "").lower()
+                if (
+                    img_name == expected_image
+                    or exp_base in img_name
+                    or exp_base in img_id
+                    or "nginx" in img_name
+                ):
                     matched = True
-                else:
-                    return False
         return matched
 
     def _apply_ingress(
@@ -900,6 +1099,59 @@ class KubernetesProvisioner:
                     used.add(int(port.node_port))
         return used
 
+    def resolve_external_preview_url(
+        self, namespace: str, *, timeout_seconds: float = 120.0
+    ) -> str | None:
+        """Resolve a cloud/production preview's public URL from the cluster.
+
+        Reads the external address of a LoadBalancer Service (``status.loadBalancer``)
+        or an Ingress (its host rule / load-balancer address) in the namespace — e.g.
+        ``http://34.120.10.5`` or ``https://preview.example.com``. Cloud load balancers
+        take time to allocate an address, so this polls while a candidate exists but has
+        no address yet; it returns ``None`` immediately when nothing is externally
+        exposed (caller keeps its default URL) and after ``timeout_seconds`` otherwise.
+        """
+        if not self._settings.kubernetes_enabled or self._core is None:
+            return None
+        import time as _time
+        from kubernetes.client.rest import ApiException
+
+        deadline = _time.time() + max(timeout_seconds, 0.0)
+        while True:
+            saw_pending = False
+
+            try:
+                services = self._core.list_namespaced_service(namespace)
+            except ApiException:
+                services = None
+            for svc in (getattr(services, "items", None) or []):
+                if svc.spec is None or svc.spec.type != "LoadBalancer":
+                    continue
+                addr = _lb_ingress_address(svc.status)
+                if addr:
+                    port = svc.spec.ports[0].port if svc.spec.ports else None
+                    return _external_url(addr, port)
+                saw_pending = True  # LB exists but address not assigned yet
+
+            if self._networking is not None:
+                try:
+                    ingresses = self._networking.list_namespaced_ingress(namespace)
+                except ApiException:
+                    ingresses = None
+                for ing in (getattr(ingresses, "items", None) or []):
+                    tls = bool(ing.spec and ing.spec.tls)
+                    host = None
+                    if ing.spec and ing.spec.rules:
+                        host = next((r.host for r in ing.spec.rules if r.host), None)
+                    chosen = host or _lb_ingress_address(ing.status)
+                    if chosen:
+                        return f"{'https' if tls else 'http'}://{chosen}"
+                    saw_pending = True  # Ingress exists but no host/address yet
+
+            if not saw_pending or _time.time() >= deadline:
+                return None
+            _time.sleep(3.0)
+
     def _read_namespaced_app_node_port(self, namespace: str) -> int | None:
         if not self._settings.kubernetes_enabled or self._core is None:
             return None
@@ -969,6 +1221,7 @@ class KubernetesProvisioner:
         container = client.V1Container(
             name="app",
             image=image,
+            image_pull_policy="IfNotPresent",
             ports=[client.V1ContainerPort(container_port=effective_port)],
             resources=resources,
             readiness_probe=client.V1Probe(
@@ -1370,6 +1623,66 @@ def allocate_node_port(
     )
 
 
+def _detect_kind_forwarded_node_ports(cluster_name: str | None = None) -> list[int]:
+    """Inspect local K3s / Kind control-plane containers to find host-forwarded NodePorts."""
+    import subprocess
+    import shutil
+    import re
+    if not shutil.which("docker"):
+        return []
+    from app.services.manifest_deploy import resolve_local_cluster_name
+    real_cluster = resolve_local_cluster_name(cluster_name)
+    # Only probe THIS cluster's containers — generic fallback names (e.g.
+    # "launchpad-control-plane") would leak another local cluster's host ports and
+    # hand previews a NodePort that isn't actually forwarded here.
+    # k3d publishes the host NodePort range on its loadbalancer (serverlb), not the
+    # server node; kind publishes on "<cluster>-control-plane".
+    containers = (
+        f"k3d-{real_cluster}-serverlb",
+        f"k3d-{real_cluster}-server-0",
+        f"{real_cluster}-k3s",
+        f"{real_cluster}-control-plane",
+    )
+    ports: list[int] = []
+    for c_name in containers:
+        try:
+            res = subprocess.run(
+                ["docker", "port", c_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode != 0:
+                continue
+            for line in res.stdout.splitlines():
+                m = re.search(r"(\d+)/tcp\s*->", line)
+                if m:
+                    port = int(m.group(1))
+                    if 30000 <= port <= 32767:
+                        ports.append(port)
+        except Exception:
+            continue
+    return sorted(set(ports))
+
+
+def _lb_ingress_address(status: object) -> str | None:
+    """First external hostname/IP from a Service/Ingress ``status.loadBalancer``."""
+    lb = getattr(status, "load_balancer", None)
+    ingress = getattr(lb, "ingress", None) if lb is not None else None
+    if not ingress:
+        return None
+    first = ingress[0]
+    return getattr(first, "hostname", None) or getattr(first, "ip", None)
+
+
+def _external_url(addr: str, port: int | None) -> str:
+    """Build a public URL, using https for :443 and omitting default ports."""
+    scheme = "https" if port == 443 else "http"
+    if port in (None, 80, 443):
+        return f"{scheme}://{addr}"
+    return f"{scheme}://{addr}:{port}"
+
+
 def resolve_preview_node_port(
     environment_id: str,
     *,
@@ -1377,6 +1690,7 @@ def resolve_preview_node_port(
     port_min: int,
     port_max: int,
     used_ports: set[int] | frozenset[int] | None = None,
+    cluster_name: str | None = None,
 ) -> int:
     """Keep an in-range sticky NodePort; otherwise allocate inside the mapped window.
 
@@ -1384,6 +1698,13 @@ def resolve_preview_node_port(
     NodePort without an explicit ``nodePort``. Those ports are usually outside the
     kind ``extraPortMappings`` range and will not load from the host.
     """
+    forwarded = _detect_kind_forwarded_node_ports(cluster_name)
+    if forwarded:
+        port_min = max(port_min, min(forwarded))
+        port_max = min(port_max, max(forwarded))
+        if port_max < port_min:
+            port_min = min(forwarded)
+            port_max = max(forwarded)
     if existing_port is not None and port_min <= existing_port <= port_max:
         return existing_port
     return allocate_node_port(

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
 
+from app.models.domain import Organization
 from app.schemas.cloud import (
     CloudCredentials,
     CloudProvider,
@@ -33,13 +35,16 @@ async def test_ensure_kind_cluster_runs_script(tmp_path: Path, monkeypatch: pyte
         settings.kind_auto_manage = True
         settings.kind_cluster_name = "launchpad"
         settings.kind_scripts_dir = str(script_dir)
+        settings.local_k8s_engine = "kind"
+        settings.local_cluster_tool = "kind"
         settings.preview_node_port_min = 30080
         settings.preview_node_port_max = 30084
         settings.default_workload_image = "nginx:1.27-alpine"
 
-        with patch("app.services.kind_cluster.kind_available", return_value=True):
+        with patch("app.services.kind_cluster.local_cluster_available", return_value=True):
             result = await ensure_kind_cluster()
     assert result["status"] == "ready"
+    assert result["engine"] == "kind"
     assert "kind-up-ok" in result["output"]
 
 
@@ -61,6 +66,8 @@ async def test_generate_bundle_starts_kind_for_local(tmp_path: Path) -> None:
         patch("app.services.provisioning.ensure_kind_cluster", new_callable=AsyncMock) as up,
         patch("app.services.provisioning.IaCGenerator") as gen_cls,
         patch("app.services.provisioning.encrypt_secret", return_value="enc"),
+        patch("app.services.user_credentials.UserCloudCredentialsService.get_credentials", new_callable=AsyncMock, return_value=CloudCredentials()),
+        patch("app.services.orgs.OrganizationService.ensure_personal_org", new_callable=AsyncMock, return_value=Organization(id=UUID("22222222-2222-2222-2222-222222222222"), name="Personal", slug="personal")),
     ):
         gen = gen_cls.return_value
         from app.schemas.cloud import IaCBundleSummary

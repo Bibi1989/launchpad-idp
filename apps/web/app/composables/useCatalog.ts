@@ -37,11 +37,18 @@ export function useCatalog() {
     })
   }
 
+  async function deleteService(id: string): Promise<void> {
+    await apiFetch<void>(`/catalog/services/${id}`, {
+      method: 'DELETE',
+    })
+  }
+
   return {
     listTemplates,
     listServices,
     getService,
     createService,
     updateService,
+    deleteService,
   }
 }

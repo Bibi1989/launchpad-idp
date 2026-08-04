@@ -23,23 +23,37 @@ const config = computed({
   set: (val) => emit('update:modelValue', val),
 })
 
-const stacks: Array<{ id: ProjectStackOption; label: string; icon: string }> = [
-  { id: 'node', label: 'Node.js', icon: 'javascript' },
-  { id: 'python', label: 'Python', icon: 'terminal' },
-  { id: 'go', label: 'Go (Golang)', icon: 'code' },
-  { id: 'java', label: 'Java', icon: 'coffee' },
-  { id: 'rust', label: 'Rust', icon: 'memory' },
-  { id: 'generic', label: 'Generic (Alpine)', icon: 'data_object' },
+const stacks: Array<{ id: ProjectStackOption; label: string; icon: string; category: 'frontend' | 'backend' }> = [
+  { id: 'nextjs', label: 'Next.js (React UI)', icon: 'web', category: 'frontend' },
+  { id: 'nuxtjs', label: 'Nuxt.js (Vue UI)', icon: 'web', category: 'frontend' },
+  { id: 'react_vite', label: 'React (Vite SPA)', icon: 'code', category: 'frontend' },
+  { id: 'vuejs', label: 'Vue.js SPA', icon: 'code', category: 'frontend' },
+  { id: 'svelte', label: 'SvelteKit UI', icon: 'code', category: 'frontend' },
+  { id: 'node', label: 'Node.js / Express', icon: 'javascript', category: 'backend' },
+  { id: 'nestjs', label: 'NestJS (Node API)', icon: 'terminal', category: 'backend' },
+  { id: 'fastapi', label: 'FastAPI (Python)', icon: 'terminal', category: 'backend' },
+  { id: 'python', label: 'Python (Flask/Django)', icon: 'terminal', category: 'backend' },
+  { id: 'go', label: 'Go (Golang)', icon: 'code', category: 'backend' },
+  { id: 'java', label: 'Java (Spring Boot)', icon: 'coffee', category: 'backend' },
+  { id: 'rust', label: 'Rust (Actix/Axum)', icon: 'memory', category: 'backend' },
+  { id: 'generic', label: 'Generic (Alpine)', icon: 'data_object', category: 'backend' },
 ]
 
 const servicesList = ref<ContainerServiceItem[]>(
   props.modelValue.services && props.modelValue.services.length > 0
-    ? [...props.modelValue.services]
+    ? props.modelValue.services.map(s => ({ app_kind: s.app_kind || 'backend', ...s }))
     : [
         {
-          name: props.modelValue.app_name || 'app',
-          stack: props.modelValue.stack || 'node',
-          listen_port: props.modelValue.listen_port || 8080,
+          name: props.modelValue.app_name || 'web-ui',
+          app_kind: 'frontend',
+          stack: 'nextjs',
+          listen_port: 3000,
+        },
+        {
+          name: 'api-server',
+          app_kind: 'backend',
+          stack: 'node',
+          listen_port: 8080,
         },
       ],
 )
@@ -48,7 +62,7 @@ watch(
   () => props.modelValue.services,
   (newSvcs) => {
     if (newSvcs && newSvcs.length > 0) {
-      servicesList.value = [...newSvcs]
+      servicesList.value = newSvcs.map(s => ({ app_kind: s.app_kind || 'backend', ...s }))
     }
   },
   { deep: true },
@@ -71,12 +85,33 @@ function emitServices() {
   })
 }
 
+function onAppKindChange(svc: ContainerServiceItem) {
+  if (svc.app_kind === 'frontend') {
+    svc.stack = 'nextjs'
+    svc.listen_port = 3000
+    if (!svc.name || svc.name === 'api-server' || svc.name === 'app') {
+      svc.name = 'web-ui'
+    }
+  } else {
+    svc.stack = 'node'
+    svc.listen_port = 8080
+    if (!svc.name || svc.name === 'web-ui' || svc.name === 'app') {
+      svc.name = 'api-server'
+    }
+  }
+  emitServices()
+}
+
 function addService() {
+  const isSecond = servicesList.value.length === 1
+  const appKind = isSecond && servicesList.value[0].app_kind === 'frontend' ? 'backend' : 'frontend'
   const nextNum = servicesList.value.length + 1
+
   servicesList.value.push({
-    name: `service-${nextNum}`,
-    stack: 'node',
-    listen_port: 8080 + nextNum,
+    name: appKind === 'frontend' ? `ui-${nextNum}` : `api-${nextNum}`,
+    app_kind: appKind,
+    stack: appKind === 'frontend' ? 'nextjs' : 'node',
+    listen_port: appKind === 'frontend' ? 3000 + nextNum : 8080 + nextNum,
   })
   emitServices()
 }
@@ -93,6 +128,7 @@ const previewDockerfile = computed(() => {
     stack: config.value.stack || 'node',
     name: config.value.app_name || 'app',
     listen_port: config.value.listen_port || 8080,
+    app_kind: 'backend',
   }
   const stack = primary.stack || 'node'
   const name = primary.name || 'app'
@@ -106,6 +142,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
 
   switch (stack) {
     case 'python':
+    case 'fastapi':
       return `# syntax=docker/dockerfile:1.7
 # Launchpad hardened multi-stage Python image (non-root USER 10001).
 
@@ -154,71 +191,12 @@ ENV PORT=${port}
 ${footer}CMD ["/app/${name}"]
 # Image: ${name}`
 
-    case 'java':
-      return `# syntax=docker/dockerfile:1.7
-# Launchpad hardened multi-stage Java image (non-root USER 10001).
-
-FROM eclipse-temurin:21-jdk-alpine AS build
-WORKDIR /src
-COPY . .
-RUN \\
-  if [ -f mvnw ]; then chmod +x mvnw && ./mvnw -q -DskipTests package; \\
-  elif [ -f gradlew ]; then chmod +x gradlew && ./gradlew -q bootJar; \\
-  elif [ -f pom.xml ]; then mvn -q -DskipTests package; \\
-  else echo "No Maven/Gradle build found" && exit 1; fi
-
-FROM eclipse-temurin:21-jre-alpine AS runtime
-WORKDIR /app
-RUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app \\
-  && apk add --no-cache ca-certificates wget
-COPY --from=build --chown=10001:10001 /src/target/*.jar /app/app.jar
-ENV PORT=${port}
-${footer}CMD ["java", "-jar", "/app/app.jar"]
-# Image: ${name}`
-
-    case 'rust':
-      return `# syntax=docker/dockerfile:1.7
-# Launchpad hardened multi-stage Rust image (non-root USER 10001).
-
-FROM rust:1.83-alpine AS build
-WORKDIR /src
-RUN apk add --no-cache musl-dev
-COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
-COPY . .
-RUN cargo build --release
-
-FROM alpine:3.21 AS runtime
-WORKDIR /app
-RUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app \\
-  && apk add --no-cache ca-certificates wget
-COPY --from=build --chown=10001:10001 /src/target/release/${name} /app/${name}
-ENV PORT=${port}
-${footer}CMD ["/app/${name}"]
-# Image: ${name}`
-
-    case 'generic':
-      return `# syntax=docker/dockerfile:1.7
-# Launchpad hardened multi-stage generic image (non-root USER 10001).
-
-FROM alpine:3.21 AS build
-WORKDIR /src
-COPY . .
-RUN echo "Customize this build stage for your stack"
-
-FROM alpine:3.21 AS runtime
-WORKDIR /app
-RUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app \\
-  && apk add --no-cache ca-certificates wget
-COPY --from=build --chown=10001:10001 /src /app
-ENV PORT=${port}
-${footer}CMD ["sleep", "infinity"]
-# Image: ${name}`
-
     case 'node':
+    case 'nextjs':
+    case 'nuxtjs':
     default:
       return `# syntax=docker/dockerfile:1.7
-# Launchpad hardened multi-stage Node.js image (non-root USER 10001).
+# Launchpad hardened multi-stage Node.js / Web UI image (non-root USER 10001).
 
 FROM node:22-alpine AS deps
 WORKDIR /src
@@ -314,10 +292,10 @@ function downloadFile() {
         </span>
         <div>
           <h3 class="text-base font-semibold text-[var(--lp-text)]">
-            Multi-Stage Dockerfile &amp; Container Services
+            Multi-Service Container Scaffold (Frontend UI &amp; Backend API)
           </h3>
           <p class="text-xs text-[var(--lp-muted)]">
-            Generate hardened multi-stage Dockerfiles (USER 10001) and docker-compose.yml into workspace
+            Configure frontend UI &amp; backend API deployments with hardened multi-stage Dockerfiles into workspace
           </p>
         </div>
       </div>
@@ -357,6 +335,19 @@ function downloadFile() {
             :key="idx"
             class="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/30 p-3"
           >
+            <div class="w-28">
+              <span class="lp-label text-[10px]">Service Type</span>
+              <select
+                v-model="svc.app_kind"
+                class="lp-input py-1 text-xs font-semibold text-[var(--lp-accent)]"
+                :disabled="disabled"
+                @change="onAppKindChange(svc)"
+              >
+                <option value="frontend">Frontend UI</option>
+                <option value="backend">Backend API</option>
+              </select>
+            </div>
+
             <div class="flex-1 min-w-[120px]">
               <span class="lp-label text-[10px]">Service Name</span>
               <input
@@ -367,19 +358,25 @@ function downloadFile() {
                 @input="emitServices"
               >
             </div>
-            <div class="w-36">
-              <span class="lp-label text-[10px]">Stack</span>
+
+            <div class="w-40">
+              <span class="lp-label text-[10px]">Framework Stack</span>
               <select
                 v-model="svc.stack"
                 class="lp-input py-1 text-xs"
                 :disabled="disabled"
                 @change="emitServices"
               >
-                <option v-for="st in stacks" :key="st.id" :value="st.id">
+                <option
+                  v-for="st in stacks.filter(s => !svc.app_kind || s.category === svc.app_kind)"
+                  :key="st.id"
+                  :value="st.id"
+                >
                   {{ st.label }}
                 </option>
               </select>
             </div>
+
             <div class="w-24">
               <span class="lp-label text-[10px]">Port</span>
               <input
@@ -391,6 +388,7 @@ function downloadFile() {
                 @input="emitServices"
               >
             </div>
+
             <button
               type="button"
               class="lp-btn-danger text-xs p-1.5 self-end"

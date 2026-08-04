@@ -1,4 +1,14 @@
-"""Manage the local kind cluster used by Dev (kind) / Launch → Local."""
+"""Manage the local Kubernetes cluster used by Dev / Launch → Local.
+
+Supports two interchangeable engines, selected by ``settings.local_k8s_engine``:
+
+* ``k3s`` (default) — real k3s running in Docker via **k3d**. Context ``k3d-<name>``.
+* ``kind``          — Kubernetes-in-Docker. Context ``kind-<name>``.
+
+The public helpers keep their historical ``*_kind_*`` names so existing callers
+(routers, provisioning, environment) need no change; internally they dispatch to
+the active engine's CLI and lifecycle script.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +28,25 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
+def _engine() -> str:
+    return get_settings().local_k8s_engine
+
+
+def _cluster_tool() -> str:
+    """CLI binary that manages the active engine's cluster (``k3d`` or ``kind``)."""
+    return get_settings().local_cluster_tool
+
+
+def _context_for(name: str) -> str:
+    prefix = "k3d" if _engine() == "k3s" else "kind"
+    return f"{prefix}-{name}"
+
+
+def _script_name(action: str) -> str:
+    """Lifecycle script for the active engine, e.g. ``k3s-up.sh`` / ``kind-down.sh``."""
+    return f"{_engine()}-{action}.sh"
+
+
 def _script_path(name: str) -> Path:
     settings = get_settings()
     configured = (settings.kind_scripts_dir or "").strip()
@@ -26,35 +55,79 @@ def _script_path(name: str) -> Path:
     return _repo_root() / "scripts" / name
 
 
+def local_cluster_available() -> bool:
+    """True when the active engine's CLI and kubectl are both installed."""
+    return shutil.which(_cluster_tool()) is not None and shutil.which("kubectl") is not None
+
+
+# Back-compat alias — historical name used across the codebase.
 def kind_available() -> bool:
-    return shutil.which("kind") is not None and shutil.which("kubectl") is not None
+    return local_cluster_available()
 
 
-async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, str]:
-    """Run ``scripts/kind-up.sh`` (idempotent). Raises RuntimeError on failure."""
-    settings = get_settings()
-    if not settings.kind_auto_manage:
-        logger.info("kind_auto_manage_disabled", action="up")
-        return {"status": "skipped", "reason": "kind_auto_manage_disabled"}
-
-    if not kind_available():
-        raise RuntimeError(
-            "kind and kubectl are required for Dev (kind). "
-            "Install kind (https://kind.sigs.k8s.io/) and kubectl, then try again."
+async def _list_clusters() -> set[str]:
+    """Names of existing local clusters for the active engine (empty on any error)."""
+    tool = _cluster_tool()
+    if not shutil.which(tool):
+        return set()
+    if tool == "k3d":
+        cmd = ["k3d", "cluster", "list", "--no-headers"]
+    else:
+        cmd = ["kind", "get", "clusters"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        stdout_b, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return set()
+        out = stdout_b.decode("utf-8", errors="replace")
+        # k3d prints "NAME SERVERS AGENTS ..."; kind prints one name per line.
+        return {line.split()[0].strip() for line in out.splitlines() if line.strip()}
+    except OSError as exc:
+        logger.warning("local_cluster_list_failed", tool=tool, error=str(exc))
+        return set()
 
-    script = _script_path("kind-up.sh")
+
+async def _nodes_ready(context: str) -> bool:
+    """True when at least one node reports Ready via kubectl (engine-agnostic)."""
+    if not shutil.which("kubectl"):
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "kubectl",
+            "--context",
+            context,
+            "get",
+            "nodes",
+            "-o",
+            'jsonpath={.items[*].status.conditions[?(@.type=="Ready")].status}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return False
+        return "True" in stdout_b.decode("utf-8", errors="replace").split()
+    except OSError as exc:
+        logger.warning("local_cluster_nodes_probe_failed", context=context, error=str(exc))
+        return False
+
+
+async def _run_lifecycle_script(action: str, name: str, *, extra_env: dict[str, str]) -> tuple[int, str, str]:
+    script = _script_path(_script_name(action))
     if not script.is_file():
-        raise RuntimeError(f"kind-up script not found at {script}")
+        raise RuntimeError(f"{_script_name(action)} not found at {script}")
 
-    name = cluster_name or settings.kind_cluster_name
     env = os.environ.copy()
-    env["KIND_CLUSTER_NAME"] = name
-    env["PREVIEW_NODE_PORT_MIN"] = str(settings.preview_node_port_min)
-    env["PREVIEW_NODE_PORT_MAX"] = str(settings.preview_node_port_max)
-    env["DEFAULT_WORKLOAD_IMAGE"] = settings.default_workload_image
+    env["KIND_CLUSTER_NAME"] = name  # shared cluster-name var across engines
+    env["LOCAL_CLUSTER_NAME"] = name
+    env["LOCAL_K8S_ENGINE"] = _engine()
+    env.update(extra_env)
 
-    logger.info("kind_cluster_up_start", cluster=name, script=str(script))
+    logger.info("local_cluster_script_start", engine=_engine(), action=action, cluster=name, script=str(script))
     proc = await asyncio.create_subprocess_exec(
         "bash",
         str(script),
@@ -64,174 +137,151 @@ async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, s
         cwd=str(_repo_root()),
     )
     stdout_b, stderr_b = await proc.communicate()
-    stdout = stdout_b.decode("utf-8", errors="replace")
-    stderr = stderr_b.decode("utf-8", errors="replace")
-    if proc.returncode != 0:
+    return (
+        proc.returncode or 0,
+        stdout_b.decode("utf-8", errors="replace"),
+        stderr_b.decode("utf-8", errors="replace"),
+    )
+
+
+async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, str]:
+    """Start the local cluster (idempotent) via the active engine. Raises on failure."""
+    settings = get_settings()
+    engine = _engine()
+    if not settings.kind_auto_manage:
+        logger.info("local_cluster_auto_manage_disabled", action="up", engine=engine)
+        return {"status": "skipped", "reason": "auto_manage_disabled"}
+
+    if not local_cluster_available():
+        tool = _cluster_tool()
+        install_hint = (
+            "Install k3d (https://k3d.io — `brew install k3d`)"
+            if tool == "k3d"
+            else "Install kind (https://kind.sigs.k8s.io/)"
+        )
+        raise RuntimeError(
+            f"{tool} and kubectl are required for Local ({engine}). {install_hint} and kubectl, then retry."
+        )
+
+    name = cluster_name or settings.kind_cluster_name
+    returncode, stdout, stderr = await _run_lifecycle_script(
+        "up",
+        name,
+        extra_env={
+            "PREVIEW_NODE_PORT_MIN": str(settings.preview_node_port_min),
+            "PREVIEW_NODE_PORT_MAX": str(settings.preview_node_port_max),
+            "DEFAULT_WORKLOAD_IMAGE": settings.default_workload_image,
+        },
+    )
+    if returncode != 0:
         logger.error(
-            "kind_cluster_up_failed",
+            "local_cluster_up_failed",
+            engine=engine,
             cluster=name,
-            returncode=proc.returncode,
+            returncode=returncode,
             stdout=stdout[-2000:],
             stderr=stderr[-2000:],
         )
-        detail = (stderr or stdout).strip() or f"kind-up exited {proc.returncode}"
-        raise RuntimeError(f"Failed to start kind cluster '{name}': {detail[:800]}")
+        detail = (stderr or stdout).strip() or f"{engine}-up exited {returncode}"
+        raise RuntimeError(f"Failed to start {engine} cluster '{name}': {detail[:800]}")
 
-    logger.info("kind_cluster_up_ok", cluster=name)
+    logger.info("local_cluster_up_ok", engine=engine, cluster=name)
     return {
         "status": "ready",
         "cluster": name,
-        "context": f"kind-{name}",
+        "engine": engine,
+        "context": _context_for(name),
         "output": stdout[-1500:],
     }
 
 
 async def delete_kind_cluster(*, cluster_name: str | None = None) -> dict[str, str]:
-    """Run ``scripts/kind-down.sh``. Raises RuntimeError on hard failure."""
+    """Delete the local cluster via the active engine. Raises on hard failure."""
     settings = get_settings()
+    engine = _engine()
     if not settings.kind_auto_manage:
-        logger.info("kind_auto_manage_disabled", action="down")
-        return {"status": "skipped", "reason": "kind_auto_manage_disabled"}
+        logger.info("local_cluster_auto_manage_disabled", action="down", engine=engine)
+        return {"status": "skipped", "reason": "auto_manage_disabled"}
 
-    if not kind_available():
-        logger.warning("kind_cluster_down_skipped", reason="kind_or_kubectl_missing")
-        return {"status": "skipped", "reason": "kind_or_kubectl_missing"}
-
-    script = _script_path("kind-down.sh")
-    if not script.is_file():
-        raise RuntimeError(f"kind-down script not found at {script}")
+    if not local_cluster_available():
+        logger.warning("local_cluster_down_skipped", reason="tool_or_kubectl_missing", engine=engine)
+        return {"status": "skipped", "reason": "tool_or_kubectl_missing"}
 
     name = cluster_name or settings.kind_cluster_name
-    env = os.environ.copy()
-    env["KIND_CLUSTER_NAME"] = name
-
-    logger.info("kind_cluster_down_start", cluster=name, script=str(script))
-    proc = await asyncio.create_subprocess_exec(
-        "bash",
-        str(script),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-        cwd=str(_repo_root()),
-    )
-    stdout_b, stderr_b = await proc.communicate()
-    stdout = stdout_b.decode("utf-8", errors="replace")
-    stderr = stderr_b.decode("utf-8", errors="replace")
-    if proc.returncode != 0:
+    returncode, stdout, stderr = await _run_lifecycle_script("down", name, extra_env={})
+    if returncode != 0:
         logger.error(
-            "kind_cluster_down_failed",
+            "local_cluster_down_failed",
+            engine=engine,
             cluster=name,
-            returncode=proc.returncode,
+            returncode=returncode,
             stdout=stdout[-2000:],
             stderr=stderr[-2000:],
         )
-        detail = (stderr or stdout).strip() or f"kind-down exited {proc.returncode}"
-        raise RuntimeError(f"Failed to delete kind cluster '{name}': {detail[:800]}")
+        detail = (stderr or stdout).strip() or f"{engine}-down exited {returncode}"
+        raise RuntimeError(f"Failed to delete {engine} cluster '{name}': {detail[:800]}")
 
-    logger.info("kind_cluster_down_ok", cluster=name)
-    return {"status": "deleted", "cluster": name, "output": stdout[-1500:]}
+    logger.info("local_cluster_down_ok", engine=engine, cluster=name)
+    return {"status": "deleted", "cluster": name, "engine": engine, "output": stdout[-1500:]}
 
 
 async def probe_kind_cluster(*, cluster_name: str | None = None) -> dict[str, object]:
-    """Read-only Kind readiness probe (never starts or deletes the cluster)."""
+    """Read-only readiness probe for the active engine (never starts/deletes)."""
     settings = get_settings()
+    engine = _engine()
+    tool = _cluster_tool()
     name = cluster_name or settings.kind_cluster_name
-    context = f"kind-{name}"
-    kind_bin = shutil.which("kind") is not None
+    context = _context_for(name)
+    tool_bin = shutil.which(tool) is not None
     kubectl_bin = shutil.which("kubectl") is not None
     auto_manage = bool(settings.kind_auto_manage)
 
     cluster_exists = False
     api_reachable = False
 
-    if kind_bin:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "kind",
-                "get",
-                "clusters",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_b, _ = await proc.communicate()
-            if proc.returncode == 0:
-                clusters = {
-                    line.strip()
-                    for line in stdout_b.decode("utf-8", errors="replace").splitlines()
-                    if line.strip()
-                }
-                cluster_exists = name in clusters
-        except OSError as exc:
-            logger.warning("kind_get_clusters_failed", error=str(exc))
+    if tool_bin:
+        cluster_exists = name in await _list_clusters()
 
     if kubectl_bin and cluster_exists:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "kubectl",
-                "--context",
-                context,
-                "cluster-info",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.communicate()
-            if proc.returncode == 0:
-                proc_cm = await asyncio.create_subprocess_exec(
-                    "kubectl",
-                    "--context",
-                    context,
-                    "get",
-                    "pods",
-                    "-n",
-                    "kube-system",
-                    "-l",
-                    "component=kube-controller-manager",
-                    "-o",
-                    "jsonpath={.items[*].status.phase}",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout_cm, _ = await proc_cm.communicate()
-                cm_phase = stdout_cm.decode("utf-8", errors="replace").strip()
-                api_reachable = proc_cm.returncode == 0 and ("Running" in cm_phase or not cm_phase)
-        except OSError as exc:
-            logger.warning("kind_cluster_info_failed", error=str(exc), context=context)
+        api_reachable = await _nodes_ready(context)
 
-    if not kind_bin or not kubectl_bin:
+    engine_label = "k3s" if engine == "k3s" else "kind"
+    if not tool_bin or not kubectl_bin:
         status = "tools_missing"
-        message = "Install kind and kubectl to use Local (kind) previews."
+        message = f"Install {tool} and kubectl to use Local ({engine_label}) previews."
         can_launch = False
     elif api_reachable:
         status = "ready"
-        message = f"Kind cluster '{name}' is reachable via context {context}."
+        message = f"{engine_label} cluster '{name}' is reachable via context {context}."
         can_launch = True
     elif cluster_exists:
         status = "unreachable"
         message = (
-            f"Kind cluster '{name}' control plane is unhealthy (kube-controller-manager not Running). "
-            "Recreating/starting cluster..."
+            f"{engine_label} cluster '{name}' exists but no node is Ready. Recreating/starting cluster..."
         )
         can_launch = False
     elif auto_manage:
         status = "absent"
         message = (
-            f"Kind cluster '{name}' is not running yet. "
+            f"{engine_label} cluster '{name}' is not running yet. "
             "Launch will start it automatically (~1–2 min first time)."
         )
         can_launch = True
     else:
         status = "absent"
         message = (
-            f"Kind cluster '{name}' is not running and auto-manage is disabled. "
-            "Run scripts/kind-up.sh or enable KIND_AUTO_MANAGE."
+            f"{engine_label} cluster '{name}' is not running and auto-manage is disabled. "
+            f"Run scripts/{engine}-up.sh or enable KIND_AUTO_MANAGE."
         )
         can_launch = False
 
     return {
         "status": status,
         "cluster": name,
+        "engine": engine,
+        "tool": tool,
         "context": context,
-        "kind_installed": kind_bin,
+        "kind_installed": tool_bin,  # historical key: the active engine's tool
         "kubectl_installed": kubectl_bin,
         "cluster_exists": cluster_exists,
         "api_reachable": api_reachable,

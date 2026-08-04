@@ -56,10 +56,17 @@ class GoldenPathTemplate:
     includes_k8s: bool = True
     includes_cicd: bool = True
     includes_iac: bool = False
+    enable_postgres: bool = False
+    enable_redis: bool = False
 
     @property
     def docker_images(self) -> tuple[str, ...]:
-        return tuple(docker_images_for_frameworks(self.frameworks))
+        images = list(docker_images_for_frameworks(self.frameworks))
+        if self.enable_postgres and "postgres:16-alpine" not in images:
+            images.append("postgres:16-alpine")
+        if self.enable_redis and "redis:7-alpine" not in images:
+            images.append("redis:7-alpine")
+        return tuple(images)
 
 
 GOLDEN_PATH_TEMPLATES: tuple[GoldenPathTemplate, ...] = (
@@ -278,6 +285,38 @@ GOLDEN_PATH_TEMPLATES: tuple[GoldenPathTemplate, ...] = (
         listen_port=3000,
         tags=("fullstack", "nextjs", "express", "node"),
         includes_iac=True,
+    ),
+    GoldenPathTemplate(
+        id="fullstack-nextjs-express-postgres",
+        version="1.0.0",
+        title="Fullstack (Next.js + Express + PostgreSQL)",
+        description="Next.js UI + Express API + PostgreSQL database — dual containers, database provisioning, K8s packaging, and security CI.",
+        icon="storage",
+        stack="nextjs",
+        frameworks=("nextjs", "express"),
+        default_tier="tier-1",
+        default_slo="99.9",
+        listen_port=3000,
+        tags=("fullstack", "nextjs", "express", "postgres", "node", "database"),
+        includes_iac=True,
+        enable_postgres=True,
+        enable_redis=False,
+    ),
+    GoldenPathTemplate(
+        id="fullstack-nextjs-express-postgres-redis",
+        version="1.0.0",
+        title="Fullstack (Next.js + Express + PostgreSQL + Redis)",
+        description="Next.js UI + Express API + PostgreSQL + Redis cache — full-stack production architecture with database and cache provisioning.",
+        icon="layers",
+        stack="nextjs",
+        frameworks=("nextjs", "express"),
+        default_tier="tier-1",
+        default_slo="99.9",
+        listen_port=3000,
+        tags=("fullstack", "nextjs", "express", "postgres", "redis", "node", "cache"),
+        includes_iac=True,
+        enable_postgres=True,
+        enable_redis=True,
     ),
     GoldenPathTemplate(
         id="fullstack-nuxt-express",

@@ -248,18 +248,11 @@ def _docker_build(*, context: Path, dockerfile: str, tag: str) -> None:
 
 
 def _kind_load_image(*, tag: str, cluster_name: str) -> None:
-    kind_bin = shutil.which("kind")
-    if kind_bin is None:
-        raise PreviewBuildError("kind is not installed — required to load preview images")
-    proc = subprocess.run(
-        [kind_bin, "load", "docker-image", tag, "--name", cluster_name],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        detail = sanitize_log_message((proc.stderr or proc.stdout or "kind load failed").strip())
-        raise PreviewBuildError(f"kind load docker-image failed: {detail[:800]}")
+    from app.services.manifest_deploy import _load_image_to_local_cluster
+
+    success = _load_image_to_local_cluster(tag, cluster_name=cluster_name)
+    if not success:
+        logger.warning("preview_build_local_image_load_warn", tag=tag, cluster=cluster_name)
 
 
 def _registry_push(*, tag: str) -> None:

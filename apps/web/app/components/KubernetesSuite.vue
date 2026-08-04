@@ -33,6 +33,14 @@ const selectedResourceForLogs = ref<K8sResource | null>(null)
 const execModalOpen = ref(false)
 const selectedResourceForExec = ref<K8sResource | null>(null)
 
+const aiDrawerOpen = ref(false)
+const aiErrorContext = ref<string | null>(null)
+
+function openAiDrawerWithError(ctx?: string | null) {
+  aiErrorContext.value = ctx || errorMessage.value || 'Kubernetes deployment error'
+  aiDrawerOpen.value = true
+}
+
 async function loadContext() {
   loadingContext.value = true
   try {
@@ -234,22 +242,32 @@ onMounted(() => {
     <!-- Actionable Warning Alert for Error Boundaries -->
     <div
       v-if="errorMessage"
-      class="flex items-start justify-between rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-xs font-mono text-rose-300 shadow-lg backdrop-blur-md"
+      class="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-xs font-mono text-rose-300 shadow-lg backdrop-blur-md"
     >
-      <div class="flex items-start gap-2.5">
-        <span class="material-symbols-outlined text-lg text-rose-400">warning</span>
-        <div>
+      <div class="flex items-start gap-2.5 min-w-0">
+        <span class="material-symbols-outlined text-lg text-rose-400 shrink-0">warning</span>
+        <div class="min-w-0">
           <h4 class="font-bold text-rose-200 uppercase tracking-wider">Cluster Connection Warning</h4>
-          <p class="mt-0.5 text-rose-300/90">{{ errorMessage }}</p>
+          <p class="mt-0.5 text-rose-300/90 break-words">{{ errorMessage }}</p>
         </div>
       </div>
-      <button
-        type="button"
-        class="rounded p-1 text-rose-400 hover:bg-rose-500/20"
-        @click="errorMessage = null"
-      >
-        <span class="material-symbols-outlined text-base">close</span>
-      </button>
+      <div class="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-500/30 transition shadow-md"
+          @click="openAiDrawerWithError(errorMessage)"
+        >
+          <span class="material-symbols-outlined text-sm text-amber-400">auto_awesome</span>
+          <span>AI Analyze &amp; Fix</span>
+        </button>
+        <button
+          type="button"
+          class="rounded p-1 text-rose-400 hover:bg-rose-500/20"
+          @click="errorMessage = null"
+        >
+          <span class="material-symbols-outlined text-base">close</span>
+        </button>
+      </div>
     </div>
 
     <!-- 1. Top Cluster Context Banner -->
@@ -266,6 +284,8 @@ onMounted(() => {
     <K8sDeploymentPipelineVisualizer
       :stages="pipelineStages"
       :active="applyingPipeline"
+      @ai-fix="openAiDrawerWithError"
+      @aiFix="openAiDrawerWithError"
     />
 
     <!-- 3. Categorized Resource Grid & Quick Action Cards -->
@@ -325,6 +345,12 @@ onMounted(() => {
       :busy="deletingResource"
       @update:open="(value) => { if (!value) pendingDelete = null }"
       @confirm="confirmDeleteResource"
+    />
+
+    <WorkspaceAiAnalysisDrawer
+      v-model:open="aiDrawerOpen"
+      :workspace-id="workspaceId"
+      :error-context="aiErrorContext"
     />
   </div>
 </template>

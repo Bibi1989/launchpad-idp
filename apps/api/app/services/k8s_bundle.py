@@ -10,6 +10,7 @@ Optional add-ons (ingress-nginx) land under ``infra/k8s/addons/``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -48,6 +49,101 @@ HELM_CHART_ROOT = Path("infra") / "helm" / "app-chart"
 INGRESS_NGINX_VALUES = K8S_ADDONS_ROOT / "ingress-nginx-values.yaml"
 
 
+@dataclass(frozen=True)
+class WorkloadImageSpec:
+    """Describes the container image + runtime shape the workload manifests deploy.
+
+    The default value reproduces the historical Nginx placeholder exactly so
+    manifests generated without a scaffolded application are byte-for-byte
+    unchanged. When Launchpad scaffolds a runnable mini-application it passes a
+    populated spec so the Deployment/Pod deploy the built image (with correct
+    port, health-probe paths, non-root UID, and writable mounts) instead of the
+    generic Nginx container.
+    """
+
+    image: str = "nginx:1.27-alpine"
+    image_pull_policy: str = "IfNotPresent"
+    container_port: int = 80
+    liveness_path: str = "/"
+    readiness_path: str = "/"
+    run_as_user: int = 101
+    read_only_root_fs: bool = True
+    writable_mounts: tuple[tuple[str, str], ...] = (
+        ("tmp", "/tmp"),
+        ("cache", "/var/cache/nginx"),
+        ("run", "/var/run"),
+    )
+    app_version: str = "1.0.0"
+    replicas: int = 2
+
+    @property
+    def image_repository(self) -> str:
+        return self.image.rsplit(":", 1)[0] if ":" in self.image else self.image
+
+    @property
+    def image_tag(self) -> str:
+        return self.image.rsplit(":", 1)[1] if ":" in self.image else "latest"
+
+
+def _render_volume_mounts_block(spec: WorkloadImageSpec) -> str:
+    if not spec.writable_mounts:
+        return ""
+    lines = ["\n          volumeMounts:"]
+    for vol_name, mount_path in spec.writable_mounts:
+        lines.append(f"            - name: {vol_name}")
+        lines.append(f"              mountPath: {mount_path}")
+    return "\n".join(lines)
+
+
+def _render_volumes_block(spec: WorkloadImageSpec) -> str:
+    if not spec.writable_mounts:
+        return ""
+    lines = ["\n      volumes:"]
+    for vol_name, _ in spec.writable_mounts:
+        lines.append(f"        - name: {vol_name}")
+        lines.append("          emptyDir: {}")
+    return "\n".join(lines)
+
+
+def _render_workload_env_block(
+    name: str,
+    spec: WorkloadImageSpec,
+    dependencies: WorkloadDependenciesConfig,
+) -> str:
+    """Render the shared application env vars surfaced to the health dashboard."""
+    has_db = (
+        dependencies.postgres.enabled
+        or dependencies.mysql.enabled
+        or dependencies.mariadb.enabled
+        or dependencies.mongodb.enabled
+    )
+    has_redis = dependencies.redis.enabled
+    return (
+        f'            - name: ENVIRONMENT_NAME\n              value: "{name}"\n'
+        f'            - name: APP_VERSION\n              value: "{spec.app_version}"\n'
+        f'            - name: PORT\n              value: "{spec.container_port}"\n'
+        f'            - name: REPLICA_COUNT\n              value: "{spec.replicas}"\n'
+        f'            - name: HAS_DATABASE\n              value: "{str(has_db).lower()}"\n'
+        f'            - name: HAS_REDIS\n              value: "{str(has_redis).lower()}"\n'
+        # NOTE: API_URL / BACKEND_URL / NEXT_PUBLIC_API_URL are injected per-workload
+        # (via extra_env) only for frontends, pointing at the real backend Service.
+        # A backend has no upstream API, and hardcoding a nonexistent "api-server"
+        # host here would leave every workload advertising a dead backend target.
+        "            - name: POD_NAME\n"
+        "              valueFrom:\n"
+        "                fieldRef:\n"
+        "                  fieldPath: metadata.name\n"
+        "            - name: POD_NAMESPACE\n"
+        "              valueFrom:\n"
+        "                fieldRef:\n"
+        "                  fieldPath: metadata.namespace\n"
+        "            - name: POD_IP\n"
+        "              valueFrom:\n"
+        "                fieldRef:\n"
+        "                  fieldPath: status.podIP"
+    )
+
+
 def write_kubernetes_layout(
     workspace_dir: Path,
     *,
@@ -57,22 +153,24 @@ def write_kubernetes_layout(
     cost_optimization: CostOptimizationConfig | None = None,
     dependencies: WorkloadDependenciesConfig | None = None,
     cloud: object | None = None,
+    workload: WorkloadImageSpec | None = None,
 ) -> list[str]:
     """Writes the selected Kubernetes packaging layout; returns relative paths."""
     opts = options or KubernetesWorkloadOptions()
     cost = cost_optimization or CostOptimizationConfig()
     deps = dependencies or WorkloadDependenciesConfig()
+    spec = workload or WorkloadImageSpec()
     if deps.any_enabled() and not opts.secret:
         opts = opts.model_copy(update={"secret": True})
     if packaging == KubernetesPackaging.NONE:
         return []
     written: list[str] = []
     if packaging == KubernetesPackaging.RAW_MANIFESTS:
-        written.extend(_write_raw_manifests(workspace_dir, name, opts, cost, deps, cloud))
+        written.extend(_write_raw_manifests(workspace_dir, name, opts, cost, deps, cloud, spec))
     elif packaging == KubernetesPackaging.HELM:
-        written.extend(_write_helm_chart(workspace_dir, name, opts, cost, deps, cloud))
+        written.extend(_write_helm_chart(workspace_dir, name, opts, cost, deps, cloud, spec))
     elif packaging == KubernetesPackaging.KUSTOMIZE:
-        written.extend(_write_kustomize_layout(workspace_dir, name, opts, cost, deps, cloud))
+        written.extend(_write_kustomize_layout(workspace_dir, name, opts, cost, deps, cloud, spec))
     else:
         raise ValueError(f"Unsupported Kubernetes packaging: {packaging!r}")
 
@@ -118,7 +216,10 @@ def _write_relative(workspace_dir: Path, relative: Path, content: str) -> str:
 
 
 def _namespace_name(name: str) -> str:
-    return f"lp-{name}"
+    """DNS-1123 subdomain namespace (max 63 chars)."""
+    from app.services.terraform_bundle import sanitize_dns1123_name
+
+    return sanitize_dns1123_name(name, max_len=63, prefix="lp")
 
 
 # --------------------------------------------------------------------------- #
@@ -133,9 +234,11 @@ def _write_raw_manifests(
     cost: CostOptimizationConfig,
     dependencies: WorkloadDependenciesConfig,
     cloud: object | None,
+    workload: WorkloadImageSpec | None = None,
 ) -> list[str]:
     ns = _namespace_name(name)
     app = "app"
+    spec = workload or WorkloadImageSpec()
     in_cluster = _in_cluster_kinds(dependencies)
     files: dict[str, str] = {
         "namespace.yaml": _namespace_yaml(ns, name),
@@ -144,28 +247,28 @@ def _write_raw_manifests(
         files[filename] = content
     if options.deployment:
         files["deployment.yaml"] = _deployment_yaml(
-            ns, name, app, options, cost, dependencies=dependencies
+            ns, name, app, options, cost, dependencies=dependencies, workload=spec
         )
     if options.service:
-        files["service.yaml"] = _service_yaml(ns, name, app)
+        files["service.yaml"] = _service_yaml(ns, name, app, workload=spec)
     if options.pod:
-        files["pod.yaml"] = _pod_yaml(ns, name, app)
+        files["pod.yaml"] = _pod_yaml(ns, name, app, workload=spec)
     if options.job:
         files["job.yaml"] = _job_yaml(ns, name, app)
     if options.cronjob:
         files["cronjob.yaml"] = _cronjob_yaml(ns, name, app)
     if options.statefulset:
-        files["statefulset.yaml"] = _statefulset_yaml(ns, name, app)
+        files["statefulset.yaml"] = _statefulset_yaml(ns, name, app, workload=spec)
     if options.daemonset:
         files["daemonset.yaml"] = _daemonset_yaml(ns, name, app)
     if options.service_account:
         files["serviceaccount.yaml"] = _serviceaccount_yaml(ns, name, app)
     if options.config_map:
-        files["configmap.yaml"] = _configmap_yaml(ns, name, app)
+        files["configmap.yaml"] = _configmap_yaml(ns, name, app, workload=spec)
     if options.secret or dependencies.any_enabled():
         files["secret.yaml"] = _secret_yaml(ns, name, app, dependencies, cloud)
     if options.ingress:
-        files["ingress.yaml"] = _ingress_yaml(ns, name, app, options.ingress_class)
+        files["ingress.yaml"] = _ingress_yaml(ns, name, app, options.ingress_class, workload=spec)
     if options.pvc:
         files["pvc.yaml"] = _pvc_yaml(ns, name, app)
     if options.role:
@@ -239,7 +342,10 @@ automountServiceAccountToken: false
 """
 
 
-def _configmap_yaml(ns: str, name: str, app: str) -> str:
+def _configmap_yaml(
+    ns: str, name: str, app: str, workload: WorkloadImageSpec | None = None
+) -> str:
+    spec = workload or WorkloadImageSpec()
     return f"""\
 apiVersion: v1
 kind: ConfigMap
@@ -251,7 +357,7 @@ metadata:
 data:
   ENVIRONMENT_NAME: "{name}"
   LOG_LEVEL: "info"
-  APP_PORT: "80"
+  APP_PORT: "{spec.container_port}"
 """
 
 
@@ -295,9 +401,11 @@ def _deployment_yaml(
     options: KubernetesWorkloadOptions,
     cost: CostOptimizationConfig | None = None,
     dependencies: WorkloadDependenciesConfig | None = None,
+    workload: WorkloadImageSpec | None = None,
 ) -> str:
     cost = cost or CostOptimizationConfig()
     deps = dependencies or WorkloadDependenciesConfig()
+    spec = workload or WorkloadImageSpec()
     in_cluster = _in_cluster_kinds(deps)
     init_block = init_container_wait_blocks(in_cluster)
     sa_block = f"\n      serviceAccountName: {app}" if options.service_account else ""
@@ -333,6 +441,10 @@ def _deployment_yaml(
         )
 
     init_containers_section = f"\n      initContainers:{init_block}" if init_block else ""
+    env_block = _render_workload_env_block(name, spec, deps)
+    volume_mounts_block = _render_volume_mounts_block(spec)
+    volumes_block = _render_volumes_block(spec)
+    read_only = str(spec.read_only_root_fs).lower()
 
     return f"""\
 {cost_marker_comment(cost)}\
@@ -344,7 +456,7 @@ metadata:
   labels:
 {_common_labels(name, app).rstrip()}
 spec:
-  replicas: 2
+  replicas: {spec.replicas}
   selector:
     matchLabels:
       app: {app}
@@ -359,22 +471,21 @@ spec:
 {spot_block}\
       securityContext:
         runAsNonRoot: true
-        runAsUser: 101
-        runAsGroup: 101
+        runAsUser: {spec.run_as_user}
+        runAsGroup: {spec.run_as_user}
         seccompProfile:
           type: RuntimeDefault
 {init_containers_section}
       containers:
         - name: {app}
-          image: nginx:1.27-alpine
-          imagePullPolicy: IfNotPresent
+          image: {spec.image}
+          imagePullPolicy: {spec.image_pull_policy}
           ports:
             - name: http
-              containerPort: 80
+              containerPort: {spec.container_port}
               protocol: TCP
           env:
-            - name: ENVIRONMENT_NAME
-              value: {name}{env_from_block}
+{env_block}{env_from_block}
           resources:
             requests:
               cpu: {cpu_req}
@@ -384,7 +495,7 @@ spec:
               memory: {mem_lim}
           readinessProbe:
             httpGet:
-              path: /
+              path: {spec.readiness_path}
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -392,7 +503,7 @@ spec:
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /
+              path: {spec.liveness_path}
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
@@ -400,30 +511,310 @@ spec:
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: {read_only}
             runAsNonRoot: true
-            runAsUser: 101
+            runAsUser: {spec.run_as_user}
             capabilities:
               drop:
-                - ALL
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-            - name: cache
-              mountPath: /var/cache/nginx
-            - name: run
-              mountPath: /var/run
-      volumes:
-        - name: tmp
-          emptyDir: {{}}
-        - name: cache
-          emptyDir: {{}}
-        - name: run
-          emptyDir: {{}}
+                - ALL{volume_mounts_block}{volumes_block}
 """
 
 
-def _service_yaml(ns: str, name: str, app: str) -> str:
+def additional_workload_manifests(
+    workspace_dir: Path,
+    *,
+    env_name: str,
+    services: list[dict[str, object]],
+    dependencies: WorkloadDependenciesConfig | None = None,
+) -> list[str]:
+    """Write a Deployment + Service manifest pair per extra workload.
+
+    Each entry is ``{name, image, port, service_type, selector}``. This lets a
+    workspace host more than one Deployment/Service — the user picks the stack
+    (which decides the image), the Service type, and the selector label per
+    workload. Every workload also receives the ``app-secrets`` connection strings
+    (``DATABASE_URL`` / ``REDIS_URL``) and ``HAS_DATABASE`` / ``HAS_REDIS`` flags
+    when the workspace has in-cluster datastores, so each app can actually connect
+    and surface database/Redis status.
+    """
+    deps = dependencies or WorkloadDependenciesConfig()
+    ns = _namespace_name(env_name)
+    written: list[str] = []
+    for svc in services:
+        wl_name = str(svc.get("name") or "app")
+        selector = str(svc.get("selector") or wl_name)
+        port = int(svc.get("port") or 8080)
+        image = str(svc.get("image") or f"{wl_name}:latest")
+        service_type = str(svc.get("service_type") or "ClusterIP")
+        health_path = str(svc.get("health_path") or "/health")
+        run_as_user = int(svc.get("run_as_user") or 10001)
+        expose_preview = bool(svc.get("expose_preview"))
+        service_name = f"{wl_name}-service"
+        extra_env = svc.get("extra_env") if isinstance(svc.get("extra_env"), dict) else None
+        written.append(
+            _write_relative(
+                workspace_dir,
+                K8S_MANIFESTS_ROOT / f"{wl_name}-deployment.yaml",
+                _named_deployment_yaml(
+                    ns, env_name, wl_name, selector, image, port, health_path,
+                    run_as_user, expose_preview, deps, extra_env,
+                ),
+            )
+        )
+        written.append(
+            _write_relative(
+                workspace_dir,
+                K8S_MANIFESTS_ROOT / f"{wl_name}-service.yaml",
+                _named_service_yaml(
+                    ns, env_name, service_name, selector, port, service_type, expose_preview
+                ),
+            )
+        )
+    return written
+
+
+def prune_orphan_default_manifests(workspace_dir: Path) -> list[str]:
+    """Delete the generic ``deployment.yaml``/``service.yaml`` when stack-specific
+    ``launch-*-deployment.yaml`` files exist.
+
+    Prevents Launch Preview from picking the nginx-fallback ``deployment.yaml``
+    over the real per-stack workloads. Returns the removed relative paths.
+    """
+    mdir = workspace_dir / K8S_MANIFESTS_ROOT
+    if not mdir.is_dir():
+        return []
+    if not any(mdir.glob("launch-*-deployment.yaml")):
+        return []
+    removed: list[str] = []
+    for fname in ("deployment.yaml", "service.yaml"):
+        target = mdir / fname
+        if target.is_file():
+            target.unlink()
+            removed.append(str(K8S_MANIFESTS_ROOT / fname).replace("\\", "/"))
+    return removed
+
+
+def _preview_target_annotation(expose_preview: bool, indent: int = 2) -> str:
+    """Render the metadata.annotations block (empty when not exposed)."""
+    if not expose_preview:
+        return ""
+    pad = " " * indent
+    return f"{pad}annotations:\n{pad}  launchpad.io/preview-target: \"true\"\n"
+
+
+def _named_deployment_yaml(
+    ns: str,
+    env_name: str,
+    wl_name: str,
+    selector: str,
+    image: str,
+    port: int,
+    health_path: str,
+    run_as_user: int,
+    expose_preview: bool = False,
+    dependencies: WorkloadDependenciesConfig | None = None,
+    extra_env: dict[str, object] | None = None,
+) -> str:
+    deps = dependencies or WorkloadDependenciesConfig()
+    annotations = _preview_target_annotation(expose_preview)
+    # Full env block (HAS_DATABASE/HAS_REDIS + downward API) and connection strings
+    # from app-secrets so this workload can reach the datastores and report status.
+    spec = WorkloadImageSpec(image=image, container_port=port, app_version="1.0.0", replicas=1)
+    env_block = _render_workload_env_block(env_name, spec, deps)
+    # Per-workload extras — e.g. a frontend's API_URL pointing at the backend
+    # Service so its dashboard can display the backend's live DB/Redis status.
+    for key, value in (extra_env or {}).items():
+        env_block += f'\n            - name: {key}\n              value: "{value}"'
+    env_from_block = ""
+    if deps.any_enabled():
+        env_from_block = (
+            "\n          envFrom:\n"
+            "            - secretRef:\n"
+            "                name: app-secrets\n"
+            "                optional: true"
+        )
+    return f"""\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {wl_name}
+  namespace: {ns}
+{annotations}\
+  labels:
+    app: {selector}
+    app.kubernetes.io/name: {wl_name}
+    app.kubernetes.io/instance: {env_name}
+    launchpad.io/environment-name: {env_name}
+    launchpad.io/managed-by: launchpad-idp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {selector}
+      launchpad.io/managed-by: launchpad-idp
+  template:
+    metadata:
+      labels:
+        app: {selector}
+        app.kubernetes.io/name: {wl_name}
+        launchpad.io/managed-by: launchpad-idp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {run_as_user}
+        runAsGroup: {run_as_user}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {wl_name}
+          image: {image}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {port}
+              protocol: TCP
+          env:
+{env_block}{env_from_block}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: {health_path}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: {health_path}
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: {run_as_user}
+            capabilities:
+              drop:
+                - ALL
+"""
+
+
+def _named_service_yaml(
+    ns: str,
+    env_name: str,
+    service_name: str,
+    selector: str,
+    port: int,
+    service_type: str,
+    expose_preview: bool = False,
+) -> str:
+    annotations = _preview_target_annotation(expose_preview)
+    return f"""\
+apiVersion: v1
+kind: Service
+metadata:
+  name: {service_name}
+  namespace: {ns}
+{annotations}\
+  labels:
+    app: {selector}
+    app.kubernetes.io/name: {service_name}
+    app.kubernetes.io/instance: {env_name}
+    launchpad.io/environment-name: {env_name}
+    launchpad.io/managed-by: launchpad-idp
+spec:
+  type: {service_type}
+  selector:
+    app: {selector}
+    launchpad.io/managed-by: launchpad-idp
+  ports:
+    - name: http
+      port: {port}
+      targetPort: http
+      protocol: TCP
+"""
+
+
+def build_multi_service_ingress(
+    *,
+    env_name: str,
+    services: list[dict[str, object]],
+    ingress_class: "IngressClassName | None" = None,
+    host: str | None = None,
+) -> str:
+    """Assemble one workspace Ingress routing exposed services by path.
+
+    The exposed frontend (``expose_preview`` / web-stack) is routed at ``/``; the
+    remaining service is routed at ``/api`` (additional services get
+    ``/api/<name>``). Backend service names are ``<name>-service`` and the
+    backend port is the app's real container port.
+    """
+    ns = _namespace_name(env_name)
+    class_name = (ingress_class or IngressClassName.NGINX).value
+    ingress_host = host or f"{env_name}.preview.127.0.0.1.nip.io"
+
+    primary = None
+    for svc in services:
+        if svc.get("expose_preview"):
+            primary = svc
+            break
+    if primary is None and services:
+        primary = services[0]
+
+    ordered: list[tuple[str, dict]] = []
+    if primary is not None:
+        ordered.append(("/", primary))
+    backends = [s for s in services if s is not primary]
+    for idx, svc in enumerate(backends):
+        path = "/api" if idx == 0 else f"/api/{svc.get('name')}"
+        ordered.append((path, svc))
+
+    path_lines: list[str] = []
+    for path, svc in ordered:
+        service_name = f"{svc.get('name')}-service"
+        port = int(svc.get("port") or 8080)
+        path_lines.append(
+            "          - path: " + path + "\n"
+            "            pathType: Prefix\n"
+            "            backend:\n"
+            "              service:\n"
+            f"                name: {service_name}\n"
+            "                port:\n"
+            f"                  number: {port}"
+        )
+    paths_block = "\n".join(path_lines)
+
+    return f"""\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: launch-preview
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/instance: {env_name}
+    launchpad.io/environment-name: {env_name}
+    launchpad.io/managed-by: launchpad-idp
+  annotations:
+    kubernetes.io/ingress.class: {class_name}
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: {class_name}
+  rules:
+    - host: {ingress_host}
+      http:
+        paths:
+{paths_block}
+"""
+
+
+def _service_yaml(ns: str, name: str, app: str, workload: WorkloadImageSpec | None = None) -> str:
+    spec = workload or WorkloadImageSpec()
+    port = spec.container_port
     return f"""\
 apiVersion: v1
 kind: Service
@@ -439,13 +830,17 @@ spec:
     launchpad.io/managed-by: launchpad-idp
   ports:
     - name: http
-      port: 80
+      port: {port}
       targetPort: http
       protocol: TCP
 """
 
 
-def _pod_yaml(ns: str, name: str, app: str) -> str:
+def _pod_yaml(
+    ns: str, name: str, app: str, workload: WorkloadImageSpec | None = None
+) -> str:
+    spec = workload or WorkloadImageSpec()
+    read_only = str(spec.read_only_root_fs).lower()
     return f"""\
 apiVersion: v1
 kind: Pod
@@ -457,16 +852,17 @@ metadata:
 spec:
   securityContext:
     runAsNonRoot: true
-    runAsUser: 101
-    runAsGroup: 101
+    runAsUser: {spec.run_as_user}
+    runAsGroup: {spec.run_as_user}
     seccompProfile:
       type: RuntimeDefault
   containers:
     - name: {app}
-      image: nginx:1.27-alpine
+      image: {spec.image}
+      imagePullPolicy: {spec.image_pull_policy}
       ports:
         - name: http
-          containerPort: 80
+          containerPort: {spec.container_port}
       resources:
         requests:
           cpu: 100m
@@ -476,21 +872,21 @@ spec:
           memory: 512Mi
       readinessProbe:
         httpGet:
-          path: /
+          path: {spec.readiness_path}
           port: http
         initialDelaySeconds: 5
         periodSeconds: 10
       livenessProbe:
         httpGet:
-          path: /
+          path: {spec.liveness_path}
           port: http
         initialDelaySeconds: 15
         periodSeconds: 20
       securityContext:
         allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
+        readOnlyRootFilesystem: {read_only}
         runAsNonRoot: true
-        runAsUser: 101
+        runAsUser: {spec.run_as_user}
         capabilities:
           drop:
             - ALL
@@ -549,7 +945,10 @@ spec:
 """
 
 
-def _statefulset_yaml(ns: str, name: str, app: str) -> str:
+def _statefulset_yaml(
+    ns: str, name: str, app: str, workload: WorkloadImageSpec | None = None
+) -> str:
+    spec = workload or WorkloadImageSpec()
     return f"""\
 apiVersion: apps/v1
 kind: StatefulSet
@@ -560,7 +959,7 @@ metadata:
 {_common_labels(name, app).rstrip()}
 spec:
   serviceName: {app}-headless
-  replicas: 2
+  replicas: {spec.replicas}
   selector:
     matchLabels:
       app: {app}
@@ -572,10 +971,11 @@ spec:
     spec:
       containers:
         - name: {app}
-          image: nginx:1.27-alpine
+          image: {spec.image}
+          imagePullPolicy: {spec.image_pull_policy}
           ports:
             - name: http
-              containerPort: 80
+              containerPort: {spec.container_port}
           volumeMounts:
             - name: data
               mountPath: /data
@@ -673,10 +1073,19 @@ roleRef:
 """
 
 
-def _ingress_yaml(ns: str, name: str, app: str, ingress_class: IngressClassName) -> str:
+def _ingress_yaml(
+    ns: str,
+    name: str,
+    app: str,
+    ingress_class: IngressClassName,
+    workload: WorkloadImageSpec | None = None,
+) -> str:
+    spec = workload or WorkloadImageSpec()
     host = f"{name}.launchpad.local"
     class_name = ingress_class.value
     annotations = _ingress_annotations(ingress_class)
+    # Route the Ingress backend to the app's real Service port (e.g. 8000 for
+    # FastAPI, 3000 for Node/NestJS, 80 for a static SPA) instead of hardcoding 80.
     return f"""\
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -699,7 +1108,7 @@ spec:
               service:
                 name: {app}
                 port:
-                  name: http
+                  number: {spec.container_port}
 """
 
 
@@ -877,8 +1286,10 @@ def _write_kustomize_layout(
     cost: CostOptimizationConfig,
     dependencies: WorkloadDependenciesConfig,
     cloud: object | None,
+    workload: WorkloadImageSpec | None = None,
 ) -> list[str]:
     ns = _namespace_name(name)
+    spec = workload or WorkloadImageSpec()
     in_cluster = _in_cluster_kinds(dependencies)
     base_resources = ["namespace.yaml", "deployment.yaml", "service.yaml"]
     for filename in in_cluster_manifest_files(ns=ns, name=name, kinds=in_cluster):
@@ -899,9 +1310,9 @@ def _write_kustomize_layout(
         ),
         KUSTOMIZE_BASE_ROOT / "namespace.yaml": _namespace_yaml(ns, name),
         KUSTOMIZE_BASE_ROOT / "deployment.yaml": _deployment_yaml(
-            ns, name, "app", options, cost, dependencies=dependencies
+            ns, name, "app", options, cost, dependencies=dependencies, workload=spec
         ),
-        KUSTOMIZE_BASE_ROOT / "service.yaml": _service_yaml(ns, name, "app"),
+        KUSTOMIZE_BASE_ROOT / "service.yaml": _service_yaml(ns, name, "app", workload=spec),
     }
     for filename, content in in_cluster_manifest_files(ns=ns, name=name, kinds=in_cluster).items():
         files[KUSTOMIZE_BASE_ROOT / filename] = content
@@ -937,12 +1348,14 @@ def _write_helm_chart(
     cost: CostOptimizationConfig,
     dependencies: WorkloadDependenciesConfig,
     cloud: object | None,
+    workload: WorkloadImageSpec | None = None,
 ) -> list[str]:
     ns = _namespace_name(name)
+    spec = workload or WorkloadImageSpec()
     in_cluster = _in_cluster_kinds(dependencies)
     files: dict[Path, str] = {
         HELM_CHART_ROOT / "Chart.yaml": _helm_chart_yaml(name),
-        HELM_CHART_ROOT / "values.yaml": _helm_values_yaml(name, options, cost),
+        HELM_CHART_ROOT / "values.yaml": _helm_values_yaml(name, options, cost, spec),
         HELM_CHART_ROOT / "templates" / "_helpers.tpl": _helm_helpers_tpl(),
     }
     if options.deployment:
@@ -1035,7 +1448,9 @@ def _helm_values_yaml(
     name: str,
     options: KubernetesWorkloadOptions,
     cost: CostOptimizationConfig,
+    workload: WorkloadImageSpec | None = None,
 ) -> str:
+    spec = workload or WorkloadImageSpec()
     cpu_req, mem_req, cpu_lim, mem_lim = resolve_resources(cost.resources)
     min_r = cost.hpa.min_replicas if cost.hpa.enabled else 2
     max_r = cost.hpa.max_replicas if cost.hpa.enabled else 10
@@ -1051,9 +1466,9 @@ fullnameOverride: ""
 replicaCount: 2
 
 image:
-  repository: nginx
-  tag: "1.27-alpine"
-  pullPolicy: IfNotPresent
+  repository: {spec.image_repository}
+  tag: "{spec.image_tag}"
+  pullPolicy: {spec.image_pull_policy}
 
 serviceAccount:
   create: {str(options.service_account).lower()}
@@ -1062,15 +1477,15 @@ serviceAccount:
 
 service:
   type: ClusterIP
-  port: 80
-  targetPort: 80
+  port: {spec.container_port}
+  targetPort: {spec.container_port}
 
 configMap:
   enabled: {str(options.config_map).lower()}
   data:
     ENVIRONMENT_NAME: "{name}"
     LOG_LEVEL: "info"
-    APP_PORT: "80"
+    APP_PORT: "{spec.container_port}"
 
 secret:
   enabled: {str(options.secret).lower()}
@@ -1136,33 +1551,34 @@ idleShutdown:
 
 readinessProbe:
   httpGet:
-    path: /
+    path: {spec.readiness_path}
     port: http
   initialDelaySeconds: 5
   periodSeconds: 10
 
 livenessProbe:
   httpGet:
-    path: /
+    path: {spec.liveness_path}
     port: http
   initialDelaySeconds: 15
   periodSeconds: 20
 
 env:
   ENVIRONMENT_NAME: {name}
+  APP_VERSION: "{spec.app_version}"
 
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 101
-  runAsGroup: 101
+  runAsUser: {spec.run_as_user}
+  runAsGroup: {spec.run_as_user}
   seccompProfile:
     type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
+  readOnlyRootFilesystem: {str(spec.read_only_root_fs).lower()}
   runAsNonRoot: true
-  runAsUser: 101
+  runAsUser: {spec.run_as_user}
   capabilities:
     drop:
       - ALL
@@ -1541,6 +1957,9 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Same-namespace pods (any port) so the app can reach in-cluster datastores.
+    - to:
+        - podSelector: {}
 {{- end }}
 """
 

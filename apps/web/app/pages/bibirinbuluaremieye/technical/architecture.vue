@@ -49,14 +49,14 @@ flowchart TB
   end
   subgraph Often
     BEAT[Celery beat]
-    KIND[kind cluster]
+    SANDBOX[Local Sandbox cluster]
   end
   WEB --> API
   API --> PG
   API --> RD
   WRK --> PG
   WRK --> RD
-  WRK --> KIND
+  WRK --> SANDBOX
   BEAT --> RD
 "
     />
@@ -174,7 +174,7 @@ flowchart TB
             </tr>
             <tr class="border-t border-[var(--lp-line)]">
               <td class="py-2 pr-4 font-mono text-xs text-[var(--lp-text)]">make kind-up</td>
-              <td class="py-2">Create local kind cluster</td>
+              <td class="py-2">Create local Sandbox cluster</td>
             </tr>
           </tbody>
         </table>

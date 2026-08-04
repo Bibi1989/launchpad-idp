@@ -392,6 +392,7 @@ export const defaultWorkloadDependencies = (): z.infer<typeof workloadDependenci
 export const containerServiceSpecSchema = z.object({
   name: z.string().trim().min(1).max(64).default('app'),
   stack: frameworkOptionSchema.default('node'),
+  app_kind: z.enum(['frontend', 'backend']).default('backend'),
   listen_port: z.number().int().min(1).max(65535).default(8080),
   dockerfile_path: z.string().nullable().optional(),
 })
@@ -481,7 +482,7 @@ export const provisioningWizardSchema = z.discriminatedUnion('provider', [
     if (value.artifact_mode !== 'manifest_only') {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Local (kind) supports manifest-only workspaces',
+        message: 'Local (Sandbox) supports manifest-only workspaces',
         path: ['artifact_mode'],
       })
     }
@@ -496,7 +497,6 @@ export const provisioningWizardSchema = z.discriminatedUnion('provider', [
     })
     return
   }
-  if (value.provider === 'local') return
   const hasRuntime =
     (value.provider === 'gcp' && (value.resources.gke || value.resources.cloud_run)) ||
     (value.provider === 'aws' && value.resources.eks) ||

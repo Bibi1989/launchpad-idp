@@ -7,6 +7,10 @@ const props = defineProps<{
   lastMessage?: string | null
 }>()
 
+defineEmits<{
+  aiFix: [reason?: string]
+}>()
+
 const defaultStages: Array<{ id: K8sPipelineStage['stage_id']; label: string; icon: string }> = [
   { id: 'manifest_parsed', label: 'Manifest Parsed', icon: 'description' },
   { id: 'kube_api_accepted', label: 'Kube-API Accepted', icon: 'api' },
@@ -109,6 +113,17 @@ function getStageState(stageId: string) {
         <p class="mt-3 text-[11px] text-[var(--lp-muted)] line-clamp-2 leading-relaxed font-mono">
           {{ getStageState(stage.id).message }}
         </p>
+
+        <!-- AI Fix Button for Failed Stages -->
+        <button
+          v-if="getStageState(stage.id).status === 'failed'"
+          type="button"
+          class="mt-2.5 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/20 px-2.5 py-1 text-[11px] font-mono text-amber-200 hover:bg-amber-500/30 transition shadow-sm"
+          @click="$emit('aiFix', getStageState(stage.id).message || `${stage.label} failed`)"
+        >
+          <span class="material-symbols-outlined text-xs text-amber-400">auto_awesome</span>
+          <span>AI Analyze &amp; Fix</span>
+        </button>
 
         <!-- Ingress details preview if ready -->
         <div

@@ -69,6 +69,26 @@ TERMINAL_STATUSES = {
 }
 
 
+def _ttl_timedelta(*, ttl_hours: int | None, ttl_minutes: int | None) -> timedelta:
+    if ttl_minutes is not None:
+        return timedelta(minutes=ttl_minutes)
+    return timedelta(hours=ttl_hours if ttl_hours is not None else 72)
+
+
+def _ttl_label(*, ttl_hours: int | None, ttl_minutes: int | None) -> str:
+    if ttl_minutes is not None:
+        return f"{ttl_minutes}m"
+    return f"{ttl_hours if ttl_hours is not None else 72}h"
+
+
+def _ttl_is_past(expires_at: datetime, *, now: datetime | None = None) -> bool:
+    cutoff = now or datetime.now(UTC)
+    expires = expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    return expires <= cutoff
+
+
 class EnvironmentService:
     def __init__(
         self,
@@ -81,7 +101,7 @@ class EnvironmentService:
         self._logs = DeploymentLogRepository(session)
 
     async def _pause_expired_rows(self, rows: list) -> None:
-        """Pause any returned environments that are past TTL (eager, no Celery required)."""
+        """Mark past-TTL environments EXPIRED (eager, no Celery required)."""
         from app.workers.tasks import pause_expired_environment
 
         paused_any = False
@@ -94,7 +114,7 @@ class EnvironmentService:
             )
             if did:
                 paused_any = True
-                logger.info("environment_ttl_eager_paused", environment_id=str(row.id))
+                logger.info("environment_ttl_eager_expired", environment_id=str(row.id))
         if paused_any:
             await self._session.commit()
 
@@ -277,6 +297,10 @@ class EnvironmentService:
             default_ttl = template.default_ttl_hours
             cost_from_template = Decimal(template.hourly_cost_hint)
             workload_image = template.workload_image
+            if getattr(template, "enable_postgres", False):
+                payload.enable_postgres = True
+            if getattr(template, "enable_redis", False):
+                payload.enable_redis = True
         else:
             assert payload.git_repo_url is not None
             assert payload.git_branch is not None
@@ -285,7 +309,7 @@ class EnvironmentService:
             template_id = None
             default_ttl = self._settings.default_ttl_hours
             cost_from_template = None
-        if payload.workload_image:
+        if payload.workload_image and payload.workload_image.lower() not in {"nginx:1.27-alpine", "app:latest", "app"}:
             workload_image = payload.workload_image
 
         existing = await self._environments.get_by_name(payload.name)
@@ -340,12 +364,16 @@ class EnvironmentService:
             if cost_from_template is not None:
                 cost_override = cost_from_template
 
-        ttl_hours = payload.ttl_hours or min(default_ttl, 168)
+        ttl_hours = payload.ttl_hours
+        ttl_minutes = payload.ttl_minutes
+        if ttl_hours is None and ttl_minutes is None:
+            ttl_hours = min(default_ttl, 168)
         create_payload = EnvironmentCreate(
             name=payload.name,
             git_branch=git_branch,
             git_repo_url=git_repo_url,
             ttl_hours=ttl_hours,
+            ttl_minutes=ttl_minutes,
             workspace_id=workspace_id,
             template_id=template_id,
             cost_estimate_hourly=cost_override,
@@ -400,7 +428,10 @@ class EnvironmentService:
             deploy_mode = payload.deploy_mode or DeployMode.PREVIEW
             manifest_packaging = None
 
-        ttl_expires_at = datetime.now(UTC) + timedelta(hours=payload.ttl_hours)
+        ttl_expires_at = datetime.now(UTC) + _ttl_timedelta(
+            ttl_hours=payload.ttl_hours,
+            ttl_minutes=payload.ttl_minutes,
+        )
         placeholder_namespace = f"launchpad-env-pending-{payload.name}"[:253]
         if payload.cost_estimate_hourly is not None:
             hourly = payload.cost_estimate_hourly
@@ -414,13 +445,23 @@ class EnvironmentService:
                     pass
 
         workload_image = payload.workload_image or self._settings.default_workload_image
-        if payload.template_id and not payload.workload_image:
+        if payload.template_id and (not payload.workload_image or payload.workload_image.lower() in {"nginx:1.27-alpine", "app:latest", "app"}):
             try:
                 workload_image = get_preview_template(payload.template_id).workload_image
             except KeyError:
                 pass
 
-        if deploy_mode == DeployMode.MANIFEST and payload.workload_image is None and payload.workspace_id:
+        # Workspace manifests are the source of truth for MANIFEST deploys, so
+        # extract the real workload image (preferring the exposed preview-target
+        # deployment) whenever the client did NOT supply a *custom* image. The
+        # launch form always sends the default nginx placeholder, which must not
+        # suppress extraction — otherwise the preview shows/uses nginx even when
+        # the workspace deploys web:latest.
+        client_image = (payload.workload_image or "").strip()
+        client_wants_default = (
+            not client_image or client_image == self._settings.default_workload_image
+        )
+        if deploy_mode == DeployMode.MANIFEST and payload.workspace_id and client_wants_default:
             try:
                 from app.models.domain import ProvisioningWorkspace
                 from app.services.manifest_deploy import (
@@ -434,8 +475,12 @@ class EnvironmentService:
                     extracted = _first_deployment_image(docs)
                     if extracted:
                         workload_image = extracted
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort; falls back to default
+                logger.warning(
+                    "manifest_image_extract_failed",
+                    workspace_id=str(payload.workspace_id),
+                    error=str(exc),
+                )
 
         workload_image_for_log = workload_image
         if deploy_mode == DeployMode.MANIFEST and payload.workload_image is None and workload_image == self._settings.default_workload_image:
@@ -471,7 +516,8 @@ class EnvironmentService:
             environment_id=environment.id,
             message=(
                 f"Queued {deploy_mode.value} deploy for {payload.git_repo_url}@{payload.git_branch} "
-                f"(TTL {payload.ttl_hours}h, image={workload_image_for_log}, "
+                f"(TTL {_ttl_label(ttl_hours=payload.ttl_hours, ttl_minutes=payload.ttl_minutes)}, "
+                f"image={workload_image_for_log}, "
                 f"correlation_id={correlation_id})"
             ),
         )
@@ -522,7 +568,15 @@ class EnvironmentService:
                 },
             )
 
-        hours = payload.hours or self._settings.ttl_extend_hours_default
+        hours = payload.hours
+        minutes = payload.minutes
+        if hours is None and minutes is None:
+            hours = self._settings.ttl_extend_hours_default
+        extend_delta = (
+            timedelta(minutes=minutes)
+            if minutes is not None
+            else timedelta(hours=hours if hours is not None else self._settings.ttl_extend_hours_default)
+        )
         now = datetime.now(UTC)
         created = environment.created_at
         if created.tzinfo is None:
@@ -532,7 +586,7 @@ class EnvironmentService:
             expires = expires.replace(tzinfo=UTC)
 
         base = max(expires, now)
-        candidate = base + timedelta(hours=hours)
+        candidate = base + extend_delta
         max_expiry = created + timedelta(hours=self._settings.ttl_max_total_hours_from_create)
         if candidate > max_expiry:
             candidate = max_expiry
@@ -564,10 +618,11 @@ class EnvironmentService:
                 )
 
         await self._environments.update_ttl(environment, candidate)
+        extend_label = f"{minutes}m" if minutes is not None else f"{hours}h"
         await self._logs.create(
             environment_id=environment.id,
             message=(
-                f"TTL extended by {hours}h → {candidate.isoformat()} "
+                f"TTL extended by {extend_label} → {candidate.isoformat()} "
                 f"(correlation_id={correlation_id})"
             ),
         )
@@ -593,6 +648,7 @@ class EnvironmentService:
                 provider=payload.provider,
                 credentials=payload.credentials,
                 ttl_hours=payload.ttl_hours,
+                ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
             )
@@ -604,6 +660,7 @@ class EnvironmentService:
                 provider=payload.provider,
                 credentials=payload.credentials,
                 ttl_hours=payload.ttl_hours,
+                ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
             )
@@ -704,7 +761,16 @@ class EnvironmentService:
         *,
         owner: User,
         correlation_id: str,
+        force: bool = False,
     ) -> EnvironmentRead:
+        """Request teardown of an environment.
+
+        ``force=True`` allows teardown even while the environment is still
+        ``PROVISIONING`` (or state-locked). Setting the status to
+        ``TEARDOWN_PENDING`` doubles as a cooperative cancellation signal: the
+        in-flight provision task re-checks the status at each stage and aborts,
+        and the teardown task cleans up any stranded resources.
+        """
         environment = await self._require_owned(environment_id, owner)
         if environment.status in {
             EnvironmentStatus.TEARDOWN_PENDING,
@@ -717,15 +783,18 @@ class EnvironmentService:
                     "message": "Environment is already tearing down or destroyed",
                 },
             )
-        if environment.status == EnvironmentStatus.PROVISIONING:
+        if environment.status == EnvironmentStatus.PROVISIONING and not force:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
                     "code": "environment_still_provisioning",
-                    "message": "Cannot teardown while provisioning is in progress",
+                    "message": (
+                        "Cannot teardown while provisioning is in progress. "
+                        "Retry with force=true to cancel provisioning and delete."
+                    ),
                 },
             )
-        if await is_state_locked(environment_id, scope="environment"):
+        if not force and await is_state_locked(environment_id, scope="environment"):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
@@ -737,7 +806,12 @@ class EnvironmentService:
         await self._environments.update_status(environment, EnvironmentStatus.TEARDOWN_PENDING)
         await self._logs.create(
             environment_id=environment.id,
-            message=f"Teardown requested (correlation_id={correlation_id})",
+            message=(
+                f"Force teardown requested during {environment.status.value} "
+                f"(correlation_id={correlation_id})"
+                if force
+                else f"Teardown requested (correlation_id={correlation_id})"
+            ),
         )
         await AuditService(self._session).record(
             action=AuditAction.TEARDOWN_INITIATED,
@@ -813,6 +887,29 @@ class EnvironmentService:
         environment = await self._require_owned(environment_id, owner)
         if environment.status == EnvironmentStatus.RUNNING:
             return self._to_read(environment)
+
+        if environment.status == EnvironmentStatus.EXPIRED or _ttl_is_past(
+            environment.ttl_expires_at
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "ttl_expired",
+                    "message": (
+                        "This environment’s TTL has expired and cannot be resumed. "
+                        "Destroy it or launch a new preview."
+                    ),
+                },
+            )
+
+        if environment.status != EnvironmentStatus.PAUSED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "cannot_resume",
+                    "message": f"Cannot resume environment in status {environment.status.value}",
+                },
+            )
 
         await self._auto_pause_if_needed(owner, exclude_id=environment.id)
 

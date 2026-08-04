@@ -378,6 +378,7 @@ export const FRAMEWORK_OPTIONS: FrameworkItem[] = [
 export interface ContainerServiceItem {
   name: string
   stack: ProjectStackOption
+  app_kind?: 'frontend' | 'backend'
   listen_port: number
   dockerfile_path?: string | null
 }

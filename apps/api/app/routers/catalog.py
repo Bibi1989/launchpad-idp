@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
@@ -74,3 +74,18 @@ async def update_catalog_service(
     service: CatalogServiceManager = Depends(get_catalog_service),
 ) -> CatalogServiceRead:
     return await service.update_service(service_id, payload, owner=user, org_id=org.org_id)
+
+
+@router.delete(
+    "/services/{service_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_catalog_service(
+    service_id: UUID,
+    user: CurrentUser,
+    org: CurrentOrg,
+    service: CatalogServiceManager = Depends(get_catalog_service),
+) -> Response:
+    await service.delete_service(service_id, owner=user, org_id=org.org_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

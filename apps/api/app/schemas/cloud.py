@@ -141,6 +141,7 @@ class DataStoreDependency(BaseModel):
 class WorkloadDependenciesConfig(BaseModel):
     postgres: DataStoreDependency = Field(default_factory=DataStoreDependency)
     mysql: DataStoreDependency = Field(default_factory=DataStoreDependency)
+    mariadb: DataStoreDependency = Field(default_factory=DataStoreDependency)
     mongodb: DataStoreDependency = Field(default_factory=DataStoreDependency)
     redis: DataStoreDependency = Field(default_factory=DataStoreDependency)
 
@@ -150,6 +151,7 @@ class WorkloadDependenciesConfig(BaseModel):
             for store in (
                 self.postgres,
                 self.mysql,
+                self.mariadb,
                 self.mongodb,
                 self.redis,
             )
@@ -436,11 +438,30 @@ class CloudCredentials(BaseModel):
 
 
 
+class ServiceTypeName(str, Enum):
+    CLUSTER_IP = "ClusterIP"
+    NODE_PORT = "NodePort"
+    LOAD_BALANCER = "LoadBalancer"
+
+
 class ContainerServiceSpec(BaseModel):
     name: str = Field(default="app", min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     stack: str = Field(default="node", max_length=50)
+    app_kind: str = Field(default="backend", description="Service tier type: 'frontend' or 'backend'")
     listen_port: int = Field(default=8080, ge=1, le=65535)
     dockerfile_path: str | None = None
+    # Kubernetes Service shape for this workload. Each service in the list yields
+    # its own Deployment + Service manifest so a workspace can host >1 workload.
+    service_type: ServiceTypeName = ServiceTypeName.CLUSTER_IP
+    selector: str | None = Field(
+        default=None,
+        max_length=63,
+        pattern=r"^[a-z][a-z0-9-]*$",
+        description="app label / selector; defaults to the service name",
+    )
+    # Which workload Launch Preview routes to. None = auto (frontend/web stacks
+    # are exposed at "/", backends at "/api"). True/False overrides the default.
+    expose_preview: bool | None = None
 
 
 class ContainerScaffoldConfig(BaseModel):

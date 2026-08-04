@@ -73,7 +73,7 @@ function toggleDocker(enabled: boolean) {
 }
 
 function setDockerFrameworks(frameworks: FrameworkOption[]) {
-  const primaryStack = frameworks.length > 0 ? frameworks[0] : 'node'
+  const primaryStack = frameworks[0] ?? 'node'
   containerScaffold.value = {
     ...containerScaffold.value,
     frameworks,
@@ -110,9 +110,7 @@ const copiedDockerfile = ref(false)
 let copiedDockerfileTimer: ReturnType<typeof setTimeout> | null = null
 
 function generateDockerScaffoldPreview(cfg: ContainerScaffoldConfig): string {
-  const stack = (cfg.frameworks && cfg.frameworks.length > 0)
-    ? cfg.frameworks[0]
-    : (cfg.stack || 'node')
+  const stack = cfg.frameworks?.[0] || cfg.stack || 'node'
   const name = cfg.app_name || 'app'
   const port = cfg.listen_port || 8080
   return dockerfileContentForStack(stack, name, port)
@@ -397,7 +395,7 @@ function downloadWorkflowYaml() {
             Scaffold Terraform or Pulumi files under <code class="font-mono text-xs text-[var(--lp-accent)]">infra/</code>.
           </p>
           <p v-if="provisionDisabled" class="text-xs text-[var(--lp-muted)] italic">
-            Dev (kind) workspaces use Kubernetes manifests only.
+            Dev (k3s) workspaces use Kubernetes manifests only.
           </p>
         </div>
 

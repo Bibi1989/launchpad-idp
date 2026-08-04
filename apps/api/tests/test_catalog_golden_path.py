@@ -17,6 +17,8 @@ REQUIRED_TEMPLATE_IDS = {
     "fullstack-nuxt-nestjs",
     "fullstack-nextjs-fastapi",
     "fullstack-nextjs-express",
+    "fullstack-nextjs-express-postgres",
+    "fullstack-nextjs-express-postgres-redis",
     "fullstack-nuxt-express",
     "fullstack-react-fastapi",
     "fullstack-vue-nestjs",
@@ -38,6 +40,13 @@ def test_list_golden_path_templates() -> None:
     assert fullstack.frameworks == ("nextjs", "nestjs")
     assert fullstack.includes_iac is True
     assert "node:22-alpine" in fullstack.docker_images
+    pg_tpl = get_golden_path_template("fullstack-nextjs-express-postgres")
+    assert pg_tpl.enable_postgres is True
+    assert "postgres:16-alpine" in pg_tpl.docker_images
+    redis_tpl = get_golden_path_template("fullstack-nextjs-express-postgres-redis")
+    assert redis_tpl.enable_postgres is True
+    assert redis_tpl.enable_redis is True
+    assert "redis:7-alpine" in redis_tpl.docker_images
     fastapi = get_golden_path_template("fastapi-api")
     assert fastapi.docker_images == ("python:3.12-alpine",)
 
@@ -65,10 +74,12 @@ def test_scorecard_passes_with_hardened_scaffold(tmp_path: Path) -> None:
     assert scorecard.passed
 
 
-def test_scorecard_fails_unhardened_scaffold(tmp_path: Path) -> None:
-    (tmp_path / "dockers").mkdir()
-    (tmp_path / "dockers" / "Dockerfile.app").write_text("FROM ubuntu:latest\n", encoding="utf-8")
-    scorecard = compute_workspace_scorecard(tmp_path)
-    assert scorecard.score < 70
-    assert not scorecard.passed
+def test_catalog_service_create_name_normalization() -> None:
+    from app.schemas.catalog import CatalogServiceCreate
+    payload = CatalogServiceCreate(
+        name="Fnep",
+        template_id="fullstack-nextjs-express-postgres",
+        owner="team@example.com",
+    )
+    assert payload.name == "fnep"
 

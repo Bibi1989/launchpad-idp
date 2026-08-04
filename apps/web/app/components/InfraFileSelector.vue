@@ -93,8 +93,8 @@ watch(
 </script>
 
 <template>
-  <aside class="flex min-h-[78vh] h-full w-[280px] shrink-0 flex-col border-r border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50">
-    <div class="flex items-center justify-between border-b border-[var(--lp-line)] px-4 py-3">
+  <aside class="flex w-full lg:w-[280px] shrink-0 flex-col border-b lg:border-b-0 lg:border-r border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50 lg:sticky lg:top-4 lg:max-h-[calc(100vh-6rem)] h-[400px] lg:h-[calc(100vh-6rem)]">
+    <div class="flex items-center justify-between border-b border-[var(--lp-line)] px-4 py-3 shrink-0">
       <div class="min-w-0">
         <h2 class="lp-label">Explorer</h2>
         <p class="mt-0.5 font-mono text-[10px] text-[var(--lp-muted)]">
@@ -141,7 +141,7 @@ watch(
       </ul>
     </div>
 
-    <div class="border-t border-[var(--lp-line)] bg-[var(--lp-panel)]/50 px-4 py-3">
+    <div class="border-t border-[var(--lp-line)] bg-[var(--lp-panel)]/50 px-4 py-3 shrink-0">
       <p class="font-mono text-[10px] leading-relaxed text-[var(--lp-muted)]">
         Select a mapped file to edit structured fields.
       </p>

@@ -27,6 +27,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/node": "^26.1.2",
     "@vue/test-utils": "^2.4.6",
     "happy-dom": "^17.6.3",
     "typescript": "^5.8.3",

@@ -152,8 +152,15 @@ function selectFile(path: string) {
   }
 }
 
-function deleteFile(path: string) {
-  if (!window.confirm(`Remove “${path}” from this scaffold session?`)) return
+const pendingDeletePath = ref<string | null>(null)
+
+function requestDeleteFile(path: string) {
+  pendingDeletePath.value = path
+}
+
+function confirmDeleteFile() {
+  const path = pendingDeletePath.value
+  if (!path) return
   const next = { ...repoFiles.value }
   delete next[path]
   repoFiles.value = next
@@ -165,6 +172,7 @@ function deleteFile(path: string) {
       editorContent.value = ''
     }
   }
+  pendingDeletePath.value = null
 }
 
 async function copyActiveFile() {
@@ -580,7 +588,7 @@ async function onBuild() {
             type="button"
             class="rounded p-1 text-[var(--lp-muted)] opacity-0 transition hover:text-[var(--lp-danger)] group-hover:opacity-100"
             title="Remove from session"
-            @click="deleteFile(path)"
+            @click="requestDeleteFile(path)"
           >
             <span class="material-symbols-outlined text-sm">delete</span>
           </button>
@@ -853,5 +861,17 @@ async function onBuild() {
     <p v-if="successMessage" class="text-sm text-[var(--lp-accent)]">{{ successMessage }}</p>
     <p v-if="error" class="text-sm text-red-300">{{ error }}</p>
     <p v-if="loading && !busyAction" class="text-sm text-[var(--lp-muted)]">Working…</p>
+
+    <ConfirmDialog
+      :open="pendingDeletePath !== null"
+      title="Remove file?"
+      :message="pendingDeletePath
+        ? `Remove “${pendingDeletePath}” from this scaffold session?`
+        : ''"
+      confirm-label="Yes, remove"
+      cancel-label="Cancel"
+      @update:open="(value) => { if (!value) pendingDeletePath = null }"
+      @confirm="confirmDeleteFile"
+    />
   </div>
 </template>

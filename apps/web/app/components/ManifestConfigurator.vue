@@ -11,6 +11,7 @@ import {
   K8S_DEPLOYMENT_PATH,
   K8S_SERVICE_PATH,
   composeImageRef,
+  derivePreviewRoutes,
   parseInfraManifest,
   serializeInfraManifest,
   serviceUsesNodePort,
@@ -95,6 +96,10 @@ const isHpa = computed(() => model.value?.kind === 'k8s-hpa')
 const isVpa = computed(() => model.value?.kind === 'k8s-vpa')
 const isPdb = computed(() => model.value?.kind === 'k8s-pdb')
 const isIngress = computed(() => model.value?.kind === 'k8s-ingress')
+// Launch Preview route cards derived from a multi-service Ingress (/ web, /api backend).
+const previewRoutes = computed(() =>
+  isIngress.value ? derivePreviewRoutes(rawContent.value) : [],
+)
 const isConfigMap = computed(() => model.value?.kind === 'k8s-configmap')
 const isSecret = computed(() => model.value?.kind === 'k8s-secret')
 const isServiceAccount = computed(() => model.value?.kind === 'k8s-serviceaccount')
@@ -809,6 +814,27 @@ onBeforeUnmount(() => {
               <input v-model="model.ingressPath" type="text" class="lp-input" placeholder="/">
             </label>
           </div>
+
+          <!-- Launch Preview routes derived from the multi-service Ingress -->
+          <div v-if="previewRoutes.length" class="space-y-2">
+            <span class="lp-label">Launch Preview routes</span>
+            <a
+              v-for="route in previewRoutes"
+              :key="route.path"
+              :href="route.url"
+              target="_blank"
+              rel="noopener"
+              class="flex items-center justify-between gap-3 rounded-md border border-[var(--lp-line)] px-3 py-2 hover:border-[var(--lp-accent)]"
+            >
+              <span class="flex items-center gap-2 text-sm">
+                <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">
+                  {{ route.path === '/' ? 'language' : 'api' }}
+                </span>
+                {{ route.label }}
+              </span>
+              <span class="font-mono text-[11px] text-[var(--lp-muted)]">{{ route.url }}</span>
+            </a>
+          </div>
         </section>
 
         <!-- ConfigMap / Secret -->
@@ -961,11 +987,55 @@ onBeforeUnmount(() => {
           </label>
         </section>
 
+        <!-- Init containers (deployment) — read-only, shown when datastores add wait blocks -->
+        <section v-if="isDeployment && model.initContainers.length" class="space-y-3">
+          <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
+            <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">hourglass_top</span>
+            <h3 class="lp-label">Init containers ({{ model.initContainers.length }})</h3>
+          </div>
+          <p class="text-[11px] text-[var(--lp-muted)]">
+            Generated automatically for each in-cluster datastore — they block startup
+            until the dependency is reachable. Read-only.
+          </p>
+          <ul class="space-y-2">
+            <li
+              v-for="(init, idx) in model.initContainers"
+              :key="`init-${idx}`"
+              class="flex items-center justify-between gap-3 rounded-md border border-[var(--lp-line)] px-3 py-2"
+            >
+              <span class="font-mono text-xs text-[var(--lp-text)]">{{ init.name }}</span>
+              <span class="font-mono text-[10px] text-[var(--lp-muted)]">{{ init.image }}</span>
+            </li>
+          </ul>
+        </section>
+
+        <!-- Expose to Launch Preview (deployment / service) -->
+        <section v-if="isDeployment || isService" class="space-y-3">
+          <label class="flex items-start gap-3 rounded-md border border-[var(--lp-line)] px-3 py-3">
+            <input
+              v-model="model.exposePreview"
+              type="checkbox"
+              class="mt-0.5 h-4 w-4 accent-[var(--lp-accent)]"
+            >
+            <span class="space-y-1">
+              <span class="lp-label flex items-center gap-2">
+                <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">public</span>
+                Expose to Launch Preview
+              </span>
+              <span class="block text-[11px] text-[var(--lp-muted)]">
+                Route Launch Preview to this workload (adds
+                <code>launchpad.io/preview-target: "true"</code>). The exposed web stack
+                is served at <code>/</code>; backends at <code>/api</code>.
+              </span>
+            </span>
+          </label>
+        </section>
+
         <!-- Container (deployment / helm) -->
         <section v-if="isDeployment || isHelm" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">view_in_ar</span>
-            <h3 class="lp-label">Container configuration</h3>
+            <h3 class="lp-label">{{ isDeployment ? 'App container' : 'Container configuration' }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">

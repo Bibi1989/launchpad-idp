@@ -14,6 +14,7 @@ from app.core.logging import configure_logging, get_logger, sanitize_log_message
 from app.models.domain import (
     AuditAction,
     AuditStatus,
+    Environment,
     EnvironmentStatus,
     ExecutionStage,
     LogLevel,
@@ -24,7 +25,11 @@ from app.repositories.user import UserRepository
 from app.schemas.k8s import DeployMode
 from app.services.audit import AuditService
 from app.services.drift_scanner import DRIFT_SCANNER_ACTOR, record_drift_if_changed, scan_environment
-from app.services.kubernetes import KubernetesProvisioner, ProvisionedResources
+from app.services.kubernetes import (
+    KubernetesProvisioner,
+    PreviewCancelled,
+    ProvisionedResources,
+)
 from app.services.manifest_deploy import ManifestDeployer
 from app.services.preview_build import (
     PreviewBuildError,
@@ -35,6 +40,7 @@ from app.services.state_lock import (
     PROVISIONING_IN_PROGRESS_MESSAGE,
     StateLockConflict,
     acquire_state_lock,
+    is_state_locked,
 )
 from app.workers.celery_app import celery_app
 
@@ -126,6 +132,19 @@ async def _record_audit(
         commit_sha=commit_sha,
         detail=detail,
     )
+
+
+async def _provision_cancelled(env_repo: "EnvironmentRepository", env_uuid: UUID) -> bool:
+    """True when a force-delete flipped the environment to TEARDOWN_PENDING/DESTROYED.
+
+    Re-queries the row so the running provision task observes a delete request
+    issued after it started, and aborts at the next checkpoint.
+    """
+    fresh = await env_repo.get_by_id(env_uuid)
+    return fresh is not None and fresh.status in {
+        EnvironmentStatus.TEARDOWN_PENDING,
+        EnvironmentStatus.DESTROYED,
+    }
 
 
 async def _maybe_build_preview_image(
@@ -368,14 +387,28 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         else None
                     )
 
+                    # Cooperative cancellation checkpoint: a force-delete request
+                    # flips the row to TEARDOWN_PENDING. Abort before the expensive
+                    # APPLY + readiness wait rather than provisioning resources the
+                    # teardown task must immediately reclaim.
+                    if await _provision_cancelled(env_repo, env_uuid):
+                        raise PreviewCancelled(f"provision cancelled for {environment_id}")
+
                     current_stage = ExecutionStage.APPLY
-                    if deploy_mode == DeployMode.MANIFEST.value and workspace_id is not None:
+                    workspace_root: Path | None = None
+                    if workspace_id is not None:
+                        workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
+                        if workspace_row is not None:
+                            workspace_root = Path(workspace_row.root_dir)
+
+                    _ctx = settings.kubernetes_context or ""
+                    if settings.kubernetes_enabled and (environment.provider == "local" or _ctx.startswith(("kind-", "k3d-"))) and workspace_root is not None:
+                        local_cluster = (_ctx or "launchpad").removeprefix("kind-").removeprefix("k3d-")
+                        _build_and_load_kind_docker_images(workspace_root, cluster_name=local_cluster)
+
+                    if deploy_mode == DeployMode.MANIFEST.value and workspace_root is not None:
                         from app.services.manifest_deploy import workspace_has_helm_chart
 
-                        workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
-                        if workspace_row is None:
-                            raise RuntimeError(f"Workspace {workspace_id} not found for manifest deploy")
-                        workspace_root = Path(workspace_row.root_dir)
                         helm_note = (
                             " (Helm chart)"
                             if workspace_has_helm_chart(workspace_root)
@@ -390,9 +423,6 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             stage=ExecutionStage.APPLY,
                         )
                         await session.commit()
-                        if settings.kubernetes_enabled and (environment.provider == "local" or (settings.kubernetes_context or "").startswith("kind-")):
-                            kind_cluster = (settings.kubernetes_context or "launchpad").removeprefix("kind-")
-                            _build_and_load_kind_docker_images(workspace_root, cluster_name=kind_cluster)
 
                         deployer = ManifestDeployer(settings, provisioner)
                         resources = deployer.deploy(
@@ -464,6 +494,19 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             stage=ExecutionStage.APPLY,
                         )
                     await session.commit()
+
+                    # Final cancellation checkpoint: if the user force-deleted
+                    # during APPLY, hand the just-applied resources to the teardown
+                    # task instead of promoting to RUNNING.
+                    if await _provision_cancelled(env_repo, env_uuid):
+                        raise PreviewCancelled(f"provision cancelled for {environment_id}")
+
+                    # Resolve the Open-app URL by target:
+                    #  • local + tunnel on → cloudflared quick-tunnel URL
+                    #  • local + tunnel off → localhost NodePort URL (provisioner default)
+                    #  • cloud/production → LoadBalancer/Ingress public URL
+                    await _attach_preview_tunnel(env_uuid, environment, resources)
+                    await _attach_cloud_preview_url(env_uuid, environment, resources, provisioner)
 
                     await env_repo.update_status(
                         environment,
@@ -542,6 +585,13 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         message=resources.preview_url or "Provision completed",
                         stage=ExecutionStage.APPLY,
                     )
+                except PreviewCancelled:
+                    # Force-delete during provisioning. Leave status TEARDOWN_PENDING
+                    # and let the enqueued teardown task reclaim the namespace + kind
+                    # images once this task releases the state lock. Do not mark FAILED.
+                    logger.info("provision_cancelled_by_delete", environment_id=environment_id)
+                    await session.rollback()
+                    return
                 except Exception as exc:
                     logger.exception("provision_failed", environment_id=environment_id)
                     await session.rollback()
@@ -565,6 +615,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             )
                             environment = await env_repo.get_by_id(env_uuid)
                             if environment is not None:
+                                await _attach_preview_tunnel(env_uuid, environment, resources)
+                                await _attach_cloud_preview_url(env_uuid, environment, resources, provisioner)
                                 await env_repo.update_status(
                                     environment,
                                     EnvironmentStatus.RUNNING,
@@ -937,6 +989,21 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     await session.commit()
 
                     provisioner.teardown(environment.namespace_name)
+                    # Stop the per-preview cloudflared tunnel (if any) so we don't
+                    # leak a cloudflared process for a destroyed environment.
+                    try:
+                        from app.services.preview_tunnel import stop_preview_tunnel
+
+                        await asyncio.to_thread(stop_preview_tunnel, str(env_uuid))
+                    except Exception:
+                        logger.exception("preview_tunnel_stop_failed", environment_id=str(env_uuid))
+                    # Reclaim the locally-built app image from kind + host so
+                    # deleted previews do not leak disk (leave shared base images).
+                    if environment.provider == "local" and environment.workload_image:
+                        local_cluster = (
+                            settings.kubernetes_context or "launchpad"
+                        ).removeprefix("kind-").removeprefix("k3d-")
+                        _remove_kind_docker_images(local_cluster, [environment.workload_image])
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     await env_repo.update_status(environment, EnvironmentStatus.DESTROYED)
                     await _emit_log(
@@ -1013,9 +1080,9 @@ async def pause_expired_environment(
     actor_id: str = "system:ttl-reaper",
     settings=None,
 ) -> bool:
-    """Scale workloads to 0 and mark an expired environment PAUSED.
+    """Scale workloads to 0 and mark an expired environment EXPIRED.
 
-    Returns True when the environment was paused in this call.
+    Returns True when the environment was expired in this call.
     """
     settings = settings or get_settings()
     if environment.status not in {EnvironmentStatus.RUNNING, EnvironmentStatus.FAILED}:
@@ -1034,21 +1101,21 @@ async def pause_expired_environment(
         scaled_ok = bool(
             provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
         )
-    except Exception as e:  # noqa: BLE001 — always mark paused; retry scale next cycle
+    except Exception as e:  # noqa: BLE001 — always mark expired; retry scale next cycle
         scaled_ok = False
         logger.error("ttl_reaper_scale_failed", environment_id=str(environment.id), error=str(e))
 
-    await env_repo.update_status(environment, EnvironmentStatus.PAUSED)
-    scale_note = "scaled replicas to 0" if scaled_ok else "status paused (scale retry next cycle)"
+    await env_repo.update_status(environment, EnvironmentStatus.EXPIRED)
+    scale_note = "scaled replicas to 0" if scaled_ok else "status expired (scale retry next cycle)"
     await _emit_log(
         log_repo,
         environment_id=environment.id,
         message=(
-            f"TTL expired — pausing environment ({scale_note}) "
+            f"TTL expired — environment marked expired ({scale_note}) "
             f"(expires_at={environment.ttl_expires_at.isoformat()})"
         ),
         log_level=LogLevel.WARN,
-        status=EnvironmentStatus.PAUSED.value,
+        status=EnvironmentStatus.EXPIRED.value,
         commit_sha=environment.latest_commit_sha,
         stage=ExecutionStage.APPLY,
     )
@@ -1065,6 +1132,45 @@ async def pause_expired_environment(
     return True
 
 
+# A preview stuck in PROVISIONING with no live worker (crashed mid-run) is failed
+# after this many seconds. Comfortably above the 3-minute readiness cap + overhead
+# so a legitimately slow-but-active provision is never falsely failed.
+STALE_PROVISIONING_SECONDS = 600
+
+
+async def _reap_stale_provisioning(session, env_repo, *, now: datetime) -> list[tuple]:
+    """Fail previews stuck in PROVISIONING with no active worker (watchdog).
+
+    Skips rows still holding the provision state lock (a worker is actively
+    provisioning them) so only genuinely orphaned rows flip to FAILED.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    cutoff = now - timedelta(seconds=STALE_PROVISIONING_SECONDS)
+    stmt = select(Environment).where(
+        Environment.status == EnvironmentStatus.PROVISIONING,
+        Environment.created_at < cutoff,
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    failed: list[tuple] = []
+    for env in rows:
+        if await is_state_locked(env.id, scope="environment"):
+            continue  # a worker is actively provisioning this environment
+        await env_repo.update_status(
+            env,
+            EnvironmentStatus.FAILED,
+            error_message=(
+                "Provisioning timed out with no active worker "
+                f"(stuck > {STALE_PROVISIONING_SECONDS}s). The provisioning worker "
+                "likely crashed. Delete and relaunch the preview."
+            ),
+        )
+        failed.append((env.id, env.latest_commit_sha))
+    return failed
+
+
 async def _run_ttl_reaper() -> int:
     settings = get_settings()
     session_factory = _session_factory()
@@ -1072,8 +1178,9 @@ async def _run_ttl_reaper() -> int:
 
     async with session_factory() as session:
         env_repo = EnvironmentRepository(session)
-        expired = await env_repo.list_expired_running(now=datetime.now(UTC))
-        paused: list[tuple] = []
+        now = datetime.now(UTC)
+        expired = await env_repo.list_expired_running(now=now)
+        expired_events: list[tuple] = []
         for environment in expired:
             commit_sha = environment.latest_commit_sha
             did_pause = await pause_expired_environment(
@@ -1084,15 +1191,26 @@ async def _run_ttl_reaper() -> int:
             )
             if did_pause:
                 reaped += 1
-                paused.append((environment.id, commit_sha))
+                expired_events.append((environment.id, commit_sha))
+
+        stale_failed = await _reap_stale_provisioning(session, env_repo, now=now)
         await session.commit()
 
-        for environment_id, commit_sha in paused:
+        for environment_id, commit_sha in expired_events:
             await _publish_status(
                 environment_id,
-                status=EnvironmentStatus.PAUSED,
+                status=EnvironmentStatus.EXPIRED,
                 commit_sha=commit_sha,
-                message="TTL expired - paused",
+                message="TTL expired",
+                stage=ExecutionStage.APPLY,
+            )
+        for environment_id, commit_sha in stale_failed:
+            reaped += 1
+            await _publish_status(
+                environment_id,
+                status=EnvironmentStatus.FAILED,
+                commit_sha=commit_sha,
+                message="Provisioning timed out — no active worker",
                 stage=ExecutionStage.APPLY,
             )
 
@@ -1169,6 +1287,55 @@ async def _run_drift_scan() -> int:
     return recorded
 
 
+async def _run_cost_metering() -> int:
+    """Sample namespace usage and accrue environment cost from the rate card."""
+    settings = get_settings()
+    if not settings.cost_metering_enabled:
+        return 0
+
+    session_factory = _session_factory()
+    sampled = 0
+    provisioner = None
+    if settings.kubernetes_enabled:
+        provisioner = KubernetesProvisioner(settings=settings)
+
+    async with session_factory() as session:
+        env_repo = EnvironmentRepository(session)
+        environments = await env_repo.list_billable_for_cost_metering()
+        now = datetime.now(UTC)
+        for environment in environments:
+            usage = None
+            if provisioner is not None:
+                try:
+                    usage = provisioner.read_namespace_usage(environment.namespace_name)
+                except Exception as exc:  # noqa: BLE001 — never fail the whole sweep
+                    logger.warning(
+                        "cost_metering_usage_failed",
+                        environment_id=str(environment.id),
+                        error=str(exc),
+                    )
+            from app.services.cost_metering import accrue_environment_cost
+
+            rate = accrue_environment_cost(
+                environment,
+                settings=settings,
+                usage=usage,
+                now=now,
+            )
+            sampled += 1
+            logger.info(
+                "cost_metering_sampled",
+                environment_id=str(environment.id),
+                burn_rate=str(rate),
+                accrued=str(environment.cost_accrued),
+                source=environment.cost_source,
+            )
+        await session.commit()
+
+    logger.info("cost_metering_complete", sampled=sampled)
+    return sampled
+
+
 @celery_app.task(name="launchpad.reap_expired_environments")
 def reap_expired_environments_task() -> int:
     return asyncio.run(_run_ttl_reaper())
@@ -1177,6 +1344,11 @@ def reap_expired_environments_task() -> int:
 @celery_app.task(name="launchpad.scan_preview_drift")
 def scan_preview_drift_task() -> int:
     return asyncio.run(_run_drift_scan())
+
+
+@celery_app.task(name="launchpad.sample_environment_costs")
+def sample_environment_costs_task() -> int:
+    return asyncio.run(_run_cost_metering())
 
 
 def enqueue_provision_environment(*, environment_id: str, correlation_id: str) -> str:
@@ -1347,48 +1519,235 @@ def _run_dockerfile_build(job_id: str, request_payload: dict) -> None:
         )
 
 
+async def _attach_preview_tunnel(env_uuid: object, environment: object, resources: object) -> None:
+    """Point a local preview's ``preview_url`` at a per-preview cloudflared tunnel.
+
+    No-op unless ``PREVIEW_TUNNEL_MODE=cloudflared`` and this is a local NodePort
+    preview. On success it rewrites ``resources.preview_url`` in place so the caller
+    persists the public ``*.trycloudflare.com`` URL as the Open-app link. Any failure
+    is swallowed — a missing tunnel just falls back to the NodePort URL.
+    """
+    try:
+        node_port = getattr(resources, "node_port", None)
+        if resources is None or node_port is None:
+            return
+        if (getattr(environment, "provider", None) or "").lower() != "local":
+            return
+        from app.services.preview_tunnel import start_preview_tunnel, tunnel_enabled
+
+        if not tunnel_enabled():
+            return
+        url = await asyncio.to_thread(
+            start_preview_tunnel, environment_id=str(env_uuid), node_port=node_port
+        )
+        if url:
+            resources.preview_url = url
+    except Exception:
+        logger.exception("preview_tunnel_attach_failed", environment_id=str(env_uuid))
+
+
+async def _attach_cloud_preview_url(
+    env_uuid: object, environment: object, resources: object, provisioner: object
+) -> None:
+    """Point a cloud/production preview's ``preview_url`` at its public address.
+
+    No-op for local previews. For cloud providers it reads the LoadBalancer/Ingress
+    external address from the cluster and rewrites ``resources.preview_url`` so the
+    Open-app link is the real production URL, not a NodePort/loopback guess. Any
+    failure is swallowed — the caller keeps its default URL.
+    """
+    try:
+        if resources is None:
+            return
+        provider = (getattr(environment, "provider", None) or "").lower()
+        if provider in ("", "local"):
+            return
+        namespace = getattr(resources, "namespace", None)
+        if not namespace:
+            return
+        timeout = get_settings().preview_cloud_url_timeout_seconds
+        url = await asyncio.to_thread(
+            provisioner.resolve_external_preview_url, namespace, timeout_seconds=timeout
+        )
+        if url:
+            resources.preview_url = url
+    except Exception:
+        logger.exception("cloud_preview_url_resolve_failed", environment_id=str(env_uuid))
+
+
 def _build_and_load_kind_docker_images(workspace_root: Path, cluster_name: str = "launchpad") -> list[str]:
-    """Build workspace Dockerfile(s) and load into local kind cluster so pods pull cleanly."""
+    """Build workspace app image(s) and load them into the local kind cluster.
+
+    The generated Kubernetes manifests reference the scaffolded application image
+    ``<app_name>:latest`` (see ``app_scaffold.CoreScaffold.image``) with
+    ``imagePullPolicy: IfNotPresent``. Kind cannot pull that private/non-existent
+    tag from a registry, so we must build it locally with the *matching* tag and
+    ``kind load`` it. Scaffolded apps live under ``apps/<name>/`` with their own
+    build context; legacy ``dockers/`` and root Dockerfiles are also supported.
+    """
     import subprocess
     import shutil
 
-    if not (shutil.which("docker") and shutil.which("kind")):
+    if not shutil.which("docker"):
         return []
 
-    loaded: list[str] = []
+    # (build_context, dockerfile, image_tag). Order matters only for logging.
+    builds: list[tuple[Path, Path, str]] = []
+    seen_tags: set[str] = set()
+
+    def _add(context: Path, dockerfile: Path, tag: str) -> None:
+        if dockerfile.is_file() and tag not in seen_tags:
+            seen_tags.add(tag)
+            builds.append((context, dockerfile, tag))
+
+    # 1) Scaffolded runnable apps: apps/<name>/Dockerfile -> <name>:latest.
+    apps_dir = workspace_root / "apps"
+    if apps_dir.is_dir():
+        for sub in sorted(apps_dir.iterdir()):
+            if sub.is_dir():
+                app_df = sub / "Dockerfile"
+                if app_df.is_file():
+                    svc_name = sub.name.lower()
+                    _add(sub, app_df, f"{svc_name}:latest")
+                    _add(sub, app_df, f"launchpad/{svc_name}:latest")
+                    if svc_name in {"api", "api-server"}:
+                        _add(sub, app_df, "api-server:latest")
+                        _add(sub, app_df, "api:latest")
+                    elif svc_name in {"web", "web-ui"}:
+                        _add(sub, app_df, "web-ui:latest")
+                        _add(sub, app_df, "web:latest")
+
+    # 2) Per-service Dockerfiles under dockers/.
     dockers_dir = workspace_root / "dockers"
-    dockerfiles: list[Path] = []
     if dockers_dir.is_dir():
-        dockerfiles.extend(dockers_dir.rglob("Dockerfile*"))
+        for df in sorted(dockers_dir.rglob("Dockerfile*")):
+            if not df.is_file():
+                continue
+            if df.name.startswith("Dockerfile."):
+                raw_svc = df.name.removeprefix("Dockerfile.").lower()
+                matching_app = apps_dir / raw_svc if apps_dir.is_dir() else None
+                if matching_app and matching_app.is_dir() and ((matching_app / "package.json").is_file() or (matching_app / "Dockerfile").is_file()):
+                    ctx = matching_app
+                elif (workspace_root / "package.json").is_file() or (workspace_root / "requirements.txt").is_file():
+                    ctx = workspace_root
+                else:
+                    continue
+
+                parts = [p for p in raw_svc.split("-") if p]
+                names = {raw_svc, parts[0] if parts else raw_svc, parts[-1] if parts else raw_svc}
+                for tag_name in names:
+                    _add(ctx, df, f"{tag_name}:latest")
+                    _add(ctx, df, f"launchpad/{tag_name}:latest")
+            else:
+                svc_name = df.parent.name.lower() if df.parent.name != "dockers" else "app"
+                matching_app = apps_dir / svc_name if apps_dir.is_dir() else None
+                ctx = matching_app if (matching_app and matching_app.is_dir()) else workspace_root
+                _add(ctx, df, f"{svc_name}:latest")
+                _add(ctx, df, f"launchpad/{svc_name}:latest")
+
+    # 3) Root Dockerfile (context = workspace root).
     root_df = workspace_root / "Dockerfile"
     if root_df.is_file():
-        dockerfiles.append(root_df)
+        _add(workspace_root, root_df, "app:latest")
+        _add(workspace_root, root_df, "launchpad/app:latest")
 
-    for df in dockerfiles:
-        if not df.is_file():
-            continue
+    from app.services.manifest_deploy import (
+        resolve_local_cluster_name,
+        _load_image_to_local_cluster,
+    )
+    real_cluster = resolve_local_cluster_name(cluster_name)
+
+    loaded: list[str] = []
+    for context, df, image_tag in builds:
         rel = df.relative_to(workspace_root)
-        svc_name = df.parent.name if df.parent != workspace_root and df.parent.name != "dockers" else "app"
-        image_tag = f"launchpad/{svc_name.lower()}:latest"
         try:
-            logger.info("building_kind_docker_image", image=image_tag, dockerfile=str(rel))
+            logger.info("building_local_docker_image", image=image_tag, dockerfile=str(rel))
             build_res = subprocess.run(
-                ["docker", "build", "-t", image_tag, "-f", str(df), str(workspace_root)],
+                ["docker", "build", "-t", image_tag, "-f", str(df), str(context)],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=600,
             )
-            if build_res.returncode == 0:
-                logger.info("loading_kind_docker_image", image=image_tag, cluster=cluster_name)
-                load_res = subprocess.run(
-                    ["kind", "load", "docker-image", image_tag, "--name", cluster_name],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
+            if build_res.returncode != 0:
+                logger.warning(
+                    "local_image_build_failed",
+                    dockerfile=str(rel),
+                    image=image_tag,
+                    error=(build_res.stderr or build_res.stdout or "").strip()[-800:],
                 )
-                if load_res.returncode == 0:
-                    loaded.append(image_tag)
+                continue
+            logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
+            # Engine-aware load (k3d image import / k3s ctr import / kind load).
+            if _load_image_to_local_cluster(image_tag, cluster_name=real_cluster):
+                loaded.append(image_tag)
+            else:
+                logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
         except Exception as exc:
-            logger.warning("kind_image_build_failed", dockerfile=str(rel), error=str(exc))
+            logger.warning("local_image_build_exception", dockerfile=str(rel), error=str(exc))
 
     return loaded
+
+
+# Official/shared images that must never be removed on teardown (they are reused
+# across previews and would just be re-pulled). Only locally-built app images go.
+_KIND_IMAGE_REMOVE_DENYLIST = (
+    "nginx",
+    "postgres",
+    "mysql",
+    "mariadb",
+    "mongo",
+    "redis",
+    "busybox",
+    "alpine",
+    "http-echo",
+)
+
+
+def _remove_kind_docker_images(cluster_name: str, images: "list[str] | None") -> list[str]:
+    """Best-effort removal of locally-built app images from kind + the host.
+
+    Removes each image from the kind node's containerd (``crictl rmi`` inside the
+    control-plane container) and from the host Docker daemon (``docker rmi``).
+    Official/shared base images (postgres, redis, nginx, …) are skipped. All
+    failures are swallowed — teardown must never fail because an image is gone.
+    """
+    import shutil
+    import subprocess
+
+    if not images or not shutil.which("docker"):
+        return []
+    settings = get_settings()
+    default_image = settings.default_workload_image
+    # Node container hosting containerd differs per engine: kind uses
+    # "<cluster>-control-plane"; k3d uses "k3d-<cluster>-server-0".
+    if settings.local_k8s_engine == "k3s":
+        node = f"k3d-{cluster_name}-server-0"
+    else:
+        node = f"{cluster_name}-control-plane"
+    removed: list[str] = []
+    seen: set[str] = set()
+    for image in images:
+        if not image or image in seen:
+            continue
+        seen.add(image)
+        repo = image.rsplit(":", 1)[0].rsplit("/", 1)[-1].lower()
+        if image == default_image or repo in _KIND_IMAGE_REMOVE_DENYLIST:
+            continue
+        try:
+            subprocess.run(
+                ["docker", "exec", node, "crictl", "rmi", image],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("kind_node_image_remove_failed", image=image, error=str(exc))
+        try:
+            subprocess.run(
+                ["docker", "rmi", "-f", image],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            removed.append(image)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("host_image_remove_failed", image=image, error=str(exc))
+    if removed:
+        logger.info("kind_images_removed", cluster=cluster_name, images=removed)
+    return removed

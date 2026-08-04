@@ -646,6 +646,26 @@ class ProvisioningService:
             await self._sandbox.kill(str(record.id))
             record.status = "destroyed"
 
+        # Cascade: force-tear-down every Launch Preview tied to this workspace so
+        # its namespace, ingress, PVCs, secrets and kind images are reclaimed
+        # (the Environment.workspace_id FK is SET NULL, which would otherwise
+        # orphan running preview namespaces after the workspace row is deleted).
+        await self._teardown_workspace_previews(workspace_id)
+
+        # Remove linked "Your services" catalog entries so they don't linger
+        # after the workspace (and its golden-path scaffold) is gone.
+        from app.services.catalog import CatalogServiceManager
+
+        removed = await CatalogServiceManager(self._session).delete_services_for_workspace(
+            workspace_id
+        )
+        if removed:
+            logger.info(
+                "workspace_catalog_services_cascaded",
+                workspace_id=str(workspace_id),
+                count=removed,
+            )
+
         self._iac.destroy_workspace(row.root_dir)
         await self._session.delete(row)
         await self._session.commit()
@@ -653,6 +673,43 @@ class ProvisioningService:
 
         if was_local:
             await self._maybe_teardown_kind(owner)
+
+    async def _teardown_workspace_previews(self, workspace_id: UUID) -> None:
+        """Force teardown of all preview environments belonging to a workspace.
+
+        Each non-destroyed environment is marked TEARDOWN_PENDING (which also
+        cancels any in-flight provision) and its teardown task is enqueued —
+        reusing the full teardown path (namespace + kind image cleanup + audit).
+        """
+        from app.models.domain import Environment, EnvironmentStatus
+        from app.repositories.environment import EnvironmentRepository
+        from app.workers.tasks import enqueue_teardown_environment
+
+        result = await self._session.execute(
+            select(Environment).where(Environment.workspace_id == workspace_id)
+        )
+        environments = result.scalars().all()
+        active = [
+            env
+            for env in environments
+            if env.status not in {EnvironmentStatus.DESTROYED, EnvironmentStatus.TEARDOWN_PENDING}
+        ]
+        if not active:
+            return
+        env_repo = EnvironmentRepository(self._session)
+        for env in active:
+            await env_repo.update_status(env, EnvironmentStatus.TEARDOWN_PENDING)
+        await self._session.commit()
+        for env in active:
+            enqueue_teardown_environment(
+                environment_id=str(env.id),
+                correlation_id=f"workspace-destroy:{workspace_id}",
+            )
+        logger.info(
+            "workspace_preview_teardown_cascaded",
+            workspace_id=str(workspace_id),
+            environment_count=len(active),
+        )
 
     async def _maybe_teardown_kind(self, owner: User) -> None:
         """Delete the kind cluster when no Dev (kind) workspaces remain for this owner."""

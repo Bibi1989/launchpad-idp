@@ -84,7 +84,7 @@ async function onSubmit() {
   errorMessage.value = null
   try {
     const created = await createService({
-      name: form.name,
+      name: form.name.trim().toLowerCase().replace(/_/g, '-'),
       description: form.description,
       template_id: form.template_id,
       owner: form.owner,

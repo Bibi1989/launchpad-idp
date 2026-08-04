@@ -3,11 +3,13 @@ import type { CatalogService, ServiceTier } from '~/types/catalog'
 
 const route = useRoute()
 const serviceId = computed(() => String(route.params.id))
-const { getService, updateService } = useCatalog()
+const { getService, updateService, deleteService } = useCatalog()
 
 const service = ref<CatalogService | null>(null)
 const loading = ref(true)
 const saving = ref(false)
+const deleting = ref(false)
+const confirmDeleteOpen = ref(false)
 const editing = ref(false)
 const errorMessage = ref<string | null>(null)
 const statusMessage = ref<string | null>(null)
@@ -82,6 +84,26 @@ async function saveEdit() {
   }
 }
 
+function requestDelete() {
+  if (!service.value || deleting.value) return
+  confirmDeleteOpen.value = true
+}
+
+async function onDelete() {
+  if (!service.value || deleting.value) return
+  deleting.value = true
+  errorMessage.value = null
+  try {
+    await deleteService(service.value.id)
+    confirmDeleteOpen.value = false
+    await navigateTo('/catalog?tab=services')
+  } catch (err) {
+    errorMessage.value = err instanceof Error ? err.message : 'Failed to delete service'
+  } finally {
+    deleting.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -128,6 +150,16 @@ onMounted(load)
           >
             <span class="material-symbols-outlined text-base">edit</span>
             Update service
+          </button>
+          <button
+            v-if="!editing"
+            type="button"
+            class="lp-btn-danger text-xs uppercase tracking-wide"
+            :disabled="deleting"
+            @click="requestDelete"
+          >
+            <span class="material-symbols-outlined text-base">delete</span>
+            {{ deleting ? 'Deleting…' : 'Delete' }}
           </button>
         </div>
       </header>
@@ -235,6 +267,16 @@ onMounted(load)
           </span>
         </div>
       </section>
+
+      <ConfirmDialog
+        v-model:open="confirmDeleteOpen"
+        title="Delete service?"
+        :message="`Delete “${service.name}” from Your services? This removes the catalog entry only. Linked workspace (if any) is kept unless you destroy it separately.`"
+        confirm-label="Yes, delete"
+        cancel-label="Cancel"
+        :busy="deleting"
+        @confirm="onDelete"
+      />
     </template>
   </div>
 </template>

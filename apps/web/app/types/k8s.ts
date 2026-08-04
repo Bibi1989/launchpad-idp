@@ -1,6 +1,6 @@
 export interface K8sClusterContext {
   workspace_id: string
-  provider: 'gcp' | 'aws' | 'azure' | 'local' | 'kind' | string
+  provider: 'gcp' | 'aws' | 'azure' | 'local' | 'kind' | 'k3s' | 'k3d' | string
   cluster_name: string
   context_name: string
   region: string

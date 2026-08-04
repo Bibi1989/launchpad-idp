@@ -3,7 +3,7 @@ import type { CatalogService, GoldenPathTemplate } from '~/types/catalog'
 
 const route = useRoute()
 const router = useRouter()
-const { listTemplates, listServices } = useCatalog()
+const { listTemplates, listServices, deleteService } = useCatalog()
 
 type CatalogTab = 'templates' | 'services'
 
@@ -11,6 +11,8 @@ const templates = ref<GoldenPathTemplate[]>([])
 const services = ref<CatalogService[]>([])
 const loading = ref(true)
 const errorMessage = ref<string | null>(null)
+const deletingId = ref<string | null>(null)
+const confirmDeleteService = ref<CatalogService | null>(null)
 
 const activeTab = computed<CatalogTab>(() => {
   const tab = typeof route.query.tab === 'string' ? route.query.tab : ''
@@ -22,6 +24,29 @@ function setTab(tab: CatalogTab) {
     path: '/catalog',
     query: tab === 'templates' ? {} : { tab },
   })
+}
+
+function requestDeleteService(svc: CatalogService, event: Event) {
+  event.preventDefault()
+  event.stopPropagation()
+  if (deletingId.value) return
+  confirmDeleteService.value = svc
+}
+
+async function confirmDeleteServiceRun() {
+  const svc = confirmDeleteService.value
+  if (!svc || deletingId.value) return
+  deletingId.value = svc.id
+  errorMessage.value = null
+  try {
+    await deleteService(svc.id)
+    services.value = services.value.filter((row) => row.id !== svc.id)
+    confirmDeleteService.value = null
+  } catch (err) {
+    errorMessage.value = err instanceof Error ? err.message : 'Failed to delete service'
+  } finally {
+    deletingId.value = null
+  }
 }
 
 onMounted(async () => {
@@ -162,31 +187,60 @@ onMounted(async () => {
           No services yet — create one from an approved golden path.
         </p>
         <div v-else class="space-y-3">
-          <NuxtLink
+          <div
             v-for="svc in services"
             :key="svc.id"
-            :to="`/catalog/${svc.id}`"
-            class="block rounded-xl border border-[var(--lp-line)] p-4 transition hover:border-[var(--lp-accent)]/40 hover:bg-[var(--lp-panel-2)]/40"
+            class="flex items-stretch gap-2 rounded-xl border border-[var(--lp-line)] transition hover:border-[var(--lp-accent)]/40 hover:bg-[var(--lp-panel-2)]/40"
           >
-            <div class="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p class="font-semibold">{{ svc.name }}</p>
-                <p class="mt-1 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
-                  {{ svc.tier }} · owner {{ svc.owner }} · SLO {{ svc.slo_target }}%
-                </p>
+            <NuxtLink
+              :to="`/catalog/${svc.id}`"
+              class="min-w-0 flex-1 p-4"
+            >
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p class="font-semibold">{{ svc.name }}</p>
+                  <p class="mt-1 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
+                    {{ svc.tier }} · owner {{ svc.owner }} · SLO {{ svc.slo_target }}%
+                  </p>
+                </div>
+                <span
+                  class="rounded border px-2 py-1 font-mono text-[10px] uppercase"
+                  :class="svc.scorecard.passed
+                    ? 'border-[var(--lp-ok)]/40 text-[var(--lp-ok)]'
+                    : 'border-amber-500/40 text-amber-400'"
+                >
+                  Score {{ svc.compliance_score }}
+                </span>
               </div>
-              <span
-                class="rounded border px-2 py-1 font-mono text-[10px] uppercase"
-                :class="svc.scorecard.passed
-                  ? 'border-[var(--lp-ok)]/40 text-[var(--lp-ok)]'
-                  : 'border-amber-500/40 text-amber-400'"
+            </NuxtLink>
+            <div class="flex items-center border-l border-[var(--lp-line)] px-2">
+              <button
+                type="button"
+                class="lp-btn-danger px-3 py-1.5 text-[10px] uppercase tracking-wide"
+                :disabled="deletingId === svc.id"
+                :title="`Delete ${svc.name}`"
+                @click="requestDeleteService(svc, $event)"
               >
-                Score {{ svc.compliance_score }}
-              </span>
+                <span class="material-symbols-outlined text-sm">delete</span>
+                {{ deletingId === svc.id ? '…' : 'Delete' }}
+              </button>
             </div>
-          </NuxtLink>
+          </div>
         </div>
       </section>
     </template>
+
+    <ConfirmDialog
+      :open="confirmDeleteService !== null"
+      title="Delete service?"
+      :message="confirmDeleteService
+        ? `Delete “${confirmDeleteService.name}” from Your services? This removes the catalog entry only. Linked workspace (if any) is kept unless you destroy it separately.`
+        : ''"
+      confirm-label="Yes, delete"
+      cancel-label="Cancel"
+      :busy="deletingId !== null"
+      @update:open="(value) => { if (!value) confirmDeleteService = null }"
+      @confirm="confirmDeleteServiceRun"
+    />
   </div>
 </template>

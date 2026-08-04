@@ -89,6 +89,235 @@ def workspace_has_deployable_k8s(workspace_root: Path) -> bool:
     return workspace_has_raw_manifests(workspace_root) or workspace_has_helm_chart(workspace_root)
 
 
+def resolve_local_cluster_name(requested_name: str | None = None) -> str:
+    """Resolve the active local cluster name from the engine's CLI (k3d or kind)."""
+    import subprocess
+    import shutil
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    default_name = settings.kind_cluster_name or "launchpad"
+    tool = settings.local_cluster_tool  # "k3d" or "kind"
+    if not shutil.which(tool):
+        return default_name
+
+    if tool == "k3d":
+        cmd = ["k3d", "cluster", "list", "--no-headers"]
+    else:
+        cmd = ["kind", "get", "clusters"]
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            # k3d rows are "NAME SERVERS AGENTS ..."; kind prints one name per line.
+            clusters = [line.split()[0].strip() for line in res.stdout.splitlines() if line.strip()]
+            if clusters:
+                if requested_name:
+                    clean_req = requested_name.removeprefix("kind-").removeprefix("k3d-").strip()
+                    if clean_req in clusters:
+                        return clean_req
+                if default_name in clusters:
+                    return default_name
+                return clusters[0]
+    except Exception:
+        pass
+
+    return default_name
+
+
+# Back-compat alias — historical name used across the codebase.
+def resolve_kind_cluster_name(requested_name: str | None = None) -> str:
+    return resolve_local_cluster_name(requested_name)
+
+
+def _load_image_to_local_cluster(image_tag: str, cluster_name: str | None = None, engine: str | None = None) -> bool:
+    """Load host docker image into local K3s/k3d or Kind cluster so pods pull cleanly without external registry."""
+    import subprocess
+    import shutil
+    from app.core.config import get_settings
+
+    if not image_tag:
+        return False
+    settings = get_settings()
+    active_engine = (engine or getattr(settings, "local_k8s_engine", "k3s")).lower()
+    real_cluster = resolve_kind_cluster_name(cluster_name)
+
+    try:
+        # Check host docker image first
+        inspect_res = subprocess.run(
+            ["docker", "image", "inspect", image_tag],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if inspect_res.returncode != 0:
+            return False
+
+        # 1. Try k3d if available / active
+        k3d_bin = shutil.which("k3d")
+        if active_engine == "k3s" and k3d_bin:
+            load_res = subprocess.run(
+                [k3d_bin, "image", "import", image_tag, "-c", real_cluster],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if load_res.returncode == 0:
+                logger.info("auto_loaded_host_image_into_k3d", image=image_tag, cluster=real_cluster)
+                return True
+
+        # 2. Try containerized k3s (ctr import)
+        if active_engine == "k3s":
+            for container_name in (f"{real_cluster}-k3s", f"k3d-{real_cluster}-server-0", "launchpad-k3s", "k3s"):
+                check_res = subprocess.run(
+                    ["docker", "exec", container_name, "crictl", "images"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if check_res.returncode == 0:
+                    short_tag = image_tag.rsplit("/", 1)[-1]
+                    if short_tag in check_res.stdout or image_tag in check_res.stdout:
+                        return True
+                    save_proc = subprocess.Popen(["docker", "save", image_tag], stdout=subprocess.PIPE)
+                    import_proc = subprocess.run(
+                        ["docker", "exec", "-i", container_name, "ctr", "-n", "k8s.io", "images", "import", "-"],
+                        stdin=save_proc.stdout,
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
+                    if save_proc.stdout:
+                        save_proc.stdout.close()
+                    if import_proc.returncode == 0:
+                        logger.info("auto_loaded_host_image_into_k3s_ctr", image=image_tag, container=container_name)
+                        return True
+
+        # 3. Kind fallback
+        kind_bin = shutil.which("kind")
+        if kind_bin:
+            load_res = subprocess.run(
+                [kind_bin, "load", "docker-image", image_tag, "--name", real_cluster],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if load_res.returncode == 0:
+                logger.info("auto_loaded_host_image_into_kind", image=image_tag, cluster=real_cluster)
+                return True
+
+        return False
+    except Exception as exc:
+        logger.warning("local_cluster_image_load_failed", image=image_tag, error=str(exc))
+        return False
+
+
+def _is_image_in_kind(image_tag: str, cluster_name: str | None = None) -> bool:
+    """Return True if image_tag is present in local cluster node or host docker (auto-loading if needed)."""
+    return _load_image_to_local_cluster(image_tag, cluster_name=cluster_name)
+
+
+def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = None) -> list[str]:
+    """Build workspace app image(s) and load them into local kind cluster so pods pull cleanly."""
+    import subprocess
+    import shutil
+
+    if not shutil.which("docker"):
+        logger.warning("local_image_build_skipped", reason="docker CLI not found")
+        return []
+
+    real_cluster = resolve_local_cluster_name(cluster_name)
+
+    builds: list[tuple[Path, Path, str]] = []
+    seen_tags: set[str] = set()
+
+    def _add(context: Path, dockerfile: Path, tag: str) -> None:
+        if dockerfile.is_file() and tag not in seen_tags:
+            seen_tags.add(tag)
+            builds.append((context, dockerfile, tag))
+
+    # 1) Scaffolded runnable apps: apps/<name>/Dockerfile -> <name>:latest.
+    apps_dir = workspace_root / "apps"
+    if apps_dir.is_dir():
+        for sub in sorted(apps_dir.iterdir()):
+            if sub.is_dir():
+                app_df = sub / "Dockerfile"
+                if app_df.is_file():
+                    svc_name = sub.name.lower()
+                    _add(sub, app_df, f"{svc_name}:latest")
+                    _add(sub, app_df, f"launchpad/{svc_name}:latest")
+                    if svc_name in {"api", "api-server"}:
+                        _add(sub, app_df, "api-server:latest")
+                        _add(sub, app_df, "api:latest")
+                    elif svc_name in {"web", "web-ui"}:
+                        _add(sub, app_df, "web-ui:latest")
+                        _add(sub, app_df, "web:latest")
+
+    # 2) Per-service Dockerfiles under dockers/.
+    dockers_dir = workspace_root / "dockers"
+    if dockers_dir.is_dir():
+        for df in sorted(dockers_dir.rglob("Dockerfile*")):
+            if not df.is_file():
+                continue
+            if df.name.startswith("Dockerfile."):
+                raw_svc = df.name.removeprefix("Dockerfile.").lower()
+                matching_app = apps_dir / raw_svc if apps_dir.is_dir() else None
+                if matching_app and matching_app.is_dir() and ((matching_app / "package.json").is_file() or (matching_app / "Dockerfile").is_file()):
+                    ctx = matching_app
+                elif (workspace_root / "package.json").is_file() or (workspace_root / "requirements.txt").is_file():
+                    ctx = workspace_root
+                else:
+                    continue
+
+                parts = [p for p in raw_svc.split("-") if p]
+                names = {raw_svc, parts[0] if parts else raw_svc, parts[-1] if parts else raw_svc}
+                for tag_name in names:
+                    _add(ctx, df, f"{tag_name}:latest")
+                    _add(ctx, df, f"launchpad/{tag_name}:latest")
+            else:
+                svc_name = df.parent.name.lower() if df.parent.name != "dockers" else "app"
+                matching_app = apps_dir / svc_name if apps_dir.is_dir() else None
+                ctx = matching_app if (matching_app and matching_app.is_dir()) else workspace_root
+                _add(ctx, df, f"{svc_name}:latest")
+                _add(ctx, df, f"launchpad/{svc_name}:latest")
+
+    # 3) Root Dockerfile (context = workspace root).
+    root_df = workspace_root / "Dockerfile"
+    if root_df.is_file():
+        _add(workspace_root, root_df, "app:latest")
+        _add(workspace_root, root_df, "launchpad/app:latest")
+
+    loaded: list[str] = []
+    for context, df, image_tag in builds:
+        rel = df.relative_to(workspace_root)
+        try:
+            logger.info("building_kind_docker_image", image=image_tag, dockerfile=str(rel))
+            build_res = subprocess.run(
+                ["docker", "build", "-t", image_tag, "-f", str(df), str(context)],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if build_res.returncode != 0:
+                logger.warning(
+                    "kind_image_build_failed",
+                    dockerfile=str(rel),
+                    image=image_tag,
+                    error=(build_res.stderr or build_res.stdout or "").strip()[-800:],
+                )
+                continue
+            logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
+            # Engine-aware load (k3d image import / k3s ctr import / kind load).
+            if _load_image_to_local_cluster(image_tag, cluster_name=real_cluster):
+                loaded.append(image_tag)
+            else:
+                logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
+        except Exception as exc:
+            logger.warning("local_image_build_exception", dockerfile=str(rel), error=str(exc))
+
+    return loaded
+
+
 def ensure_workspace_k8s_manifests(
     workspace_root: Path,
     image: str | None = None,
@@ -97,7 +326,9 @@ def ensure_workspace_k8s_manifests(
         return
     manifest_dir = workspace_root / K8S_MANIFESTS_DIR
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    target_image = (image or "").strip() or "nginx:1.27-alpine"
+    target_image = (image or "").strip()
+    if not target_image:
+        target_image = "app:latest"
     deployment_yaml = f"""apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -237,13 +468,42 @@ def load_workspace_manifest_documents(
     )
 
 
+def _deployment_container_image(doc: dict[str, Any]) -> str | None:
+    containers = (
+        ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+    ).get("containers") or []
+    for container in containers:
+        if isinstance(container, dict):
+            image = container.get("image")
+            if isinstance(image, str) and image.strip():
+                return image.strip()
+    return None
+
+
 def _first_deployment_image(documents: list[dict[str, Any]]) -> str | None:
-    """Return the first container image declared on a Deployment document or Helm values."""
+    """Return the workload image for the preview.
+
+    Prefers the deployment flagged ``launchpad.io/preview-target: "true"`` (the
+    exposed web/frontend in a multi-stack workspace), so Launch Preview routes to
+    the intended primary rather than an alphabetically-first backend. Falls back
+    to the first non-datastore Deployment image, then Helm values.
+    """
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        if str(doc.get("kind") or "").lower() != "deployment" or _is_datastore_workload(doc):
+            continue
+        if _has_preview_target_annotation(doc):
+            image = _deployment_container_image(doc)
+            if image:
+                return image
     for doc in documents:
         if not isinstance(doc, dict):
             continue
         kind = str(doc.get("kind") or "").lower()
         if kind == "deployment":
+            if _is_datastore_workload(doc):
+                continue
             containers = (
                 ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
             ).get("containers") or []
@@ -252,16 +512,16 @@ def _first_deployment_image(documents: list[dict[str, Any]]) -> str | None:
                     image = container.get("image")
                     if isinstance(image, str) and image.strip():
                         return image.strip()
-        img = doc.get("image")
-        if isinstance(img, dict) and img.get("repository"):
-            repo = str(img.get("repository")).strip()
-            tag = str(img.get("tag") or "").strip()
-            if repo:
-                if tag and not repo.endswith(f":{tag}") and ":" not in repo:
-                    return f"{repo}:{tag}"
-                return repo
-        elif isinstance(img, str) and img.strip():
-            return img.strip()
+            img = doc.get("image")
+            if isinstance(img, dict) and img.get("repository"):
+                repo = str(img.get("repository")).strip()
+                tag = str(img.get("tag") or "").strip()
+                if repo:
+                    if tag and not repo.endswith(f":{tag}") and ":" not in repo:
+                        return f"{repo}:{tag}"
+                    return repo
+            elif isinstance(img, str) and img.strip():
+                return img.strip()
     return None
 
 
@@ -604,7 +864,7 @@ def patch_manifest_documents(
 
     manifest_port: int | None = None
     for doc in documents:
-        if doc.get("kind") != "Deployment":
+        if doc.get("kind") != "Deployment" or _is_datastore_workload(doc):
             continue
         containers = (
             ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
@@ -640,6 +900,20 @@ def patch_manifest_documents(
             continue
         metadata = doc.setdefault("metadata", {})
         metadata["namespace"] = target_namespace
+        # Datastore companions (postgres/redis/…) keep their own official image,
+        # name, selector and ports. Only pin them to the target namespace so they
+        # co-locate with the app workload — never overwrite them with the app image.
+        if _is_datastore_workload(doc):
+            patched.append(doc)
+            continue
+        # Per-stack launch-* workloads carry their own built image + selector and
+        # are routed by the multi-service Ingress. Stamp governance labels but
+        # never rewrite their image or force them onto the single-app selector.
+        if _is_launch_workload(doc):
+            meta_labels = metadata.setdefault("labels", {})
+            meta_labels.update(labels)
+            patched.append(doc)
+            continue
         meta_labels = metadata.setdefault("labels", {})
         meta_labels.update(labels)
         if kind == "Deployment":
@@ -674,9 +948,86 @@ def _is_preview_skipped_workload_document(doc: dict[str, Any]) -> bool:
 
     HPAs without metrics.k8s.io spam kube-controller-manager and have contributed
     to CrashLoopBackOff / stalled Deployment rollouts on the Launchpad kind cluster.
+    VPAs additionally require the autoscaling.k8s.io CRD, which kind does not ship.
     """
     kind = str(doc.get("kind") or "")
     return kind in {"HorizontalPodAutoscaler", "VerticalPodAutoscaler"}
+
+
+# In-cluster datastore companion workloads (see workload_dependencies.py). These
+# carry their own official images (postgres:*, redis:*, …) and their own
+# name/selector — the app-workload preview patch must never overwrite them.
+_DATASTORE_WORKLOAD_NAMES = frozenset(
+    {"postgres", "mysql", "mariadb", "mongodb", "redis"}
+)
+
+
+def _is_datastore_workload(doc: dict[str, Any]) -> bool:
+    """Return True for a generated in-cluster datastore Deployment/Service."""
+    name = str((doc.get("metadata") or {}).get("name") or "").strip().lower()
+    if name in _DATASTORE_WORKLOAD_NAMES:
+        return True
+    labels = (doc.get("metadata") or {}).get("labels") or {}
+    return str(labels.get("launchpad.io/component") or "").lower() == "datastore"
+
+
+def _is_launch_workload(doc: dict[str, Any]) -> bool:
+    """Return True for a per-stack ``launch-*`` Deployment/Service.
+
+    These carry their own built image and their own ``app`` selector so their
+    Service + the multi-service Ingress route correctly — the single-app preview
+    patch must not overwrite their image or force them onto the ``app`` selector.
+    """
+    name = str((doc.get("metadata") or {}).get("name") or "").strip().lower()
+    return name.startswith("launch-")
+
+
+def _has_preview_target_annotation(doc: dict[str, Any]) -> bool:
+    ann = (doc.get("metadata") or {}).get("annotations") or {}
+    return str(ann.get("launchpad.io/preview-target") or "").lower() == "true"
+
+
+def _resolve_preview_target(documents: list[dict[str, Any]]) -> tuple[str, int]:
+    """Return (app_label, target_port) for the workload Launch Preview exposes.
+
+    Prefers the Deployment annotated ``launchpad.io/preview-target: "true"`` (the
+    exposed web/frontend in a multi-stack workspace), then the single-app ``app``
+    Deployment, then the first non-datastore Deployment. The NodePort Service is
+    given this pod selector so it actually has endpoints.
+    """
+    def _info(doc: dict[str, Any]) -> tuple[str | None, int | None]:
+        spec = doc.get("spec") or {}
+        app_label = ((spec.get("selector") or {}).get("matchLabels") or {}).get("app")
+        if not app_label:
+            tmpl = ((spec.get("template") or {}).get("metadata") or {}).get("labels") or {}
+            app_label = tmpl.get("app")
+        containers = ((spec.get("template") or {}).get("spec") or {}).get("containers") or []
+        port = (
+            _manifest_container_port(containers[0])
+            if containers and isinstance(containers[0], dict)
+            else None
+        )
+        return app_label, port
+
+    deployments = [
+        d
+        for d in documents
+        if isinstance(d, dict) and d.get("kind") == "Deployment" and not _is_datastore_workload(d)
+    ]
+    for d in deployments:
+        if _has_preview_target_annotation(d):
+            app_label, port = _info(d)
+            if app_label:
+                return app_label, port or 80
+    for d in deployments:
+        if str((d.get("metadata") or {}).get("name") or "") == APP_NAME:
+            app_label, port = _info(d)
+            return app_label or APP_NAME, port or 80
+    for d in deployments:
+        app_label, port = _info(d)
+        if app_label:
+            return app_label, port or 80
+    return APP_NAME, 80
 
 
 # nginx:*-alpine non-root UID/GID (matches KubernetesProvisioner preview profile).
@@ -720,21 +1071,39 @@ def _patch_deployment(
         containers.append({"name": APP_NAME})
     container = containers[0]
     container["name"] = container.get("name") or APP_NAME
-    container["image"] = image
+    existing_image = str(container.get("image") or "").strip()
+    provided_image = (image or "").strip()
+    generic_placeholders = {"app:latest", "app", "latest", "api-server:latest", "web-ui:latest", "paygo:latest", "api:latest", "web:latest"}
+    if provided_image and provided_image.lower() not in {"nginx:1.27-alpine"}:
+        target_image = provided_image
+    elif existing_image:
+        target_image = existing_image
+    else:
+        target_image = provided_image or "app:latest"
+
+    settings = get_settings()
+    is_kind_cluster = settings.kubernetes_enabled and ((settings.kubernetes_context or "").startswith("kind-") or not settings.kubernetes_context)
+    if is_kind_cluster and "/" not in target_image and target_image.lower() in generic_placeholders:
+        cluster_name = (settings.kubernetes_context or "launchpad").removeprefix("kind-")
+        if not _is_image_in_kind(target_image, cluster_name=cluster_name):
+            logger.warning("local_kind_image_not_found_fallback", image=target_image)
+            target_image = "nginx:1.27-alpine"
+
+    container["image"] = target_image
     container["imagePullPolicy"] = "IfNotPresent"
     env = {item["name"]: item for item in container.get("env", []) if "name" in item}
     env["GIT_REPO_URL"] = {"name": "GIT_REPO_URL", "value": git_repo_url}
     env["GIT_BRANCH"] = {"name": "GIT_BRANCH", "value": git_branch}
     env["PORT"] = {"name": "PORT", "value": str(listen_port)}
     # Vite / many Node servers bind 127.0.0.1 unless HOST is set — probes use the pod IP.
-    if not _is_nginx_image(image):
+    if not _is_nginx_image(target_image):
         env.setdefault("HOST", {"name": "HOST", "value": "0.0.0.0"})
         env.setdefault("APP_PORT", {"name": "APP_PORT", "value": str(listen_port)})
     container["env"] = list(env.values())
-    _align_container_port_and_probes(container, listen_port=listen_port, image=image)
-    _ensure_non_nginx_runtime_resources(container, image=image)
-    _ensure_non_root_user(pod_spec, container, image=image)
-    _strip_nginx_only_mounts(pod_spec, container, image=image)
+    _align_container_port_and_probes(container, listen_port=listen_port, image=target_image)
+    _ensure_non_nginx_runtime_resources(container, image=target_image)
+    _ensure_non_root_user(pod_spec, container, image=target_image)
+    _strip_nginx_only_mounts(pod_spec, container, image=target_image)
 
 
 def _strip_nginx_only_mounts(
@@ -910,6 +1279,9 @@ class ManifestDeployer:
             )
             return resources
 
+        if self._settings.kubernetes_enabled:
+            build_and_load_kind_images(workspace_root, cluster_name=self._settings.kubernetes_context)
+
         documents = load_workspace_manifest_documents(
             workspace_root,
             namespace=namespace,
@@ -931,16 +1303,10 @@ class ManifestDeployer:
             owner_label=owner_label,
             image=workload_image,
         )
-        listen_port = 80
-        for doc in patched:
-            if doc.get("kind") != "Deployment":
-                continue
-            containers = (
-                ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
-            ).get("containers") or []
-            if containers and isinstance(containers[0], dict):
-                listen_port = _manifest_container_port(containers[0]) or listen_port
-                break
+        # Resolve which workload the preview NodePort exposes (the annotated
+        # preview-target, else "app", else the first app workload) so the Service
+        # selector matches real pods and the listen port is that workload's port.
+        preview_app_label, listen_port = _resolve_preview_target(patched)
 
         self._provisioner.apply_governance(
             namespace=namespace,
@@ -960,6 +1326,7 @@ class ManifestDeployer:
             port_min=self._settings.preview_node_port_min,
             port_max=self._settings.preview_node_port_max,
             used_ports=used_ports,
+            cluster_name=self._settings.kubernetes_context,
         )
         # Always pin the Service into the kind-mapped range (fixes auto-assigned ports).
         node_port = self._assign_node_port(
@@ -968,6 +1335,7 @@ class ManifestDeployer:
             used_ports=used_ports,
             labels=labels,
             target_port=listen_port,
+            selector_app=preview_app_label,
         )
         resources.node_port = node_port
 
@@ -1235,18 +1603,19 @@ class ManifestDeployer:
         used_ports: set[int],
         labels: dict[str, str] | None = None,
         target_port: int = 80,
+        selector_app: str = APP_NAME,
     ) -> int:
-        """Pin Service ``app`` to an explicit NodePort in the kind-mapped range.
+        """Pin the preview Service ``app`` to an explicit NodePort in the kind range.
 
-        Always creates a clean Service body (never reuse a read object's
-        resourceVersion/uid/clusterIP). Changing ``nodePort`` requires
-        delete+recreate. Returns the applied port.
+        The Service selects the *exposed* workload's pods (``selector_app``) so a
+        multi-stack workspace (whose pods are labelled ``app: launch-web`` etc.,
+        not ``app: app``) still gets NodePort endpoints. Always creates a clean
+        Service body; changing ``nodePort`` requires delete+recreate.
         """
         assert self._provisioner._core is not None
         from kubernetes import client
         from kubernetes.client.rest import ApiException
 
-        from app.services.k8s_spec import preview_workload_selector
         from app.services.kubernetes import _is_node_port_allocated_error
 
         candidates = [node_port]
@@ -1256,7 +1625,10 @@ class ManifestDeployer:
             if port not in candidates and port not in used_ports:
                 candidates.append(port)
 
-        selector = preview_workload_selector()
+        selector = {
+            "app": selector_app,
+            "launchpad.io/managed-by": "launchpad-idp",
+        }
         svc_labels = dict(labels or {})
         svc_labels.setdefault("app", APP_NAME)
         svc_labels.setdefault("launchpad.io/managed-by", "launchpad-idp")

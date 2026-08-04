@@ -200,17 +200,15 @@ async def test_probe_kind_cluster_absent_with_auto_manage() -> None:
 
 @pytest.mark.asyncio
 async def test_probe_kind_cluster_ready() -> None:
-    kind_proc = MagicMock()
-    kind_proc.returncode = 0
-    kind_proc.communicate = AsyncMock(return_value=(b"launchpad\n", b""))
+    # k3d cluster list --no-headers → "NAME SERVERS AGENTS ..." (first token is name).
+    list_proc = MagicMock()
+    list_proc.returncode = 0
+    list_proc.communicate = AsyncMock(return_value=(b"launchpad 1/1 0/0 true\n", b""))
 
-    kubectl_proc = MagicMock()
-    kubectl_proc.returncode = 0
-    kubectl_proc.communicate = AsyncMock(return_value=(b"", b""))
-
-    kubectl_cm_proc = MagicMock()
-    kubectl_cm_proc.returncode = 0
-    kubectl_cm_proc.communicate = AsyncMock(return_value=(b"Running\n", b""))
+    # kubectl get nodes -o jsonpath → node Ready condition status.
+    nodes_proc = MagicMock()
+    nodes_proc.returncode = 0
+    nodes_proc.communicate = AsyncMock(return_value=(b"True", b""))
 
     def which(name: str) -> str | None:
         return f"/usr/bin/{name}"
@@ -221,15 +219,19 @@ async def test_probe_kind_cluster_ready() -> None:
         patch(
             "app.services.kind_cluster.asyncio.create_subprocess_exec",
             new_callable=AsyncMock,
-            side_effect=[kind_proc, kubectl_proc, kubectl_cm_proc],
+            side_effect=[list_proc, nodes_proc],
         ),
     ):
         settings = settings_mock.return_value
         settings.kind_auto_manage = True
         settings.kind_cluster_name = "launchpad"
+        settings.local_k8s_engine = "k3s"
+        settings.local_cluster_tool = "k3d"
         payload = await probe_kind_cluster()
 
     assert payload["status"] == "ready"
+    assert payload["engine"] == "k3s"
+    assert payload["context"] == "k3d-launchpad"
     assert payload["api_reachable"] is True
     assert payload["can_launch"] is True
 

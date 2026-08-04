@@ -74,7 +74,7 @@ const sections = [
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
           Use
           <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
-          for a one-click preview — Local kind (single screen) or cloud, catalog template or your
+          for a one-click preview — Local Sandbox (single screen) or cloud, catalog template or your
           own repo. Use
           <NuxtLink to="/environments" class="text-[var(--lp-accent)] hover:underline">Environments</NuxtLink>
           to manage running previews.
@@ -125,7 +125,7 @@ const sections = [
           An environment is a governed, time-boxed preview of your application. The fastest path is
           <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
           — choose
-          <strong class="text-[var(--lp-text)]">Local (kind)</strong>
+          <strong class="text-[var(--lp-text)]">Local (Sandbox)</strong>
           to test on your machine with no cloud credentials, or connect GCP/AWS/Azure/Cloudflare.
           Provisioning runs asynchronously; the detail page shows live status and logs while it
           comes up.
@@ -134,7 +134,7 @@ const sections = [
           <li>
             Open
             <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">/launch</NuxtLink>
-            and pick a target (Local kind is the default for local testing).
+            and pick a target (Local Sandbox is the default for local testing).
           </li>
           <li>
             For Local: run

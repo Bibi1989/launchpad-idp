@@ -520,7 +520,7 @@ watch(advancedMode, async (enabled) => {
           @open-destroy="openIacDestroyModal"
           @open-terminal="void ensureSandboxBackground()"
         />
-        <div class="grid min-h-[78vh] grid-cols-1 gap-0 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <div class="grid min-h-[78vh] grid-cols-1 gap-0 lg:grid-cols-[280px_minmax(0,1fr)] items-start">
           <InfraFileSelector
             :key="infraFilesKey"
             v-model="selectedInfraFile"

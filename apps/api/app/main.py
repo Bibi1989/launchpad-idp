@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 
 async def _ttl_reaper_loop(stop: asyncio.Event) -> None:
-    """Pause TTL-expired environments in-process so pause works without Celery beat."""
+    """Mark TTL-expired environments EXPIRED in-process so it works without Celery beat."""
     settings = get_settings()
     interval = max(30.0, float(settings.ttl_reaper_interval_seconds))
     while not stop.is_set():

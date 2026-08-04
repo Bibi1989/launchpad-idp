@@ -197,7 +197,7 @@ const creationStepLabel = computed(() => {
   if (creationStep.value === 1) return 'Validating cloud configuration & dependencies…'
   if (creationStep.value === 2) return 'Generating IaC & container scaffolds…'
   if (creationStep.value === 3) return 'Scaffolding Kubernetes workload manifests…'
-  if (creationStep.value === 4) return isLocalProvider.value ? 'Starting kind cluster & terminal sandbox…' : 'Opening terminal sandbox…'
+  if (creationStep.value === 4) return isLocalProvider.value ? 'Starting local cluster & terminal sandbox…' : 'Opening terminal sandbox…'
   return 'Workspace ready!'
 })
 const creationProgressPercent = computed(() => Math.min(creationStep.value * 25, 100))
@@ -205,7 +205,7 @@ const creationSteps = computed(() => [
   { key: 1, label: 'Validate cloud configuration' },
   { key: 2, label: 'Generate IaC & container scaffolds' },
   { key: 3, label: 'Scaffold Kubernetes workload manifests' },
-  { key: 4, label: isLocalProvider.value ? 'Start kind cluster & sandbox' : 'Initialize terminal sandbox' },
+  { key: 4, label: isLocalProvider.value ? 'Start local cluster & sandbox' : 'Initialize terminal sandbox' },
 ])
 const bundle = ref<IaCBundleSummary | null>(null)
 const wsPath = ref<string | null>(null)
@@ -351,10 +351,10 @@ const providers: Array<{
 }> = [
   {
     id: 'local',
-    label: 'Dev (kind)',
+    label: 'Dev (k3s)',
     badge: 'LOCAL',
     icon: 'developer_board',
-    blurb: 'Verify Launchpad on your machine with kind — no cloud credentials.',
+    blurb: 'Verify Launchpad on your machine with k3s — no cloud credentials.',
   },
   {
     id: 'aws',
@@ -647,11 +647,11 @@ function validateStep(): boolean {
   if (currentStep.value === 2) {
     if (form.provider === 'local') {
       if (!form.local.cluster_name.trim() || !form.local.context.trim()) {
-        fieldError.value = 'Kind cluster name and kubectl context are required.'
+        fieldError.value = 'Local cluster name and kubectl context are required.'
         return false
       }
       if (!infraGeneration.value.kubernetes.enabled) {
-        fieldError.value = 'Enable Kubernetes generation for Dev (kind) workspaces.'
+        fieldError.value = 'Enable Kubernetes generation for Dev (k3s) workspaces.'
         return false
       }
       return true
@@ -1014,7 +1014,7 @@ async function onPrimaryAction() {
                 <option value="pulumi">Pulumi</option>
               </select>
               <p v-if="isLocalProvider" class="text-xs text-[var(--lp-muted)]">
-                Dev (kind) scaffolds Kubernetes manifests only — switch to a cloud provider for
+                Dev (k3s) scaffolds Kubernetes manifests only — switch to a cloud provider for
                 Terraform, OpenTofu, or Pulumi.
               </p>
             </label>
@@ -1290,7 +1290,7 @@ async function onPrimaryAction() {
             <div
               class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
             >
-              <p class="font-medium text-[var(--lp-text)]">Verify your local kind setup</p>
+              <p class="font-medium text-[var(--lp-text)]">Verify your local Sandbox setup</p>
               <ol class="mt-2 list-decimal space-y-1 pl-5">
                 <li>
                   Launchpad runs
@@ -1317,7 +1317,7 @@ async function onPrimaryAction() {
             </div>
             <div class="grid gap-4 sm:grid-cols-2">
               <label class="block space-y-2">
-                <span class="lp-label">Kind cluster name</span>
+                <span class="lp-label">Cluster name</span>
                 <input v-model="form.local.cluster_name" class="lp-input" placeholder="launchpad">
               </label>
               <label class="block space-y-2">
@@ -1716,7 +1716,7 @@ async function onPrimaryAction() {
             <span>{{
               submitting
                 ? isLocalProvider
-                  ? 'Starting kind…'
+                  ? 'Starting cluster…'
                   : 'Saving…'
                 : isNewWorkspace
                   ? 'Generate workspace'

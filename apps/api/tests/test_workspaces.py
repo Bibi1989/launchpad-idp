@@ -110,6 +110,108 @@ async def test_list_and_destroy_workspace(
 
 
 @pytest.mark.asyncio
+async def test_destroy_workspace_removes_catalog_service(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+    tmp_path: Path,
+) -> None:
+    from app.models.domain import CatalogService
+    from app.services.orgs import OrganizationService
+
+    workspace_id = uuid4()
+    service_id = uuid4()
+    root = tmp_path / str(workspace_id)
+    root.mkdir()
+
+    async with session_factory() as session:
+        personal = await OrganizationService(session).ensure_personal_org(test_user)
+        session.add(
+            ProvisioningWorkspace(
+                id=workspace_id,
+                owner_id=test_user.id,
+                org_id=personal.id,
+                name="svc-linked-ws",
+                engine="terraform",
+                provider="local",
+                root_dir=str(root),
+                status="ready",
+            )
+        )
+        session.add(
+            CatalogService(
+                id=service_id,
+                owner_id=test_user.id,
+                org_id=personal.id,
+                workspace_id=workspace_id,
+                name="linked-svc",
+                description="from golden path",
+                service_owner=test_user.email,
+                tier="tier-2",
+                slo_target="99.5",
+                template_id="fastapi-api",
+                template_version="1.0.0",
+                compliance_score=80,
+                scorecard_json='{"score":80,"gate":70,"passed":true,"items":[]}',
+            )
+        )
+        await session.commit()
+
+    with patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True):
+        deleted = await client.delete(
+            f"/api/v1/provisioning/workspaces/{workspace_id}",
+            headers=auth_header(test_user),
+        )
+    assert deleted.status_code == 204
+
+    async with session_factory() as session:
+        remaining = await session.get(CatalogService, service_id)
+        assert remaining is None
+
+
+@pytest.mark.asyncio
+async def test_delete_catalog_service_endpoint(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    from app.models.domain import CatalogService
+    from app.services.orgs import OrganizationService
+
+    service_id = uuid4()
+    async with session_factory() as session:
+        personal = await OrganizationService(session).ensure_personal_org(test_user)
+        session.add(
+            CatalogService(
+                id=service_id,
+                owner_id=test_user.id,
+                org_id=personal.id,
+                workspace_id=None,
+                name="solo-svc",
+                description="",
+                service_owner=test_user.email,
+                tier="tier-2",
+                slo_target="99.5",
+                template_id="fastapi-api",
+                template_version="1.0.0",
+                compliance_score=70,
+                scorecard_json='{"score":70,"gate":70,"passed":true,"items":[]}',
+            )
+        )
+        await session.commit()
+
+    deleted = await client.delete(
+        f"/api/v1/catalog/services/{service_id}",
+        headers=auth_header(test_user),
+    )
+    assert deleted.status_code == 204
+
+    listed = await client.get("/api/v1/catalog/services", headers=auth_header(test_user))
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+
+@pytest.mark.asyncio
 async def test_get_workspace_when_files_missing_on_disk(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],

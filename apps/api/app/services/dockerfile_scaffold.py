@@ -68,9 +68,11 @@ def scaffold_dockerfile(
     generators = {
         ProjectStack.REACT_VITE: _react_vite_dockerfile,
         ProjectStack.NEXTJS: _nextjs_dockerfile,
-        ProjectStack.NUXTJS: _react_vite_dockerfile,
-        ProjectStack.VUEJS: _react_vite_dockerfile,
-        ProjectStack.SVELTE: _react_vite_dockerfile,
+        ProjectStack.NUXTJS: _nuxt_dockerfile,
+        ProjectStack.VUEJS: _vue_dockerfile,
+        ProjectStack.SVELTE: _svelte_dockerfile,
+        ProjectStack.ANGULAR: _angular_dockerfile,
+        ProjectStack.DOTNET: _dotnet_dockerfile,
         ProjectStack.FASTAPI: _fastapi_dockerfile,
         ProjectStack.FLASK: _python_dockerfile,
         ProjectStack.DJANGO: _python_dockerfile,
@@ -138,12 +140,14 @@ def scaffold_docker_compose_services(
         safe_name = _sanitize_name(raw_name)
         port = int(service.get("listen_port") or 8080)
         dockerfile_path = str(service.get("dockerfile_path") or "dockers/Dockerfile")
+        context = str(service.get("context") or ".")
+        health_path = str(service.get("health_path") or "/health")
         image_env = f"APP_IMAGE_{safe_name.upper().replace('-', '_').replace('.', '_')}"
         lines.extend(
             [
                 f"  {safe_name}:",
                 "    build:",
-                "      context: .",
+                f"      context: {context}",
                 f"      dockerfile: {dockerfile_path}",
                 f"    image: ${{{image_env}:-{safe_name}:latest}}",
                 f"    container_name: {safe_name}",
@@ -154,7 +158,7 @@ def scaffold_docker_compose_services(
                 "      - NODE_ENV=production",
                 "    restart: unless-stopped",
                 "    healthcheck:",
-                f'      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:{port}/health"]',
+                f'      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:{port}{health_path}"]',
                 "      interval: 30s",
                 "      timeout: 5s",
                 "      retries: 3",
@@ -212,6 +216,24 @@ def scaffold_dependency_compose_blocks(
             ]
         )
     if (
+        dependencies.mariadb.enabled
+        and dependencies.mariadb.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        lines.extend(
+            [
+                "  mariadb:",
+                "    image: mariadb:11",
+                "    environment:",
+                "      MARIADB_ROOT_PASSWORD: changeme",
+                "      MARIADB_DATABASE: app",
+                "      MARIADB_USER: launchpad",
+                "      MARIADB_PASSWORD: changeme",
+                "    ports:",
+                "      - \"3307:3306\"",
+                "",
+            ]
+        )
+    if (
         dependencies.mongodb.enabled
         and dependencies.mongodb.placement == DependencyPlacement.IN_CLUSTER
     ):
@@ -249,6 +271,8 @@ _DEFAULT_LISTEN_PORTS: Final[dict[ProjectStack, int]] = {
     ProjectStack.NUXTJS: 3000,
     ProjectStack.VUEJS: 80,
     ProjectStack.SVELTE: 3000,
+    ProjectStack.ANGULAR: 80,
+    ProjectStack.DOTNET: 8080,
     ProjectStack.FASTAPI: 8000,
     ProjectStack.FLASK: 5000,
     ProjectStack.DJANGO: 8000,
@@ -494,6 +518,131 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT={port}
 {_common_footer(port=port)}CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "{port}"]
+# Image: {app_name}
+"""
+
+
+def _vue_dockerfile(app_name: str, port: int) -> str:
+    return f"""\
+# syntax=docker/dockerfile:1.7
+# Launchpad hardened multi-stage Vue SPA image (Caddy static server, non-root).
+
+FROM node:22-alpine AS build
+WORKDIR /src
+COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+RUN \\
+  if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
+  elif [ -f package-lock.json ]; then npm ci; \\
+  else npm install; fi
+COPY . .
+RUN npm run build || pnpm run build || yarn build
+
+FROM caddy:2.8-alpine AS runtime
+COPY --from=build /src/dist /usr/share/caddy
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
+  CMD wget -qO- http://127.0.0.1:80/ || exit 1
+CMD ["caddy", "file-server", "--root", "/usr/share/caddy", "--listen", ":80"]
+# Image: {app_name}
+"""
+
+
+def _svelte_dockerfile(app_name: str, port: int) -> str:
+    return f"""\
+# syntax=docker/dockerfile:1.7
+# Launchpad hardened multi-stage Svelte SPA image (BusyBox httpd, non-root).
+
+FROM node:22-alpine AS build
+WORKDIR /src
+COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+RUN \\
+  if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
+  elif [ -f package-lock.json ]; then npm ci; \\
+  else npm install; fi
+COPY . .
+RUN npm run build || pnpm run build || yarn build
+
+FROM busybox:1.36-uclibc AS runtime
+COPY --from=build /src/dist /www
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
+  CMD wget -qO- http://127.0.0.1:8080/ || exit 1
+CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]
+# Image: {app_name}
+"""
+
+
+def _angular_dockerfile(app_name: str, port: int) -> str:
+    return f"""\
+# syntax=docker/dockerfile:1.7
+# Launchpad hardened multi-stage Angular SPA image (non-root Nginx).
+
+FROM node:22-alpine AS build
+WORKDIR /src
+COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+RUN \\
+  if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
+  elif [ -f package-lock.json ]; then npm ci; \\
+  else npm install; fi
+COPY . .
+RUN npm run build
+
+FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+COPY --from=build --chown=101:101 /src/dist/*/browser /usr/share/nginx/html
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
+  CMD wget -qO- http://127.0.0.1:8080/ || exit 1
+# Image: {app_name}
+"""
+
+
+def _dotnet_dockerfile(app_name: str, port: int) -> str:
+    return f"""\
+# syntax=docker/dockerfile:1.7
+# Launchpad hardened multi-stage .NET image (non-root).
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY *.csproj ./
+RUN dotnet restore
+COPY . .
+RUN dotnet publish -c Release -o /app --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+WORKDIR /app
+COPY --from=build /app ./
+ENV ASPNETCORE_URLS=http://0.0.0.0:{port} PORT={port}
+USER 1654
+EXPOSE {port}
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+  CMD wget -qO- http://127.0.0.1:{port}/health || exit 1
+CMD ["dotnet", "app.dll"]
+# Image: {app_name}
+"""
+
+
+def _nuxt_dockerfile(app_name: str, port: int) -> str:
+    return f"""\
+# syntax=docker/dockerfile:1.7
+# Launchpad hardened multi-stage Nuxt SSR image (Node runtime, USER 10001).
+
+FROM node:22-alpine AS build
+WORKDIR /src
+COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+RUN \\
+  if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
+  elif [ -f package-lock.json ]; then npm ci; \\
+  else npm install; fi
+COPY . .
+RUN npm run build || pnpm run build || yarn build
+
+FROM node:22-alpine AS runtime
+WORKDIR /app
+RUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app \\
+  && apk add --no-cache ca-certificates wget
+COPY --from=build --chown=10001:10001 /src/.output ./.output
+ENV NODE_ENV=production HOST=0.0.0.0 PORT={port} NITRO_PORT={port} NITRO_HOST=0.0.0.0
+{_common_footer(port=port)}CMD ["node", ".output/server/index.mjs"]
 # Image: {app_name}
 """
 

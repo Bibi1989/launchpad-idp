@@ -28,6 +28,7 @@ PR_LINKED_ACTIVE_STATUSES = (
     EnvironmentStatus.FAILED,
     EnvironmentStatus.PROVISIONING,
     EnvironmentStatus.PAUSED,
+    EnvironmentStatus.EXPIRED,
 )
 
 ACTIVE_CONCURRENCY_STATUSES = (
@@ -255,6 +256,41 @@ class EnvironmentRepository:
         await self._session.flush()
         await self._session.refresh(environment)
         return environment
+
+    async def update_cost(
+        self,
+        environment: Environment,
+        *,
+        cost_accrued: Decimal,
+        cost_sampled_at: datetime,
+        cost_source: str | None,
+        cost_estimate_hourly: Decimal | None = None,
+    ) -> Environment:
+        environment.cost_accrued = cost_accrued
+        environment.cost_sampled_at = cost_sampled_at
+        environment.cost_source = cost_source
+        if cost_estimate_hourly is not None:
+            environment.cost_estimate_hourly = cost_estimate_hourly
+        await self._session.flush()
+        await self._session.refresh(environment)
+        return environment
+
+    async def list_billable_for_cost_metering(self) -> list[Environment]:
+        """Environments that still consume cluster capacity for cost sampling."""
+        result = await self._session.execute(
+            select(Environment)
+            .where(
+                Environment.status.in_(
+                    (
+                        EnvironmentStatus.RUNNING,
+                        EnvironmentStatus.PROVISIONING,
+                        EnvironmentStatus.FAILED,
+                    )
+                )
+            )
+            .order_by(Environment.created_at.asc())
+        )
+        return list(result.scalars().all())
 
     async def mark_rebuild(
         self,

@@ -62,10 +62,44 @@ def _pulumi_deps(cloud: CloudConfig) -> dict[str, str]:
     return deps
 
 
+def _pulumi_sanitize_helper() -> list[str]:
+    """TypeScript helpers for DNS-1123 / RFC 1035 resource names."""
+    return [
+        "function sanitizeDns1123(value: string, maxLen = 63, prefix = ''): string {",
+        "  let slug = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')"
+        ".replace(/-+/g, '-').replace(/^-|-$/g, '');",
+        "  if (!slug) slug = 'env';",
+        "  let candidate = prefix ? `${prefix.replace(/-$/, '')}-${slug}` "
+        ": (slug[0].match(/[a-z]/) ? slug : `lp-${slug}`);",
+        "  candidate = candidate.slice(0, maxLen).replace(/-$/, '');",
+        "  if (!candidate || !/^[a-z]/.test(candidate)) {",
+        "    candidate = `lp-${candidate}`.slice(0, maxLen).replace(/-$/, '');",
+        "  }",
+        "  return candidate || 'lp-env';",
+        "}",
+        "function envHash(value: string): string {",
+        "  let h = 0;",
+        "  for (let i = 0; i < value.length; i++) {",
+        "    h = ((h << 5) - h + value.charCodeAt(i)) | 0;",
+        "  }",
+        "  return Math.abs(h).toString(16).padStart(8, '0').slice(0, 8);",
+        "}",
+        "function cidrOctet(value: string): number {",
+        "  const h = envHash(value);",
+        "  return 16 + (parseInt(h.slice(0, 2), 16) % 224);",
+        "}",
+    ]
+
+
 def _pulumi_index(name: str, cloud: CloudConfig) -> str:
     tags_obj = (
         "{ EnvironmentId: environmentName, Owner: 'launchpad', "
         "CreatedBy: 'launchpad-control-plane', TTL_Expiration: ttlExpiration }"
+    )
+    gcp_labels_obj = (
+        "{ environment_id: environmentName, owner: 'launchpad', "
+        "created_by: 'launchpad-control-plane', "
+        "ttl_expiration: ttlExpiration.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') }"
     )
     env_name_lit = json.dumps(name)
 
@@ -78,57 +112,94 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             f"const environmentName = config.get('environmentName') ?? {env_name_lit};",
             "const ttlExpiration = config.get('ttlExpiration') ?? 'unset';",
             f"const region = {json.dumps(r.region)};",
+            * _pulumi_sanitize_helper(),
+            "const gkeName = sanitizeDns1123(environmentName, 40, 'gke');",
+            "const nodePoolName = sanitizeDns1123(environmentName, 40, 'np');",
+            "const name55 = sanitizeDns1123(environmentName, 55, 'lp');",
+            "const name63 = sanitizeDns1123(environmentName, 63, 'lp');",
+            "const bucketName = sanitizeDns1123("
+            "`${environmentName}-${envHash(environmentName)}`, 63, 'lp');",
+            "const octet = cidrOctet(environmentName);",
         ]
         if r.vpc:
             lines.append(
                 "const vpc = new gcp.compute.Network('lp-vpc', {"
                 " autoCreateSubnetworks: false,"
-                " name: `lp-${environmentName}-vpc`,"
-                f" labels: {tags_obj} }});"
+                " name: `${name55}-vpc` });"
             )
         if r.subnets and r.vpc:
-            lines.append(
-                "const subnet = new gcp.compute.Subnetwork('lp-subnet', {"
-                " name: `lp-${environmentName}-subnet`,"
-                " ipCidrRange: '10.10.0.0/20',"
-                " region,"
-                " network: vpc.id,"
-                f" labels: {tags_obj} }});"
-            )
+            if r.network_topology.value == "standard":
+                lines.append(
+                    "const publicSubnet = new gcp.compute.Subnetwork('lp-subnet-public', {"
+                    " name: `${name55}-public`,"
+                    " ipCidrRange: `10.${octet}.16.0/20`,"
+                    " region,"
+                    " network: vpc.id });"
+                )
+                lines.append(
+                    "const subnet = new gcp.compute.Subnetwork('lp-subnet-private', {"
+                    " name: `${name55}-private`,"
+                    " ipCidrRange: `10.${octet}.32.0/20`,"
+                    " region,"
+                    " network: vpc.id,"
+                    " privateIpGoogleAccess: true });"
+                )
+                lines.append(
+                    "const router = new gcp.compute.Router('lp-router', {"
+                    " name: `${name55}-router`, region, network: vpc.id });"
+                )
+                lines.append(
+                    "new gcp.compute.RouterNat('lp-nat', {"
+                    " name: `${name55}-nat`, router: router.name, region,"
+                    " natIpAllocateOption: 'AUTO_ONLY',"
+                    " sourceSubnetworkIpRangesToNat: 'LIST_OF_SUBNETWORKS',"
+                    " subnetworks: [{ name: subnet.id,"
+                    " sourceIpRangesToNats: ['ALL_IP_RANGES'] }] });"
+                )
+            else:
+                lines.append(
+                    "const subnet = new gcp.compute.Subnetwork('lp-subnet', {"
+                    " name: `${name55}-subnet`,"
+                    " ipCidrRange: `10.${octet}.0.0/20`,"
+                    " region,"
+                    " network: vpc.id });"
+                )
         if r.artifact_registry:
             lines.append(
                 "new gcp.artifactregistry.Repository('lp-ar', {"
                 " location: region,"
-                " repositoryId: `lp-${environmentName}`,"
+                " repositoryId: name63,"
                 " format: 'DOCKER',"
-                f" labels: {tags_obj} }});"
+                f" labels: {gcp_labels_obj} }});"
             )
         if r.gke:
             network_arg = "vpc.id" if r.vpc else "undefined"
             lines.append(
                 "const cluster = new gcp.container.Cluster('lp-gke', {"
-                " name: `lp-${environmentName}-gke`,"
+                " name: gkeName,"
                 " location: region,"
                 " removeDefaultNodePool: true,"
                 " initialNodeCount: 1,"
+                " deletionProtection: false,"
                 f" network: {network_arg},"
-                f" resourceLabels: {tags_obj} }});"
+                f" resourceLabels: {gcp_labels_obj} }});"
             )
             lines.append(
                 "new gcp.container.NodePool('lp-gke-primary', {"
-                " name: `lp-${environmentName}-primary`,"
+                " name: nodePoolName,"
                 " cluster: cluster.name,"
                 " location: region,"
                 " nodeCount: 2,"
-                " nodeConfig: { machineType: 'e2-standard-4', "
-                f"labels: {tags_obj} }} }});"
+                f" nodeConfig: {{ machineType: '{r.machine_type}', "
+                f"labels: {gcp_labels_obj} }} }},"
+                " { dependsOn: [cluster] });"
             )
         if r.secret_backend == SecretBackend.SECRET_MANAGER:
             lines.append(
                 "new gcp.secretmanager.Secret('lp-secrets', {"
-                " secretId: `lp-${environmentName}-secrets`,"
+                " secretId: `${name55}-secrets`,"
                 " replication: { auto: {} },"
-                f" labels: {tags_obj} }});"
+                f" labels: {gcp_labels_obj} }});"
             )
         else:
             lines.append(
@@ -136,31 +207,32 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             )
             lines.append(
                 "new k8s.core.v1.Secret('lp-secrets', {"
-                " metadata: { name: `lp-${environmentName}-secrets`, "
+                " metadata: { name: `${name55}-secrets`, "
                 f"labels: {tags_obj} }},"
                 " type: 'Opaque' });"
             )
         if r.cloud_run:
             lines.append(
                 "new gcp.cloudrunv2.Service('lp-run', {"
-                " name: `lp-${environmentName}-run`,"
+                " name: `${name55}-run`,"
                 " location: region,"
                 " template: { containers: [{ image: "
                 "'us-docker.pkg.dev/cloudrun/container/hello' }] },"
-                f" labels: {tags_obj} }});"
+                f" labels: {gcp_labels_obj} }});"
             )
         if r.cloud_functions:
             lines.append(
                 "new gcp.cloudfunctionsv2.Function('lp-fn', {"
-                " name: `lp-${environmentName}-fn`,"
+                " name: `${name55}-fn`,"
                 " location: region,"
                 " buildConfig: { runtime: 'nodejs20', entryPoint: 'handler', "
                 "source: { storageSource: { bucket: "
-                "`lp-${environmentName}-fn-source`, object: 'function-source.zip' } } },"
+                "`${bucketName}-fn`, object: 'function-source.zip' } } },"
                 " serviceConfig: { maxInstanceCount: 3, availableMemory: '256M' },"
-                f" labels: {tags_obj} }});"
+                f" labels: {gcp_labels_obj} }});"
             )
         lines.append("export const environment = environmentName;")
+        lines.append("export const gkeClusterName = gkeName;")
         return "\n".join(lines) + "\n"
 
     if isinstance(cloud, AwsCloudConfig):
@@ -172,13 +244,19 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             f"const environmentName = config.get('environmentName') ?? {env_name_lit};",
             "const ttlExpiration = config.get('ttlExpiration') ?? 'unset';",
             f"const region = {json.dumps(r.region)};",
+            * _pulumi_sanitize_helper(),
+            "const name55 = sanitizeDns1123(environmentName, 55, 'lp');",
+            "const name63 = sanitizeDns1123(environmentName, 63, 'lp');",
+            "const bucketName = sanitizeDns1123("
+            "`${environmentName}-${envHash(environmentName)}`, 63, 'lp');",
+            "const octet = cidrOctet(environmentName);",
         ]
         if r.vpc:
             lines.append(
                 "const vpc = new aws.ec2.Vpc('lp-vpc', {"
-                " cidrBlock: '10.20.0.0/16',"
+                " cidrBlock: `10.${octet}.0.0/16`,"
                 " enableDnsHostnames: true,"
-                " tags: { Name: `lp-${environmentName}-vpc`, "
+                " tags: { Name: `${name55}-vpc`, "
                 "EnvironmentId: environmentName, Owner: 'launchpad', "
                 "CreatedBy: 'launchpad-control-plane', TTL_Expiration: ttlExpiration } });"
             )
@@ -186,17 +264,17 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             lines.append(
                 "const publicSubnet = new aws.ec2.Subnet('lp-subnet-public', {"
                 " vpcId: vpc.id,"
-                " cidrBlock: '10.20.1.0/24',"
+                " cidrBlock: `10.${octet}.1.0/24`,"
                 " mapPublicIpOnLaunch: true,"
-                " tags: { Name: `lp-${environmentName}-public`, "
+                " tags: { Name: `${name55}-public`, "
                 "EnvironmentId: environmentName, Owner: 'launchpad', "
                 "CreatedBy: 'launchpad-control-plane', TTL_Expiration: ttlExpiration } });"
             )
             lines.append(
                 "const privateSubnet = new aws.ec2.Subnet('lp-subnet-private', {"
                 " vpcId: vpc.id,"
-                " cidrBlock: '10.20.2.0/24',"
-                " tags: { Name: `lp-${environmentName}-private`, "
+                " cidrBlock: `10.${octet}.2.0/24`,"
+                " tags: { Name: `${name55}-private`, "
                 "EnvironmentId: environmentName, Owner: 'launchpad', "
                 "CreatedBy: 'launchpad-control-plane', TTL_Expiration: ttlExpiration } });"
             )
@@ -210,13 +288,14 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             lines.append(
                 "new aws.ec2.Instance('lp-ec2', {"
                 " ami: ami.id,"
-                " instanceType: 't3.medium',"
+                f" instanceType: '{r.instance_type}',"
                 f" tags: {tags_obj} }});"
             )
         if r.s3:
             lines.append(
                 "new aws.s3.Bucket('lp-data', {"
-                " bucket: `lp-${environmentName}-data`,"
+                " bucket: bucketName,"
+                " forceDestroy: true,"
                 f" tags: {tags_obj} }});"
             )
         if r.eks:
@@ -229,14 +308,15 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             )
             lines.append(
                 "new aws.eks.Cluster('lp-eks', {"
-                " name: `lp-${environmentName}-eks`,"
+                " name: `${name55}-eks`,"
                 " roleArn: eksRole.arn,"
-                f" tags: {tags_obj} }});"
+                f" tags: {tags_obj} }},"
+                " { dependsOn: [eksRole] });"
             )
         if r.secrets_manager:
             lines.append(
                 "new aws.secretsmanager.Secret('lp-secrets', {"
-                " name: `lp-${environmentName}-secrets`,"
+                " name: `${name55}-secrets`,"
                 f" tags: {tags_obj} }});"
             )
         lines.append("export const environment = environmentName;")
@@ -252,6 +332,10 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             "const ttlExpiration = config.get('ttlExpiration') ?? 'unset';",
             f"const location = {json.dumps(r.location)};",
             f"const resourceGroupName = {json.dumps(r.resource_group)};",
+            * _pulumi_sanitize_helper(),
+            "const name63 = sanitizeDns1123(environmentName, 63, 'lp');",
+            "const name40 = sanitizeDns1123(environmentName, 40, 'lp');",
+            "const octet = cidrOctet(environmentName);",
             (
                 "const rg = new azure.resources.ResourceGroup('lp-rg', {"
                 " resourceGroupName, location,"
@@ -263,7 +347,7 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 "const vnet = new azure.network.VirtualNetwork('lp-vnet', {"
                 " resourceGroupName: rg.name,"
                 " location,"
-                " addressSpace: { addressPrefixes: ['10.30.0.0/16'] },"
+                " addressSpace: { addressPrefixes: [`10.${octet}.0.0/16`] },"
                 f" tags: {tags_obj} }});"
             )
         if r.subnets and r.vnet:
@@ -271,16 +355,16 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 "new azure.network.Subnet('lp-subnet', {"
                 " resourceGroupName: rg.name,"
                 " virtualNetworkName: vnet.name,"
-                " addressPrefix: '10.30.1.0/24' });"
+                " addressPrefix: `10.${octet}.1.0/24` });"
             )
         if r.aks:
             lines.append(
                 "new azure.containerservice.ManagedCluster('lp-aks', {"
                 " resourceGroupName: rg.name,"
                 " location,"
-                " dnsPrefix: `lp-${environmentName}`,"
+                " dnsPrefix: name40,"
                 " agentPoolProfiles: [{ name: 'default', count: 2, "
-                "vmSize: 'Standard_D2_v2', mode: 'System' }],"
+                f"vmSize: '{r.vm_size}', mode: 'System' }}],"
                 " identity: { type: 'SystemAssigned' },"
                 f" tags: {tags_obj} }});"
             )
@@ -358,6 +442,38 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _is_multi_stack_workspace(request: ProvisioningWizardRequest) -> bool:
+    """True when the workspace hosts >1 stack (explicit services or multi-framework).
+
+    These produce per-stack ``launch-*`` manifests, so the generic single-app
+    nginx Deployment/Service/Ingress must not be emitted.
+    """
+    cfg = request.container_scaffold
+    if not cfg.enabled:
+        return False
+    if cfg.services:
+        return True
+    from app.services.dockerfile_scaffold import resolve_scaffold_stacks
+
+    return len(resolve_scaffold_stacks(stack=cfg.stack, frameworks=cfg.frameworks)) > 1
+
+
+def _manifest_options_for(request: ProvisioningWizardRequest) -> "KubernetesWorkloadOptions":
+    """Kubernetes options to pass to the generic layout writer.
+
+    When the workspace hosts explicit multi-stack services OR a multi-framework
+    (fullstack) selection, the generic single-app Deployment/Service/Ingress
+    (nginx fallback) must NOT be emitted — the per-stack ``launch-*`` manifests +
+    multi-service Ingress replace them.
+    """
+    opts = request.kubernetes_options
+    if _is_multi_stack_workspace(request):
+        opts = opts.model_copy(
+            update={"deployment": False, "service": False, "ingress": False}
+        )
+    return opts
+
+
 class IaCGenerator:
     """Renders and manages ephemeral Terraform/Pulumi workspaces on disk."""
 
@@ -404,8 +520,7 @@ class IaCGenerator:
     ) -> list[str]:
         """Rewrite IaC under an existing workspace directory from an updated wizard request."""
         root = workspace_dir.resolve()
-        if not root.is_dir():
-            raise FileNotFoundError(f"IaC workspace '{workspace_dir}' does not exist")
+        root.mkdir(parents=True, exist_ok=True)
 
         # Clear prior generated layouts so deselected resources do not leave orphans.
         for relative in ("infra", "dockers"):
@@ -465,15 +580,18 @@ class IaCGenerator:
             WorkspaceArtifactsMode.MANIFEST_ONLY,
             WorkspaceArtifactsMode.BOTH,
         } and request.kubernetes_packaging != KubernetesPackaging.NONE:
+            from app.services.app_scaffold import workload_image_spec_for_request
+
             files.extend(
                 write_kubernetes_layout(
                     workspace_dir,
                     name=request.name,
                     packaging=request.kubernetes_packaging,
-                    options=request.kubernetes_options,
+                    options=_manifest_options_for(request),
                     cost_optimization=request.cost_optimization,
                     dependencies=request.dependencies,
                     cloud=request.cloud,
+                    workload=workload_image_spec_for_request(request),
                 )
             )
         if request.dependencies.any_enabled():
@@ -490,11 +608,133 @@ class IaCGenerator:
 
         return files
 
+    def _write_script(self, workspace_dir: Path, relative: str, content: str) -> None:
+        """Write an executable helper script (chmod 0755)."""
+        path = workspace_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        try:
+            path.chmod(0o755)
+        except OSError:  # pragma: no cover - non-POSIX filesystems
+            pass
+
+    def _write_core_app_scaffold(
+        self,
+        workspace_dir: Path,
+        request: ProvisioningWizardRequest,
+        scaffold: "object",
+    ) -> list[str]:
+        """Write a runnable mini-application (source, Dockerfile, scripts, README)."""
+        from app.schemas.cloud import LocalCloudConfig
+        from app.services.dockerfile_scaffold import (
+            scaffold_dependency_compose_blocks,
+            scaffold_docker_compose_services,
+        )
+        from app.services.k8s_bundle import _namespace_name
+
+        written: list[str] = []
+        for relative, content in scaffold.files().items():  # type: ignore[attr-defined]
+            path = workspace_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            written.append(relative)
+
+        build_rel, build_content = scaffold.build_script()  # type: ignore[attr-defined]
+        self._write_script(workspace_dir, build_rel, build_content)
+        written.append(build_rel)
+
+        if isinstance(request.cloud, LocalCloudConfig):
+            cluster = request.cloud.resources.cluster_name
+            namespace = _namespace_name(request.name)
+            for rel, content in scaffold.kind_scripts(  # type: ignore[attr-defined]
+                cluster_name=cluster, namespace=namespace
+            ).items():
+                self._write_script(workspace_dir, rel, content)
+                written.append(rel)
+
+        if request.container_scaffold.generate_docker_compose:
+            port = scaffold.image_spec().container_port  # type: ignore[attr-defined]
+            health_path = "/healthz" if scaffold.is_frontend else "/health"  # type: ignore[attr-defined]
+            dc_content = scaffold_docker_compose_services(
+                [
+                    {
+                        "name": scaffold.app_name,  # type: ignore[attr-defined]
+                        "listen_port": port,
+                        "dockerfile_path": "Dockerfile",
+                        "context": scaffold.app_dir,  # type: ignore[attr-defined]
+                        "health_path": health_path,
+                    }
+                ],
+                dependency_blocks=scaffold_dependency_compose_blocks(request.dependencies),
+            )
+            (workspace_dir / "docker-compose.yml").write_text(dc_content, encoding="utf-8")
+            written.append("docker-compose.yml")
+
+        return written
+
+    @staticmethod
+    def _sanitize_service_name(name: str) -> str:
+        from app.services.app_scaffold import _sanitize_name
+
+        return _sanitize_name(name)
+
+    def _emit_launch_manifests(
+        self,
+        workspace_dir: Path,
+        request: ProvisioningWizardRequest,
+        workload_specs: list[dict[str, object]],
+        written: list[str],
+    ) -> None:
+        """Write per-stack launch-* Deployment/Service manifests + routing Ingress,
+        and prune the generic nginx deployment.yaml/service.yaml fallback."""
+        from app.services.k8s_bundle import (
+            additional_workload_manifests,
+            build_multi_service_ingress,
+            prune_orphan_default_manifests,
+        )
+
+        # Point each frontend's API_URL at the first backend Service so its SSR
+        # dashboard can show the backend's live database/Redis connection status.
+        backend = next((w for w in workload_specs if not w.get("_is_frontend")), None)
+        if backend is not None:
+            api_url = f"http://{backend['name']}-service:{backend['port']}"
+            for w in workload_specs:
+                if w.get("_is_frontend"):
+                    extra = dict(w.get("extra_env") or {})
+                    extra.update({
+                        "API_URL": api_url,
+                        "BACKEND_URL": api_url,
+                        "NEXT_PUBLIC_API_URL": api_url,
+                    })
+                    w["extra_env"] = extra
+
+        written.extend(
+            additional_workload_manifests(
+                workspace_dir,
+                env_name=request.name,
+                services=workload_specs,
+                dependencies=request.dependencies,
+            )
+        )
+        ingress_yaml = build_multi_service_ingress(
+            env_name=request.name,
+            services=workload_specs,
+            ingress_class=request.kubernetes_options.ingress_class,
+        )
+        ingress_rel = "infra/k8s/manifests/ingress.yaml"
+        (workspace_dir / ingress_rel).write_text(ingress_yaml, encoding="utf-8")
+        if ingress_rel not in written:
+            written.append(ingress_rel)
+        removed = prune_orphan_default_manifests(workspace_dir)
+        if removed:
+            written[:] = [w for w in written if w not in removed]
+
     def _write_container_scaffold(
         self,
         workspace_dir: Path,
         request: ProvisioningWizardRequest,
     ) -> list[str]:
+        from app.services.app_scaffold import resolve_core_scaffold
         from app.services.dockerfile_scaffold import (
             default_listen_port_for_stack,
             dockerfile_path_for_service,
@@ -503,44 +743,211 @@ class IaCGenerator:
             scaffold_dockerfile,
         )
 
+        core = resolve_core_scaffold(request)
+        if core is not None:
+            return self._write_core_app_scaffold(workspace_dir, request, core)
+
         written: list[str] = []
         c_cfg = request.container_scaffold
-        stacks = resolve_scaffold_stacks(stack=c_cfg.stack, frameworks=c_cfg.frameworks)
-        multi = len(stacks) > 1 or bool(c_cfg.frameworks)
         app_name = c_cfg.app_name or request.name
         compose_services: list[dict[str, object]] = []
 
-        for stack in stacks:
-            port = (
-                default_listen_port_for_stack(stack, c_cfg.listen_port or 8080)
-                if multi
-                else (c_cfg.listen_port or default_listen_port_for_stack(stack, 8080))
+        if c_cfg.services:
+            from app.schemas.dockerfile_schema import ProjectStack
+            from app.services.app_scaffold import (
+                _SSR_FRONTEND_STACKS,
+                _STATIC_FRONTEND_STACKS,
+                CoreScaffold,
+                _sanitize_name,
+                is_core_stack,
+                resolve_app_port,
             )
-            service_name = f"{app_name}-{stack.value}" if multi else app_name
-            rel_dockerfile = dockerfile_path_for_service(
-                app_name,
-                stack if multi else None,
-                multi=multi,
+            from app.services.k8s_bundle import (
+                additional_workload_manifests,
+                build_multi_service_ingress,
+                prune_orphan_default_manifests,
             )
-            df_path = workspace_dir / rel_dockerfile
 
-            if c_cfg.generate_dockerfile:
-                df_content = scaffold_dockerfile(
-                    stack,
-                    app_name=service_name,
-                    listen_port=port,
+            frontend_stacks = _STATIC_FRONTEND_STACKS | _SSR_FRONTEND_STACKS
+            emit_manifests = request.kubernetes_packaging != KubernetesPackaging.NONE
+            workload_specs: list[dict[str, object]] = []
+
+            for s_spec in c_cfg.services:
+                raw_stack = str(s_spec.stack or "node").lower()
+                try:
+                    stack = ProjectStack(raw_stack)
+                except ValueError:
+                    stack = ProjectStack.NODE
+                app_slug = _sanitize_name(s_spec.name or f"{app_name}-{raw_stack}")
+                # Kubernetes resource name is prefixed launch-<name> so preview
+                # workloads are self-documenting and never clash with the generic
+                # single-app "app" workload.
+                wl_name = app_slug if app_slug.startswith("launch-") else f"launch-{app_slug}"
+                selector = s_spec.selector or app_slug
+                service_type = s_spec.service_type.value
+                is_frontend = stack in frontend_stacks
+                # Auto-expose the frontend/web stack; explicit flag always wins.
+                expose_preview = (
+                    s_spec.expose_preview if s_spec.expose_preview is not None else is_frontend
                 )
-                df_path.parent.mkdir(parents=True, exist_ok=True)
-                df_path.write_text(df_content, encoding="utf-8")
-                written.append(rel_dockerfile)
 
-            compose_services.append(
-                {
-                    "name": service_name,
-                    "listen_port": port,
-                    "dockerfile_path": rel_dockerfile,
-                }
-            )
+                if is_core_stack(stack):
+                    # Generate a real runnable app under apps/<slug>/ built as <slug>:latest.
+                    port = resolve_app_port(stack, s_spec.listen_port)
+                    scaffold = CoreScaffold(
+                        stack=stack,
+                        app_name=app_slug,
+                        port=port,
+                        dependencies=request.dependencies,
+                    )
+                    for rel, content in scaffold.files().items():
+                        path = workspace_dir / rel
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(content, encoding="utf-8")
+                        written.append(rel)
+                    img_spec = scaffold.image_spec()
+                    image = scaffold.image
+                    port = img_spec.container_port
+                    health_path = img_spec.liveness_path
+                    run_as_user = img_spec.run_as_user
+                    compose_services.append(
+                        {
+                            "name": app_slug,
+                            "listen_port": port,
+                            "dockerfile_path": "Dockerfile",
+                            "context": scaffold.app_dir,
+                            "health_path": health_path,
+                        }
+                    )
+                else:
+                    # Non-core stack: legacy Dockerfile + pullable placeholder image.
+                    port = s_spec.listen_port or default_listen_port_for_stack(stack, 8080)
+                    rel_dockerfile = s_spec.dockerfile_path or f"dockers/{app_slug}/Dockerfile"
+                    if c_cfg.generate_dockerfile:
+                        df_path = workspace_dir / rel_dockerfile
+                        df_path.parent.mkdir(parents=True, exist_ok=True)
+                        df_path.write_text(
+                            scaffold_dockerfile(stack, app_name=app_slug, listen_port=port),
+                            encoding="utf-8",
+                        )
+                        written.append(rel_dockerfile)
+                    image = "nginx:1.27-alpine"
+                    health_path = "/"
+                    run_as_user = 101
+                    compose_services.append(
+                        {
+                            "name": app_slug,
+                            "listen_port": port,
+                            "dockerfile_path": rel_dockerfile,
+                        }
+                    )
+
+                workload_specs.append(
+                    {
+                        "name": wl_name,
+                        "image": image,
+                        "port": port,
+                        "service_type": service_type,
+                        "selector": selector,
+                        "health_path": health_path,
+                        "run_as_user": run_as_user,
+                        "expose_preview": expose_preview,
+                        "_is_frontend": is_frontend,
+                    }
+                )
+
+            if emit_manifests and workload_specs:
+                self._emit_launch_manifests(workspace_dir, request, workload_specs, written)
+        else:
+            stacks = resolve_scaffold_stacks(stack=c_cfg.stack, frameworks=c_cfg.frameworks)
+            multi = len(stacks) > 1
+
+            if multi:
+                # Multi-framework (fullstack) workspace: scaffold a real app per
+                # stack and emit per-stack launch-* manifests + Ingress instead of
+                # the generic nginx Deployment (which was the "shows nginx" bug for
+                # catalog fullstack templates).
+                from app.services.app_scaffold import (
+                    _SSR_FRONTEND_STACKS,
+                    _STATIC_FRONTEND_STACKS,
+                    CoreScaffold,
+                    is_core_stack,
+                    resolve_app_port,
+                )
+
+                frontend_stacks = _STATIC_FRONTEND_STACKS | _SSR_FRONTEND_STACKS
+                emit_manifests = request.kubernetes_packaging != KubernetesPackaging.NONE
+                workload_specs = []
+                for stack in stacks:
+                    # DNS-1123 safe slug (react_vite -> react-vite) for k8s names.
+                    stack_slug = self._sanitize_service_name(stack.value)
+                    app_slug = self._sanitize_service_name(f"{app_name}-{stack.value}")
+                    wl_name = f"launch-{stack_slug}"
+                    is_frontend = stack in frontend_stacks
+                    if is_core_stack(stack):
+                        port = resolve_app_port(stack, c_cfg.listen_port)
+                        scaffold = CoreScaffold(
+                            stack=stack,
+                            app_name=app_slug,
+                            port=port,
+                            dependencies=request.dependencies,
+                        )
+                        for rel, content in scaffold.files().items():
+                            path = workspace_dir / rel
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_text(content, encoding="utf-8")
+                            written.append(rel)
+                        img_spec = scaffold.image_spec()
+                        image = scaffold.image
+                        port = img_spec.container_port
+                        health_path = img_spec.liveness_path
+                        run_as_user = img_spec.run_as_user
+                        compose_services.append(
+                            {"name": app_slug, "listen_port": port,
+                             "dockerfile_path": "Dockerfile", "context": scaffold.app_dir,
+                             "health_path": health_path}
+                        )
+                    else:
+                        port = default_listen_port_for_stack(stack, 8080)
+                        rel_dockerfile = f"dockers/{stack.value}/Dockerfile"
+                        if c_cfg.generate_dockerfile:
+                            df_path = workspace_dir / rel_dockerfile
+                            df_path.parent.mkdir(parents=True, exist_ok=True)
+                            df_path.write_text(
+                                scaffold_dockerfile(stack, app_name=app_slug, listen_port=port),
+                                encoding="utf-8",
+                            )
+                            written.append(rel_dockerfile)
+                        image = "nginx:1.27-alpine"
+                        health_path = "/"
+                        run_as_user = 101
+                        compose_services.append(
+                            {"name": app_slug, "listen_port": port, "dockerfile_path": rel_dockerfile}
+                        )
+                    workload_specs.append(
+                        {"name": wl_name, "image": image, "port": port,
+                         "service_type": "ClusterIP", "selector": stack_slug,
+                         "health_path": health_path, "run_as_user": run_as_user,
+                         "expose_preview": is_frontend, "_is_frontend": is_frontend}
+                    )
+                if emit_manifests and workload_specs:
+                    self._emit_launch_manifests(workspace_dir, request, workload_specs, written)
+            else:
+                stack = stacks[0]
+                port = c_cfg.listen_port or default_listen_port_for_stack(stack, 8080)
+                service_name = app_name
+                rel_dockerfile = f"dockers/{app_name}/Dockerfile"
+                if c_cfg.generate_dockerfile:
+                    df_path = workspace_dir / rel_dockerfile
+                    df_path.parent.mkdir(parents=True, exist_ok=True)
+                    df_path.write_text(
+                        scaffold_dockerfile(stack, app_name=service_name, listen_port=port),
+                        encoding="utf-8",
+                    )
+                    written.append(rel_dockerfile)
+                compose_services.append(
+                    {"name": service_name, "listen_port": port, "dockerfile_path": rel_dockerfile}
+                )
 
         if c_cfg.generate_docker_compose:
             from app.services.dockerfile_scaffold import scaffold_dependency_compose_blocks
@@ -610,6 +1017,8 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
             encoding="utf-8",
         )
 
+        from app.services.app_scaffold import workload_image_spec_for_request
+
         files = [
             "README.md",
             "infra/kind/README.md",
@@ -617,10 +1026,11 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
                 workspace_dir,
                 name=request.name,
                 packaging=packaging,
-                options=request.kubernetes_options,
+                options=_manifest_options_for(request),
                 cost_optimization=request.cost_optimization,
                 dependencies=request.dependencies,
                 cloud=request.cloud,
+                workload=workload_image_spec_for_request(request),
             ),
         ]
         if request.container_scaffold.enabled:
@@ -717,15 +1127,27 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
         or transmit externally.
         """
         workspace_dir = self.get_workspace(workspace_ref)
+        root = workspace_dir.resolve()
         files: dict[str, str] = {}
         for path in sorted(workspace_dir.rglob("*")):
             if not path.is_file():
+                continue
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved != root and root not in resolved.parents:
+                logger.warning(
+                    "iac_bundle_file_skipped_escape",
+                    workspace_ref=workspace_ref,
+                    path=str(path),
+                )
                 continue
             relative = path.relative_to(workspace_dir)
             if is_denied_workspace_path(relative):
                 continue
             try:
-                files[str(relative)] = path.read_text(encoding="utf-8")
+                files[str(relative).replace("\\", "/")] = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 logger.warning(
                     "iac_bundle_file_skipped_binary",

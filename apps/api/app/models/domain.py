@@ -29,6 +29,7 @@ class EnvironmentStatus(str, enum.Enum):
     PROVISIONING = "PROVISIONING"
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
+    EXPIRED = "EXPIRED"
     TEARDOWN_PENDING = "TEARDOWN_PENDING"
     DESTROYED = "DESTROYED"
     FAILED = "FAILED"
@@ -290,6 +291,17 @@ class Environment(Base):
     enable_redis: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ttl_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     cost_estimate_hourly: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    cost_accrued: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4),
+        nullable=False,
+        default=Decimal("0.0000"),
+        server_default="0",
+    )
+    cost_sampled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    cost_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -497,7 +509,7 @@ class CatalogService(Base):
     )
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("provisioning_workspaces.id", ondelete="SET NULL"),
+        ForeignKey("provisioning_workspaces.id", ondelete="CASCADE"),
         nullable=True,
     )
     name: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -22,11 +22,11 @@ const providerBadgeClass = computed(() => {
 })
 
 const providerLabel = computed(() => {
-  const p = props.context?.provider?.toUpperCase() || 'KIND'
+  const p = props.context?.provider?.toUpperCase() || 'LOCAL'
   if (p === 'GCP') return 'GCP (GKE)'
   if (p === 'AWS') return 'AWS (EKS)'
   if (p === 'AZURE') return 'Azure (AKS)'
-  return 'Local Kind Cluster'
+  return 'Local (Sandbox)'
 })
 </script>
 

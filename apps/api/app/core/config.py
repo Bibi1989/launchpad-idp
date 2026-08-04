@@ -4,7 +4,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     ttl_warning_hours: int = 2
     ttl_max_total_hours_from_create: int = 168
 
+    # Usage-based cost metering (ResourceQuota / pod requests × rate card)
+    cost_metering_enabled: bool = True
+    cost_sample_interval_seconds: float = 300.0
+    # Rough public-cloud shadow rates ($/hour). Local soft-cap still skips local envs.
+    cost_rate_cpu_core_hour: Decimal = Decimal("0.0310")
+    cost_rate_memory_gib_hour: Decimal = Decimal("0.0042")
+    cost_rate_postgres_hour: Decimal = Decimal("0.0800")
+    cost_rate_redis_hour: Decimal = Decimal("0.0400")
+
     # Preview drift scanner (live K8s vs control-plane expectations)
     drift_scan_enabled: bool = True
     drift_scan_interval_seconds: float = 600.0
@@ -51,10 +60,14 @@ class Settings(BaseSettings):
     kubernetes_in_cluster: bool = False
     kubernetes_kubeconfig_path: str | None = None
     kubernetes_context: str | None = None
-    kubernetes_cpu_request: str = "500m"
-    kubernetes_cpu_limit: str = "2"
-    kubernetes_memory_request: str = "512Mi"
-    kubernetes_memory_limit: str = "4Gi"
+    # Preview namespace ResourceQuota (total across the app + its in-cluster
+    # datastores). Sized so a workload plus postgres/redis/mysql/mongodb fits;
+    # the old 512Mi memory cap rejected datastore pods ("exceeded quota"), which
+    # left the app stuck in PodInitializing on its wait-for-db init container.
+    kubernetes_cpu_request: str = "2"
+    kubernetes_cpu_limit: str = "4"
+    kubernetes_memory_request: str = "2Gi"
+    kubernetes_memory_limit: str = "8Gi"
     kubernetes_pod_limit: str = "20"
     kubernetes_ready_timeout_seconds: float = 120.0
     kubernetes_ready_poll_seconds: float = 2.0
@@ -147,7 +160,11 @@ class Settings(BaseSettings):
     preview_build_kind_load: bool = True
     preview_build_timeout_seconds: float = 900.0
 
-    # Auto-manage kind for Dev (kind) / Launch → Local (runs scripts/kind-up|down.sh)
+    # Local K8s cluster engine: "k3s" (default, via k3d) or "kind".
+    # Override with LOCAL_K8S_ENGINE=kind to use Kubernetes-in-Docker instead.
+    local_k8s_engine: str = "k3s"
+
+    # Auto-manage local cluster for Dev / Launch → Local (runs scripts/kind-up|down.sh or k3s up)
     kind_auto_manage: bool = True
     kind_cluster_name: str = "launchpad"
     # Optional absolute path to the directory that contains kind-up.sh / kind-down.sh
@@ -164,17 +181,64 @@ class Settings(BaseSettings):
 
     # When kubernetes_enabled, Open Preview uses NodePort on this host.
     # Keep the range small (≤10 ports) — large maps often break kind on Docker Desktop.
-    preview_node_host: str = "127.0.0.1"
+    preview_node_host: str | None = None
     preview_node_port_min: int = 30080
     preview_node_port_max: int = 30089
 
     # Optional Ingress host template when kubernetes_enabled (e.g. "{name}.localtest.me")
     preview_ingress_host_template: str | None = None
 
+    # Per-preview cloudflared quick tunnels so "Open app" works remotely, not just on
+    # 127.0.0.1. "off" (default) keeps the NodePort URL + client-side host detection;
+    # "cloudflared" starts a `cloudflared tunnel --url` quick tunnel per local preview
+    # and uses its https://<random>.trycloudflare.com URL. No Cloudflare account needed.
+    preview_tunnel_mode: str = "off"
+    cloudflared_bin: str = "cloudflared"
+    preview_tunnel_timeout_seconds: float = 30.0
+    # Where the tunnel registry (pid/url per preview) is persisted; default ~/.launchpad
+    preview_tunnel_state_dir: str | None = None
+
+    # Cloud/production previews: how long to wait for a LoadBalancer/Ingress to get a
+    # public address before falling back to the default preview URL.
+    preview_cloud_url_timeout_seconds: float = 120.0
+
     # Launch Preview Analyzer (Gemini structured diagnostics)
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
     preview_analyzer_heuristic_fallback: bool = True
+
+    @property
+    def local_cluster_tool(self) -> str:
+        """CLI that manages the local cluster for the active engine (k3d or kind)."""
+        return "k3d" if self.local_k8s_engine == "k3s" else "kind"
+
+    @property
+    def local_cluster_context(self) -> str:
+        """kube-context the active local engine creates for ``kind_cluster_name``.
+
+        Both k3d and kind derive a stable ``<tool>-<name>`` context, so switching
+        ``LOCAL_K8S_ENGINE`` is enough to re-point every consumer.
+        """
+        prefix = "k3d" if self.local_k8s_engine == "k3s" else "kind"
+        return f"{prefix}-{self.kind_cluster_name}"
+
+    @property
+    def resolved_kubernetes_context(self) -> str | None:
+        ctx = self.kubernetes_context
+        if ctx:
+            # A context that still names the *other* engine's local cluster (or the
+            # bare "k3s" sentinel) follows the active engine instead, so one env
+            # var — LOCAL_K8S_ENGINE — flips both the runtime and its context.
+            engine_local = {
+                f"kind-{self.kind_cluster_name}",
+                f"k3d-{self.kind_cluster_name}",
+                "k3s",
+                "kind",
+            }
+            if ctx in engine_local:
+                return self.local_cluster_context
+            return ctx
+        return self.local_cluster_context
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -203,6 +267,7 @@ class Settings(BaseSettings):
         "kubernetes_context",
         "preview_ingress_host_template",
         "kind_scripts_dir",
+        "preview_tunnel_state_dir",
         "smtp_host",
         "smtp_username",
         "smtp_password",
@@ -219,6 +284,26 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("local_k8s_engine", mode="before")
+    @classmethod
+    def normalize_local_k8s_engine(cls, value: object) -> str:
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if val in ("k3s", "k3d"):
+                return "k3s"
+            if val in ("kind", "local"):
+                return "kind"
+        return "k3s"
+
+    @field_validator("preview_tunnel_mode", mode="before")
+    @classmethod
+    def normalize_preview_tunnel_mode(cls, value: object) -> str:
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if val in ("cloudflared", "cloudflare", "cf", "quick", "trycloudflare"):
+                return "cloudflared"
+        return "off"
 
     @field_validator("oidc_group_role_map", mode="before")
     @classmethod
@@ -237,6 +322,20 @@ class Settings(BaseSettings):
                 raise ValueError("OIDC_GROUP_ROLE_MAP must be a JSON object")
             return {str(k): str(v) for k, v in parsed.items()}
         return value
+
+    @model_validator(mode="after")
+    def _compute_preview_node_host(self) -> "Settings":
+        if self.preview_node_host is None:
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(self.preview_public_base_url)
+                if parsed.hostname:
+                    self.preview_node_host = parsed.hostname
+                else:
+                    self.preview_node_host = "127.0.0.1"
+            except Exception:
+                self.preview_node_host = "127.0.0.1"
+        return self
 
 
 @lru_cache

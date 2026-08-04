@@ -206,7 +206,7 @@ export function buildKubernetesScaffold(mode: K8sScaffoldMode): ScaffoldTarget[]
           '    spec:',
           '      containers:',
           '        - name: app',
-          '          image: nginx:1.27-alpine',
+          '          image: app:latest',
           '          ports:',
           '            - containerPort: 80',
           '',
@@ -268,7 +268,7 @@ export function buildKubernetesScaffold(mode: K8sScaffoldMode): ScaffoldTarget[]
           '    spec:',
           '      containers:',
           '        - name: app',
-          '          image: nginx:1.27-alpine',
+          '          image: app:latest',
           '          ports:',
           '            - containerPort: 80',
           '',
@@ -300,7 +300,7 @@ export function buildKubernetesScaffold(mode: K8sScaffoldMode): ScaffoldTarget[]
     },
     {
       path: 'infra/helm/app-chart/values.yaml',
-      content: ['replicaCount: 1', 'image:', '  repository: nginx', '  tag: "1.27-alpine"', ''].join('\n'),
+      content: ['replicaCount: 1', 'image:', '  repository: app', '  tag: "latest"', ''].join('\n'),
     },
     {
       path: 'infra/helm/app-chart/templates/deployment.yaml',

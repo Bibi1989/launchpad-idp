@@ -309,7 +309,7 @@ async def test_ttl_reaper_queues_teardown(
         env_repo = EnvironmentRepository(session)
         environment = await env_repo.get_by_id(env_id)
         assert environment is not None
-        assert environment.status == EnvironmentStatus.PAUSED
+        assert environment.status == EnvironmentStatus.EXPIRED
 
 
 def test_kubernetes_simulate_mode_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -445,6 +445,142 @@ async def test_retry_failed_environment_requeues_provision(
 
 
 @pytest.mark.asyncio
+async def test_manifest_launch_extracts_image_despite_default_nginx(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+    tmp_path,
+) -> None:
+    """A workspace launch that sends the default nginx image must still resolve the
+    real workload image from the manifests (regression: nginx shown/used even
+    though the workspace deploys web:latest)."""
+    from app.models.domain import ProvisioningWorkspace
+    from app.schemas.environment import EnvironmentCreate
+    from app.services.k8s_bundle import additional_workload_manifests
+    from app.services.orgs import OrganizationService
+
+    root = tmp_path / "shop-ws"
+    (root / "infra" / "k8s" / "manifests").mkdir(parents=True)
+    additional_workload_manifests(
+        root,
+        env_name="shop",
+        services=[
+            {"name": "launch-web", "image": "web:latest", "port": 8080,
+             "service_type": "ClusterIP", "selector": "web", "expose_preview": True},
+            {"name": "launch-server", "image": "server:latest", "port": 8000,
+             "service_type": "ClusterIP", "selector": "server", "expose_preview": False},
+        ],
+    )
+
+    async with session_factory() as session:
+        personal = await OrganizationService(session).ensure_personal_org(test_user)
+        ws_id = uuid4()
+        session.add(
+            ProvisioningWorkspace(
+                id=ws_id,
+                owner_id=test_user.id,
+                org_id=personal.id,
+                name="shop",
+                engine="terraform",
+                provider="local",
+                root_dir=str(root),
+                status="ready",
+            )
+        )
+        await session.commit()
+
+        service = EnvironmentService(session)
+        payload = EnvironmentCreate(
+            name="shop-preview",
+            git_branch="main",
+            git_repo_url=f"https://launchpad.local/workspaces/{ws_id}",
+            ttl_hours=1,
+            workspace_id=ws_id,
+            provider="local",
+            # The launch form always sends the default placeholder — must NOT win.
+            workload_image="nginx:1.27-alpine",
+        )
+        with patch("app.services.environment.enqueue_provision_environment"):
+            with patch("app.services.environment.publish_env_event", new=AsyncMock()):
+                result = await service.enqueue_provision(
+                    payload, owner=test_user, correlation_id="corr-img"
+                )
+
+        environment = await EnvironmentRepository(session).get_by_id(result.id)
+        # The exposed preview-target (web) image wins over both the client default
+        # nginx and the alphabetically-first backend.
+        assert environment.workload_image == "web:latest"
+
+
+@pytest.mark.asyncio
+async def test_teardown_rejects_provisioning_without_force(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    from fastapi import HTTPException
+
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            name="provisioning-env",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-provisioning-1",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=24),
+            cost_estimate_hourly=Decimal("0.42"),
+        )
+        await repo.update_status(environment, EnvironmentStatus.PROVISIONING)
+        await session.commit()
+
+        service = EnvironmentService(session)
+        with pytest.raises(HTTPException) as exc:
+            await service.request_teardown(
+                environment.id, owner=test_user, correlation_id="corr-td"
+            )
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "environment_still_provisioning"
+
+
+@pytest.mark.asyncio
+async def test_force_teardown_cancels_provisioning(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            name="provisioning-env-force",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-provisioning-2",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=24),
+            cost_estimate_hourly=Decimal("0.42"),
+        )
+        await repo.update_status(environment, EnvironmentStatus.PROVISIONING)
+        await session.commit()
+        env_id = environment.id
+
+        service = EnvironmentService(session)
+        with patch("app.services.environment.enqueue_teardown_environment") as enqueue:
+            result = await service.request_teardown(
+                env_id, owner=test_user, correlation_id="corr-force", force=True
+            )
+            enqueue.assert_called_once_with(
+                environment_id=str(env_id), correlation_id="corr-force"
+            )
+
+        # Status flips to TEARDOWN_PENDING — the provision task observes this at
+        # its next checkpoint and aborts (cooperative cancellation signal).
+        await session.refresh(environment)
+        assert environment.status == EnvironmentStatus.TEARDOWN_PENDING
+        assert result.status in (
+            EnvironmentStatus.TEARDOWN_PENDING,
+            EnvironmentStatus.TEARDOWN_PENDING.value,
+        )
+
+
+@pytest.mark.asyncio
 async def test_retry_rejects_provisioning(
     session_factory: async_sessionmaker[AsyncSession],
     test_user: User,
@@ -558,6 +694,64 @@ async def test_pause_and_resume_environment(
             )
             prov.scale_deployment.assert_called_with(namespace="launchpad-env-pause-demo", replicas=1)
             assert resumed.status == EnvironmentStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_resume_blocked_when_ttl_expired(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    from fastapi import HTTPException
+
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            name="expired-resume",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-expired-resume",
+            ttl_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            cost_estimate_hourly=Decimal("0.42"),
+        )
+        await repo.update_status(environment, EnvironmentStatus.EXPIRED)
+        await session.commit()
+        env_id = environment.id
+
+        service = EnvironmentService(session)
+        with pytest.raises(HTTPException) as exc:
+            await service.resume_environment(
+                env_id,
+                owner=test_user,
+                correlation_id="corr-expired",
+            )
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "ttl_expired"
+
+
+@pytest.mark.asyncio
+async def test_create_environment_accepts_ttl_minutes(
+    client: AsyncClient,
+    test_user: User,
+) -> None:
+    with patch("app.services.environment.enqueue_provision_environment") as enqueue:
+        enqueue.return_value = "celery-task-id"
+        response = await client.post(
+            "/api/v1/environments",
+            headers=auth_header(test_user),
+            json={
+                "name": "minute-ttl",
+                "git_branch": "main",
+                "git_repo_url": "https://github.com/acme/app.git",
+                "ttl_minutes": 30,
+            },
+        )
+    assert response.status_code == 202
+    body = response.json()
+    expires = datetime.fromisoformat(body["ttl_expires_at"].replace("Z", "+00:00"))
+    created = datetime.fromisoformat(body["created_at"].replace("Z", "+00:00"))
+    delta_minutes = (expires - created).total_seconds() / 60
+    assert 29 <= delta_minutes <= 31
 
 
 @pytest.mark.asyncio

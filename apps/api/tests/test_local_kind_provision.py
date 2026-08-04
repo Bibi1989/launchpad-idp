@@ -39,7 +39,11 @@ def test_local_kind_workspace_skips_terraform(tmp_path: Path) -> None:
     assert "terraform init" not in bootstrap
 
 
-def test_local_kind_writes_multi_framework_dockers(tmp_path: Path) -> None:
+def test_local_kind_writes_multi_framework_launch_manifests(tmp_path: Path) -> None:
+    # Multi-framework (fullstack) core stacks scaffold a real app per stack and
+    # emit launch-* manifests with real images — never the generic nginx fallback.
+    import yaml
+
     gen = IaCGenerator(workspace_root=tmp_path)
     request = ProvisioningWizardRequest(
         name="multi-demo",
@@ -59,12 +63,15 @@ def test_local_kind_writes_multi_framework_dockers(tmp_path: Path) -> None:
     )
     bundle = gen.generate(request)
     root = Path(bundle.root_dir)
-    assert (root / "dockers" / "nuxtjs" / "Dockerfile").is_file()
-    assert (root / "dockers" / "fastapi" / "Dockerfile").is_file()
-    assert (root / "dockers" / "nestjs" / "Dockerfile").is_file()
-    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "dockers/nuxtjs/Dockerfile" in compose
-    assert "dockers/fastapi/Dockerfile" in compose
-    assert "dockers/nestjs/Dockerfile" in compose
-    assert "dockers/nuxtjs/Dockerfile" in bundle.files
+    mdir = root / "infra" / "k8s" / "manifests"
+
+    # No generic nginx Deployment.
+    assert not (mdir / "deployment.yaml").exists()
+    # Real per-stack app source + launch-* manifests with real images.
+    for stack in ("nuxtjs", "fastapi", "nestjs"):
+        assert (root / "apps" / f"shop-{stack}").is_dir()
+        dep = yaml.safe_load((mdir / f"launch-{stack}-deployment.yaml").read_text())
+        img = dep["spec"]["template"]["spec"]["containers"][0]["image"]
+        assert img == f"shop-{stack}:latest"
+        assert "nginx" not in img
     assert "docker-compose.yml" in bundle.files

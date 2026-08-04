@@ -12,6 +12,8 @@ const tone = computed(() => {
       return 'text-[var(--lp-ok)] border-[var(--lp-ok)]/40 bg-[var(--lp-ok)]/10 ring-1 ring-[var(--lp-ok)]/30'
     case 'PAUSED':
       return 'text-amber-400 border-amber-500/40 bg-amber-500/10'
+    case 'EXPIRED':
+      return 'text-[var(--lp-muted)] border-[var(--lp-line)] bg-[var(--lp-panel-2)]'
     case 'FAILED':
       return 'text-[var(--lp-danger)] border-[var(--lp-danger)]/40 bg-[var(--lp-danger)]/10'
     case 'PROVISIONING':
@@ -30,6 +32,7 @@ const label = computed(() => {
   }
   if (props.status === 'RUNNING') return '🟢 RUNNING'
   if (props.status === 'PAUSED') return '⏸️ PAUSED'
+  if (props.status === 'EXPIRED') return '⌛ EXPIRED'
   if (props.status === 'FAILED') return '🔴 FAILED'
   return props.status
 })

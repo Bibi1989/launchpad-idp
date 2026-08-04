@@ -20,7 +20,7 @@ const features = [
   },
   {
     title: 'Multi-cloud IaC',
-    blurb: 'Generate Terraform or Pulumi for GCP, AWS, Azure, Cloudflare, or local kind — then apply from a sandbox.',
+    blurb: 'Generate Terraform or Pulumi for GCP, AWS, Azure, Cloudflare, or local Sandbox, then apply from a sandbox.',
   },
   {
     title: 'Kubernetes workloads',

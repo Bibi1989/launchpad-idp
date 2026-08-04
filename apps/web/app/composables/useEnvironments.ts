@@ -35,8 +35,12 @@ export function useEnvironments() {
       name: payload.name,
       git_branch: payload.git_branch,
       git_repo_url: payload.git_repo_url,
-      ttl_hours: payload.ttl_hours,
       workspace_id: payload.workspace_id ?? null,
+    }
+    if (payload.ttl_minutes != null) {
+      body.ttl_minutes = payload.ttl_minutes
+    } else if (payload.ttl_hours != null) {
+      body.ttl_hours = payload.ttl_hours
     }
     const result = await apiFetch<Environment>('/environments', {
       method: 'POST',

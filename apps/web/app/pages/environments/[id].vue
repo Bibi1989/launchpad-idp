@@ -94,7 +94,30 @@ const remainingLabel = computed(() => {
   return `${hours}h ${minutes}m`
 })
 
-const appHref = computed(() => environment.value?.preview_url || null)
+const ttlExpired = computed(() => {
+  tick.value
+  if (!environment.value) return false
+  if (environment.value.status === 'EXPIRED') return true
+  const left = environment.value.time_remaining_seconds
+    ?? Math.max(
+      Math.floor((new Date(environment.value.ttl_expires_at).getTime() - Date.now()) / 1000),
+      0,
+    )
+  return left <= 0
+})
+
+const displayStatus = computed(() => {
+  if (!environment.value) return 'PROVISIONING' as const
+  if (environment.value.status === 'EXPIRED') return 'EXPIRED' as const
+  if (environment.value.status === 'PAUSED' && ttlExpired.value) return 'EXPIRED' as const
+  return environment.value.status
+})
+
+const canResume = computed(
+  () => environment.value?.status === 'PAUSED' && !ttlExpired.value,
+)
+
+const appHref = computed(() => resolvePreviewUrl(environment.value ?? undefined))
 
 const portalHref = computed(() => {
   if (!environment.value) return '#'
@@ -285,7 +308,7 @@ async function onOpenAppClick(e: MouseEvent) {
   } catch {
     // Fall back to the current href if refresh fails.
   }
-  const href = environment.value?.preview_url || fallbackHref
+  const href = resolvePreviewUrl(environment.value ?? undefined) || fallbackHref
   if (!href) return
   const w = window.open(href, '_blank')
   // Ensure the opened window can't reach back into our page.
@@ -367,7 +390,7 @@ onMounted(() => {
           <div class="min-w-0 space-y-3">
             <h1 class="text-3xl font-semibold tracking-tight">{{ environment.name }}</h1>
             <div class="flex flex-wrap items-center gap-3">
-              <StatusBadge :status="environment.status" />
+              <StatusBadge :status="displayStatus" />
               <span class="break-all font-mono text-xs text-[var(--lp-muted)]">{{ environment.namespace_name }}</span>
             </div>
             <p v-if="environment.runtime_summary" class="font-mono text-xs text-[var(--lp-muted)]">
@@ -414,7 +437,7 @@ onMounted(() => {
                 {{ pausing ? 'Pausing…' : 'Pause' }}
               </button>
               <button
-                v-if="environment.status === 'PAUSED'"
+                v-if="canResume"
                 type="button"
                 class="lp-btn-primary whitespace-nowrap bg-emerald-600 hover:bg-emerald-500 text-white"
                 :disabled="resuming"
@@ -423,6 +446,14 @@ onMounted(() => {
                 <span class="material-symbols-outlined text-base">play_arrow</span>
                 {{ resuming ? 'Resuming…' : 'Resume' }}
               </button>
+              <span
+                v-else-if="displayStatus === 'EXPIRED'"
+                class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[var(--lp-line)] px-3 py-2 text-sm text-[var(--lp-muted)]"
+                title="TTL expired — resume is disabled"
+              >
+                <span class="material-symbols-outlined text-base">timer_off</span>
+                Expired
+              </span>
               <button
                 v-if="canRetry"
                 type="button"
@@ -605,11 +636,20 @@ onMounted(() => {
             </p>
             <p class="text-xs text-[var(--lp-muted)]">
               ${{ environment.cost_estimate_hourly }}/hr
+              <span v-if="environment.cost_source" class="ml-1 opacity-80">
+                · {{ environment.cost_source }}
+              </span>
             </p>
           </div>
           <div v-else>
             <p class="lp-label">Cost</p>
-            <p class="mt-1 text-sm text-[var(--lp-muted)]">Local — $0</p>
+            <p class="mt-1 text-sm text-[var(--lp-muted)]">
+              Local shadow
+              <span class="font-mono"> ${{ environment.cost_accrued ?? '0.00' }}</span>
+              <span v-if="environment.cost_source" class="opacity-80">
+                · {{ environment.cost_source }}
+              </span>
+            </p>
           </div>
           <div>
             <p class="lp-label">Git repository</p>

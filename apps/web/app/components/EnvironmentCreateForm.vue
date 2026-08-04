@@ -23,13 +23,15 @@ const form = reactive<{
   name: string
   git_branch: string
   git_repo_url: string
-  ttl_hours: number
+  ttl_unit: 'hours' | 'minutes'
+  ttl_value: number
   workspace_id: string | null
 }>({
   name: '',
   git_branch: 'main',
   git_repo_url: 'https://github.com/example/app.git',
-  ttl_hours: 72,
+  ttl_unit: 'hours',
+  ttl_value: 72,
   workspace_id: props.initialWorkspaceId ?? linkedFromQuery.value ?? null,
 })
 
@@ -94,23 +96,29 @@ async function onSubmit() {
       </label>
 
       <label class="block space-y-2">
-        <span class="lp-label">TTL (hours)</span>
+        <span class="lp-label">TTL</span>
+        <div class="flex gap-2">
+          <input
+            v-model.number="form.ttl_value"
+            type="number"
+            min="1"
+            :max="form.ttl_unit === 'minutes' ? 43200 : 720"
+            class="lp-input flex-1"
+          >
+          <select v-model="form.ttl_unit" class="lp-input w-28">
+            <option value="hours">Hours</option>
+            <option value="minutes">Minutes</option>
+          </select>
+        </div>
         <input
-          v-model.number="form.ttl_hours"
-          type="number"
-          min="1"
-          max="720"
-          class="lp-input"
-        >
-        <input
-          v-model.number="form.ttl_hours"
+          v-model.number="form.ttl_value"
           type="range"
           min="1"
-          max="168"
+          :max="form.ttl_unit === 'minutes' ? 240 : 168"
           class="mt-2 w-full accent-[var(--lp-accent)]"
         >
-        <p v-if="fieldErrors.ttl_hours" class="text-sm text-[var(--lp-danger)]">
-          {{ fieldErrors.ttl_hours }}
+        <p v-if="fieldErrors.ttl_value" class="text-sm text-[var(--lp-danger)]">
+          {{ fieldErrors.ttl_value }}
         </p>
       </label>
 

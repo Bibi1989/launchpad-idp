@@ -73,6 +73,7 @@ const aiAnalysisTargets = ref<Array<{ path: string; content: string }>>([])
 const aiAnalysisLoading = ref(false)
 const confirmIacDestroy = ref<{ title: string; message: string; command: string } | null>(null)
 const pendingDeletePath = ref<string | null>(null)
+const pendingDiscardPath = ref<string | null>(null)
 const deletingPath = ref(false)
 const newName = ref('')
 const openDropdown = ref<'k8s' | 'terraform' | 'pulumi' | null>(null)
@@ -202,9 +203,14 @@ async function openFile(path: string) {
     contextMenu.value = null
     return
   }
-  if (dirty.value && selectedPath.value !== path && !window.confirm('Discard unsaved changes?')) {
+  if (dirty.value && selectedPath.value !== path) {
+    pendingDiscardPath.value = path
     return
   }
+  await loadFile(path)
+}
+
+async function loadFile(path: string) {
   loadingFile.value = true
   errorMessage.value = null
   contextMenu.value = null
@@ -218,6 +224,13 @@ async function openFile(path: string) {
   } finally {
     loadingFile.value = false
   }
+}
+
+async function confirmDiscardUnsaved() {
+  const path = pendingDiscardPath.value
+  pendingDiscardPath.value = null
+  if (!path) return
+  await loadFile(path)
 }
 
 async function saveFile() {
@@ -993,6 +1006,17 @@ onUnmounted(() => {
       :busy="deletingPath"
       @update:open="(value) => { if (!value) pendingDeletePath = null }"
       @confirm="confirmDeletePath"
+    />
+
+    <ConfirmDialog
+      :open="pendingDiscardPath !== null"
+      title="Discard unsaved changes?"
+      message="You have unsaved edits in the current file. Opening another file will discard them."
+      confirm-label="Discard and open"
+      cancel-label="Keep editing"
+      danger
+      @update:open="(value) => { if (!value) pendingDiscardPath = null }"
+      @confirm="confirmDiscardUnsaved"
     />
   </section>
 </template>

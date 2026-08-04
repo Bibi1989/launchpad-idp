@@ -184,6 +184,10 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Same-namespace pods (any port) so the app + its wait-for-db init containers
+    # can reach in-cluster datastores (postgres/redis/mysql/mongodb) and siblings.
+    - to:
+        - podSelector: {{}}
     - to:
         - namespaceSelector:
             matchLabels:
@@ -257,6 +261,7 @@ def build_preview_network_policy(
                 )
             ],
             egress=[
+                # DNS resolution.
                 client.V1NetworkPolicyEgressRule(
                     to=[
                         client.V1NetworkPolicyPeer(
@@ -271,6 +276,14 @@ def build_preview_network_policy(
                         client.V1NetworkPolicyPort(protocol="UDP", port=53),
                         client.V1NetworkPolicyPort(protocol="TCP", port=53),
                     ],
+                ),
+                # Same-namespace egress so the workload (and its wait-for-db init
+                # containers) can reach in-cluster datastores (postgres/redis/…)
+                # and sibling services. An empty podSelector with no
+                # namespaceSelector matches all pods in this namespace only, so
+                # the zero-trust boundary at the namespace edge is preserved.
+                client.V1NetworkPolicyEgressRule(
+                    to=[client.V1NetworkPolicyPeer(pod_selector=client.V1LabelSelector())],
                 ),
             ],
         ),

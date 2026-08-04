@@ -32,6 +32,11 @@ export type InfraManifestKind =
   | 'gitlab-ci'
   | 'unknown'
 
+export interface InfraInitContainer {
+  name: string
+  image: string
+}
+
 export interface InfraManifestModel {
   kind: InfraManifestKind
   resourceName: string
@@ -42,6 +47,10 @@ export interface InfraManifestModel {
   imageTag: string
   pullPolicy: 'Always' | 'IfNotPresent' | 'Never'
   appPort: string
+  /** Read-only: init containers (e.g. wait-for-postgres) surfaced for visibility. */
+  initContainers: InfraInitContainer[]
+  /** launchpad.io/preview-target annotation — routes Launch Preview to this workload. */
+  exposePreview: boolean
   targetPort: string
   /** Host node port — only for NodePort / LoadBalancer. Empty = allocate. */
   nodePort: string
@@ -92,10 +101,12 @@ const DEFAULT_MODEL: InfraManifestModel = {
   namespaceName: '',
   appLabel: 'app',
   replicas: 1,
-  appImage: 'nginx',
+  appImage: 'app',
   imageTag: 'latest',
   pullPolicy: 'IfNotPresent',
   appPort: '80',
+  initContainers: [],
+  exposePreview: false,
   targetPort: '80',
   nodePort: '',
   serviceType: 'ClusterIP',
@@ -193,7 +204,7 @@ function inferKind(path: string): InfraManifestKind {
 }
 
 function parseImageParts(image: string): { repo: string; tag: string } {
-  if (!image) return { repo: 'nginx', tag: 'latest' }
+  if (!image) return { repo: 'app', tag: 'latest' }
   const idx = image.lastIndexOf(':')
   if (idx === -1) return { repo: image, tag: 'latest' }
   return { repo: image.slice(0, idx), tag: image.slice(idx + 1) || 'latest' }
@@ -217,6 +228,132 @@ export function serviceUsesNodePort(
 
 function stripQuotes(value: string): string {
   return value.trim().replace(/^["']|["']$/g, '')
+}
+
+/**
+ * Return the substring starting at the main pod `containers:` key.
+ *
+ * The lowercase `containers:` deliberately does not match `initContainers:`
+ * (capital C), so this isolates the app container list from any init containers
+ * that precede it. Falls back to the whole document when no explicit
+ * `containers:` key is present.
+ */
+export function appContainersSection(content: string): string {
+  const idx = content.search(/\n[ \t]*containers:/)
+  return idx >= 0 ? content.slice(idx) : content
+}
+
+export interface PreviewRoute {
+  /** Human label, e.g. "Launch Web Preview" or "Launch API Endpoint". */
+  label: string
+  /** Ingress path, e.g. "/" or "/api". */
+  path: string
+  /** Backing service name, e.g. "launch-web-service". */
+  service: string
+  /** Full URL, e.g. "http://ws-123.preview.127.0.0.1.nip.io/api". */
+  url: string
+}
+
+/**
+ * Derive the Launch Preview route cards from a multi-service Ingress manifest.
+ *
+ * Parses `spec.rules[].http.paths[]` and maps `/` to a "Web Preview" and `/api*`
+ * to an "API Endpoint" label, producing display-ready `{label, path, url}` for
+ * the workspace dashboard.
+ */
+export function derivePreviewRoutes(ingressYaml: string, baseUrl?: string): PreviewRoute[] {
+  const hostMatch = ingressYaml.match(/host:\s*([^\n]+)/)
+  const host = hostMatch ? stripQuotes(hostMatch[1]!.trim()) : ''
+  const origin = (baseUrl && baseUrl.replace(/\/$/, '')) || (host ? `http://${host}` : '')
+
+  const routes: PreviewRoute[] = []
+  const pathRe =
+    /- path:\s*([^\n]+)[\s\S]*?service:\s*[\s\S]*?name:\s*([^\n]+)/g
+  let m: RegExpExecArray | null
+  while ((m = pathRe.exec(ingressYaml)) !== null) {
+    const path = stripQuotes(m[1]!.trim())
+    const service = stripQuotes(m[2]!.trim())
+    const isApi = /^\/api(\/|$)/.test(path)
+    const label = path === '/' ? 'Launch Web Preview' : isApi ? 'Launch API Endpoint' : `Route ${path}`
+    routes.push({
+      label,
+      path,
+      service,
+      url: `${origin}${path === '/' ? '' : path}` || path,
+    })
+  }
+  return routes
+}
+
+const PREVIEW_TARGET_RE = /launchpad\.io\/preview-target:\s*["']?true["']?/i
+
+/** True when the manifest carries `launchpad.io/preview-target: "true"`. */
+export function hasPreviewTargetAnnotation(content: string): boolean {
+  return PREVIEW_TARGET_RE.test(content)
+}
+
+/** Add or remove the `launchpad.io/preview-target` annotation under metadata. */
+export function setPreviewTargetAnnotation(content: string, on: boolean): string {
+  const present = PREVIEW_TARGET_RE.test(content)
+  if (on === present) return content
+  if (!on) {
+    // Remove the annotation line; drop an emptied `annotations:` block too.
+    const lines = content.split('\n').filter((l) => !PREVIEW_TARGET_RE.test(l))
+    const cleaned: string[] = []
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!
+      if (/^\s*annotations:\s*$/.test(line)) {
+        const next = lines[i + 1] ?? ''
+        const indent = line.match(/^(\s*)/)?.[1]?.length ?? 0
+        const nextIndent = next.match(/^(\s*)/)?.[1]?.length ?? 0
+        // annotations: with no deeper child -> drop it.
+        if (!next.trim() || nextIndent <= indent) continue
+      }
+      cleaned.push(line)
+    }
+    return cleaned.join('\n')
+  }
+  // Inject under metadata: after the metadata `name:`/`namespace:` line.
+  const lines = content.split('\n')
+  let metaIndent = -1
+  let insertAt = -1
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    if (/^\s*metadata:\s*$/.test(line)) {
+      metaIndent = line.match(/^(\s*)/)?.[1]?.length ?? 0
+      continue
+    }
+    if (metaIndent >= 0) {
+      const indent = line.match(/^(\s*)/)?.[1]?.length ?? 0
+      if (line.trim() && indent <= metaIndent) break // left metadata block
+      if (/^\s*(name|namespace):/.test(line)) insertAt = i
+    }
+  }
+  if (insertAt < 0) return content
+  const childIndent = ' '.repeat((lines[insertAt]!.match(/^(\s*)/)?.[1]?.length ?? 2))
+  lines.splice(
+    insertAt + 1,
+    0,
+    `${childIndent}annotations:`,
+    `${childIndent}  launchpad.io/preview-target: "true"`,
+  )
+  return lines.join('\n')
+}
+
+/** Parse the `initContainers:` list into {name, image} entries (best-effort). */
+export function parseInitContainers(content: string): InfraInitContainer[] {
+  const start = content.search(/\n[ \t]*initContainers:/)
+  if (start < 0) return []
+  let block = content.slice(start + 1)
+  const end = block.search(/\n[ \t]*containers:/)
+  if (end >= 0) block = block.slice(0, end)
+  const items: InfraInitContainer[] = []
+  const entryRe = /-\s*name:\s*([^\n]+)[\s\S]*?image:\s*([^\n]+)/g
+  let m: RegExpExecArray | null
+  while ((m = entryRe.exec(block)) !== null) {
+    items.push({ name: stripQuotes(m[1]!.trim()), image: stripQuotes(m[2]!.trim()) })
+  }
+  return items
 }
 
 /** Read `metadata.name` without nested regex backtracking. */
@@ -406,15 +543,22 @@ export function parseInfraManifest(path: string, content: string): InfraManifest
   }
 
   if (model.kind === 'k8s-deployment') {
-    const image = matchGroup(content, /image:\s*([^\n]+)/)
+    // Init containers (e.g. the wait-for-postgres busybox blocks) are emitted
+    // *before* the main `containers:` list, so parsing the first `image:` would
+    // surface busybox. Scope app-container fields to the real `containers:`
+    // section, and surface the init containers separately for visibility.
+    model.initContainers = parseInitContainers(content)
+    model.exposePreview = hasPreviewTargetAnnotation(content)
+    const appSection = appContainersSection(content)
+    const image = matchGroup(appSection, /image:\s*([^\n]+)/)
     const parsed = parseImageParts(stripQuotes(image))
     model.resourceName = parseMetadataName(content)
     model.appLabel = parseFirstBareLabel(content, 'app') || 'app'
     model.replicas = Number(matchGroup(content, /replicas:\s*([0-9]+)/) || '1')
     model.appImage = parsed.repo
     model.imageTag = parsed.tag
-    model.appPort = matchGroup(content, /containerPort:\s*([0-9]+)/) || model.appPort
-    const pullPolicy = matchGroup(content, /imagePullPolicy:\s*(Always|IfNotPresent|Never)/)
+    model.appPort = matchGroup(appSection, /containerPort:\s*([0-9]+)/) || model.appPort
+    const pullPolicy = matchGroup(appSection, /imagePullPolicy:\s*(Always|IfNotPresent|Never)/)
     if (pullPolicy === 'Always' || pullPolicy === 'IfNotPresent' || pullPolicy === 'Never') {
       model.pullPolicy = pullPolicy
     }
@@ -431,6 +575,7 @@ export function parseInfraManifest(path: string, content: string): InfraManifest
   if (model.kind === 'k8s-service') {
     model.resourceName = parseMetadataName(content)
     model.appLabel = parseFirstBareLabel(content, 'app') || 'app'
+    model.exposePreview = hasPreviewTargetAnnotation(content)
     model.appPort = matchGroup(content, /port:\s*([0-9]+)/) || model.appPort
     model.targetPort = matchGroup(content, /targetPort:\s*([^\n]+)/) || model.targetPort
     model.nodePort = matchGroup(content, /nodePort:\s*([0-9]+)/) || ''
@@ -826,6 +971,7 @@ export function serializeInfraManifest(
   }
 
   if (kind === 'k8s-deployment') {
+    next = setPreviewTargetAnnotation(next, model.exposePreview)
     if (model.resourceName) next = replaceMetadataName(next, model.resourceName)
     if (model.appLabel) {
       next = replaceBareKeyLines(next, 'app', model.appLabel)
@@ -837,24 +983,30 @@ export function serializeInfraManifest(
       `replicas: ${Math.max(1, model.replicas || 1)}`,
       `replicas: ${Math.max(1, model.replicas || 1)}`,
     )
-    next = replaceOrAppend(
-      next,
+    // Scope app-container field edits to the main `containers:` section so a
+    // preceding init container (e.g. busybox wait-for-db) is never rewritten.
+    const splitIdx = next.search(/\n[ \t]*containers:/)
+    const head = splitIdx >= 0 ? next.slice(0, splitIdx) : ''
+    let body = splitIdx >= 0 ? next.slice(splitIdx) : next
+    body = replaceOrAppend(
+      body,
       /image:\s*[^\n]+/,
       `image: ${model.appImage}:${model.imageTag}`,
       `image: ${model.appImage}:${model.imageTag}`,
     )
-    next = replaceOrAppend(
-      next,
+    body = replaceOrAppend(
+      body,
       /containerPort:\s*[0-9]+/,
       `containerPort: ${model.appPort || '80'}`,
       `containerPort: ${model.appPort || '80'}`,
     )
-    next = replaceOrAppend(
-      next,
+    body = replaceOrAppend(
+      body,
       /imagePullPolicy:\s*(Always|IfNotPresent|Never)/,
       `imagePullPolicy: ${model.pullPolicy}`,
       `imagePullPolicy: ${model.pullPolicy}`,
     )
+    next = head + body
     if (model.envVars.length) {
       const lines = next.split('\n')
       const existing = findYamlKeyBlock(lines, 'env')
@@ -872,6 +1024,7 @@ export function serializeInfraManifest(
   }
 
   if (kind === 'k8s-service') {
+    next = setPreviewTargetAnnotation(next, model.exposePreview)
     if (model.resourceName) next = replaceMetadataName(next, model.resourceName)
     if (model.appLabel) {
       next = replaceBareKeyLines(next, 'app', model.appLabel)

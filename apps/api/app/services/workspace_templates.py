@@ -97,7 +97,7 @@ metadata:
 spec:
   containers:
     - name: app
-      image: nginx:1.27-alpine
+      image: app:latest
       ports:
         - containerPort: 80
       resources:
@@ -134,7 +134,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: nginx:1.27-alpine
+          image: app:latest
           ports:
             - name: http
               containerPort: 80
@@ -175,7 +175,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: nginx:1.27-alpine
+          image: app:latest
           ports:
             - containerPort: 80
           volumeMounts:

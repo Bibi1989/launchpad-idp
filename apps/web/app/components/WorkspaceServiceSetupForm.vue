@@ -556,7 +556,7 @@ onMounted(async () => {
         <template v-if="provider === 'local'">
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
-              <span class="lp-label">Kind cluster name</span>
+              <span class="lp-label">Cluster name</span>
               <input v-model="form.local.cluster_name" class="lp-input">
             </label>
             <label class="block space-y-2">
@@ -758,7 +758,7 @@ onMounted(async () => {
             <dt class="lp-label">Cloud services in IaC</dt>
             <dd class="mt-1">
               <template v-if="provider === 'local'">
-                <span class="font-mono text-xs text-[var(--lp-muted)]">local kind</span>
+                <span class="font-mono text-xs text-[var(--lp-muted)]">local k8s</span>
               </template>
               <template v-else-if="!selectedCloudServices.length">
                 <span class="text-xs text-[var(--lp-muted)]">None selected</span>

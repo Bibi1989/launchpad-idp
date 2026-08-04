@@ -32,5 +32,9 @@ celery_app.conf.update(
             "task": "launchpad.scan_preview_drift",
             "schedule": schedule(run_every=settings.drift_scan_interval_seconds),
         },
+        "cost-metering-sample": {
+            "task": "launchpad.sample_environment_costs",
+            "schedule": schedule(run_every=settings.cost_sample_interval_seconds),
+        },
     },
 )

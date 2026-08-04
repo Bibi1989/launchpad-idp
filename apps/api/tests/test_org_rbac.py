@@ -233,6 +233,7 @@ async def test_org_cost_summary(
             provider="gcp",
         )
         await repo.update_status(cloud, EnvironmentStatus.RUNNING)
+        cloud.created_at = datetime.now(UTC) - timedelta(hours=2)
         await session.commit()
 
     response = await client.get(

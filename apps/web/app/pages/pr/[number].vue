@@ -24,7 +24,7 @@ onMounted(async () => {
     if (matches.value.length === 1) {
       const env = matches.value[0]!
       if (env.preview_url && env.app_ready) {
-        await navigateTo(env.preview_url, { external: true })
+        await navigateTo(resolvePreviewUrl(env)!, { external: true })
         return
       }
       await navigateTo(`/environments/${env.id}`)
@@ -70,7 +70,7 @@ onMounted(async () => {
           </NuxtLink>
           <a
             v-if="env.preview_url"
-            :href="env.preview_url"
+            :href="resolvePreviewUrl(env)!"
             class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
             target="_blank"
             rel="noreferrer"

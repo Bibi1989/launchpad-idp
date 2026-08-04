@@ -2,6 +2,7 @@ export type EnvironmentStatus =
   | 'PROVISIONING'
   | 'RUNNING'
   | 'PAUSED'
+  | 'EXPIRED'
   | 'TEARDOWN_PENDING'
   | 'DESTROYED'
   | 'FAILED'
@@ -41,6 +42,8 @@ export interface Environment {
   ttl_expires_at: string
   cost_estimate_hourly: string
   cost_accrued: string
+  cost_sampled_at?: string | null
+  cost_source?: string | null
   time_remaining_seconds: number
   error_message: string | null
   created_at: string
@@ -107,7 +110,8 @@ export interface EnvironmentCreatePayload {
   name: string
   git_branch: string
   git_repo_url: string
-  ttl_hours: number
+  ttl_hours?: number | null
+  ttl_minutes?: number | null
   workspace_id?: string | null
   template_id?: string | null
 }
@@ -123,6 +127,8 @@ export interface PreviewAppTemplate {
   hourly_cost_hint: string
   workload_image: string
   tags: string[]
+  enable_postgres?: boolean
+  enable_redis?: boolean
 }
 
 export interface PreviewLaunchPayload {
@@ -134,6 +140,7 @@ export interface PreviewLaunchPayload {
   provider: 'local' | 'gcp' | 'aws' | 'azure' | 'cloudflare'
   credentials?: Record<string, string | null | undefined>
   ttl_hours?: number | null
+  ttl_minutes?: number | null
   workspace_id?: string | null
   github_pr_number?: number | null
   github_pr_url?: string | null
@@ -143,6 +150,7 @@ export interface PreviewLaunchPayload {
 
 export interface EnvironmentExtendPayload {
   hours?: number | null
+  minutes?: number | null
 }
 
 export interface EnvironmentPromotePayload {
@@ -150,6 +158,7 @@ export interface EnvironmentPromotePayload {
   credentials?: Record<string, string | null | undefined>
   name?: string | null
   ttl_hours?: number | null
+  ttl_minutes?: number | null
 }
 
 export interface ApiErrorBody {

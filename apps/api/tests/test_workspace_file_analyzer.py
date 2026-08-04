@@ -4,9 +4,58 @@ from app.core.secrets import credentials_to_env, project_id_from_gcp_sa_json
 from app.services.workspace_file_analyzer import (
     WorkspaceFileAnalyzerService,
     _REPORT_JSON_SCHEMA,
+    _inject_pgdata_env,
+    _postgres_needs_pgdata_fix,
     _strip_duplicate_root_provider_blocks,
     detect_kind_from_path,
 )
+
+
+def _stale_postgres_manifest() -> str:
+    from app.services.workload_dependencies import _postgres_deployment_yaml
+
+    fixed = _postgres_deployment_yaml("lp-demo", "demo")
+    return "\n".join(
+        line
+        for line in fixed.split("\n")
+        if line.strip() not in ("- name: PGDATA", "value: /var/lib/postgresql/data/pgdata")
+    )
+
+
+def test_postgres_pgdata_detector() -> None:
+    stale = _stale_postgres_manifest()
+    assert "- name: PGDATA" not in stale  # env var removed (comment may still mention it)
+    assert _postgres_needs_pgdata_fix(stale.lower()) is True
+    # Already-fixed manifest is not flagged.
+    from app.services.workload_dependencies import _postgres_deployment_yaml
+
+    assert _postgres_needs_pgdata_fix(_postgres_deployment_yaml("lp-demo", "demo").lower()) is False
+
+
+def test_analyzer_autofixes_postgres_pgdata() -> None:
+    import yaml
+    from app.services.workload_dependencies import _postgres_deployment_yaml
+
+    stale = _stale_postgres_manifest()
+    service = WorkspaceFileAnalyzerService.__new__(WorkspaceFileAnalyzerService)
+    resp = service._heuristic_kubernetes(
+        "infra/k8s/manifests/postgres-deployment.yaml", stale
+    )
+    assert any(i.ruleId == "POSTGRES_PGDATA_SUBDIR" and i.severity == "critical" for i in resp.issues)
+    assert resp.improvedContent is not None
+    doc = yaml.safe_load(resp.improvedContent)
+    env = {
+        e["name"]: e.get("value")
+        for e in doc["spec"]["template"]["spec"]["containers"][0]["env"]
+        if "value" in e
+    }
+    assert env["PGDATA"] == "/var/lib/postgresql/data/pgdata"
+    # Auto-fix reproduces the corrected generator output exactly.
+    assert resp.improvedContent.strip() == _postgres_deployment_yaml("lp-demo", "demo").strip()
+
+
+def test_inject_pgdata_is_noop_without_env_block() -> None:
+    assert _inject_pgdata_env("kind: Deployment\nmetadata:\n  name: postgres\n") is None
 
 
 def test_report_json_schema_is_gemini_compatible() -> None:
