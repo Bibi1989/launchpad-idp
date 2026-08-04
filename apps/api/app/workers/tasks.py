@@ -598,13 +598,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             stage=ExecutionStage.APPLY,
                         )
                         await session.commit()
-                        if getattr(environment, "enable_postgres", False) or getattr(environment, "enable_redis", False):
-                            provisioner.apply_ephemeral_datastores(
-                                namespace=environment.namespace_name,
-                                name=environment.name,
-                                enable_postgres=getattr(environment, "enable_postgres", False),
-                                enable_redis=getattr(environment, "enable_redis", False),
-                            )
+                        # Ephemeral datastores are applied inside provision() now,
+                        # after the namespace exists and before the app workload.
                         resources = provisioner.provision(
                             namespace=environment.namespace_name,
                             environment_id=str(environment.id),

@@ -336,6 +336,18 @@ class KubernetesProvisioner:
 
         self.apply_governance(namespace=namespace, labels=labels, resources=resources)
 
+        # Ephemeral datastores (and their connection Secret) must be applied AFTER
+        # the namespace/governance exist but BEFORE the app workload, so the app's
+        # init-containers and app-secrets envFrom resolve on first start. Applying
+        # them here (rather than before provision) fixes a 404 where the Secret was
+        # written into a namespace that had not been created yet.
+        self.apply_ephemeral_datastores(
+            namespace=namespace,
+            name=name,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
+        )
+
         used_ports = self._list_allocated_node_ports(exclude_namespace=namespace)
         # Prefer a sticky in-range NodePort; ignore API auto-assigned ports outside the
         # kind-mapped PREVIEW_NODE_PORT_MIN/MAX window (those are unreachable from the host).

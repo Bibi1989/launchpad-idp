@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
+import pytest
+
 from app.core.config import Settings
 from app.services.kubernetes import KubernetesProvisioner
 
@@ -116,3 +120,60 @@ def test_build_app_deployment_sets_pod_security_context_only_for_nginx() -> None
     )
     pod_spec = deployment.spec.template.spec
     assert pod_spec.security_context is None
+
+
+def test_provision_applies_datastores_after_namespace_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ephemeral datastores must be applied after governance (namespace) and
+    before the app workload - otherwise the Secret/manifests 404 into a
+    namespace that has not been created yet.
+    """
+    # Avoid loading real kube clients / touching a cluster.
+    monkeypatch.setattr(KubernetesProvisioner, "_load_clients", lambda self: None)
+    monkeypatch.setattr(
+        "app.services.manifest_deploy.build_and_load_kind_images", lambda **_: None
+    )
+    monkeypatch.setattr(
+        "app.services.manifest_deploy._is_image_in_kind", lambda *_a, **_k: True
+    )
+    monkeypatch.setattr(
+        "app.services.kubernetes.resolve_preview_node_port", lambda *_a, **_k: 30080
+    )
+
+    provisioner = KubernetesProvisioner(Settings(kubernetes_enabled=True))
+
+    manager = MagicMock()
+    monkeypatch.setattr(provisioner, "apply_governance", manager.apply_governance)
+    monkeypatch.setattr(
+        provisioner, "apply_ephemeral_datastores", manager.apply_ephemeral_datastores
+    )
+    monkeypatch.setattr(provisioner, "_list_allocated_node_ports", lambda **_: set())
+    monkeypatch.setattr(provisioner, "_read_namespaced_app_node_port", lambda _ns: None)
+    monkeypatch.setattr(provisioner, "wait_for_workload_ready", lambda **_: None)
+
+    def fake_apply_workload(**kwargs: object) -> int:
+        manager._apply_workload(**kwargs)
+        return 30080
+
+    monkeypatch.setattr(provisioner, "_apply_workload", fake_apply_workload)
+
+    provisioner.provision(
+        namespace="launchpad-env-abc",
+        environment_id="env-abc",
+        name="demo",
+        git_branch="main",
+        git_repo_url="https://github.com/acme/demo.git",
+        ttl_expires_at="2026-12-01T00:00:00+00:00",
+        enable_postgres=True,
+        enable_redis=True,
+    )
+
+    ordered = [c[0] for c in manager.mock_calls]
+    assert "apply_governance" in ordered
+    assert "apply_ephemeral_datastores" in ordered
+    assert ordered.index("apply_governance") < ordered.index("apply_ephemeral_datastores")
+    assert ordered.index("apply_ephemeral_datastores") < ordered.index("_apply_workload")
+
+    ds_call = next(c for c in manager.mock_calls if c[0] == "apply_ephemeral_datastores")
+    assert ds_call.kwargs["namespace"] == "launchpad-env-abc"
+    assert ds_call.kwargs["enable_postgres"] is True
+    assert ds_call.kwargs["enable_redis"] is True
