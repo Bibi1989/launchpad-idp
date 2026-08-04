@@ -327,18 +327,9 @@ class EnvironmentService:
         provisioning = ProvisioningService(self._session)
 
         if payload.provider == PreviewProvider.LOCAL:
-            from app.services.kind_cluster import ensure_kind_cluster
-
-            try:
-                await ensure_kind_cluster()
-            except RuntimeError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={
-                        "code": "kind_cluster_unavailable",
-                        "message": str(exc),
-                    },
-                ) from exc
+            # Cluster create (k3d) can take 1-2 min. Do not block POST /preview/launch;
+            # the Celery worker calls ensure_kind_cluster before deploy. Fail-fast tool
+            # checks stay on GET /preview/kind/status (Launch UI Refresh).
             cost_override = Decimal("0.0000")
             if payload.workspace_id is not None:
                 await provisioning.get_workspace_for_owner(payload.workspace_id, owner)

@@ -24,8 +24,23 @@ logger = get_logger(__name__)
 
 
 def _repo_root() -> Path:
-    # apps/api/app/services/kind_cluster.py → launchpad/
-    return Path(__file__).resolve().parents[4]
+    """Resolve a usable working directory for lifecycle scripts.
+
+    Monorepo checkout: ``.../launchpad/apps/api/app/services/kind_cluster.py`` → repo root.
+    OCI / compose image: ``/app/app/services/kind_cluster.py`` → ``/app`` (parents[4] does not exist).
+    """
+    here = Path(__file__).resolve()
+    parents = list(here.parents)
+    if len(parents) > 4:
+        candidate = parents[4]
+        if (candidate / "scripts").is_dir() and (candidate / "apps").is_dir():
+            return candidate
+    # Slim API image layout used by deploy/oci/Dockerfile.api
+    if Path("/app/app").is_dir():
+        return Path("/app")
+    if len(parents) > 4:
+        return parents[4]
+    return Path.cwd()
 
 
 def _engine() -> str:

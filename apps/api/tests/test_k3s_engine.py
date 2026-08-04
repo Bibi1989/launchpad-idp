@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from app.core.config import Settings
 from app.services.manifest_deploy import _load_image_to_local_cluster
@@ -57,6 +59,30 @@ def test_context_follows_active_engine_when_it_names_other_engine():
 def test_explicit_remote_context_is_preserved():
     s = Settings(local_k8s_engine="k3s", kubernetes_context="gke-prod-us")
     assert s.resolved_kubernetes_context == "gke-prod-us"
+
+
+def test_repo_root_survives_oci_image_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OCI Dockerfile lays code at /app/app/...; parents[4] must not IndexError."""
+    from app.services import kind_cluster as kc
+
+    monkeypatch.setattr(kc, "__file__", "/app/app/services/kind_cluster.py")
+    root = kc._repo_root()
+    assert root is not None
+    assert isinstance(root, Path)
+
+
+def test_repo_root_prefers_monorepo_when_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import kind_cluster as kc
+
+    repo = tmp_path / "launchpad"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "apps").mkdir()
+    fake = repo / "apps" / "api" / "app" / "services" / "kind_cluster.py"
+    fake.parent.mkdir(parents=True)
+    fake.write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(kc, "__file__", str(fake))
+
+    assert kc._repo_root() == repo.resolve()
 
 
 def test_kind_cluster_module_dispatches_script_by_engine(monkeypatch):

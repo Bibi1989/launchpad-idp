@@ -80,6 +80,8 @@ export function useEnvironments() {
     const result = await apiFetch<Environment>('/preview/launch', {
       method: 'POST',
       body: JSON.stringify(payload),
+      // Local first create can still be slow if other sync work runs; keep headroom.
+      timeoutMs: 90_000,
     })
     await refresh()
     return result
