@@ -80,6 +80,8 @@ class Settings(BaseSettings):
 
     # Ephemeral IaC workspaces (durable path - /tmp is wiped on reboot/cleanup)
     iac_workspace_root: str = str(Path.home() / ".launchpad" / "workspaces")
+    # Temporary clone root for repository import sessions
+    repo_import_root: str = "/tmp/launchpad/imports"
 
     # Sandbox execution
     sandbox_docker_enabled: bool = False

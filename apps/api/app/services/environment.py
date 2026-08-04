@@ -301,14 +301,21 @@ class EnvironmentService:
                 payload.enable_postgres = True
             if getattr(template, "enable_redis", False):
                 payload.enable_redis = True
-        else:
-            assert payload.git_repo_url is not None
-            assert payload.git_branch is not None
+        elif payload.git_repo_url and payload.git_branch:
             git_repo_url = payload.git_repo_url
             git_branch = payload.git_branch
             template_id = None
             default_ttl = self._settings.default_ttl_hours
             cost_from_template = None
+        else:
+            # Local image-only preview (no catalog / git). Persist stable metadata placeholders.
+            git_repo_url = "https://github.com/launchpad-idp/local-image-preview.git"
+            git_branch = "main"
+            template_id = None
+            default_ttl = self._settings.default_ttl_hours
+            cost_from_template = None
+            if payload.workload_image:
+                workload_image = payload.workload_image
         if payload.workload_image and payload.workload_image.lower() not in {"nginx:1.27-alpine", "app:latest", "app"}:
             workload_image = payload.workload_image
 
@@ -763,17 +770,18 @@ class EnvironmentService:
         and the teardown task cleans up any stranded resources.
         """
         environment = await self._require_owned(environment_id, owner)
-        if environment.status in {
-            EnvironmentStatus.TEARDOWN_PENDING,
-            EnvironmentStatus.DESTROYED,
-        }:
+        if environment.status == EnvironmentStatus.DESTROYED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
-                    "code": "environment_already_tearing_down",
-                    "message": "Environment is already tearing down or destroyed",
+                    "code": "environment_already_destroyed",
+                    "message": "Environment is already destroyed",
                 },
             )
+        # A TEARDOWN_PENDING environment is allowed to be re-requested: a previous
+        # teardown may have been dropped (worker restart) or crashed before it
+        # reached DESTROYED. Re-enqueue is idempotent - the teardown task acquires
+        # the state lock, so a genuinely in-flight teardown just no-ops.
         if environment.status == EnvironmentStatus.PROVISIONING and not force:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

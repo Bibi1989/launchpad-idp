@@ -16,23 +16,17 @@ function envName(id: string) {
   return environments.value.find((env) => env.id === id)?.name ?? 'environment'
 }
 
-async function onPause(id: string) {
-  try {
-    await pauseEnvironment(id)
-    toast.success('Environment paused', `${envName(id)} was paused.`)
-  } catch (err) {
-    toast.error('Pause failed', toastError(err, 'Could not pause the environment.'))
-  }
-}
+const { define } = useAsyncAction()
 
-async function onResume(id: string) {
-  try {
-    await resumeEnvironment(id)
-    toast.success('Environment resumed', `${envName(id)} is resuming.`)
-  } catch (err) {
-    toast.error('Resume failed', toastError(err, 'Could not resume the environment.'))
-  }
-}
+const pauseAction = define((id: string) => pauseEnvironment(id), {
+  success: (env) => ({ title: 'Environment paused', message: `${env.name} was paused.` }),
+  error: (err) => ({ title: 'Pause failed', message: toastError(err, 'Could not pause the environment.') }),
+})
+
+const resumeAction = define((id: string) => resumeEnvironment(id), {
+  success: (env) => ({ title: 'Environment resumed', message: `${env.name} is resuming.` }),
+  error: (err) => ({ title: 'Resume failed', message: toastError(err, 'Could not resume the environment.') }),
+})
 
 const pendingDestroyName = computed(() => {
   const id = confirmDestroyId.value
@@ -291,8 +285,8 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
           :retrying="retryingId === env.id"
           @destroy="requestDestroy"
           @retry="onRetry"
-          @pause="onPause"
-          @resume="onResume"
+          @pause="pauseAction.run"
+          @resume="resumeAction.run"
           @update="onCardUpdate"
         />
       </div>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { GitHubAppStatus, GitHubRepositoryItem } from '~/types/provisioning'
+import { isPersonalGithubInstallation } from '~/utils/githubAccount'
 
 const props = withDefaults(
   defineProps<{
@@ -58,8 +59,8 @@ const selectedInstallation = computed(() => {
   return status.value.installations.find((item) => item.id === id) ?? null
 })
 
-const isPersonalAccount = computed(
-  () => (selectedInstallation.value?.account_type || '').toLowerCase() === 'user',
+const isPersonalAccount = computed(() =>
+  isPersonalGithubInstallation(selectedInstallation.value),
 )
 
 async function refresh() {
@@ -255,31 +256,12 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div v-if="status?.installations.length" class="space-y-2">
-        <p class="lp-label">GitHub account</p>
-        <div class="flex flex-wrap gap-2">
-          <button
-            v-for="item in status.installations"
-            :key="item.id"
-            type="button"
-            class="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition"
-            :class="
-              modelInstallationId === item.id
-                ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10 text-[var(--lp-text)]'
-                : 'border-[var(--lp-line)] text-[var(--lp-muted)] hover:border-[var(--lp-accent)]/40'
-            "
-            @click="selectInstallation(item.id)"
-          >
-            <span
-              class="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--lp-panel-2)] font-mono text-[10px]"
-            >
-              {{ item.account_login.slice(0, 2).toUpperCase() }}
-            </span>
-            {{ item.account_login }}
-            <span class="font-mono text-[10px] opacity-60">{{ item.account_type }}</span>
-          </button>
-        </div>
-      </div>
+      <GithubInstallationPicker
+        v-if="status?.installations.length"
+        :model-value="modelInstallationId ?? null"
+        :installations="status.installations"
+        @update:model-value="(id) => { if (id != null) selectInstallation(id) }"
+      />
 
       <div v-if="showRepoPicker && modelInstallationId" class="space-y-3 border-t border-[var(--lp-line)] pt-4">
         <p

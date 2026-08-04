@@ -93,6 +93,35 @@ async def _emit_log(
     )
 
 
+async def _emit_stage(
+    log_repo: DeploymentLogRepository,
+    session: AsyncSession,
+    *,
+    environment_id: UUID,
+    stage: ExecutionStage,
+    message: str,
+    commit_sha: str | None = None,
+    status: str = EnvironmentStatus.PROVISIONING.value,
+    log_level: LogLevel = LogLevel.INFO,
+) -> None:
+    """Emit a progress log line for a provisioning stage and persist it.
+
+    Collapses the ``_emit_log(...)`` + ``session.commit()`` pattern repeated
+    throughout the provision and rebuild pipelines into a single call. Defaults
+    ``status`` to PROVISIONING since that is the state during every interim stage.
+    """
+    await _emit_log(
+        log_repo,
+        environment_id=environment_id,
+        message=message,
+        log_level=log_level,
+        status=status,
+        commit_sha=commit_sha,
+        stage=stage,
+    )
+    await session.commit()
+
+
 async def _publish_status(
     environment_id: UUID,
     *,
@@ -424,15 +453,14 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                 commit_sha = environment.latest_commit_sha
                 current_stage = ExecutionStage.INIT
 
-                await _emit_log(
+                await _emit_stage(
                     log_repo,
+                    session,
                     environment_id=env_uuid,
-                    message="INIT - starting Kubernetes provision workflow",
-                    status=EnvironmentStatus.PROVISIONING.value,
-                    commit_sha=commit_sha,
                     stage=ExecutionStage.INIT,
+                    message="INIT - starting Kubernetes provision workflow",
+                    commit_sha=commit_sha,
                 )
-                await session.commit()
 
                 try:
                     current_stage = ExecutionStage.VALIDATE
@@ -566,15 +594,14 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             if workspace_has_helm_chart(workspace_root)
                             else ""
                         )
-                        await _emit_log(
+                        await _emit_stage(
                             log_repo,
+                            session,
                             environment_id=env_uuid,
-                            message=f"APPLY - deploying workspace Kubernetes manifests{helm_note}",
-                            status=EnvironmentStatus.PROVISIONING.value,
-                            commit_sha=commit_sha,
                             stage=ExecutionStage.APPLY,
+                            message=f"APPLY - deploying workspace Kubernetes manifests{helm_note}",
+                            commit_sha=commit_sha,
                         )
-                        await session.commit()
 
                         deployer = ManifestDeployer(settings, provisioner)
                         resources = deployer.deploy(
@@ -589,15 +616,14 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             image=manifest_image_override,
                         )
                     else:
-                        await _emit_log(
+                        await _emit_stage(
                             log_repo,
+                            session,
                             environment_id=env_uuid,
-                            message="APPLY - mutating Kubernetes resources (preview profile)",
-                            status=EnvironmentStatus.PROVISIONING.value,
-                            commit_sha=commit_sha,
                             stage=ExecutionStage.APPLY,
+                            message="APPLY - mutating Kubernetes resources (preview profile)",
+                            commit_sha=commit_sha,
                         )
-                        await session.commit()
                         # Ephemeral datastores are applied inside provision() now,
                         # after the namespace exists and before the app workload.
                         resources = provisioner.provision(
@@ -614,16 +640,16 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         )
 
                     if resources.simulated:
-                        await _emit_log(
+                        await _emit_stage(
                             log_repo,
+                            session,
                             environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
                             message=(
                                 "APPLY - simulated ResourceQuota, LimitRange, "
                                 "NetworkPolicy, Deployment, and Service"
                             ),
-                            status=EnvironmentStatus.PROVISIONING.value,
                             commit_sha=commit_sha,
-                            stage=ExecutionStage.APPLY,
                         )
                     else:
                         port_note = (
@@ -631,18 +657,17 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             if resources.node_port is not None
                             else ""
                         )
-                        await _emit_log(
+                        await _emit_stage(
                             log_repo,
+                            session,
                             environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
                             message=(
                                 f"APPLY - ResourceQuota + LimitRange + zero-trust NetworkPolicy; "
                                 f"Deployment/Service ready (image={resources.image}{port_note})"
                             ),
-                            status=EnvironmentStatus.PROVISIONING.value,
                             commit_sha=commit_sha,
-                            stage=ExecutionStage.APPLY,
                         )
-                    await session.commit()
 
                     # Final cancellation checkpoint: if the user force-deleted
                     # during APPLY, hand the just-applied resources to the teardown
@@ -830,7 +855,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     await _fail_execution(
                         session_factory,
                         environment_id=env_uuid,
-                        error_text=f"Provision failed - rolling back: {error_text}",
+                        error_text=f"Provision failed: {error_text}",
                         commit_sha=commit_sha,
                         stage=current_stage,
                         audit_action=AuditAction.PROVISION_FAILED,
@@ -902,16 +927,16 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                 new_rollout_ok = False
 
                 if environment.status == EnvironmentStatus.TEARDOWN_PENDING:
-                    await _emit_log(
+                    await _emit_stage(
                         log_repo,
+                        session,
                         environment_id=env_uuid,
-                        message="Skipping rebuild - environment is tearing down",
-                        log_level=LogLevel.WARN,
-                        status=environment.status.value,
-                        commit_sha=short_sha,
                         stage=ExecutionStage.INIT,
+                        message="Skipping rebuild - environment is tearing down",
+                        commit_sha=short_sha,
+                        status=environment.status.value,
+                        log_level=LogLevel.WARN,
                     )
-                    await session.commit()
                     return
 
                 if environment.status != EnvironmentStatus.PROVISIONING:
@@ -930,43 +955,40 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         stage=ExecutionStage.INIT,
                     )
 
-                await _emit_log(
+                await _emit_stage(
                     log_repo,
+                    session,
                     environment_id=env_uuid,
-                    message=f"INIT - GitOps rebuild for commit {short_sha}",
-                    status=EnvironmentStatus.PROVISIONING.value,
-                    commit_sha=short_sha,
                     stage=ExecutionStage.INIT,
+                    message=f"INIT - GitOps rebuild for commit {short_sha}",
+                    commit_sha=short_sha,
                 )
-                await session.commit()
 
                 try:
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     current_stage = ExecutionStage.VALIDATE
-                    await _emit_log(
+                    await _emit_stage(
                         log_repo,
+                        session,
                         environment_id=env_uuid,
-                        message=f"VALIDATE - pulling application revision {short_sha}",
-                        status=EnvironmentStatus.PROVISIONING.value,
-                        commit_sha=short_sha,
                         stage=ExecutionStage.VALIDATE,
+                        message=f"VALIDATE - pulling application revision {short_sha}",
+                        commit_sha=short_sha,
                     )
-                    await session.commit()
 
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     current_stage = ExecutionStage.PLAN
-                    await _emit_log(
+                    await _emit_stage(
                         log_repo,
+                        session,
                         environment_id=env_uuid,
+                        stage=ExecutionStage.PLAN,
                         message=(
                             f"PLAN - workload update in {environment.namespace_name} "
                             f"(kubectl set image / Deployment roll)"
                         ),
-                        status=EnvironmentStatus.PROVISIONING.value,
                         commit_sha=short_sha,
-                        stage=ExecutionStage.PLAN,
                     )
-                    await session.commit()
 
                     rebuild_image: str | None = None
                     built_image, built_sha = await _maybe_build_preview_image(
@@ -982,15 +1004,14 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         short_sha = built_sha or short_sha
 
                     current_stage = ExecutionStage.APPLY
-                    await _emit_log(
+                    await _emit_stage(
                         log_repo,
+                        session,
                         environment_id=env_uuid,
-                        message="APPLY - rolling Deployment",
-                        status=EnvironmentStatus.PROVISIONING.value,
-                        commit_sha=short_sha,
                         stage=ExecutionStage.APPLY,
+                        message="APPLY - rolling Deployment",
+                        commit_sha=short_sha,
                     )
-                    await session.commit()
 
                     provisioner.rebuild_workload(
                         namespace=environment.namespace_name,
@@ -1009,15 +1030,14 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                     new_rollout_ok = True
 
                     await asyncio.sleep(settings.provision_step_delay_seconds)
-                    await _emit_log(
+                    await _emit_stage(
                         log_repo,
+                        session,
                         environment_id=env_uuid,
-                        message="APPLY - waiting for rollout to complete",
-                        status=EnvironmentStatus.PROVISIONING.value,
-                        commit_sha=short_sha,
                         stage=ExecutionStage.APPLY,
+                        message="APPLY - waiting for rollout to complete",
+                        commit_sha=short_sha,
                     )
-                    await session.commit()
 
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     await env_repo.update_status(
@@ -1147,29 +1167,53 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         stage=ExecutionStage.INIT,
                     )
 
-                await _emit_log(
+                await _emit_stage(
                     log_repo,
+                    session,
                     environment_id=env_uuid,
-                    message=f"INIT - tearing down namespace {environment.namespace_name}",
-                    status=EnvironmentStatus.TEARDOWN_PENDING.value,
-                    commit_sha=environment.latest_commit_sha,
                     stage=ExecutionStage.INIT,
+                    message=f"INIT - tearing down namespace {environment.namespace_name}",
+                    commit_sha=environment.latest_commit_sha,
+                    status=EnvironmentStatus.TEARDOWN_PENDING.value,
                 )
-                await session.commit()
 
                 try:
                     current_stage = ExecutionStage.APPLY
-                    await _emit_log(
+                    await _emit_stage(
                         log_repo,
+                        session,
                         environment_id=env_uuid,
-                        message="APPLY - deleting namespace and resources",
-                        status=EnvironmentStatus.TEARDOWN_PENDING.value,
-                        commit_sha=environment.latest_commit_sha,
                         stage=ExecutionStage.APPLY,
+                        message="APPLY - deleting namespace and resources",
+                        commit_sha=environment.latest_commit_sha,
+                        status=EnvironmentStatus.TEARDOWN_PENDING.value,
                     )
-                    await session.commit()
 
-                    provisioner.teardown(environment.namespace_name)
+                    # Best-effort cluster cleanup: honor the destroy request even if
+                    # the cluster is unreachable. A cleanup failure must NOT leave the
+                    # environment stuck - we still mark it DESTROYED below and let the
+                    # cluster GC / TTL reaper reclaim any orphaned namespace.
+                    try:
+                        provisioner.teardown(environment.namespace_name)
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "teardown_namespace_cleanup_failed",
+                            environment_id=environment_id,
+                            namespace=environment.namespace_name,
+                            error=str(cleanup_exc),
+                        )
+                        await _emit_log(
+                            log_repo,
+                            environment_id=env_uuid,
+                            message=(
+                                "APPLY - namespace cleanup could not reach the cluster "
+                                f"({sanitize_log_message(str(cleanup_exc))}); marking DESTROYED anyway"
+                            ),
+                            log_level=LogLevel.WARN,
+                            status=EnvironmentStatus.TEARDOWN_PENDING.value,
+                            commit_sha=environment.latest_commit_sha,
+                            stage=ExecutionStage.APPLY,
+                        )
                     # Stop the per-preview cloudflared tunnel (if any) so we don't
                     # leak a cloudflared process for a destroyed environment.
                     try:
@@ -1181,10 +1225,15 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     # Reclaim the locally-built app image from kind + host so
                     # deleted previews do not leak disk (leave shared base images).
                     if environment.provider == "local" and environment.workload_image:
-                        local_cluster = (
-                            settings.kubernetes_context or "launchpad"
-                        ).removeprefix("kind-").removeprefix("k3d-")
-                        _remove_kind_docker_images(local_cluster, [environment.workload_image])
+                        try:
+                            local_cluster = (
+                                settings.kubernetes_context or "launchpad"
+                            ).removeprefix("kind-").removeprefix("k3d-")
+                            _remove_kind_docker_images(local_cluster, [environment.workload_image])
+                        except Exception:
+                            logger.exception(
+                                "teardown_image_cleanup_failed", environment_id=environment_id
+                            )
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     await env_repo.update_status(environment, EnvironmentStatus.DESTROYED)
                     await _emit_log(
@@ -1426,6 +1475,11 @@ async def _run_drift_scan() -> int:
 
     session_factory = _session_factory()
     provisioner = KubernetesProvisioner(settings)
+    if not provisioner.clients_ready:
+        # kubeconfig/context unreachable at scan time: skip this cycle rather than
+        # crash every environment scan. The next beat retries once clients load.
+        logger.warning("drift_scan_skipped_no_cluster_client")
+        return 0
     recorded = 0
     scanned = 0
 
@@ -1757,116 +1811,14 @@ async def _attach_cloud_preview_url(
 
 
 def _build_and_load_kind_docker_images(workspace_root: Path, cluster_name: str = "launchpad") -> list[str]:
-    """Build workspace app image(s) and load them into the local kind cluster.
+    """Build workspace Dockerfiles and load images into the local cluster.
 
-    The generated Kubernetes manifests reference the scaffolded application image
-    ``<app_name>:latest`` (see ``app_scaffold.CoreScaffold.image``) with
-    ``imagePullPolicy: IfNotPresent``. Kind cannot pull that private/non-existent
-    tag from a registry, so we must build it locally with the *matching* tag and
-    ``kind load`` it. Scaffolded apps live under ``apps/<name>/`` with their own
-    build context; legacy ``dockers/`` and root Dockerfiles are also supported.
+    Delegates to ``manifest_deploy.build_and_load_kind_images`` so import
+    ``launch-*:latest`` tags stay aligned with Deployment manifests.
     """
-    import subprocess
-    import shutil
+    from app.services.manifest_deploy import build_and_load_kind_images
 
-    if not shutil.which("docker"):
-        return []
-
-    # (build_context, dockerfile, image_tag). Order matters only for logging.
-    builds: list[tuple[Path, Path, str]] = []
-    seen_tags: set[str] = set()
-
-    def _add(context: Path, dockerfile: Path, tag: str) -> None:
-        if dockerfile.is_file() and tag not in seen_tags:
-            seen_tags.add(tag)
-            builds.append((context, dockerfile, tag))
-
-    # 1) Scaffolded runnable apps: apps/<name>/Dockerfile -> <name>:latest.
-    apps_dir = workspace_root / "apps"
-    if apps_dir.is_dir():
-        for sub in sorted(apps_dir.iterdir()):
-            if sub.is_dir():
-                app_df = sub / "Dockerfile"
-                if app_df.is_file():
-                    svc_name = sub.name.lower()
-                    _add(sub, app_df, f"{svc_name}:latest")
-                    _add(sub, app_df, f"launchpad/{svc_name}:latest")
-                    if svc_name in {"api", "api-server"}:
-                        _add(sub, app_df, "api-server:latest")
-                        _add(sub, app_df, "api:latest")
-                    elif svc_name in {"web", "web-ui"}:
-                        _add(sub, app_df, "web-ui:latest")
-                        _add(sub, app_df, "web:latest")
-
-    # 2) Per-service Dockerfiles under dockers/.
-    dockers_dir = workspace_root / "dockers"
-    if dockers_dir.is_dir():
-        for df in sorted(dockers_dir.rglob("Dockerfile*")):
-            if not df.is_file():
-                continue
-            if df.name.startswith("Dockerfile."):
-                raw_svc = df.name.removeprefix("Dockerfile.").lower()
-                matching_app = apps_dir / raw_svc if apps_dir.is_dir() else None
-                if matching_app and matching_app.is_dir() and ((matching_app / "package.json").is_file() or (matching_app / "Dockerfile").is_file()):
-                    ctx = matching_app
-                elif (workspace_root / "package.json").is_file() or (workspace_root / "requirements.txt").is_file():
-                    ctx = workspace_root
-                else:
-                    continue
-
-                parts = [p for p in raw_svc.split("-") if p]
-                names = {raw_svc, parts[0] if parts else raw_svc, parts[-1] if parts else raw_svc}
-                for tag_name in names:
-                    _add(ctx, df, f"{tag_name}:latest")
-                    _add(ctx, df, f"launchpad/{tag_name}:latest")
-            else:
-                svc_name = df.parent.name.lower() if df.parent.name != "dockers" else "app"
-                matching_app = apps_dir / svc_name if apps_dir.is_dir() else None
-                ctx = matching_app if (matching_app and matching_app.is_dir()) else workspace_root
-                _add(ctx, df, f"{svc_name}:latest")
-                _add(ctx, df, f"launchpad/{svc_name}:latest")
-
-    # 3) Root Dockerfile (context = workspace root).
-    root_df = workspace_root / "Dockerfile"
-    if root_df.is_file():
-        _add(workspace_root, root_df, "app:latest")
-        _add(workspace_root, root_df, "launchpad/app:latest")
-
-    from app.services.manifest_deploy import (
-        resolve_local_cluster_name,
-        _load_image_to_local_cluster,
-    )
-    real_cluster = resolve_local_cluster_name(cluster_name)
-
-    loaded: list[str] = []
-    for context, df, image_tag in builds:
-        rel = df.relative_to(workspace_root)
-        try:
-            logger.info("building_local_docker_image", image=image_tag, dockerfile=str(rel))
-            build_res = subprocess.run(
-                ["docker", "build", "-t", image_tag, "-f", str(df), str(context)],
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-            if build_res.returncode != 0:
-                logger.warning(
-                    "local_image_build_failed",
-                    dockerfile=str(rel),
-                    image=image_tag,
-                    error=(build_res.stderr or build_res.stdout or "").strip()[-800:],
-                )
-                continue
-            logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
-            # Engine-aware load (k3d image import / k3s ctr import / kind load).
-            if _load_image_to_local_cluster(image_tag, cluster_name=real_cluster):
-                loaded.append(image_tag)
-            else:
-                logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
-        except Exception as exc:
-            logger.warning("local_image_build_exception", dockerfile=str(rel), error=str(exc))
-
-    return loaded
+    return build_and_load_kind_images(workspace_root, cluster_name=cluster_name)
 
 
 # Official/shared images that must never be removed on teardown (they are reused

@@ -12,6 +12,8 @@ alwaysApply: false
 - Types: strict TypeScript; define shared types in `~/types/`. Never use `any`.
 - Validation: Zod for forms and API payloads.
 - Real-time: prefer SSE or WebSockets for deployment logs; always remove listeners in `onUnmounted()`.
+- **Reuse first**: before new UI, search `components/`, `composables/`, `utils/`. Prefer composing existing pieces over duplicating markup or fetch logic.
+- **GitHub selection**: always use `GithubInstallationPicker` + `GithubRepoPicker` (and `~/utils/githubAccount`) for account/repo pickers. Do not rebuild `<select>` lists for installs or repos.
 
 ```typescript
 // ❌ BAD - listener leak + any
@@ -27,4 +29,14 @@ onUnmounted(() => {
   es.value?.removeEventListener('message', onMessage)
   es.value?.close()
 })
+```
+
+```vue
+<!-- ❌ BAD: one-off install + repo selects -->
+<select v-model="installationId">...</select>
+<select v-model="repo">...</select>
+
+<!-- ✅ GOOD: shared GitHub pickers -->
+<GithubInstallationPicker v-model="installationId" :installations="installations" />
+<GithubRepoPicker v-model="repoFullName" :installation-id="installationId" @select-repo="onSelect" />
 ```

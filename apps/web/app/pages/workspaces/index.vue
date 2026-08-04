@@ -2,12 +2,20 @@
 import type { WorkspaceListItem } from '~/types/provisioning'
 import { artifactModeLabel, workspaceStackLabel } from '~/utils/workspaceDisplay'
 
+const route = useRoute()
 const { listWorkspaces, destroyWorkspace } = useProvisioning()
 const workspaces = ref<WorkspaceListItem[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const destroyingId = ref<string | null>(null)
 const confirmDestroyId = ref<string | null>(null)
+const confirmDestroyOpen = computed({
+  get: () => confirmDestroyId.value !== null,
+  set: (open: boolean) => {
+    if (!open) confirmDestroyId.value = null
+  },
+})
+const importOpen = ref(false)
 
 const pendingDestroyName = computed(() => {
   const id = confirmDestroyId.value
@@ -47,7 +55,28 @@ async function onDestroy() {
   }
 }
 
-onMounted(refresh)
+function openImport() {
+  importOpen.value = true
+}
+
+async function onImportSaved() {
+  importOpen.value = false
+  await refresh()
+}
+
+onMounted(async () => {
+  await refresh()
+  if (route.query.import === '1' || route.query.import === 'true') {
+    importOpen.value = true
+  }
+})
+
+watch(
+  () => route.query.import,
+  (value) => {
+    if (value === '1' || value === 'true') importOpen.value = true
+  },
+)
 </script>
 
 <template>
@@ -56,13 +85,19 @@ onMounted(refresh)
       <div>
         <h1 class="text-3xl font-semibold tracking-tight">Workspaces</h1>
         <p class="mt-1 max-w-xl text-sm text-[var(--lp-muted)]">
-          Generated Terraform and Pulumi bundles ready for sandbox execution or GitHub bootstrap.
+          Import a GitHub or GitLab repo, or provision a new IaC bundle for sandbox execution.
         </p>
       </div>
-      <NuxtLink to="/provision" class="lp-btn-primary">
-        <span class="material-symbols-outlined text-base">add</span>
-        New workspace
-      </NuxtLink>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" class="lp-btn-ghost" @click="openImport">
+          <span class="material-symbols-outlined text-base">download</span>
+          Import repo
+        </button>
+        <NuxtLink to="/provision" class="lp-btn-primary">
+          <span class="material-symbols-outlined text-base">add</span>
+          New workspace
+        </NuxtLink>
+      </div>
     </header>
 
     <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
@@ -74,7 +109,12 @@ onMounted(refresh)
     >
       <span class="material-symbols-outlined mb-3 text-4xl text-[var(--lp-muted)]">folder_off</span>
       <p class="text-sm text-[var(--lp-muted)]">No workspaces yet.</p>
-      <NuxtLink to="/provision" class="lp-btn-primary mt-4 inline-flex">Create one</NuxtLink>
+      <div class="mt-4 flex flex-wrap justify-center gap-2">
+        <button type="button" class="lp-btn-ghost inline-flex" @click="openImport">
+          Import a repo
+        </button>
+        <NuxtLink to="/provision" class="lp-btn-primary inline-flex">Create one</NuxtLink>
+      </div>
     </div>
 
     <div v-else class="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -95,38 +135,17 @@ onMounted(refresh)
               </span>
             </p>
           </div>
-          <span
-            class="shrink-0 rounded border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 px-2 py-1 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-accent)]"
-          >
-            {{ ws.status }}
-          </span>
-        </div>
-        <div class="space-y-3 p-4">
-          <p class="font-mono text-xs text-[var(--lp-muted)]">
-            Created {{ new Date(ws.created_at).toLocaleString() }}
-          </p>
-          <div class="flex flex-wrap gap-2">
-            <NuxtLink
-              :to="`/workspaces/${ws.id}`"
-              class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
-            >
-              <span class="material-symbols-outlined text-sm">terminal</span>
+          <div class="flex shrink-0 gap-2">
+            <NuxtLink :to="`/workspaces/${ws.id}`" class="lp-btn-ghost px-3 py-1.5 text-xs">
               Open
-            </NuxtLink>
-            <NuxtLink
-              :to="`/launch?workspace=${ws.id}`"
-              class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
-            >
-              <span class="material-symbols-outlined text-sm">deployed_code</span>
-              Create env
             </NuxtLink>
             <button
               type="button"
-              class="lp-btn-danger py-1.5 text-xs uppercase tracking-wide"
+              class="lp-btn-danger px-3 py-1.5 text-xs"
               :disabled="destroyingId === ws.id"
               @click="requestDestroy(ws.id)"
             >
-              {{ destroyingId === ws.id ? 'Destroying…' : 'Destroy' }}
+              Destroy
             </button>
           </div>
         </div>
@@ -134,14 +153,17 @@ onMounted(refresh)
     </div>
 
     <ConfirmDialog
-      :open="confirmDestroyId !== null"
+      v-model:open="confirmDestroyOpen"
       title="Destroy workspace?"
-      :message="`Destroy IaC workspace “${pendingDestroyName}”? Generated files and the sandbox will be removed. This cannot be undone.`"
-      confirm-label="Yes, destroy"
-      cancel-label="No"
+      :message="`Destroy workspace “${pendingDestroyName}”? Generated files and the sandbox will be removed. This cannot be undone.`"
+      confirm-label="Destroy"
       :busy="destroyingId !== null"
-      @update:open="(value) => { if (!value) confirmDestroyId = null }"
       @confirm="onDestroy"
+    />
+
+    <RepoImporterModal
+      v-model:open="importOpen"
+      @saved="onImportSaved"
     />
   </div>
 </template>

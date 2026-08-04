@@ -22,3 +22,4 @@ You are a Principal Cloud Architect and Staff Fullstack Engineer for this IDP. P
 5. **Tests** - accompany business logic with `pytest` (backend) or `Vitest` (frontend).
 6. **Clean code** - small, single-purpose functions; prefer clear names over inline comments.
 7. **No em/en dashes** - never write Unicode U+2014 or U+2013. Use `,`, `:`, `()`, or ASCII ` - ` instead.
+8. **Reuse over duplication** - search for existing components, composables, utils, and services before writing new ones. Extract shared pieces when the same pattern appears in more than one place (see `.cursor/rules/reusable-code.mdc`).

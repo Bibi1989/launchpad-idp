@@ -158,6 +158,33 @@ def _workload_ready_timeout_seconds(*, image: str, base_timeout_seconds: float) 
     return min(base_timeout_seconds, PREVIEW_READY_TIMEOUT_CAP_SECONDS)
 
 
+def _read_or_none(read, *args, **kwargs):
+    """Return the resource, or None when the Kubernetes API responds 404.
+
+    Collapses the ``try: read() except ApiException: if 404 -> None else raise``
+    idiom. Non-404 errors propagate unchanged.
+    """
+    from kubernetes.client.rest import ApiException
+
+    try:
+        return read(*args, **kwargs)
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise
+
+
+def _ignore_404(call, *args, **kwargs) -> None:
+    """Invoke a delete/mutate call, swallowing a 404 (resource already gone)."""
+    from kubernetes.client.rest import ApiException
+
+    try:
+        call(*args, **kwargs)
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+
+
 @dataclass
 class ProvisionedResources:
     namespace: str
@@ -184,6 +211,13 @@ class KubernetesProvisioner:
         self._autoscaling = None
         if self._settings.kubernetes_enabled:
             self._load_clients()
+
+    @property
+    def clients_ready(self) -> bool:
+        """True when the API clients loaded (kubeconfig reachable). False when
+        Kubernetes is disabled or client loading failed, so callers can skip live
+        cluster reads instead of asserting/crashing."""
+        return self._core is not None and self._apps is not None
 
     def _load_clients(self) -> None:
         from kubernetes import client, config
@@ -324,7 +358,7 @@ class KubernetesProvisioner:
             resources.created_network_policy = True
             resources.created_workload = True
             resources.simulated = True
-            resources.preview_url = self._portal_preview_url(environment_id=environment_id)
+            resources.preview_url = self.portal_preview_url(environment_id=environment_id)
             return resources
 
         if self._settings.kubernetes_enabled:
@@ -348,10 +382,10 @@ class KubernetesProvisioner:
             enable_redis=enable_redis,
         )
 
-        used_ports = self._list_allocated_node_ports(exclude_namespace=namespace)
+        used_ports = self.list_allocated_node_ports(exclude_namespace=namespace)
         # Prefer a sticky in-range NodePort; ignore API auto-assigned ports outside the
         # kind-mapped PREVIEW_NODE_PORT_MIN/MAX window (those are unreachable from the host).
-        existing_port = self._read_namespaced_app_node_port(namespace)
+        existing_port = self.read_namespaced_app_node_port(namespace)
         node_port = resolve_preview_node_port(
             environment_id,
             existing_port=existing_port,
@@ -381,10 +415,10 @@ class KubernetesProvisioner:
                 environment_id=environment_id,
                 namespace=namespace,
             )
-            self._apply_ingress(namespace=namespace, labels=labels, host=host)
+            self.apply_ingress(namespace=namespace, labels=labels, host=host)
             resources.preview_url = f"http://{host}"
         else:
-            resources.preview_url = self._node_port_preview_url(node_port=node_port)
+            resources.preview_url = self.node_port_preview_url(node_port=node_port)
 
         self.wait_for_workload_ready(
             namespace=namespace,
@@ -616,11 +650,7 @@ class KubernetesProvisioner:
         )
 
         for legacy_name in ("deny-cross-namespace-egress", "deny-cross-namespace"):
-            try:
-                self._networking.delete_namespaced_network_policy(legacy_name, namespace)
-            except ApiException as exc:
-                if exc.status != 404:
-                    raise
+            _ignore_404(self._networking.delete_namespaced_network_policy, legacy_name, namespace)
 
     def _apply_namespaced_core_object(
         self,
@@ -710,11 +740,11 @@ class KubernetesProvisioner:
                     body_meta.resource_version = resource_version
                 replace(name, namespace, body)
 
-    def _portal_preview_url(self, *, environment_id: str) -> str:
+    def portal_preview_url(self, *, environment_id: str) -> str:
         base = self._settings.preview_public_base_url.rstrip("/")
         return f"{base}/p/{environment_id}"
 
-    def _node_port_preview_url(self, *, node_port: int) -> str:
+    def node_port_preview_url(self, *, node_port: int) -> str:
         host = self._settings.preview_node_host.rstrip("/")
         if "://" in host:
             return f"{host}:{node_port}"
@@ -1104,7 +1134,7 @@ class KubernetesProvisioner:
                     matched = True
         return matched
 
-    def _apply_ingress(
+    def apply_ingress(
         self,
         *,
         namespace: str,
@@ -1148,7 +1178,7 @@ class KubernetesProvisioner:
             self._networking.create_namespaced_ingress(namespace, ingress)
         logger.info("kubernetes_ingress_applied", namespace=namespace, host=host)
 
-    def _list_allocated_node_ports(self, *, exclude_namespace: str | None = None) -> set[int]:
+    def list_allocated_node_ports(self, *, exclude_namespace: str | None = None) -> set[int]:
         """Return NodePorts already claimed by Services cluster-wide."""
         if not self._settings.kubernetes_enabled or self._core is None:
             return set()
@@ -1225,25 +1255,39 @@ class KubernetesProvisioner:
                 return None
             _time.sleep(3.0)
 
-    def _read_namespaced_app_node_port(self, namespace: str) -> int | None:
+    def read_namespaced_app_node_port(self, namespace: str) -> int | None:
         if not self._settings.kubernetes_enabled or self._core is None:
             return None
-        from kubernetes.client.rest import ApiException
 
-        try:
-            existing = self._core.read_namespaced_service("app", namespace)
-        except ApiException as exc:
-            if exc.status == 404:
-                return None
-            raise
+        existing = _read_or_none(self._core.read_namespaced_service, "app", namespace)
         if (
-            existing.spec is None
+            existing is None
+            or existing.spec is None
             or existing.spec.type != "NodePort"
             or not existing.spec.ports
             or existing.spec.ports[0].node_port is None
         ):
             return None
         return int(existing.spec.ports[0].node_port)
+
+    # Public Service accessors so collaborators (e.g. ManifestDeployer) operate on
+    # a supported surface instead of reaching into the raw ``_core`` client.
+    def read_service(self, name: str, namespace: str):
+        """Return the named Service, or None on 404 / when Kubernetes is disabled."""
+        if self._core is None:
+            return None
+        return _read_or_none(self._core.read_namespaced_service, name, namespace)
+
+    def delete_service(self, name: str, namespace: str) -> None:
+        """Delete the named Service, ignoring a 404 (already gone)."""
+        if self._core is None:
+            return
+        _ignore_404(self._core.delete_namespaced_service, name, namespace)
+
+    def create_service(self, namespace: str, body: object) -> None:
+        """Create a Service in the namespace."""
+        assert self._core is not None
+        self._core.create_namespaced_service(namespace, body)
 
     @staticmethod
     def _datastore_init_containers(
@@ -1578,11 +1622,7 @@ class KubernetesProvisioner:
                 ):
                     self._core.replace_namespaced_service("app", namespace, service)
                 else:
-                    try:
-                        self._core.delete_namespaced_service("app", namespace)
-                    except ApiException as delete_exc:
-                        if delete_exc.status != 404:
-                            raise
+                    _ignore_404(self._core.delete_namespaced_service, "app", namespace)
                     self._core.create_namespaced_service(namespace, service)
                 applied_port = candidate
                 last_error = None
@@ -1734,7 +1774,14 @@ class KubernetesProvisioner:
             logger.info("kubernetes_simulate_teardown", namespace=namespace)
             return
 
-        assert self._core is not None
+        if self._core is None:
+            # Clients failed to load (kubeconfig/context unreachable). There is
+            # nothing we can delete from here; treat the namespace as already gone
+            # so the environment can still be marked DESTROYED instead of getting
+            # stuck. Any live namespace is left to the cluster's GC / TTL reaper.
+            logger.warning("kubernetes_teardown_skipped_no_client", namespace=namespace)
+            return
+
         from kubernetes.client.rest import ApiException
 
         try:
@@ -1747,20 +1794,18 @@ class KubernetesProvisioner:
             raise
 
     def rollback(self, resources: ProvisionedResources) -> None:
-        """Undo provision work without destroying a pre-existing preview namespace.
+        """Keep the preview namespace after a failed first provision / Ready timeout.
 
-        Retry/re-provision often applies into an existing namespace. Tearing that
-        namespace down on Ready-timeout deletes the manifest image and leaves Open
-        app pointing at a different nginx NodePort on another environment.
+        Deleting the namespace here looked like a user-initiated teardown and removed
+        Retry/Destroy targets. Rebuild failures restore a prior good revision via
+        ``_attempt_rebuild_rollback`` instead. Explicit Destroy still calls ``teardown``.
         """
         if not self._settings.kubernetes_enabled:
             return
-        if resources.created_namespace:
-            self.teardown(resources.namespace)
-            return
         logger.info(
-            "kubernetes_rollback_skipped_existing_namespace",
+            "kubernetes_rollback_skipped_keep_namespace",
             namespace=resources.namespace,
+            created_namespace=resources.created_namespace,
             created_workload=resources.created_workload,
             image=resources.image,
             node_port=resources.node_port,

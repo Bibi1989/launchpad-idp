@@ -146,8 +146,8 @@ def test_provision_applies_datastores_after_namespace_exists(monkeypatch: pytest
     monkeypatch.setattr(
         provisioner, "apply_ephemeral_datastores", manager.apply_ephemeral_datastores
     )
-    monkeypatch.setattr(provisioner, "_list_allocated_node_ports", lambda **_: set())
-    monkeypatch.setattr(provisioner, "_read_namespaced_app_node_port", lambda _ns: None)
+    monkeypatch.setattr(provisioner, "list_allocated_node_ports", lambda **_: set())
+    monkeypatch.setattr(provisioner, "read_namespaced_app_node_port", lambda _ns: None)
     monkeypatch.setattr(provisioner, "wait_for_workload_ready", lambda **_: None)
 
     def fake_apply_workload(**kwargs: object) -> int:
@@ -177,3 +177,48 @@ def test_provision_applies_datastores_after_namespace_exists(monkeypatch: pytest
     assert ds_call.kwargs["namespace"] == "launchpad-env-abc"
     assert ds_call.kwargs["enable_postgres"] is True
     assert ds_call.kwargs["enable_redis"] is True
+
+
+def test_read_or_none_swallows_404_and_reraises_others() -> None:
+    from kubernetes.client.rest import ApiException
+
+    from app.services.kubernetes import _read_or_none
+
+    assert _read_or_none(lambda: "resource") == "resource"
+
+    def not_found() -> None:
+        raise ApiException(status=404)
+
+    assert _read_or_none(not_found) is None
+
+    def server_error() -> None:
+        raise ApiException(status=500)
+
+    with pytest.raises(ApiException):
+        _read_or_none(server_error)
+
+
+def test_ignore_404_swallows_404_and_reraises_others() -> None:
+    from kubernetes.client.rest import ApiException
+
+    from app.services.kubernetes import _ignore_404
+
+    calls: list[int] = []
+    _ignore_404(lambda: calls.append(1))
+    assert calls == [1]
+
+    def not_found() -> None:
+        raise ApiException(status=404)
+
+    _ignore_404(not_found)  # already gone: no raise
+
+    def conflict() -> None:
+        raise ApiException(status=409)
+
+    with pytest.raises(ApiException):
+        _ignore_404(conflict)
+
+
+def test_clients_ready_false_when_kubernetes_disabled() -> None:
+    provisioner = KubernetesProvisioner(Settings(kubernetes_enabled=False))
+    assert provisioner.clients_ready is False

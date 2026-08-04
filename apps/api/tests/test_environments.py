@@ -312,6 +312,28 @@ async def test_ttl_reaper_queues_teardown(
         assert environment.status == EnvironmentStatus.EXPIRED
 
 
+def test_kubernetes_rollback_keeps_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """First-preview Ready failure must not delete the namespace (Retry/Destroy stay usable)."""
+    monkeypatch.setenv("KUBERNETES_ENABLED", "true")
+    from app.core.config import get_settings
+    from app.services.kubernetes import ProvisionedResources
+
+    get_settings.cache_clear()
+    provisioner = KubernetesProvisioner()
+    resources = ProvisionedResources(
+        namespace="launchpad-env-first-fail",
+        created_namespace=True,
+        created_workload=True,
+        image="nginx:1.27-alpine",
+        node_port=30080,
+        preview_url="http://127.0.0.1:30080",
+    )
+    with patch.object(provisioner, "teardown") as teardown:
+        provisioner.rollback(resources)
+        teardown.assert_not_called()
+    get_settings.cache_clear()
+
+
 def test_kubernetes_simulate_mode_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KUBERNETES_ENABLED", "false")
     from app.core.config import get_settings
@@ -420,7 +442,7 @@ async def test_retry_failed_environment_requeues_provision(
         await repo.update_status(
             environment,
             EnvironmentStatus.FAILED,
-            error_message="Provision failed - rolling back: timeout",
+            error_message="Provision failed: timeout",
         )
         await session.commit()
         env_id = environment.id

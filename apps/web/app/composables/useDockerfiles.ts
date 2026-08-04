@@ -35,9 +35,7 @@ export function useDockerfiles() {
     full_name: string
     ref?: string | null
   }): Promise<DockerfileScanResponse> {
-    loading.value = true
-    error.value = null
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>('/dockerfiles/scan', {
         method: 'POST',
         body: JSON.stringify({
@@ -58,12 +56,7 @@ export function useDockerfiles() {
         editorContent.value = ''
       }
       return parsed
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Dockerfile scan failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Dockerfile scan failed')
   }
 
   async function scaffold(input: {
@@ -74,9 +67,7 @@ export function useDockerfiles() {
     app_name?: string | null
     listen_port?: number
   }): Promise<DockerfileScaffoldResponse> {
-    loading.value = true
-    error.value = null
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>('/dockerfiles/scaffold', {
         method: 'POST',
         body: JSON.stringify({
@@ -93,12 +84,7 @@ export function useDockerfiles() {
       selectedPath.value = parsed.path
       editorContent.value = parsed.content
       return parsed
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Dockerfile scaffold failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Dockerfile scaffold failed')
   }
 
   async function review(input: {
@@ -106,9 +92,7 @@ export function useDockerfiles() {
     stack?: ProjectStack | null
     source_path?: string | null
   }): Promise<DockerfileReviewResponse> {
-    loading.value = true
-    error.value = null
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>('/dockerfiles/review', {
         method: 'POST',
         body: JSON.stringify({
@@ -121,12 +105,7 @@ export function useDockerfiles() {
       const parsed = dockerfileReviewResponseSchema.parse(raw)
       report.value = parsed.report
       return parsed
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Dockerfile review failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Dockerfile review failed')
   }
 
   async function applyImprovedDockerfile() {
@@ -143,9 +122,7 @@ export function useDockerfiles() {
     commit_message?: string
     branch?: string | null
   }): Promise<DockerfilePushResponse> {
-    loading.value = true
-    error.value = null
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>('/dockerfiles/push', {
         method: 'POST',
         body: JSON.stringify({
@@ -160,12 +137,7 @@ export function useDockerfiles() {
         timeoutMs: 60_000,
       })
       return dockerfilePushResponseSchema.parse(raw)
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Dockerfile push failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Dockerfile push failed')
   }
 
   async function pushBundle(input: {
@@ -175,9 +147,7 @@ export function useDockerfiles() {
     commit_message?: string
     branch?: string | null
   }): Promise<RepoPushBundleResponse> {
-    loading.value = true
-    error.value = null
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>('/dockerfiles/push-bundle', {
         method: 'POST',
         body: JSON.stringify({
@@ -190,20 +160,13 @@ export function useDockerfiles() {
         timeoutMs: 90_000,
       })
       return repoPushBundleResponseSchema.parse(raw)
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Scaffold push failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Scaffold push failed')
   }
 
   async function enqueueBuild(
     payload: DockerfileBuildPayload,
   ): Promise<DockerfileBuildEnqueueResponse> {
-    loading.value = true
-    error.value = null
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>('/dockerfiles/build', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -220,12 +183,7 @@ export function useDockerfiles() {
         updated_at: null,
       }
       return parsed
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Build enqueue failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Build enqueue failed')
   }
 
   async function getBuildJob(jobId: string): Promise<DockerfileBuildJobResponse> {

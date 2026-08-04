@@ -17,44 +17,24 @@ const {
 
 const environment = ref<Environment | null>(null)
 const loadError = ref<string | null>(null)
-const destroying = ref(false)
 const confirmDestroyOpen = ref(false)
-const extending = ref(false)
-const promoting = ref(false)
-const scanningDrift = ref(false)
-const retrying = ref(false)
-const pausing = ref(false)
-const resuming = ref(false)
 
-async function onPause() {
-  if (!environment.value || pausing.value) return
-  pausing.value = true
-  loadError.value = null
-  try {
-    environment.value = await pauseEnvironment(environment.value.id)
-    toast.success('Environment paused', `${environment.value.name} was paused.`)
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Pause failed'
-    toast.error('Pause failed', toastError(err, 'Could not pause the environment.'))
-  } finally {
-    pausing.value = false
-  }
-}
+const { define } = useAsyncAction()
 
-async function onResume() {
-  if (!environment.value || resuming.value) return
-  resuming.value = true
-  loadError.value = null
-  try {
-    environment.value = await resumeEnvironment(environment.value.id)
-    toast.success('Environment resumed', `${environment.value.name} is resuming.`)
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Resume failed'
-    toast.error('Resume failed', toastError(err, 'Could not resume the environment.'))
-  } finally {
-    resuming.value = false
-  }
-}
+const pauseAction = define(() => pauseEnvironment(environment.value!.id), {
+  success: (env) => ({ title: 'Environment paused', message: `${env.name} was paused.` }),
+  error: (err) => ({ title: 'Pause failed', message: toastError(err, 'Could not pause the environment.') }),
+  onSuccess: (env) => { environment.value = env; loadError.value = null },
+  onError: (msg) => { loadError.value = msg },
+})
+
+const resumeAction = define(() => resumeEnvironment(environment.value!.id), {
+  success: (env) => ({ title: 'Environment resumed', message: `${env.name} is resuming.` }),
+  error: (err) => ({ title: 'Resume failed', message: toastError(err, 'Could not resume the environment.') }),
+  onSuccess: (env) => { environment.value = env; loadError.value = null },
+  onError: (msg) => { loadError.value = msg },
+})
+
 const showPromote = ref(false)
 const tick = ref(0)
 const copied = ref(false)
@@ -94,10 +74,7 @@ const remainingLabel = computed(() => {
       Math.floor((new Date(environment.value.ttl_expires_at).getTime() - Date.now()) / 1000),
       0,
     )
-  if (left <= 0) return 'Expired'
-  const hours = Math.floor(left / 3600)
-  const minutes = Math.floor((left % 3600) / 60)
-  return `${hours}h ${minutes}m`
+  return formatDuration(left)
 })
 
 const ttlExpired = computed(() => {
@@ -146,17 +123,6 @@ const openAppTitle = computed(() => {
 const isProvisioning = computed(() => environment.value?.status === 'PROVISIONING')
 const isLocal = computed(() => Boolean(environment.value?.is_local))
 
-function formatCostSource(source: string | null | undefined): string {
-  if (!source) return ''
-  const labels: Record<string, string> = {
-    usage_quota: 'quota usage',
-    usage_requests: 'pod requests',
-    estimate: 'estimate',
-    idle: 'idle',
-  }
-  return labels[source] ?? source
-}
-
 const canExtend = computed(() => {
   const s = environment.value?.status
   return s === 'RUNNING' || s === 'FAILED'
@@ -191,21 +157,12 @@ async function onAnalyze() {
   }
 }
 
-async function onRetry() {
-  if (!environment.value || retrying.value) return
-  retrying.value = true
-  loadError.value = null
-  try {
-    environment.value = await retryProvision(environment.value.id)
-    connect(environment.value.id)
-    toast.info('Retrying provision', `${environment.value.name} is provisioning again.`)
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Retry failed'
-    toast.error('Retry failed', toastError(err, 'Could not retry provisioning.'))
-  } finally {
-    retrying.value = false
-  }
-}
+const retryAction = define(() => retryProvision(environment.value!.id), {
+  success: (env) => ({ type: 'info', title: 'Retrying provision', message: `${env.name} is provisioning again.` }),
+  error: (err) => ({ title: 'Retry failed', message: toastError(err, 'Could not retry provisioning.') }),
+  onSuccess: (env) => { environment.value = env; loadError.value = null; connect(env.id) },
+  onError: (msg) => { loadError.value = msg },
+})
 
 async function load(opts: { softAudits?: boolean } = {}) {
   loadError.value = null
@@ -234,89 +191,71 @@ function toggleActionsMenu() {
   actionsMenuOpen.value = !actionsMenuOpen.value
 }
 
+const destroyAction = define(() => destroy(environment.value!.id), {
+  // Read the name before the result comes back mangled with a "--destroyed-" suffix.
+  success: () => ({ title: 'Teardown queued', message: `${environment.value?.name ?? 'Environment'} is being destroyed.` }),
+  error: (err) => ({ title: 'Destroy failed', message: toastError(err, 'Could not destroy the environment.') }),
+  onSuccess: (env) => { environment.value = env; connect(env.id) },
+  onError: (msg) => { loadError.value = msg },
+})
+
 function requestDestroy() {
-  if (!environment.value || destroying.value) return
+  if (!environment.value || destroyAction.pending) return
   confirmDestroyOpen.value = true
 }
 
 async function onDestroy() {
-  if (!environment.value || destroying.value) return
   confirmDestroyOpen.value = false
-  destroying.value = true
-  const name = environment.value.name
-  try {
-    environment.value = await destroy(environment.value.id)
-    connect(environment.value.id)
-    toast.success('Teardown queued', `${name} is being destroyed.`)
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Destroy failed'
-    toast.error('Destroy failed', toastError(err, `Could not destroy ${name}.`))
-  } finally {
-    destroying.value = false
-  }
+  await destroyAction.run()
 }
 
-async function onExtend() {
-  if (!environment.value || extending.value) return
-  extending.value = true
-  try {
-    environment.value = await extendTtl(environment.value.id, {})
-    toast.success('TTL extended', `${environment.value.name} will live longer.`)
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Extend failed'
-    toast.error('Extend failed', toastError(err, 'Could not extend the TTL.'))
-  } finally {
-    extending.value = false
-  }
-}
+const extendAction = define(() => extendTtl(environment.value!.id, {}), {
+  success: (env) => ({ title: 'TTL extended', message: `${env.name} will live longer.` }),
+  error: (err) => ({ title: 'Extend failed', message: toastError(err, 'Could not extend the TTL.') }),
+  onSuccess: (env) => { environment.value = env; loadError.value = null },
+  onError: (msg) => { loadError.value = msg },
+})
 
-async function onScanDrift() {
-  if (!environment.value || scanningDrift.value) return
-  scanningDrift.value = true
-  loadError.value = null
-  try {
-    environment.value = await scanDrift(environment.value.id)
+const scanDriftAction = define(
+  async () => {
+    const env = await scanDrift(environment.value!.id)
     const soft = audits.value.length > 0
     if (!soft) auditsLoading.value = true
     try {
-      audits.value = await listAudits(environment.value.id)
+      audits.value = await listAudits(env.id)
     } catch {
       if (!soft) audits.value = []
     } finally {
       auditsLoading.value = false
     }
-    if (environment.value.drift_detected) {
-      toast.warning('Drift detected', 'Live cluster state differs from Launchpad.')
-    } else {
-      toast.success('No drift', 'Live state matches Launchpad.')
-    }
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Drift scan failed'
-    toast.error('Drift scan failed', toastError(err, 'Could not scan for drift.'))
-  } finally {
-    scanningDrift.value = false
-  }
-}
+    return env
+  },
+  {
+    success: (env) => env.drift_detected
+      ? { type: 'warning', title: 'Drift detected', message: 'Live cluster state differs from Launchpad.' }
+      : { title: 'No drift', message: 'Live state matches Launchpad.' },
+    error: (err) => ({ title: 'Drift scan failed', message: toastError(err, 'Could not scan for drift.') }),
+    onSuccess: (env) => { environment.value = env; loadError.value = null },
+    onError: (msg) => { loadError.value = msg },
+  },
+)
 
-async function onPromote() {
-  if (!environment.value || promoting.value) return
-  promoting.value = true
-  loadError.value = null
-  try {
-    const created = await promoteToCloud(environment.value.id, {
-      provider: promoteForm.provider,
-      credentials: { ...promoteCredentials },
-    })
-    showPromote.value = false
-    toast.success('Cloud preview launching', `Deploying to ${promoteForm.provider.toUpperCase()}.`)
-    await navigateTo(`/environments/${created.id}`)
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Promote failed'
-    toast.error('Deploy failed', toastError(err, 'Could not launch the cloud preview.'))
-  } finally {
-    promoting.value = false
-  }
-}
+const promoteAction = define(
+  () => promoteToCloud(environment.value!.id, {
+    provider: promoteForm.provider,
+    credentials: { ...promoteCredentials },
+  }),
+  {
+    success: () => ({ title: 'Cloud preview launching', message: `Deploying to ${promoteForm.provider.toUpperCase()}.` }),
+    error: (err) => ({ title: 'Deploy failed', message: toastError(err, 'Could not launch the cloud preview.') }),
+    onSuccess: async (created) => {
+      showPromote.value = false
+      loadError.value = null
+      await navigateTo(`/environments/${created.id}`)
+    },
+    onError: (msg) => { loadError.value = msg },
+  },
+)
 
 async function copyAppUrl() {
   if (!appHref.value) return
@@ -467,21 +406,21 @@ onMounted(() => {
                 v-if="environment.status === 'RUNNING'"
                 type="button"
                 class="lp-btn-ghost whitespace-nowrap text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
-                :disabled="pausing"
-                @click="onPause"
+                :disabled="pauseAction.pending"
+                @click="pauseAction.run()"
               >
                 <span class="material-symbols-outlined text-base">pause</span>
-                {{ pausing ? 'Pausing…' : 'Pause' }}
+                {{ pauseAction.pending ? 'Pausing…' : 'Pause' }}
               </button>
               <button
                 v-if="canResume"
                 type="button"
                 class="lp-btn-primary whitespace-nowrap bg-emerald-600 hover:bg-emerald-500 text-white"
-                :disabled="resuming"
-                @click="onResume"
+                :disabled="resumeAction.pending"
+                @click="resumeAction.run()"
               >
                 <span class="material-symbols-outlined text-base">play_arrow</span>
-                {{ resuming ? 'Resuming…' : 'Resume' }}
+                {{ resumeAction.pending ? 'Resuming…' : 'Resume' }}
               </button>
               <span
                 v-else-if="displayStatus === 'EXPIRED'"
@@ -495,21 +434,21 @@ onMounted(() => {
                 v-if="canRetry"
                 type="button"
                 class="lp-btn-primary whitespace-nowrap"
-                :disabled="retrying"
-                @click="onRetry"
+                :disabled="retryAction.pending"
+                @click="retryAction.run()"
               >
                 <span class="material-symbols-outlined text-base">replay</span>
-                {{ retrying ? 'Retrying…' : 'Retry provision' }}
+                {{ retryAction.pending ? 'Retrying…' : 'Retry provision' }}
               </button>
               <button
                 v-if="environment.status !== 'DESTROYED' && environment.status !== 'TEARDOWN_PENDING' && environment.status !== 'PROVISIONING'"
                 type="button"
                 class="lp-btn-danger whitespace-nowrap"
-                :disabled="destroying"
+                :disabled="destroyAction.pending"
                 @click="requestDestroy"
               >
                 <span class="material-symbols-outlined text-base">delete</span>
-                {{ destroying ? 'Queuing teardown…' : 'Destroy' }}
+                {{ destroyAction.pending ? 'Queuing teardown…' : 'Destroy' }}
               </button>
             </div>
 
@@ -545,22 +484,22 @@ onMounted(() => {
                   type="button"
                   role="menuitem"
                   class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
-                  :disabled="extending"
-                  @click="onExtend(); closeActionsMenu()"
+                  :disabled="extendAction.pending"
+                  @click="extendAction.run(); closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">more_time</span>
-                  {{ extending ? 'Extending…' : 'Extend TTL' }}
+                  {{ extendAction.pending ? 'Extending…' : 'Extend TTL' }}
                 </button>
                 <button
                   v-if="canScanDrift"
                   type="button"
                   role="menuitem"
                   class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
-                  :disabled="scanningDrift"
-                  @click="onScanDrift(); closeActionsMenu()"
+                  :disabled="scanDriftAction.pending"
+                  @click="scanDriftAction.run(); closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">difference</span>
-                  {{ scanningDrift ? 'Scanning…' : 'Scan drift' }}
+                  {{ scanDriftAction.pending ? 'Scanning…' : 'Scan drift' }}
                 </button>
                 <button
                   v-if="canAnalyze"
@@ -630,10 +569,10 @@ onMounted(() => {
           <button
             type="button"
             class="lp-btn-primary"
-            :disabled="promoting"
-            @click="onPromote"
+            :disabled="promoteAction.pending"
+            @click="promoteAction.run()"
           >
-            {{ promoting ? 'Launching cloud preview…' : 'Launch cloud preview' }}
+            {{ promoteAction.pending ? 'Launching cloud preview…' : 'Launch cloud preview' }}
           </button>
         </div>
 
@@ -840,7 +779,7 @@ onMounted(() => {
         :message="`Destroy preview “${environment.name}”? Kubernetes resources for this environment will be torn down. This cannot be undone.`"
         confirm-label="Yes, destroy"
         cancel-label="No"
-        :busy="destroying"
+        :busy="destroyAction.pending"
         @confirm="onDestroy"
       />
     </template>

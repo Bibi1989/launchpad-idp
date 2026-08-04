@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { GitHubAppStatus, GitlabProjectItem, GitlabStatus } from '~/types/provisioning'
+import { isPersonalGithubInstallation } from '~/utils/githubAccount'
 import { syncWorkspaceCicdToPlatform } from '~/utils/syncWorkspaceCicd'
 
 const props = defineProps<{
@@ -62,8 +63,8 @@ const selectedInstallation = computed(() =>
   githubApp.value?.installations.find((item) => item.id === pushInstallationId.value) ?? null,
 )
 
-const isPersonalGithubAccount = computed(
-  () => (selectedInstallation.value?.account_type || '').toLowerCase() === 'user',
+const isPersonalGithubAccount = computed(() =>
+  isPersonalGithubInstallation(selectedInstallation.value),
 )
 
 async function loadStatus() {
@@ -312,18 +313,11 @@ const showCommitMessage = computed(() => {
             <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">Integrations</NuxtLink>
           </p>
           <template v-else>
-            <label class="block space-y-2">
-              <span class="lp-label">Installation</span>
-              <select v-model.number="pushInstallationId" class="lp-input">
-                <option
-                  v-for="item in githubApp.installations"
-                  :key="item.id"
-                  :value="item.id"
-                >
-                  {{ item.account_login }} ({{ item.account_type }})
-                </option>
-              </select>
-            </label>
+            <GithubInstallationPicker
+              v-model="pushInstallationId"
+              :installations="githubApp.installations"
+              label="Installation"
+            />
 
             <div class="flex flex-wrap gap-2">
               <button

@@ -35,11 +35,7 @@ async function copyShareLink() {
 const remainingLabel = computed(() => {
   tick.value
   if (!environment.value) return '-'
-  const left = environment.value.time_remaining_seconds
-  if (left <= 0) return 'Expired'
-  const hours = Math.floor(left / 3600)
-  const minutes = Math.floor((left % 3600) / 60)
-  return `${hours}h ${minutes}m`
+  return formatDuration(environment.value.time_remaining_seconds)
 })
 
 const isLive = computed(() => environment.value?.status === 'RUNNING')

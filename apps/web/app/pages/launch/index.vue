@@ -1,27 +1,25 @@
 <script setup lang="ts">
-import type { KindClusterStatus, PreviewAppTemplate, PreviewBuildStatus, PreviewLaunchPayload } from '~/types/environment'
+import type { KindClusterStatus, PreviewBuildStatus, PreviewLaunchPayload } from '~/types/environment'
 import type { WorkspaceListItem } from '~/types/provisioning'
+import type { GitHost } from '~/types/git'
 import { hasAwsAuth, hasGcpAuth } from '~/utils/cloudValidation'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
-type SourceMode = 'template' | 'repo'
 
-const { listPreviewTemplates, launchPreview, getKindStatus, getPreviewBuildStatus } = useEnvironments()
+const { launchPreview, getKindStatus, getPreviewBuildStatus } = useEnvironments()
 const { listWorkspaces } = useProvisioning()
 const route = useRoute()
 
 const step = ref(1)
-const templates = ref<PreviewAppTemplate[]>([])
 const workspaces = ref<WorkspaceListItem[]>([])
-const loadingTemplates = ref(true)
 const loadingWorkspaces = ref(true)
 const submitting = ref(false)
 const errorMessage = ref<string | null>(null)
-const sourceMode = ref<SourceMode>('template')
 const kindStatus = ref<KindClusterStatus | null>(null)
 const kindStatusLoading = ref(false)
 const kindStatusError = ref<string | null>(null)
 const previewBuild = ref<PreviewBuildStatus | null>(null)
+const gitHost = ref<GitHost>('github')
 
 const linkedFromQuery = computed(() => {
   const raw = route.query.workspace
@@ -35,7 +33,6 @@ const form = reactive({
   ttl_value: 8,
   workload_image: 'nginx:1.27-alpine',
   workspace_id: null as string | null,
-  template_id: '' as string,
   git_repo_url: '',
   git_branch: 'main',
   github_pr_number: null as number | null,
@@ -85,7 +82,7 @@ const localLaunchBlocked = computed(
 )
 
 const buildsFromRepo = computed(
-  () => Boolean(previewBuild.value?.enabled && sourceMode.value === 'repo' && !usesWorkspaceSource.value),
+  () => Boolean(previewBuild.value?.enabled && !usesWorkspaceSource.value && form.git_repo_url.trim()),
 )
 
 const selectedWorkspace = computed(() =>
@@ -127,10 +124,6 @@ const cloudSteps = computed(() => {
 
 const confirmStep = computed(() => (showSourceStep.value ? 3 : 2))
 
-const selectedTemplate = computed(() =>
-  templates.value.find((t) => t.id === form.template_id) ?? null,
-)
-
 const providerLabel = computed(() => {
   const match = providers.find((p) => p.id === form.provider)
   return match?.label ?? form.provider
@@ -138,18 +131,17 @@ const providerLabel = computed(() => {
 
 const hourlyDisplay = computed(() => {
   if (form.provider === 'local') return '0.00'
-  if (sourceMode.value === 'repo') return '0.42'
-  return selectedTemplate.value?.hourly_cost_hint || '0.42'
+  return '0.42'
 })
 
 const sourceSummary = computed(() => {
   if (usesWorkspaceSource.value && selectedWorkspace.value) {
     return `Workspace: ${selectedWorkspace.value.name}`
   }
-  if (sourceMode.value === 'repo') {
-    return form.git_repo_url.trim() || 'Your repository'
+  if (form.git_repo_url.trim()) {
+    return form.git_repo_url.trim()
   }
-  return selectedTemplate.value?.title || '-'
+  return `Image ${form.workload_image.trim() || 'nginx:1.27-alpine'}`
 })
 
 const imageSummary = computed(() => {
@@ -176,21 +168,6 @@ async function refreshKindStatus() {
   }
 }
 
-function selectTemplate(tpl: any) {
-  form.template_id = tpl.id
-  form.ttl_unit = 'hours'
-  form.ttl_value = tpl.default_ttl_hours
-  if (tpl.workload_image) {
-    form.workload_image = tpl.workload_image
-  }
-  if (tpl.enable_postgres !== undefined) {
-    form.enable_postgres = Boolean(tpl.enable_postgres)
-  }
-  if (tpl.enable_redis !== undefined) {
-    form.enable_redis = Boolean(tpl.enable_redis)
-  }
-}
-
 onMounted(async () => {
   form.name = `preview-${Math.random().toString(36).slice(2, 8)}`
   const remembered = localStorage.getItem(PROVIDER_STORAGE_KEY)
@@ -207,24 +184,18 @@ onMounted(async () => {
     form.workspace_id = linkedFromQuery.value
   }
   try {
-    const [templateList, workspaceList, buildStatus] = await Promise.all([
-      listPreviewTemplates(),
+    const [workspaceList, buildStatus] = await Promise.all([
       listWorkspaces(),
       getPreviewBuildStatus(),
     ])
-    templates.value = templateList
     workspaces.value = workspaceList
     previewBuild.value = buildStatus
-    if (templates.value[0]) {
-      selectTemplate(templates.value[0])
-    }
     if (linkedFromQuery.value) {
       applyWorkspaceSelection(linkedFromQuery.value)
     }
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : 'Failed to load launch options'
   } finally {
-    loadingTemplates.value = false
     loadingWorkspaces.value = false
   }
   await refreshKindStatus()
@@ -284,25 +255,10 @@ watch(
   },
 )
 
-watch(
-  () => form.template_id,
-  (id) => {
-    if (sourceMode.value !== 'template') return
-    const tpl = templates.value.find((t) => t.id === id)
-    if (tpl) {
-      form.ttl_unit = 'hours'
-      form.ttl_value = tpl.default_ttl_hours
-    }
-  },
-)
-
-watch(sourceMode, (mode) => {
-  if (mode === 'template' && selectedTemplate.value) {
-    form.ttl_unit = 'hours'
-    form.ttl_value = selectedTemplate.value.default_ttl_hours
-  } else if (mode === 'repo') {
-    form.ttl_unit = 'hours'
-    form.ttl_value = 24
+watch(gitHost, () => {
+  // Clear mismatched URL when switching provider so the user re-enters intentionally.
+  if (form.git_repo_url.trim() && !urlMatchesGitHost(form.git_repo_url, gitHost.value)) {
+    form.git_repo_url = ''
   }
 })
 
@@ -322,18 +278,43 @@ function canContinueStep1(): boolean {
   return form.credentials.cloudflare_api_token.trim().length > 0
 }
 
+const gitUrlPlaceholder = computed(() =>
+  gitHost.value === 'github'
+    ? 'https://github.com/org/app.git'
+    : 'https://gitlab.com/group/project.git',
+)
+
+const prFieldLabel = computed(() =>
+  gitHost.value === 'github' ? 'GitHub PR number (optional)' : 'GitLab MR number (optional)',
+)
+
+function urlMatchesGitHost(url: string, host: GitHost): boolean {
+  const lower = url.trim().toLowerCase()
+  if (!lower) return true
+  if (host === 'github') {
+    return lower.includes('github.com') || lower.startsWith('git@github.com:')
+  }
+  // GitLab: gitlab.com or any other host that is not github
+  return !lower.includes('github.com') && !lower.startsWith('git@github.com:')
+}
+
 function sourceValid(): boolean {
   if (usesWorkspaceSource.value) return true
-  if (sourceMode.value === 'template') return Boolean(form.template_id)
+  // Local image-only: nginx (or custom image) without cloning a repo.
+  if (isLocal.value && !form.git_repo_url.trim()) {
+    return Boolean(form.workload_image.trim())
+  }
   const repo = form.git_repo_url.trim()
   const branch = form.git_branch.trim()
   if (!branch || /[\s\\]/.test(branch) || branch.includes('..')) return false
   const lower = repo.toLowerCase()
-  return (
+  const looksLikeGit = (
     Boolean(repo)
     && (lower.startsWith('https://') || lower.startsWith('http://') || lower.startsWith('git@') || lower.startsWith('ssh://'))
     && !/[\s\n\r\t]/.test(repo)
   )
+  if (!looksLikeGit) return false
+  return urlMatchesGitHost(repo, gitHost.value)
 }
 
 function goNext() {
@@ -343,9 +324,9 @@ function goNext() {
     return
   }
   if (step.value === 2 && showSourceStep.value && !sourceValid()) {
-    errorMessage.value = sourceMode.value === 'repo'
-      ? 'Enter a valid git repo URL and branch'
-      : 'Pick a preview app'
+    errorMessage.value = form.git_repo_url.trim() && !urlMatchesGitHost(form.git_repo_url, gitHost.value)
+      ? `URL must match the selected ${gitHost.value === 'github' ? 'GitHub' : 'GitLab'} provider`
+      : 'Enter a valid git repo URL and branch'
     return
   }
   if (step.value === 1 && !showSourceStep.value) {
@@ -367,9 +348,13 @@ async function launch() {
     return
   }
   if (!sourceValid()) {
-    errorMessage.value = sourceMode.value === 'repo'
-      ? 'Enter a valid git repo URL and branch'
-      : 'Pick a preview app'
+    errorMessage.value = usesWorkspaceSource.value
+      ? 'Workspace source is invalid'
+      : isLocal.value && !form.git_repo_url.trim()
+        ? 'Set a container image (or a git repo URL and branch)'
+        : form.git_repo_url.trim() && !urlMatchesGitHost(form.git_repo_url, gitHost.value)
+          ? `URL must match the selected ${gitHost.value === 'github' ? 'GitHub' : 'GitLab'} provider`
+          : 'Enter a valid git repo URL and branch'
     return
   }
   if (!isLocal.value && !canContinueStep1()) {
@@ -403,14 +388,15 @@ async function launch() {
     }
     if (form.workspace_id) {
       payload.workspace_id = form.workspace_id
-    } else if (sourceMode.value === 'template') {
-      payload.template_id = form.template_id
-    } else {
+    } else if (form.git_repo_url.trim()) {
       payload.git_repo_url = form.git_repo_url.trim()
-      payload.git_branch = form.git_branch.trim()
+      payload.git_branch = form.git_branch.trim() || 'main'
       if (form.github_pr_number && form.github_pr_number > 0) {
         payload.github_pr_number = form.github_pr_number
       }
+    } else {
+      // Local image-only (no catalog templates).
+      payload.workload_image = form.workload_image.trim() || 'nginx:1.27-alpine'
     }
     if (form.provider !== 'local') {
       payload.credentials = { ...form.credentials }
@@ -433,7 +419,7 @@ async function launch() {
       </p>
       <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">Launch a preview app</h1>
       <p class="max-w-2xl text-sm text-[var(--lp-muted)]">
-        Deploy a catalog demo or your own repo. Local Sandbox is the default happy path.
+        Deploy a GitHub or GitLab repo, or a linked workspace. Local Sandbox is the default happy path.
         Need custom YAML, Helm, or Terraform?
         <NuxtLink to="/provision" class="font-medium text-[var(--lp-accent)] hover:underline">
           Use Provision →
@@ -561,71 +547,21 @@ async function launch() {
             (manifest deploy). Otherwise it uses the built-in preview profile.
           </template>
           <template v-else>
-            Link a workspace to deploy its Kubernetes manifests, or choose a catalog template / git
-            repo below.
+            Link a workspace to deploy its Kubernetes manifests, or enter a git repo URL below.
             <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">Create one</NuxtLink>
           </template>
         </p>
       </label>
 
       <template v-if="!usesWorkspaceSource">
-      <div class="flex gap-2">
-        <button
-          type="button"
-          class="rounded-lg border px-3 py-1.5 text-sm transition"
-          :class="
-            sourceMode === 'template'
-              ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-              : 'border-[var(--lp-line)] text-[var(--lp-muted)]'
-          "
-          @click="sourceMode = 'template'"
-        >
-          Catalog template
-        </button>
-        <button
-          type="button"
-          class="rounded-lg border px-3 py-1.5 text-sm transition"
-          :class="
-            sourceMode === 'repo'
-              ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-              : 'border-[var(--lp-line)] text-[var(--lp-muted)]'
-          "
-          @click="sourceMode = 'repo'"
-        >
-          Your repository
-        </button>
-      </div>
-
-      <div v-if="sourceMode === 'template'">
-        <p v-if="loadingTemplates" class="text-sm text-[var(--lp-muted)]">Loading templates…</p>
-        <div v-else class="grid gap-3">
-          <button
-            v-for="tpl in templates"
-            :key="tpl.id"
-            type="button"
-            class="rounded-lg border p-4 text-left transition"
-            :class="
-              form.template_id === tpl.id
-                ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-                : 'border-[var(--lp-line)] hover:bg-[var(--lp-panel-2)]'
-            "
-            @click="selectTemplate(tpl)"
-          >
-            <p class="text-sm font-medium">{{ tpl.title }}</p>
-            <p class="mt-1 text-xs text-[var(--lp-muted)]">{{ tpl.description }}</p>
-            <p class="mt-2 font-mono text-[10px] text-[var(--lp-muted)]">
-              image {{ tpl.workload_image }}
-            </p>
-          </button>
-        </div>
-      </div>
-      <div v-else class="grid gap-3 sm:grid-cols-3">
+      <GitProviderPicker v-model="gitHost" size="sm" />
+      <div class="grid gap-3 sm:grid-cols-3">
         <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">Git repository URL</span>
+          <span class="lp-label">{{ gitHost === 'github' ? 'GitHub' : 'GitLab' }} repository URL <span class="font-normal text-[var(--lp-muted)]">(optional for Local)</span></span>
           <input
             v-model="form.git_repo_url"
             class="lp-input font-mono text-xs"
-            placeholder="https://github.com/org/app.git"
+            :placeholder="gitUrlPlaceholder"
             autocomplete="off"
           >
         </label>
@@ -634,7 +570,7 @@ async function launch() {
           <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
         </label>
         <label class="block space-y-2 sm:col-span-3">
-          <span class="lp-label">GitHub PR number (optional)</span>
+          <span class="lp-label">{{ prFieldLabel }}</span>
           <input
             v-model.number="form.github_pr_number"
             type="number"
@@ -643,9 +579,9 @@ async function launch() {
             placeholder="42"
           >
           <p class="text-xs text-[var(--lp-muted)]">
-            When Running, Launchpad smokes the preview URL, posts a PR comment + commit status
+            When Running, Launchpad smokes the preview URL, posts a PR/MR comment + commit status
             (Open in Launchpad), and exposes a stable <code class="font-mono text-[10px]">/pr/{n}</code> URL.
-            Synchronize rebuilds; closing or merging the PR tears it down automatically.
+            Synchronize rebuilds; closing or merging tears it down automatically.
           </p>
         </label>
         <p
@@ -723,7 +659,7 @@ async function launch() {
       <label class="block space-y-2">
         <span class="lp-label">Workspace</span>
         <select v-model="form.workspace_id" class="lp-input" :disabled="loadingWorkspaces">
-          <option :value="null">None - use catalog or git repo</option>
+          <option :value="null">None - use git repo</option>
           <option v-for="ws in workspaces" :key="ws.id" :value="ws.id">
             {{ ws.name }} · {{ ws.provider }}/{{ ws.engine }}
           </option>
@@ -732,7 +668,7 @@ async function launch() {
           <template v-if="usesWorkspaceSource">
             Launching from workspace
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            - skip catalog/git on the next step.
+            - skip git on the next step.
           </template>
           <template v-else>
             Using stored credentials from
@@ -779,67 +715,17 @@ async function launch() {
       <div>
         <h2 class="text-lg font-semibold">Pick source</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          Use a catalog template or point at your own git repository and branch.
+          Choose GitHub or GitLab, then point at your repository and branch.
         </p>
       </div>
-      <div class="flex gap-2">
-        <button
-          type="button"
-          class="rounded-lg border px-3 py-1.5 text-sm transition"
-          :class="
-            sourceMode === 'template'
-              ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-              : 'border-[var(--lp-line)] text-[var(--lp-muted)]'
-          "
-          @click="sourceMode = 'template'"
-        >
-          Catalog template
-        </button>
-        <button
-          type="button"
-          class="rounded-lg border px-3 py-1.5 text-sm transition"
-          :class="
-            sourceMode === 'repo'
-              ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-              : 'border-[var(--lp-line)] text-[var(--lp-muted)]'
-          "
-          @click="sourceMode = 'repo'"
-        >
-          Your repository
-        </button>
-      </div>
-      <p v-if="loadingTemplates && sourceMode === 'template'" class="text-sm text-[var(--lp-muted)]">
-        Loading templates…
-      </p>
-      <div v-else-if="sourceMode === 'template'" class="grid gap-3">
-        <button
-          v-for="tpl in templates"
-          :key="tpl.id"
-          type="button"
-          class="rounded-lg border p-4 text-left transition"
-          :class="
-            form.template_id === tpl.id
-              ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-              : 'border-[var(--lp-line)] hover:bg-[var(--lp-panel-2)]'
-          "
-          @click="form.template_id = tpl.id"
-        >
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <p class="text-sm font-medium">{{ tpl.title }}</p>
-              <p class="mt-1 text-xs text-[var(--lp-muted)]">{{ tpl.description }}</p>
-            </div>
-            <span class="font-mono text-xs text-[var(--lp-accent)]">${{ tpl.hourly_cost_hint }}/hr</span>
-          </div>
-        </button>
-      </div>
-      <div v-else class="grid gap-3 sm:grid-cols-3">
+      <GitProviderPicker v-model="gitHost" size="sm" />
+      <div class="grid gap-3 sm:grid-cols-3">
         <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">Git repository URL</span>
+          <span class="lp-label">{{ gitHost === 'github' ? 'GitHub' : 'GitLab' }} repository URL</span>
           <input
             v-model="form.git_repo_url"
             class="lp-input font-mono text-xs"
-            placeholder="https://github.com/org/app.git"
+            :placeholder="gitUrlPlaceholder"
           >
         </label>
         <label class="block space-y-2">
@@ -847,7 +733,7 @@ async function launch() {
           <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
         </label>
         <label class="block space-y-2 sm:col-span-3">
-          <span class="lp-label">GitHub PR number (optional)</span>
+          <span class="lp-label">{{ prFieldLabel }}</span>
           <input
             v-model.number="form.github_pr_number"
             type="number"
@@ -856,7 +742,7 @@ async function launch() {
             placeholder="42"
           >
           <p class="text-xs text-[var(--lp-muted)]">
-            Enables stable /pr/{n} URL, smoke + status checks, sync rebuilds, and auto-destroy on PR close.
+            Enables stable /pr/{n} URL, smoke + status checks, sync rebuilds, and auto-destroy on close.
           </p>
         </label>
       </div>
@@ -904,6 +790,7 @@ async function launch() {
           class="lp-input font-mono text-xs"
           placeholder="nginx:1.27-alpine"
           autocomplete="off"
+        >
       </label>
       <div class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4">
         <span class="lp-label">Ephemeral Datastores (opt-in)</span>

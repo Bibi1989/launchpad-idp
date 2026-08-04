@@ -147,6 +147,32 @@ def has_aws_auth(creds: CloudCredentials) -> bool:
     return bool(creds.aws_access_key_id and creds.aws_secret_access_key)
 
 
+def validate_cloud_credentials(provider: str, creds: CloudCredentials) -> None:
+    """Raise ValueError when the credentials for a cloud provider are incomplete.
+
+    Shared by the preview-launch and promote request validators so the per-provider
+    rules and messages live in one place. ``provider`` may be a PreviewProvider
+    member or its string value ("gcp"/"aws"/...), which compare equal here.
+    """
+    if provider == "gcp" and not has_gcp_auth(creds):
+        raise ValueError(
+            "GCP credentials required: service account JSON or complete Workload Identity Federation config"
+        )
+    if provider == "aws" and not has_aws_auth(creds):
+        raise ValueError(
+            "AWS credentials required: access key + secret, or IAM role ARN for keyless OIDC"
+        )
+    if provider == "azure" and (
+        not creds.azure_client_id
+        or not creds.azure_client_secret
+        or not creds.azure_tenant_id
+        or not creds.azure_subscription_id
+    ):
+        raise ValueError("Azure service principal fields are required")
+    if provider == "cloudflare" and not creds.cloudflare_api_token:
+        raise ValueError("Cloudflare API token is required")
+
+
 def cloud_credentials_to_map(credentials: CloudCredentials) -> dict[str, str | None]:
     """Flatten CloudCredentials for sandbox env materialization."""
     return {

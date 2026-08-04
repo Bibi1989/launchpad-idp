@@ -265,6 +265,16 @@ def test_scan_environment_skips_when_kubernetes_disabled() -> None:
     assert scan_environment(provisioner, environment, default_image="img:1") is None
 
 
+def test_scan_environment_skips_when_clients_not_ready() -> None:
+    # Regression: kubeconfig/context unreachable leaves clients unloaded. The scan
+    # must skip gracefully, not crash the periodic task on an assertion.
+    provisioner = MagicMock()
+    provisioner._settings.kubernetes_enabled = True
+    provisioner.clients_ready = False
+    environment = MagicMock()
+    assert scan_environment(provisioner, environment, default_image="img:1") is None
+
+
 @pytest_asyncio.fixture
 async def client(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncClient]:
     app = create_app()

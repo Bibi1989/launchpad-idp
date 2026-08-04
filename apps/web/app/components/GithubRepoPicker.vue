@@ -128,7 +128,12 @@ watch(
   () => props.installationId,
   () => {
     repos.value = []
-    if (isOpen.value) {
+    searchQuery.value = ''
+    searchError.value = null
+    if (props.modelValue) {
+      emit('update:modelValue', '')
+    }
+    if (props.installationId && isOpen.value) {
       void fetchRepos('')
     }
   },

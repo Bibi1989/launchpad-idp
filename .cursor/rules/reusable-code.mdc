@@ -1,0 +1,32 @@
+---
+description: Prefer reusable components, utilities, and shared services over duplication
+alwaysApply: true
+---
+
+# Reuse First
+
+Before adding UI, API helpers, or domain logic, search the codebase for an existing component, composable, util, or service. Extend or compose it. Do not copy-paste near-duplicates.
+
+## Frontend (Nuxt)
+
+1. **Search first** - `apps/web/app/components/`, `composables/`, `utils/`, `types/`.
+2. **GitHub flows** - use shared pieces:
+   - `GithubInstallationPicker` for personal vs organization App installs
+   - `GithubRepoPicker` for searchable repository selection
+   - `GithubConnectCard` for connect / status surfaces
+   - `~/utils/githubAccount` for account labels and clone URLs
+3. **Extract when duplicated** - if the same UI or logic appears twice, pull a shared component or util before shipping the third copy.
+4. **Props over forks** - prefer optional props / slots on an existing component over a parallel one-off.
+5. **Types once** - shared contracts live in `~/types/`; do not redefine the same shape inline.
+
+## Backend (FastAPI)
+
+1. Reuse services in `app/services/` and shared pkgs under `pkg/`.
+2. Do not duplicate token resolution, install lookup, or clone helpers across routers.
+3. Prefer small pure helpers over copy-pasted blocks in workers and routers.
+
+## Checklist before new code
+
+- [ ] Existing component/composable/service found and reused, or extraction planned
+- [ ] No second implementation of install picker, repo search, or account-type labels
+- [ ] Public props/events stay typed and documented by usage in at least one call site

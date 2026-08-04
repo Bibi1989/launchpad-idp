@@ -40,6 +40,17 @@ def test_preview_launch_local_skips_credentials() -> None:
     assert payload.credentials.gcp_sa_key_json is None
 
 
+def test_preview_launch_local_image_only() -> None:
+    payload = PreviewLaunchRequest(
+        name="image-only",
+        provider=PreviewProvider.LOCAL,
+        workload_image="nginx:1.27-alpine",
+    )
+    assert payload.git_repo_url is None
+    assert payload.template_id is None
+    assert payload.workload_image == "nginx:1.27-alpine"
+
+
 def test_preview_launch_custom_repo() -> None:
     payload = PreviewLaunchRequest(
         name="my-feature",

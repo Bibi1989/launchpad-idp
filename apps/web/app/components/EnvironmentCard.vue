@@ -58,10 +58,8 @@ const remaining = computed(() => {
   const totalMs = Math.max(expires - created, 1)
   const leftMs = Math.max(expires - now, 0)
   const ratio = Math.min(Math.max(leftMs / totalMs, 0), 1)
-  const hours = Math.floor(leftMs / 3_600_000)
-  const minutes = Math.floor((leftMs % 3_600_000) / 60_000)
   return {
-    label: `${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m`,
+    label: formatDuration(Math.floor(leftMs / 1000), { pad: true }),
     dashOffset: CIRCUMFERENCE * (1 - ratio),
     expired: leftMs <= 0,
   }
@@ -97,17 +95,7 @@ const costToDate = computed(() => {
   return '0.0000'
 })
 
-const costSourceLabel = computed(() => {
-  const source = props.environment.cost_source
-  if (!source) return null
-  const labels: Record<string, string> = {
-    usage_quota: 'quota usage',
-    usage_requests: 'pod requests',
-    estimate: 'estimate',
-    idle: 'idle',
-  }
-  return labels[source] ?? source
-})
+const costSourceLabel = computed(() => formatCostSource(props.environment.cost_source))
 
 const isLocal = computed(() => Boolean(props.environment.is_local))
 

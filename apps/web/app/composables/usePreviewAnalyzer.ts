@@ -45,12 +45,10 @@ export function usePreviewAnalyzer() {
     id: string,
     payload: AnalyzePreviewPayload = {},
   ): Promise<AnalyzePreviewResponse> {
-    loading.value = true
-    error.value = null
     environmentId.value = id
     open.value = true
     resetPatchDecision()
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>(`/environments/${id}/analyze`, {
         method: 'POST',
         body: JSON.stringify({
@@ -68,20 +66,13 @@ export function usePreviewAnalyzer() {
       report.value = parsed.report
       telemetrySummary.value = parsed.telemetrySummary
       return parsed
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Analyzer failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Analyzer failed')
   }
 
   async function analyzeAdHoc(payload: AnalyzePreviewPayload): Promise<AnalyzePreviewResponse> {
-    loading.value = true
-    error.value = null
     open.value = true
     resetPatchDecision()
-    try {
+    return runRequest({ loading, error }, async () => {
       const raw = await apiFetch<unknown>('/preview/analyze', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -91,12 +82,7 @@ export function usePreviewAnalyzer() {
       report.value = parsed.report
       telemetrySummary.value = parsed.telemetrySummary
       return parsed
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'Analyzer failed'
-      throw err
-    } finally {
-      loading.value = false
-    }
+    }, 'Analyzer failed')
   }
 
   async function applyPatch(workspaceId: string): Promise<void> {

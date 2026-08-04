@@ -256,7 +256,16 @@ class PreviewLaunchRequest(BaseModel):
         has_template = bool(self.template_id)
         has_custom = bool(self.git_repo_url)
         has_workspace = self.workspace_id is not None
+        has_local_image = (
+            self.provider == PreviewProvider.LOCAL
+            and bool(self.workload_image)
+            and not has_template
+            and not has_custom
+            and not has_workspace
+        )
         source_modes = sum([has_template, has_custom, has_workspace])
+        if has_local_image:
+            return self
         if source_modes != 1:
             raise ValueError(
                 "Provide exactly one of workspace_id, template_id, or git_repo_url (+ git_branch)"
@@ -268,26 +277,9 @@ class PreviewLaunchRequest(BaseModel):
             return self
         if self.workspace_id is not None:
             return self
-        from app.core.secrets import has_aws_auth, has_gcp_auth
+        from app.core.secrets import validate_cloud_credentials
 
-        creds = self.credentials
-        if self.provider == PreviewProvider.GCP and not has_gcp_auth(creds):
-            raise ValueError(
-                "GCP credentials required: service account JSON or complete Workload Identity Federation config"
-            )
-        if self.provider == PreviewProvider.AWS and not has_aws_auth(creds):
-            raise ValueError(
-                "AWS credentials required: access key + secret, or IAM role ARN for keyless OIDC"
-            )
-        if self.provider == PreviewProvider.AZURE and (
-            not creds.azure_client_id
-            or not creds.azure_client_secret
-            or not creds.azure_tenant_id
-            or not creds.azure_subscription_id
-        ):
-            raise ValueError("Azure service principal fields are required")
-        if self.provider == PreviewProvider.CLOUDFLARE and not creds.cloudflare_api_token:
-            raise ValueError("Cloudflare API token is required")
+        validate_cloud_credentials(self.provider, self.credentials)
         return self
 
 
@@ -324,26 +316,9 @@ class EnvironmentPromoteRequest(BaseModel):
             raise ValueError("Provide ttl_hours or ttl_minutes, not both")
         if self.provider == PreviewProvider.LOCAL:
             raise ValueError("Promote target must be a cloud provider")
-        from app.core.secrets import has_aws_auth, has_gcp_auth
+        from app.core.secrets import validate_cloud_credentials
 
-        creds = self.credentials
-        if self.provider == PreviewProvider.GCP and not has_gcp_auth(creds):
-            raise ValueError(
-                "GCP credentials required: service account JSON or complete Workload Identity Federation config"
-            )
-        if self.provider == PreviewProvider.AWS and not has_aws_auth(creds):
-            raise ValueError(
-                "AWS credentials required: access key + secret, or IAM role ARN for keyless OIDC"
-            )
-        if self.provider == PreviewProvider.AZURE and (
-            not creds.azure_client_id
-            or not creds.azure_client_secret
-            or not creds.azure_tenant_id
-            or not creds.azure_subscription_id
-        ):
-            raise ValueError("Azure service principal fields are required")
-        if self.provider == PreviewProvider.CLOUDFLARE and not creds.cloudflare_api_token:
-            raise ValueError("Cloudflare API token is required")
+        validate_cloud_credentials(self.provider, self.credentials)
         return self
 
 

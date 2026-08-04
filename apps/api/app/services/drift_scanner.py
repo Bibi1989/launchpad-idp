@@ -172,6 +172,11 @@ def scan_environment(
     """Compare live cluster state to control-plane expectations. Returns None if in sync."""
     if not provisioner._settings.kubernetes_enabled:  # noqa: SLF001
         return None
+    if not provisioner.clients_ready:
+        # Cluster clients unavailable (kubeconfig/context unreachable): cannot
+        # compare against live state, so skip rather than crash the scan.
+        logger.warning("drift_scan_skipped_no_cluster_client", environment_id=str(environment.id))
+        return None
 
     deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
     if deploy_mode == DeployMode.MANIFEST.value:
@@ -190,7 +195,8 @@ def _scan_preview(
     *,
     default_image: str,
 ) -> DriftFinding | None:
-    assert provisioner._apps is not None  # noqa: SLF001
+    if not provisioner.clients_ready:
+        return None
 
     from kubernetes.client.rest import ApiException
 
@@ -243,7 +249,8 @@ def _scan_manifest(
     default_image: str,
     workspace_root: Path | None,
 ) -> DriftFinding | None:
-    assert provisioner._apps is not None  # noqa: SLF001
+    if not provisioner.clients_ready:
+        return None
 
     from kubernetes.client.rest import ApiException
 

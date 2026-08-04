@@ -218,9 +218,15 @@ def _is_image_in_kind(image_tag: str, cluster_name: str | None = None) -> bool:
 
 
 def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = None) -> list[str]:
-    """Build workspace app image(s) and load them into local kind cluster so pods pull cleanly."""
-    import subprocess
+    """Build workspace app image(s) and load them into the local cluster so pods pull cleanly.
+
+    Prefer ``.launchpad/image-builds.json`` (written by repo import) so tags match
+    Deployment image refs like ``launch-web:latest``. Fall back to apps/*/Dockerfile
+    and root Dockerfile heuristics.
+    """
+    import json
     import shutil
+    import subprocess
 
     if not shutil.which("docker"):
         logger.warning("local_image_build_skipped", reason="docker CLI not found")
@@ -230,13 +236,62 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
 
     builds: list[tuple[Path, Path, str]] = []
     seen_tags: set[str] = set()
+    required_tags: set[str] = set()
 
-    def _add(context: Path, dockerfile: Path, tag: str) -> None:
+    def _add(context: Path, dockerfile: Path, tag: str, *, required: bool = False) -> None:
         if dockerfile.is_file() and tag not in seen_tags:
             seen_tags.add(tag)
             builds.append((context, dockerfile, tag))
+            if required:
+                required_tags.add(tag)
 
-    # 1) Scaffolded runnable apps: apps/<name>/Dockerfile -> <name>:latest.
+    # 0) Import / generator plan - exact service image names.
+    plan_path = workspace_root / ".launchpad" / "image-builds.json"
+    if plan_path.is_file():
+        try:
+            raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raw = []
+        if isinstance(raw, list):
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                image = str(entry.get("image") or "").strip()
+                ctx_rel = str(entry.get("context") or ".").strip() or "."
+                df_rel = str(entry.get("dockerfile") or "Dockerfile").strip()
+                if not image:
+                    continue
+                context = workspace_root if ctx_rel in {".", ""} else workspace_root / ctx_rel
+                dockerfile = workspace_root / df_rel
+                if not dockerfile.is_file():
+                    # Dockerfile may live beside the package even if plan is stale.
+                    alt = context / "Dockerfile"
+                    if alt.is_file():
+                        dockerfile = alt
+                _add(context, dockerfile, image, required=True)
+
+    # Also map detected-stack services when plan is missing but stack metadata exists.
+    stack_path = workspace_root / ".launchpad" / "detected-stack.json"
+    if stack_path.is_file() and not plan_path.is_file():
+        try:
+            stack = json.loads(stack_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            stack = {}
+        for svc in stack.get("services") or []:
+            if not isinstance(svc, dict) or svc.get("enabled") is False:
+                continue
+            name = str(svc.get("name") or "").strip()
+            path = str(svc.get("path") or ".").strip() or "."
+            if not name:
+                continue
+            pkg = workspace_root if path in {".", ""} else workspace_root / path
+            df_hint = str(svc.get("dockerfile_path") or "Dockerfile")
+            dockerfile = pkg / df_hint
+            if not dockerfile.is_file():
+                dockerfile = pkg / "Dockerfile"
+            _add(pkg if pkg.is_dir() else workspace_root, dockerfile, f"{name}:latest", required=True)
+
+    # 1) Scaffolded runnable apps: apps/<name>/Dockerfile -> <name>:latest (+ launch-* aliases).
     apps_dir = workspace_root / "apps"
     if apps_dir.is_dir():
         for sub in sorted(apps_dir.iterdir()):
@@ -245,13 +300,16 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                 if app_df.is_file():
                     svc_name = sub.name.lower()
                     _add(sub, app_df, f"{svc_name}:latest")
+                    _add(sub, app_df, f"launch-{svc_name}:latest")
                     _add(sub, app_df, f"launchpad/{svc_name}:latest")
                     if svc_name in {"api", "api-server"}:
                         _add(sub, app_df, "api-server:latest")
                         _add(sub, app_df, "api:latest")
+                        _add(sub, app_df, "launch-server:latest")
                     elif svc_name in {"web", "web-ui"}:
                         _add(sub, app_df, "web-ui:latest")
                         _add(sub, app_df, "web:latest")
+                        _add(sub, app_df, "launch-web:latest")
 
     # 2) Per-service Dockerfiles under dockers/.
     dockers_dir = workspace_root / "dockers"
@@ -274,20 +332,37 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                 for tag_name in names:
                     _add(ctx, df, f"{tag_name}:latest")
                     _add(ctx, df, f"launchpad/{tag_name}:latest")
+                    _add(ctx, df, f"launch-{tag_name}:latest")
             else:
                 svc_name = df.parent.name.lower() if df.parent.name != "dockers" else "app"
                 matching_app = apps_dir / svc_name if apps_dir.is_dir() else None
                 ctx = matching_app if (matching_app and matching_app.is_dir()) else workspace_root
                 _add(ctx, df, f"{svc_name}:latest")
                 _add(ctx, df, f"launchpad/{svc_name}:latest")
+                _add(ctx, df, f"launch-{svc_name}:latest")
 
     # 3) Root Dockerfile (context = workspace root).
     root_df = workspace_root / "Dockerfile"
     if root_df.is_file():
         _add(workspace_root, root_df, "app:latest")
         _add(workspace_root, root_df, "launchpad/app:latest")
+        _add(workspace_root, root_df, "launch-app:latest")
+        _add(workspace_root, root_df, "launch-web:latest")
+
+    # packages/* Dockerfiles (monorepo without apps/)
+    packages_dir = workspace_root / "packages"
+    if packages_dir.is_dir():
+        for sub in sorted(packages_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            app_df = sub / "Dockerfile"
+            if app_df.is_file():
+                svc_name = sub.name.lower()
+                _add(sub, app_df, f"{svc_name}:latest")
+                _add(sub, app_df, f"launch-{svc_name}:latest")
 
     loaded: list[str] = []
+    failed_required: list[str] = []
     for context, df, image_tag in builds:
         rel = df.relative_to(workspace_root)
         try:
@@ -299,21 +374,33 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                 timeout=600,
             )
             if build_res.returncode != 0:
+                detail = (build_res.stderr or build_res.stdout or "").strip()[-800:]
                 logger.warning(
                     "kind_image_build_failed",
                     dockerfile=str(rel),
                     image=image_tag,
-                    error=(build_res.stderr or build_res.stdout or "").strip()[-800:],
+                    error=detail,
                 )
+                if image_tag in required_tags:
+                    failed_required.append(f"{image_tag} ({rel}): {detail[:200]}")
                 continue
             logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
-            # Engine-aware load (k3d image import / k3s ctr import / kind load).
             if _load_image_to_local_cluster(image_tag, cluster_name=real_cluster):
                 loaded.append(image_tag)
             else:
                 logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
+                if image_tag in required_tags:
+                    failed_required.append(f"{image_tag}: built but failed to load into cluster")
         except Exception as exc:
             logger.warning("local_image_build_exception", dockerfile=str(rel), error=str(exc))
+            if image_tag in required_tags:
+                failed_required.append(f"{image_tag}: {exc}")
+
+    if failed_required:
+        raise RuntimeError(
+            "Failed to build/load required workspace image(s) from Dockerfile. "
+            + "; ".join(failed_required[:3])
+        )
 
     return loaded
 
@@ -1274,7 +1361,7 @@ class ManifestDeployer:
                 provided_image=image,
                 default_image=self._settings.default_workload_image,
             )
-            resources.preview_url = self._provisioner._portal_preview_url(
+            resources.preview_url = self._provisioner.portal_preview_url(
                 environment_id=environment_id
             )
             return resources
@@ -1318,8 +1405,8 @@ class ManifestDeployer:
         self._apply_documents(namespace=namespace, documents=patched)
         resources.created_workload = True
 
-        used_ports = self._provisioner._list_allocated_node_ports(exclude_namespace=namespace)
-        existing_port = self._provisioner._read_namespaced_app_node_port(namespace)
+        used_ports = self._provisioner.list_allocated_node_ports(exclude_namespace=namespace)
+        existing_port = self._provisioner.read_namespaced_app_node_port(namespace)
         node_port = resolve_preview_node_port(
             environment_id,
             existing_port=existing_port,
@@ -1345,10 +1432,10 @@ class ManifestDeployer:
                 environment_id=environment_id,
                 namespace=namespace,
             )
-            self._provisioner._apply_ingress(namespace=namespace, labels=labels, host=host)
+            self._provisioner.apply_ingress(namespace=namespace, labels=labels, host=host)
             resources.preview_url = f"http://{host}"
         else:
-            resources.preview_url = self._provisioner._node_port_preview_url(node_port=node_port)
+            resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
 
         ready_timeout = self._settings.kubernetes_ready_timeout_seconds
         # Non-nginx images (pull + cold Node/Vite bind) need more headroom than nginx.
@@ -1612,7 +1699,6 @@ class ManifestDeployer:
         not ``app: app``) still gets NodePort endpoints. Always creates a clean
         Service body; changing ``nodePort`` requires delete+recreate.
         """
-        assert self._provisioner._core is not None
         from kubernetes import client
         from kubernetes.client.rest import ApiException
 
@@ -1635,12 +1721,7 @@ class ManifestDeployer:
 
         last_error: ApiException | None = None
         for candidate in candidates:
-            try:
-                existing = self._provisioner._core.read_namespaced_service(APP_NAME, namespace)
-            except ApiException as exc:
-                if exc.status != 404:
-                    raise
-                existing = None
+            existing = self._provisioner.read_service(APP_NAME, namespace)
 
             existing_target: int | None = None
             if (
@@ -1689,12 +1770,8 @@ class ManifestDeployer:
 
             try:
                 if existing is not None:
-                    try:
-                        self._provisioner._core.delete_namespaced_service(APP_NAME, namespace)
-                    except ApiException as delete_exc:
-                        if delete_exc.status != 404:
-                            raise
-                self._provisioner._core.create_namespaced_service(namespace, service)
+                    self._provisioner.delete_service(APP_NAME, namespace)
+                self._provisioner.create_service(namespace, service)
                 return candidate
             except ApiException as exc:
                 last_error = exc
