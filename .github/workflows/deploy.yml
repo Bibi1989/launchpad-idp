@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: launchpad
+    runs-on: [self-hosted, launchpad]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
