@@ -1,0 +1,56 @@
+# API/worker image for laptop / self-hosted servers that run Local (k3s/k3d) previews.
+# Includes kubectl, k3d, and the Docker CLI (talks to the mounted host docker.sock).
+# Build context: monorepo root.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
+    KUBECONFIG=/kube/config
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash \
+      build-essential \
+      ca-certificates \
+      curl \
+      git \
+      gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# kubectl + Docker CLI + k3d (arch-aware)
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64) KARCH=amd64; DARCH=x86_64 ;; \
+      aarch64|arm64) KARCH=arm64; DARCH=aarch64 ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"; \
+    curl -fsSLo /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KARCH}/kubectl"; \
+    chmod +x /usr/local/bin/kubectl; \
+    DOCKER_VERSION=27.5.1; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${DARCH}/docker-${DOCKER_VERSION}.tgz" \
+      | tar -xz -C /tmp; \
+    mv /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker; \
+    curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash; \
+    kubectl version --client=true; \
+    docker --version; \
+    k3d version
+
+COPY apps/api/pyproject.toml ./
+COPY apps/api/app ./app
+COPY apps/api/alembic.ini ./
+COPY apps/api/alembic ./alembic
+COPY pkg ./pkg
+
+RUN pip install --upgrade pip && pip install .
+
+EXPOSE 8000
+
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

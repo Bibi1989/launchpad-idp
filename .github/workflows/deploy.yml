@@ -97,7 +97,13 @@ jobs:
           CADDY_HTTPS_PORT=${CADDY_HTTPS_PORT:-8443}
           AUTH_DEV_LOGIN_ENABLED=${AUTH_DEV_LOGIN_ENABLED:-true}
           LOG_LEVEL=INFO
-          KUBERNETES_ENABLED=false
+          KUBERNETES_ENABLED=true
+          LOCAL_K8S_ENGINE=k3s
+          KIND_AUTO_MANAGE=true
+          KIND_CLUSTER_NAME=launchpad
+          DOCKER_SOCK=/var/run/docker.sock
+          K3D_API_HOST=host.docker.internal
+          K3D_API_PORT=6445
           DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
           TTL_REAPER_INTERVAL_SECONDS=300
           EOF

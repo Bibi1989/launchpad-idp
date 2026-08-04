@@ -90,6 +90,11 @@ else
     --wait
     --timeout 150s
   )
+  # When k3d runs inside the api/worker container (Docker socket mount), the
+  # kube-apiserver must be reachable via the host gateway name, not 127.0.0.1.
+  if [[ -n "${K3D_API_HOST:-}" ]]; then
+    CREATE_ARGS+=(--api-port "${K3D_API_HOST}:${K3D_API_PORT:-6445}")
+  fi
   if [[ -n "${K3S_IMAGE}" ]]; then
     CREATE_ARGS+=(--image "${K3S_IMAGE}")
   fi

@@ -1,12 +1,24 @@
-# Production-oriented stack for Oracle Cloud Always Free (Ampere A1 / x86).
+# Full stack for a self-hosted laptop/server (16GB+ recommended when KUBERNETES_ENABLED=true).
 # From repo root:
 #   cp deploy/oci/env.example deploy/oci/.env
 #   # edit deploy/oci/.env
 #   docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build
 #
 # Or: make oci-up
+#
+# Local Sandbox: api/worker talk to the host Docker daemon (k3d) via the mounted socket.
 
 name: launchpad-oci
+
+x-api-build: &api_build
+  context: ../..
+  dockerfile: deploy/oci/Dockerfile.api
+
+x-k8s-volumes: &k8s_volumes
+  - workspace_data:/var/lib/launchpad/workspaces
+  - kube_data:/kube
+  - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+  - ../../scripts:/opt/launchpad/scripts:ro
 
 services:
   caddy:
@@ -15,7 +27,6 @@ services:
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     ports:
       # macOS often has AirPlay on :80 - set CADDY_HTTP_PORT=8080 locally.
-      # On OCI VMs keep the defaults (80/443) and open them in the security list.
       - "${CADDY_HTTP_PORT:-80}:80"
       - "${CADDY_HTTPS_PORT:-443}:443"
       - "${CADDY_HTTPS_PORT:-443}:443/udp"
@@ -38,7 +49,6 @@ services:
       dockerfile: Dockerfile
       args:
         NUXT_PUBLIC_API_BASE: /api/v1
-        # Empty → browser uses same-origin wss/ws via Caddy (see useTerminalSession).
         NUXT_PUBLIC_WS_BASE: ""
     restart: unless-stopped
     environment:
@@ -53,10 +63,10 @@ services:
         condition: service_healthy
 
   api:
-    build:
-      context: ../..
-      dockerfile: apps/api/Dockerfile
+    build: *api_build
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment: &api_env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-launchpad}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-launchpad}
       REDIS_URL: redis://redis:6379/0
@@ -68,7 +78,20 @@ services:
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY}
       AUTH_DEV_LOGIN_ENABLED: ${AUTH_DEV_LOGIN_ENABLED:-false}
       DEFAULT_WORKLOAD_IMAGE: ${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine}
-      KUBERNETES_ENABLED: ${KUBERNETES_ENABLED:-false}
+      KUBERNETES_ENABLED: ${KUBERNETES_ENABLED:-true}
+      KUBERNETES_IN_CLUSTER: "false"
+      KUBERNETES_KUBECONFIG_PATH: /kube/config
+      KUBECONFIG: /kube/config
+      LOCAL_K8S_ENGINE: ${LOCAL_K8S_ENGINE:-k3s}
+      KIND_AUTO_MANAGE: ${KIND_AUTO_MANAGE:-true}
+      KIND_CLUSTER_NAME: ${KIND_CLUSTER_NAME:-launchpad}
+      KIND_SCRIPTS_DIR: /opt/launchpad/scripts
+      # Reach k3d API from inside api/worker containers
+      K3D_API_HOST: ${K3D_API_HOST:-host.docker.internal}
+      K3D_API_PORT: ${K3D_API_PORT:-6445}
+      PREVIEW_NODE_PORT_MIN: ${PREVIEW_NODE_PORT_MIN:-30080}
+      PREVIEW_NODE_PORT_MAX: ${PREVIEW_NODE_PORT_MAX:-30089}
+      PREVIEW_NODE_HOST: ${PREVIEW_NODE_HOST:-}
       IAC_WORKSPACE_ROOT: /var/lib/launchpad/workspaces
       INVITE_BASE_URL: ${LAUNCHPAD_PUBLIC_ORIGIN}/invite
       GITHUB_APP_SETUP_URL: ${LAUNCHPAD_PUBLIC_ORIGIN}/integrations/github
@@ -76,8 +99,7 @@ services:
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
-    volumes:
-      - workspace_data:/var/lib/launchpad/workspaces
+    volumes: *k8s_volumes
     expose:
       - "8000"
     healthcheck:
@@ -99,15 +121,14 @@ services:
         condition: service_healthy
 
   worker:
-    build:
-      context: ../..
-      dockerfile: apps/api/Dockerfile
+    build: *api_build
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       <<: *api_env
-    volumes:
-      - workspace_data:/var/lib/launchpad/workspaces
+    volumes: *k8s_volumes
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,14 +138,14 @@ services:
         condition: service_healthy
 
   beat:
-    build:
-      context: ../..
-      dockerfile: apps/api/Dockerfile
+    build: *api_build
     command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
     restart: unless-stopped
     environment:
       <<: *api_env
       TTL_REAPER_INTERVAL_SECONDS: ${TTL_REAPER_INTERVAL_SECONDS:-300}
+    volumes:
+      - workspace_data:/var/lib/launchpad/workspaces
     depends_on:
       postgres:
         condition: service_healthy
@@ -151,7 +172,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # Not published - only reachable on the compose network.
 
   redis:
     image: redis:7-alpine
@@ -169,5 +189,6 @@ volumes:
   postgres_data:
   redis_data:
   workspace_data:
+  kube_data:
   caddy_data:
   caddy_config:

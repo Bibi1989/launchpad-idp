@@ -120,15 +120,31 @@ make oci-down
 docker system df
 ```
 
-## Limits of Always Free
+## Limits of Always Free / small VMs
 
 | Capability | On this stack |
 |------------|----------------|
 | Portal UI, auth, workspaces, IaC files | Yes |
-| Real preview pods (kind / k3s) | Not enabled; needs more RAM / a second VM |
-| Heavy concurrent Celery builds | Keep concurrency low |
+| Real preview pods (k3d / k3s via host Docker) | Yes when `KUBERNETES_ENABLED=true` (16GB+ laptop/server recommended) |
+| Tiny Always Free Ampere only | Set `KUBERNETES_ENABLED=false` to keep the box healthy |
 
-To enable Kubernetes later, install k3s on a second A1 (or the same host if you have 24 GB), set `KUBERNETES_ENABLED=true`, and mount a kubeconfig into `api` / `worker` - that is out of scope for this minimal pack.
+### Local Sandbox on this compose stack
+
+`api` / `worker` images (`deploy/oci/Dockerfile.api`) include `kubectl`, `k3d`, and the Docker CLI. Compose mounts:
+
+- host `${DOCKER_SOCK:-/var/run/docker.sock}` → `/var/run/docker.sock`
+- shared `kube_data` volume at `/kube` (`KUBECONFIG=/kube/config`)
+- `scripts/` → `/opt/launchpad/scripts` (`KIND_SCRIPTS_DIR`)
+
+Requirements on the **host**:
+
+1. Docker Engine or Docker Desktop running
+2. Enough RAM for the control plane + a k3d cluster (~16GB comfortable)
+3. After changing env, recreate api/worker:
+   `docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build api worker`
+4. On Launch, click **Refresh** until status is not `tools_missing`
+
+Open-app NodePorts use host ports `30080-30089` (created by k3d on the Docker host).
 
 ## Troubleshooting
 
