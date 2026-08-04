@@ -1,25 +1,17 @@
-# Launchpad edge proxy for Oracle Cloud Always Free (Ampere A1).
+# Launchpad edge proxy.
 #
-# LAUNCHPAD_SITE_ADDRESS:
-#   - Domain with DNS A/AAAA → VM public IP:  launchpad.example.com
-#     (Caddy obtains Let's Encrypt certs automatically)
-#   - Public IP only / no DNS yet:             :80
-#
-# Set ACME_EMAIL when using a real domain (optional but recommended).
-
-{
-	email {$ACME_EMAIL:}
-}
+# LAUNCHPAD_SITE_ADDRESS (set by caddy-entrypoint.sh):
+#   - No DNS yet:              :80
+#   - Real DNS hostname only:  launchpad.example.com
+# Never use http://... or a bare IP here.
 
 {$LAUNCHPAD_SITE_ADDRESS} {
 	encode gzip zstd
 
-	# Control-plane REST + SSE + WebSockets (terminal)
 	handle /api/v1/* {
 		reverse_proxy api:8000
 	}
 
-	# OpenAPI / health under the API root (optional)
 	handle /docs* {
 		reverse_proxy api:8000
 	}
@@ -30,7 +22,6 @@
 		reverse_proxy api:8000
 	}
 
-	# Nuxt UI
 	handle {
 		reverse_proxy web:3000
 	}

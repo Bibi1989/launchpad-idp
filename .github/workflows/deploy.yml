@@ -90,9 +90,11 @@ jobs:
           POSTGRES_DB=launchpad
           JWT_SECRET=${JWT_SECRET}
           SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
-          LAUNCHPAD_PUBLIC_ORIGIN=${LAUNCHPAD_PUBLIC_ORIGIN:-http://127.0.0.1}
+          LAUNCHPAD_PUBLIC_ORIGIN=${LAUNCHPAD_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
           LAUNCHPAD_SITE_ADDRESS=${LAUNCHPAD_SITE_ADDRESS:-:80}
-          ACME_EMAIL=${ACME_EMAIL:-}
+          # Avoid macOS AirPlay / other services binding host :80
+          CADDY_HTTP_PORT=${CADDY_HTTP_PORT:-8080}
+          CADDY_HTTPS_PORT=${CADDY_HTTPS_PORT:-8443}
           AUTH_DEV_LOGIN_ENABLED=${AUTH_DEV_LOGIN_ENABLED:-true}
           LOG_LEVEL=INFO
           KUBERNETES_ENABLED=false
@@ -114,7 +116,7 @@ jobs:
             -f deploy/oci/docker-compose.yml \
             --env-file deploy/oci/.env \
             ps
-          echo "Open http://127.0.0.1 (Caddy :80) when healthy."
+          echo "Open http://127.0.0.1:8080 when healthy (Caddy on host port 8080)."
 
       - name: Wait for API health
         run: |
@@ -181,6 +183,11 @@ jobs:
             APP_DIR="${HOME}/launchpad-idp"
             REPO="${REPO_URL:-https://github.com/Bibi1989/launchpad-idp.git}"
             PUBLIC_ORIGIN="${LAUNCHPAD_PUBLIC_ORIGIN:-http://${OCI_HOST}}"
+            # Site address must be :80 or a DNS hostname - never http:// or a bare IP.
+            SITE_ADDRESS="${LAUNCHPAD_SITE_ADDRESS:-:80}"
+            case "$SITE_ADDRESS" in
+              http://*|https://*|"") SITE_ADDRESS=":80" ;;
+            esac
 
             if [ ! -d "$APP_DIR/.git" ]; then
               git clone "$REPO" "$APP_DIR"
@@ -199,8 +206,9 @@ jobs:
             JWT_SECRET=${JWT_SECRET}
             SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
             LAUNCHPAD_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
-            LAUNCHPAD_SITE_ADDRESS=${LAUNCHPAD_SITE_ADDRESS:-:80}
-            ACME_EMAIL=${ACME_EMAIL:-}
+            LAUNCHPAD_SITE_ADDRESS=${SITE_ADDRESS}
+            CADDY_HTTP_PORT=80
+            CADDY_HTTPS_PORT=443
             AUTH_DEV_LOGIN_ENABLED=${AUTH_DEV_LOGIN_ENABLED:-false}
             LOG_LEVEL=INFO
             KUBERNETES_ENABLED=false
@@ -209,5 +217,7 @@ jobs:
             EOF
             sed -i 's/^[[:space:]]*//' deploy/oci/.env
 
+            chmod +x deploy/oci/caddy-entrypoint.sh || true
             docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build
             docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env ps
+            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=40 caddy
