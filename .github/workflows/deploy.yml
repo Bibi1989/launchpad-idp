@@ -19,7 +19,7 @@ jobs:
 
       - name: Rename Server
         run: |
-          pm2 reload my-app || pm2 start npm --name launchpad-idp -- start
+          pm2 reload my-app || pm2 start npm --name launchpad -- start
   # deploy:
   #   runs-on: ubuntu-latest
 
