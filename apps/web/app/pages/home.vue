@@ -82,7 +82,7 @@ const actions = [
       <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-5">
         <p class="lp-label">Active environments</p>
         <p class="mt-2 font-mono text-3xl text-[var(--lp-text)]">
-          {{ loading ? '—' : runningEnvs }}
+          {{ loading ? '-' : runningEnvs }}
         </p>
         <NuxtLink to="/environments" class="mt-3 inline-block text-sm text-[var(--lp-accent)] hover:underline">
           View all →
@@ -91,7 +91,7 @@ const actions = [
       <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-5">
         <p class="lp-label">Workspaces</p>
         <p class="mt-2 font-mono text-3xl text-[var(--lp-text)]">
-          {{ loading ? '—' : workspaceCount }}
+          {{ loading ? '-' : workspaceCount }}
         </p>
         <NuxtLink to="/workspaces" class="mt-3 inline-block text-sm text-[var(--lp-accent)] hover:underline">
           Open workspaces →

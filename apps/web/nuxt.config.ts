@@ -14,7 +14,7 @@ export default defineNuxtConfig({
     public: {
       // Same-origin proxy in dev avoids browser CORS for REST; override for direct API access.
       apiBase: process.env.NUXT_PUBLIC_API_BASE || "/api/v1",
-      // WebSockets must hit the API directly — Nitro/Vite proxies often drop WS upgrades.
+      // WebSockets must hit the API directly - Nitro/Vite proxies often drop WS upgrades.
       wsBase: process.env.NUXT_PUBLIC_WS_BASE || "ws://localhost:8000",
     },
   },

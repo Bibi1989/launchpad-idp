@@ -235,7 +235,7 @@ onMounted(load)
         </div>
         <div>
           <p class="lp-label">On-call</p>
-          <p class="mt-1 text-sm">{{ service.on_call || '—' }}</p>
+          <p class="mt-1 text-sm">{{ service.on_call || '-' }}</p>
         </div>
         <div v-if="service.runbook_url" class="sm:col-span-2">
           <p class="lp-label">Runbook</p>
@@ -248,7 +248,7 @@ onMounted(load)
       <section class="space-y-3 rounded-xl border border-[var(--lp-line)] p-5">
         <h2 class="text-lg font-semibold">Scorecard</h2>
         <p class="text-xs text-[var(--lp-muted)]">
-          Gate {{ service.scorecard.gate }} — {{ service.scorecard.passed ? 'passed' : 'needs work' }}
+          Gate {{ service.scorecard.gate }} - {{ service.scorecard.passed ? 'passed' : 'needs work' }}
         </p>
         <div
           v-for="item in service.scorecard.items"

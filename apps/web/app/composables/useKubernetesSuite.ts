@@ -68,7 +68,7 @@ export function useKubernetesSuite() {
     if (namespace) params.set('namespace', namespace)
     const path = `/api/v1/ws/k8s/exec/${workspaceId}?${params.toString()}`
 
-    // Prefer direct API WebSocket — Nuxt/Vite proxies often drop WS upgrades.
+    // Prefer direct API WebSocket - Nuxt/Vite proxies often drop WS upgrades.
     const configured = String(config.public.wsBase || '').replace(/\/$/, '')
     if (configured) {
       return `${configured}${path}`

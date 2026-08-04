@@ -192,7 +192,7 @@ class OidcService:
     async def _decode_id_token(self, id_token: str, meta: dict[str, Any]) -> dict[str, Any]:
         jwks_uri = meta.get("jwks_uri")
         if not jwks_uri:
-            # Unsafe fallback for local/dev IdPs without JWKS — still requires iss match.
+            # Unsafe fallback for local/dev IdPs without JWKS - still requires iss match.
             claims = jwt.decode(
                 id_token,
                 options={"verify_signature": False, "verify_aud": False},

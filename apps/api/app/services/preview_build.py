@@ -93,7 +93,7 @@ def _resolve_clone_url(repo_url: str, token: str | None) -> str:
 def _git_binary() -> str:
     git = shutil.which("git")
     if git is None:
-        raise PreviewBuildError("git is not installed — required for preview builds")
+        raise PreviewBuildError("git is not installed - required for preview builds")
     return git
 
 
@@ -225,7 +225,7 @@ def _docker_build(*, context: Path, dockerfile: str, tag: str) -> None:
     dockerfile_path = context / dockerfile
     if not dockerfile_path.is_file():
         raise PreviewBuildError(
-            f"{dockerfile} not found at repository root — add a Dockerfile to enable preview builds"
+            f"{dockerfile} not found at repository root - add a Dockerfile to enable preview builds"
         )
     try:
         _, build_logs = client.images.build(
@@ -300,7 +300,7 @@ def build_preview_image_sync(
             )
             return PreviewBuildResult(image=tag, commit_sha=simulated_sha, simulated=True)
         raise PreviewBuildError(
-            "Docker is not available — start Docker Desktop or disable PREVIEW_BUILD_ENABLED"
+            "Docker is not available - start Docker Desktop or disable PREVIEW_BUILD_ENABLED"
         )
 
     with tempfile.TemporaryDirectory(prefix="launchpad-preview-") as tmp:

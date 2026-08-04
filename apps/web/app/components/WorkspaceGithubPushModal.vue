@@ -104,7 +104,7 @@ async function loadStatus() {
         base_url: 'https://gitlab.com',
         username: null,
         token_type: null,
-        message: 'GitLab unavailable — connect later from Integrations.',
+        message: 'GitLab unavailable - connect later from Integrations.',
       }
       gitlabProjects.value = []
     }
@@ -308,7 +308,7 @@ const showCommitMessage = computed(() => {
 
         <template v-if="!loadingStatus && provider === 'github'">
           <p v-if="!githubApp?.installations.length" class="text-sm text-[var(--lp-warn)]">
-            Connect GitHub first —
+            Connect GitHub first -
             <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">Integrations</NuxtLink>
           </p>
           <template v-else>
@@ -395,7 +395,7 @@ const showCommitMessage = computed(() => {
 
         <template v-else-if="!loadingStatus">
           <p v-if="!gitlabStatus?.connected" class="text-sm text-[var(--lp-warn)]">
-            Connect GitLab first —
+            Connect GitLab first -
             <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">Integrations</NuxtLink>
           </p>
           <template v-else>

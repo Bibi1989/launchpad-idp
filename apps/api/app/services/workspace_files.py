@@ -202,5 +202,5 @@ def format_content(path: str, content: str) -> str:
             if doc is not None
         )
         return dumped + "\n"
-    # HCL / TS / other — ensure trailing newline
+    # HCL / TS / other - ensure trailing newline
     return text if text.endswith("\n") else text + "\n"

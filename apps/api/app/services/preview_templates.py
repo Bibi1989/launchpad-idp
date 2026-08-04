@@ -2,7 +2,7 @@
 
 Templates deploy Launchpad's configured workload image (see each template's
 ``workload_image``) into an ephemeral namespace. Git URLs are real public repos
-used for GitOps labels, rebuild matching, and PR association — not a full CI
+used for GitOps labels, rebuild matching, and PR association - not a full CI
 build pipeline yet.
 """
 
@@ -32,7 +32,7 @@ PREVIEW_TEMPLATES: tuple[PreviewAppTemplate, ...] = (
         id="hello-web",
         title="Hello Web",
         description=(
-            "Nginx welcome page — fastest way to prove Open app + NodePort end-to-end. "
+            "Nginx welcome page - fastest way to prove Open app + NodePort end-to-end. "
             "Uses the public nginxinc/NGINX-Demos repo for GitOps labels."
         ),
         icon="language",
@@ -47,7 +47,7 @@ PREVIEW_TEMPLATES: tuple[PreviewAppTemplate, ...] = (
         id="node-api",
         title="HTTP Echo API",
         description=(
-            "hashicorp/http-echo service on port 80 — lightweight API smoke test for "
+            "hashicorp/http-echo service on port 80 - lightweight API smoke test for "
             "feature-branch previews."
         ),
         icon="api",
@@ -61,7 +61,7 @@ PREVIEW_TEMPLATES: tuple[PreviewAppTemplate, ...] = (
     PreviewAppTemplate(
         id="fullstack-nextjs-express-postgres",
         title="Fullstack (Next.js + Express + PostgreSQL)",
-        description="Next.js UI + Express API + PostgreSQL database — dual containers, database provisioning, K8s packaging.",
+        description="Next.js UI + Express API + PostgreSQL database - dual containers, database provisioning, K8s packaging.",
         icon="storage",
         git_repo_url="https://github.com/kubernetes/examples.git",
         git_branch="master",
@@ -75,7 +75,7 @@ PREVIEW_TEMPLATES: tuple[PreviewAppTemplate, ...] = (
     PreviewAppTemplate(
         id="fullstack-nextjs-express-postgres-redis",
         title="Fullstack (Next.js + Express + PostgreSQL + Redis)",
-        description="Next.js UI + Express API + PostgreSQL + Redis cache — full-stack architecture with database and cache provisioning.",
+        description="Next.js UI + Express API + PostgreSQL + Redis cache - full-stack architecture with database and cache provisioning.",
         icon="layers",
         git_repo_url="https://github.com/kubernetes/examples.git",
         git_branch="master",

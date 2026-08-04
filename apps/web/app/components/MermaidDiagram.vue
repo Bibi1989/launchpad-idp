@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * Renders a Mermaid diagram on the client only.
- * Intentionally NOT a `.client.vue` file — Nuxt's client-only wrapper SSR-stubs as an
+ * Intentionally NOT a `.client.vue` file - Nuxt's client-only wrapper SSR-stubs as an
  * empty <div> and races onMounted before the real template/refs exist.
  * SVG is kept in `svgHtml` (v-html) so a status re-render cannot wipe imperative innerHTML.
  */

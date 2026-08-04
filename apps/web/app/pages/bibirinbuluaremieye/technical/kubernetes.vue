@@ -26,14 +26,14 @@ useHead({
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <code class="font-mono text-xs">KUBERNETES_ENABLED=false</code>
-          — workers fake success. Useful for UI wiring without Docker/kind. Preview URL often points
+          - workers fake success. Useful for UI wiring without Docker/kind. Preview URL often points
           at the portal status page
           <code class="font-mono text-xs">/p/{id}</code>.
         </li>
         <li>
           <code class="font-mono text-xs">KUBERNETES_ENABLED=true</code>
-          — real apply/delete against the configured context. Local NodePorts sit in a small range
-          (default 30080–30089) so kind on Docker Desktop stays reliable.
+          - real apply/delete against the configured context. Local NodePorts sit in a small range
+          (default 30080-30089) so kind on Docker Desktop stays reliable.
         </li>
       </ul>
     </section>

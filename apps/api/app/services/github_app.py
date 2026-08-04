@@ -67,7 +67,7 @@ def load_github_app_private_key(settings: Settings | None = None) -> str:
         return file_pem
 
     raise GitHubAppAuthError(
-        "GitHub App private key missing — set GITHUB_APP_PRIVATE_KEY or "
+        "GitHub App private key missing - set GITHUB_APP_PRIVATE_KEY or "
         "GITHUB_APP_PRIVATE_KEY_PATH"
     )
 
@@ -125,7 +125,7 @@ def get_github_app_status(settings: Settings | None = None) -> GitHubAppStatus:
 
     if configured and install_url:
         message = (
-            "GitHub App credentials loaded — click Connect GitHub to authorize an installation"
+            "GitHub App credentials loaded - click Connect GitHub to authorize an installation"
         )
     elif configured and not install_url:
         message = (
@@ -254,10 +254,10 @@ def resolve_installation_id(
         return installations[0].id
     if not installations:
         raise GitHubAppAuthError(
-            "GitHub App has no installations — install it on an organization first"
+            "GitHub App has no installations - install it on an organization first"
         )
     raise GitHubAppAuthError(
-        "Multiple GitHub App installations found — pass installation_id or organization"
+        "Multiple GitHub App installations found - pass installation_id or organization"
     )
 
 
@@ -384,7 +384,7 @@ def list_installation_repositories(
             f"Failed to list repositories for installation {resolved_id}"
         ) from exc
     except AttributeError as exc:
-        # Older PyGithub without Installation.get_repos — use installation token + REST helper.
+        # Older PyGithub without Installation.get_repos - use installation token + REST helper.
         logger.warning("github_list_repos_attr_fallback", error=str(exc))
         client, _, _, _ = get_installation_client(installation_id=resolved_id, settings=settings)
         try:

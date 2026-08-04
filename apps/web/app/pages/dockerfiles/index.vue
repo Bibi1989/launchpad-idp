@@ -256,7 +256,7 @@ async function onScan() {
       if (firstDockerfile) selectFile(firstDockerfile.path)
     }
     if (result.scaffold_suggested) {
-      successMessage.value = 'No Dockerfile found — scaffold artifacts for the detected stack.'
+      successMessage.value = 'No Dockerfile found - scaffold artifacts for the detected stack.'
     } else {
       successMessage.value = `Found ${result.dockerfiles.length} Dockerfile(s).`
     }

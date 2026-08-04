@@ -14,19 +14,19 @@ useHead({
         A practical runbook for local development, plus the categories of environment variables that
         shape behavior. Secret values stay in
         <code class="font-mono text-xs">.env</code>
-        — this page only names the knobs.
+        - this page only names the knobs.
       </p>
     </header>
 
     <section class="space-y-3">
       <h2 class="text-xl font-semibold">Suggested local boot order</h2>
       <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
-        <li><code class="font-mono text-xs">make up</code> — Postgres + Redis</li>
-        <li><code class="font-mono text-xs">make migrate</code> — schema</li>
-        <li><code class="font-mono text-xs">make api</code> — control plane</li>
-        <li><code class="font-mono text-xs">make worker</code> — jobs</li>
-        <li><code class="font-mono text-xs">make beat</code> — TTL + drift timers (optional but useful)</li>
-        <li><code class="font-mono text-xs">make web</code> — UI</li>
+        <li><code class="font-mono text-xs">make up</code> - Postgres + Redis</li>
+        <li><code class="font-mono text-xs">make migrate</code> - schema</li>
+        <li><code class="font-mono text-xs">make api</code> - control plane</li>
+        <li><code class="font-mono text-xs">make worker</code> - jobs</li>
+        <li><code class="font-mono text-xs">make beat</code> - TTL + drift timers (optional but useful)</li>
+        <li><code class="font-mono text-xs">make web</code> - UI</li>
         <li>
           For real Local previews:
           <code class="font-mono text-xs">make kind-up</code>
@@ -124,7 +124,7 @@ flowchart LR
       <p class="text-sm leading-7 text-[var(--lp-muted)]">
         API:
         <code class="font-mono text-xs">cd apps/api && .venv/bin/pytest</code>
-        — covers auth, org RBAC, drift, invites/SSO, name reuse after destroy, preview build, etc.
+        - covers auth, org RBAC, drift, invites/SSO, name reuse after destroy, preview build, etc.
         Web:
         <code class="font-mono text-xs">npm test</code>
         under
@@ -141,7 +141,7 @@ flowchart LR
         <code class="font-mono text-xs">noindex</code>
         and are absent from
         <code class="font-mono text-xs">AppShell</code>
-        navigation. Anyone who already has a Launchpad login could open the URL if they guessed it —
+        navigation. Anyone who already has a Launchpad login could open the URL if they guessed it -
         secrecy is obscurity, not an ACL. Treat the content accordingly.
       </p>
     </section>

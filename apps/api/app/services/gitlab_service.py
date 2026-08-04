@@ -49,7 +49,7 @@ class GitLabAuthService:
     def authorize_url(self) -> str:
         if not self.oauth_configured():
             raise GitLabAuthError(
-                "GitLab OAuth is not configured — set GITLAB_OAUTH_CLIENT_ID and "
+                "GitLab OAuth is not configured - set GITLAB_OAUTH_CLIENT_ID and "
                 "GITLAB_OAUTH_CLIENT_SECRET"
             )
         base = _normalize_base_url(self._settings.gitlab_base_url)
@@ -188,7 +188,7 @@ class GitLabAuthService:
                 select(GitlabConnection).where(GitlabConnection.user_id == user_id)
             )
             return result.scalar_one_or_none()
-        except Exception as exc:  # noqa: BLE001 — missing migration must not break GitHub UI
+        except Exception as exc:  # noqa: BLE001 - missing migration must not break GitHub UI
             await self._session.rollback()
             logger.warning("gitlab_connection_lookup_failed", error=str(exc))
             return None
@@ -472,7 +472,7 @@ class GitLabProvisioningService:
             },
         )
         if create.status_code >= 400 and create.status_code != 400:
-            # 400 often means file already exists — ignore
+            # 400 often means file already exists - ignore
             logger.warning(
                 "gitlab_branch_bootstrap_failed",
                 status=create.status_code,
@@ -499,10 +499,11 @@ class GitLabProvisioningService:
 
 def _default_gitlab_ci(app_name: str) -> str:
     return (
-        f"# Launchpad CI for {app_name}\n"
+        f"# Golden path GitLab CI for {app_name}\n"
         "stages:\n"
         "  - test\n"
         "  - build\n"
+        "  - scan\n"
         "sast:\n"
         "  stage: test\n"
         "  image: returntocorp/semgrep:1.97.0\n"
@@ -514,6 +515,12 @@ def _default_gitlab_ci(app_name: str) -> str:
         "  services: [docker:27-dind]\n"
         "  script:\n"
         "    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .\n"
+        "container-security-scan:\n"
+        "  stage: scan\n"
+        "  image: aquasec/trivy:0.58.1\n"
+        "  script:\n"
+        "    - trivy image --exit-code 0 $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA\n"
+        "  allow_failure: true\n"
     )
 
 

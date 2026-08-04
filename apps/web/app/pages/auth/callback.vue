@@ -21,7 +21,7 @@ onMounted(async () => {
     return
   }
   if (expected && expected !== state) {
-    error.value = 'OIDC state mismatch — restart login'
+    error.value = 'OIDC state mismatch - restart login'
     completing.value = false
     return
   }

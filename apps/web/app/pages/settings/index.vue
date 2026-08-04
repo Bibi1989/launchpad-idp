@@ -93,7 +93,7 @@ const providers = [
       <h1 class="text-3xl font-semibold tracking-tight">Settings</h1>
       <p class="text-sm text-[var(--lp-muted)]">
         Profile for <strong class="text-[var(--lp-text)]">{{ user?.email }}</strong>.
-        Store cloud keys once — Provision and sandbox sessions can reuse them when workspace fields are blank.
+        Store cloud keys once - Provision and sandbox sessions can reuse them when workspace fields are blank.
       </p>
     </header>
 
@@ -139,7 +139,7 @@ const providers = [
         <span class="font-mono text-[var(--lp-accent)]">
           {{ providers.find((p) => p.id === activeProvider)?.hint() || 'configured' }}
         </span>
-        — paste new values below to replace.
+        - paste new values below to replace.
       </p>
 
       <CloudCredentialsFields v-model:credentials="credentials" :provider="activeProvider" />
@@ -167,11 +167,11 @@ const providers = [
       <ul class="mt-3 list-disc space-y-2 pl-5">
         <li>
           <NuxtLink to="/org" class="text-[var(--lp-accent)] hover:underline">Organization</NuxtLink>
-          — members, invites, SSO
+          - members, invites, SSO
         </li>
         <li>
           <NuxtLink to="/integrations" class="text-[var(--lp-accent)] hover:underline">Integrations</NuxtLink>
-          — GitHub App, GitLab
+          - GitHub App, GitLab
         </li>
       </ul>
     </section>

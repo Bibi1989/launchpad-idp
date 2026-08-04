@@ -8,7 +8,7 @@ RUN npm install
 
 COPY . .
 
-# Same-origin defaults — Caddy proxies /api/v1 and WebSockets to the API.
+# Same-origin defaults - Caddy proxies /api/v1 and WebSockets to the API.
 ARG NUXT_PUBLIC_API_BASE=/api/v1
 ARG NUXT_PUBLIC_WS_BASE=
 ENV NUXT_PUBLIC_API_BASE=${NUXT_PUBLIC_API_BASE}

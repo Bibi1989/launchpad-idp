@@ -12,12 +12,12 @@ alwaysApply: false
 - **Required tags** on every provisioned resource: `EnvironmentId`, `Owner`, `CreatedBy`, `TTL_Expiration`.
 
 ```typescript
-// ❌ BAD — hardcoded secret, missing governance tags
+// ❌ BAD - hardcoded secret, missing governance tags
 const db = new gcp.sql.DatabaseInstance("db", {
   rootPassword: "supersecret",
 });
 
-// ✅ GOOD — secret reference + required tags
+// ✅ GOOD - secret reference + required tags
 const password = gcp.secretmanager.getSecretVersionOutput({ secret: "db-root" });
 const db = new gcp.sql.DatabaseInstance("db", {
   // ...config using password

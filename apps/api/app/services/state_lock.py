@@ -101,7 +101,7 @@ async def acquire_state_lock(
                     lock_key=key,
                 )
             except LockError:
-                # Lock expired or was already released — safe to ignore.
+                # Lock expired or was already released - safe to ignore.
                 logger.warning(
                     "state_lock_release_noop",
                     scope=scope,

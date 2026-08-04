@@ -138,7 +138,7 @@ def accrue_environment_cost(
     environment.cost_sampled_at = ts
     environment.cost_source = source
     # Keep the displayed hourly estimate aligned with the latest measured burn
-    # when we have real usage — soft-cap UX and cards stay coherent.
+    # when we have real usage - soft-cap UX and cards stay coherent.
     if source in {"usage_quota", "usage_requests"} and rate > 0:
         environment.cost_estimate_hourly = rate
     return rate

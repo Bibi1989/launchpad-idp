@@ -52,7 +52,7 @@ class DockerfileSecurityIssue(BaseModel):
 
 
 class DockerfileSecurityReport(BaseModel):
-    """Structured Gemini output — camelCase for UI consumption."""
+    """Structured Gemini output - camelCase for UI consumption."""
 
     summary: str
     securityIssues: list[DockerfileSecurityIssue] = Field(default_factory=list)

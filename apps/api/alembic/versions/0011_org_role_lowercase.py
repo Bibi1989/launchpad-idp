@@ -32,5 +32,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Irreversible data normalization — roles remain valid lowercase values.
+    # Irreversible data normalization - roles remain valid lowercase values.
     pass

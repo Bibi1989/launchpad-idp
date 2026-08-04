@@ -148,7 +148,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # Not published — only reachable on the compose network.
+    # Not published - only reachable on the compose network.
 
   redis:
     image: redis:7-alpine

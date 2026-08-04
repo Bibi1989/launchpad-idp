@@ -1,4 +1,4 @@
-"""pkg/auth/oidc package — Keyless OIDC Token Generation & Key Management Suite."""
+"""pkg/auth/oidc package - Keyless OIDC Token Generation & Key Management Suite."""
 
 from pkg.auth.oidc.key_manager import OidcKeyManager, get_key_manager, reset_key_manager
 from pkg.auth.oidc.token_engine import (

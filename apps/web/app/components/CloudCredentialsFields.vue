@@ -67,7 +67,7 @@ watch(
 
       <div v-else class="grid gap-3 sm:grid-cols-2">
         <p class="sm:col-span-2 text-xs text-[var(--lp-muted)]">
-          Minted short-lived OIDC tokens via Workload Identity Federation — no long-lived keys in the sandbox.
+          Minted short-lived OIDC tokens via Workload Identity Federation - no long-lived keys in the sandbox.
         </p>
         <label class="block space-y-2">
           <span class="lp-label">GCP project number</span>

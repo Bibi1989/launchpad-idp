@@ -125,7 +125,7 @@ def resolve_local_cluster_name(requested_name: str | None = None) -> str:
     return default_name
 
 
-# Back-compat alias — historical name used across the codebase.
+# Back-compat alias - historical name used across the codebase.
 def resolve_kind_cluster_name(requested_name: str | None = None) -> str:
     return resolve_local_cluster_name(requested_name)
 
@@ -568,7 +568,7 @@ def inspect_image_exposed_ports(image: str) -> list[int]:
         return []
 
     if completed.returncode != 0:
-        # Image may not be local yet — best-effort pull then re-inspect.
+        # Image may not be local yet - best-effort pull then re-inspect.
         pull = subprocess.run(
             ["docker", "pull", image],
             capture_output=True,
@@ -660,7 +660,7 @@ def resolve_workload_listen_port(
     Scaffold manifests default to 80. When the image EXPOSEs a different HTTP port
     (e.g. Vite on 5000), prefer the image so readiness does not probe the wrong port.
     Helm charts often keep Deployment containerPort at the chart default while
-    ``service.targetPort`` already carries the real listen port — honor that too.
+    ``service.targetPort`` already carries the real listen port - honor that too.
     """
     if manifest_port is not None and manifest_port != 80:
         return manifest_port
@@ -693,7 +693,7 @@ def _align_container_port_and_probes(
     """Align containerPort + probes to the workload listen port.
 
     Scaffold charts ship HTTP GET probes tuned for nginx. Vite/Node (and similar)
-    often accept TCP long before HTTP returns headers — kubelet then fails with
+    often accept TCP long before HTTP returns headers - kubelet then fails with
     ``context deadline exceeded (awaiting headers)`` and the Deployment never
     becomes Ready within the provision timeout. Non-nginx images therefore use
     ``tcpSocket`` (+ a long ``startupProbe``) so Ready tracks "listening", not
@@ -772,7 +772,7 @@ def _apply_tcp_workload_probes(container: dict[str, Any], *, listen_port: int) -
         for key in ("httpGet", "exec", "grpc"):
             probe.pop(key, None)
         probe["tcpSocket"] = {"port": listen_port}
-        # Overwrite scaffold/Helm HTTP timings — keeping chart initialDelay (15+)
+        # Overwrite scaffold/Helm HTTP timings - keeping chart initialDelay (15+)
         # delays Ready after the startup probe already proved the port is open.
         probe.update(timings)
         probe.setdefault("successThreshold", 1)
@@ -902,7 +902,7 @@ def patch_manifest_documents(
         metadata["namespace"] = target_namespace
         # Datastore companions (postgres/redis/…) keep their own official image,
         # name, selector and ports. Only pin them to the target namespace so they
-        # co-locate with the app workload — never overwrite them with the app image.
+        # co-locate with the app workload - never overwrite them with the app image.
         if _is_datastore_workload(doc):
             patched.append(doc)
             continue
@@ -956,7 +956,7 @@ def _is_preview_skipped_workload_document(doc: dict[str, Any]) -> bool:
 
 # In-cluster datastore companion workloads (see workload_dependencies.py). These
 # carry their own official images (postgres:*, redis:*, …) and their own
-# name/selector — the app-workload preview patch must never overwrite them.
+# name/selector - the app-workload preview patch must never overwrite them.
 _DATASTORE_WORKLOAD_NAMES = frozenset(
     {"postgres", "mysql", "mariadb", "mongodb", "redis"}
 )
@@ -975,7 +975,7 @@ def _is_launch_workload(doc: dict[str, Any]) -> bool:
     """Return True for a per-stack ``launch-*`` Deployment/Service.
 
     These carry their own built image and their own ``app`` selector so their
-    Service + the multi-service Ingress route correctly — the single-app preview
+    Service + the multi-service Ingress route correctly - the single-app preview
     patch must not overwrite their image or force them onto the ``app`` selector.
     """
     name = str((doc.get("metadata") or {}).get("name") or "").strip().lower()
@@ -1095,7 +1095,7 @@ def _patch_deployment(
     env["GIT_REPO_URL"] = {"name": "GIT_REPO_URL", "value": git_repo_url}
     env["GIT_BRANCH"] = {"name": "GIT_BRANCH", "value": git_branch}
     env["PORT"] = {"name": "PORT", "value": str(listen_port)}
-    # Vite / many Node servers bind 127.0.0.1 unless HOST is set — probes use the pod IP.
+    # Vite / many Node servers bind 127.0.0.1 unless HOST is set - probes use the pod IP.
     if not _is_nginx_image(target_image):
         env.setdefault("HOST", {"name": "HOST", "value": "0.0.0.0"})
         env.setdefault("APP_PORT", {"name": "APP_PORT", "value": str(listen_port)})
@@ -1129,7 +1129,7 @@ def _ensure_non_root_user(
 
     Workspace scaffolds historically set ``runAsNonRoot: true`` without a UID.
     ``nginx`` images still declare USER root, so kubelet rejects the pod until an
-    explicit UID is present. Non-nginx images keep their own USER — do not invent
+    explicit UID is present. Non-nginx images keep their own USER - do not invent
     nginx's UID 101 for them.
     """
     pod_security = pod_spec.setdefault("securityContext", {})
@@ -1701,7 +1701,7 @@ class ManifestDeployer:
                 if _is_node_port_allocated_error(exc):
                     used_ports.add(candidate)
                     continue
-                # Non-collision create failures after delete must not soft-return —
+                # Non-collision create failures after delete must not soft-return -
                 # otherwise Open app points at a dead mapped port with no Service.
                 used_ports.add(candidate)
                 continue

@@ -13,7 +13,7 @@ from app.schemas.cloud import CloudCredentials
 
 
 class PreviewProvider(str, Enum):
-    """Where a one-click preview deploys — local kind or a cloud account."""
+    """Where a one-click preview deploys - local kind or a cloud account."""
 
     LOCAL = "local"
     GCP = "gcp"

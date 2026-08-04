@@ -67,7 +67,13 @@ function isLive(index: number, entry: AuditLogEntry): boolean {
 
           <div class="relative z-10 mt-1 flex h-6 w-6 shrink-0 items-center justify-center">
             <span
-              v-if="isLive(index, entry)"
+              v-if="entry.status === 'FAILURE' || entry.status === 'REJECTED'"
+              class="flex h-6 w-6 items-center justify-center rounded-full border border-[var(--lp-danger)]/40 bg-[var(--lp-danger)]/15"
+            >
+              <span class="material-symbols-outlined text-sm text-[var(--lp-danger)]">close</span>
+            </span>
+            <span
+              v-else-if="isLive(index, entry)"
               class="flex h-6 w-6 items-center justify-center rounded-full border border-[var(--lp-ok)]/40 bg-[var(--lp-ok)]/15"
             >
               <span class="h-2 w-2 rounded-full bg-[var(--lp-ok)]" />
@@ -82,9 +88,11 @@ function isLive(index: number, entry: AuditLogEntry): boolean {
 
           <article
             class="min-w-0 flex-1 rounded-lg border px-4 py-3 transition"
-            :class="isLive(index, entry)
-              ? 'border-[var(--lp-accent)]/50 bg-[var(--lp-accent)]/5 shadow-[0_0_0_1px_rgba(45,212,191,0.08)]'
-              : 'border-[var(--lp-line)] bg-[var(--lp-panel)]/50'"
+            :class="entry.status === 'FAILURE' || entry.status === 'REJECTED'
+              ? 'border-[var(--lp-danger)]/40 bg-[var(--lp-danger)]/5'
+              : isLive(index, entry)
+                ? 'border-[var(--lp-accent)]/50 bg-[var(--lp-accent)]/5 shadow-[0_0_0_1px_rgba(45,212,191,0.08)]'
+                : 'border-[var(--lp-line)] bg-[var(--lp-panel)]/50'"
           >
             <div class="flex flex-wrap items-start justify-between gap-2">
               <div class="flex flex-wrap items-center gap-2">

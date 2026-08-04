@@ -41,7 +41,7 @@ def test_local_kind_workspace_skips_terraform(tmp_path: Path) -> None:
 
 def test_local_kind_writes_multi_framework_launch_manifests(tmp_path: Path) -> None:
     # Multi-framework (fullstack) core stacks scaffold a real app per stack and
-    # emit launch-* manifests with real images — never the generic nginx fallback.
+    # emit launch-* manifests with real images - never the generic nginx fallback.
     import yaml
 
     gen = IaCGenerator(workspace_root=tmp_path)

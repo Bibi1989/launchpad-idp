@@ -15,7 +15,7 @@ useHead({
         How Launchpad is built
       </h1>
       <p class="text-sm leading-7 text-[var(--lp-muted)]">
-        This is a private technical walkthrough of the Launchpad Internal Developer Portal —
+        This is a private technical walkthrough of the Launchpad Internal Developer Portal -
         written in plain language, with diagrams and concrete examples. It is
         <strong class="text-[var(--lp-text)]">not</strong>
         linked from the product navigation. The path is only useful if you know it.
@@ -30,18 +30,18 @@ useHead({
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <strong class="text-[var(--lp-text)]">Web UI</strong>
-          (<code class="font-mono text-xs">apps/web</code>) — a Nuxt 4 frontend where developers
+          (<code class="font-mono text-xs">apps/web</code>) - a Nuxt 4 frontend where developers
           launch previews, provision cloud workspaces, and watch logs.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Control plane</strong>
-          (<code class="font-mono text-xs">apps/api</code>) — a FastAPI backend that stores state,
+          (<code class="font-mono text-xs">apps/api</code>) - a FastAPI backend that stores state,
           queues long jobs on Celery, talks to Kubernetes, and streams status over Redis.
         </li>
       </ul>
       <p class="text-sm leading-7 text-[var(--lp-muted)]">
         Think of the UI as a remote control, and the API + workers as the machine room. When you
-        click <em>Launch</em>, the UI does not create Kubernetes namespaces itself — it asks the
+        click <em>Launch</em>, the UI does not create Kubernetes namespaces itself - it asks the
         API to queue a job, then listens for live updates.
       </p>
     </section>
@@ -136,7 +136,7 @@ flowchart LR
           >
             Architecture
           </NuxtLink>
-          — folders, processes, and how data moves.
+          - folders, processes, and how data moves.
         </li>
         <li>
           <NuxtLink
@@ -145,7 +145,7 @@ flowchart LR
           >
             Core flows
           </NuxtLink>
-          — launch, GitOps rebuild, teardown, drift.
+          - launch, GitOps rebuild, teardown, drift.
         </li>
         <li>
           <NuxtLink
@@ -154,7 +154,7 @@ flowchart LR
           >
             Operations
           </NuxtLink>
-          — how to run it locally day to day.
+          - how to run it locally day to day.
         </li>
       </ul>
     </section>

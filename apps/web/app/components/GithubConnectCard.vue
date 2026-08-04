@@ -163,7 +163,7 @@ onMounted(async () => {
     class="overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/80"
     :class="compact ? 'p-4' : 'p-6'"
   >
-    <!-- Not connected — Vercel-style CTA -->
+    <!-- Not connected - Vercel-style CTA -->
     <div v-if="!connected && !loading" class="space-y-5">
       <div class="flex items-start gap-4">
         <div
@@ -178,7 +178,7 @@ onMounted(async () => {
         <div class="min-w-0 flex-1 space-y-1">
           <h2 class="text-lg font-semibold">Connect GitHub</h2>
           <p class="text-sm text-[var(--lp-muted)]">
-            Authorize Launchpad on GitHub to create repositories and push deploy workflows — same
+            Authorize Launchpad on GitHub to create repositories and push deploy workflows - same
             flow as Vercel.
           </p>
         </div>
@@ -222,7 +222,7 @@ onMounted(async () => {
 
     <p v-else-if="loading" class="text-sm text-[var(--lp-muted)]">Checking GitHub connection…</p>
 
-    <!-- Connected — account switcher + optional repo picker -->
+    <!-- Connected - account switcher + optional repo picker -->
     <div v-else class="space-y-5">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-3">

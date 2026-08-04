@@ -171,7 +171,7 @@ function toggleStore(key: DataStoreKind, enabled: boolean) {
             v-else-if="storeRef(store.key).placement === 'managed'"
             class="text-xs text-[var(--lp-muted)]"
           >
-            Connection strings use Terraform outputs — see infra/MANAGED_DATASTORES.md after apply.
+            Connection strings use Terraform outputs - see infra/MANAGED_DATASTORES.md after apply.
           </p>
         </div>
       </div>

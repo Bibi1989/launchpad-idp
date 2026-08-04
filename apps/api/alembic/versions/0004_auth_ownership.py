@@ -45,7 +45,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_users_email", "users", ["email"], unique=True)
 
-    # Placeholder hash — system user is not used for login; real users register/login.
+    # Placeholder hash - system user is not used for login; real users register/login.
     op.execute(
         sa.text(
             "INSERT INTO users (id, email, password_hash, display_name) "

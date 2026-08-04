@@ -13,7 +13,7 @@ export function useTerminalSession() {
     const join = path.includes('?') ? '&' : '?'
     const withAuth = authQuery ? `${path}${join}${authQuery}` : path
 
-    // Prefer direct API WebSocket — Nuxt/Nitro HTTP proxies often break WS upgrades.
+    // Prefer direct API WebSocket - Nuxt/Nitro HTTP proxies often break WS upgrades.
     const configured = String(config.public.wsBase || '').replace(/\/$/, '')
     if (configured) {
       return `${configured}${withAuth.startsWith('/') ? withAuth : `/${withAuth}`}`
@@ -55,7 +55,7 @@ export function useTerminalSession() {
     }
     ws.onerror = () => {
       error.value =
-        'WebSocket connection failed — ensure API is on :8000 and NUXT_PUBLIC_WS_BASE=ws://localhost:8000'
+        'WebSocket connection failed - ensure API is on :8000 and NUXT_PUBLIC_WS_BASE=ws://localhost:8000'
       connected.value = false
     }
     ws.onmessage = (event: MessageEvent<string>) => {

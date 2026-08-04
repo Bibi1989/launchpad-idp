@@ -470,7 +470,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
             <div class="space-y-2">
               <p class="lp-label">Services in selected IaC</p>
               <p v-if="provider === 'local'" class="text-sm text-[var(--lp-muted)]">
-                Local Sandbox — no cloud managed services.
+                Local Sandbox - no cloud managed services.
               </p>
               <p v-else-if="!selectedServices.length" class="text-sm text-[var(--lp-muted)]">
                 No managed cloud services enabled. Add them under Update workspace → Edit service resources.
@@ -542,7 +542,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
                     {{ hasStoredCredentials ? 'Replace with a new key' : 'Add a cloud key' }}
                   </span>
                   <span class="mt-0.5 block text-[11px] text-[var(--lp-muted)]">
-                    Paste credentials below — they are encrypted at rest for this workspace.
+                    Paste credentials below - they are encrypted at rest for this workspace.
                   </span>
                 </span>
               </label>
@@ -666,7 +666,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
                   </span>
                   <span>
                     <span class="capitalize">{{ s.label }}</span>
-                    <span v-if="s.description" class="ml-1 text-[var(--lp-muted)]">— {{ s.description }}</span>
+                    <span v-if="s.description" class="ml-1 text-[var(--lp-muted)]">- {{ s.description }}</span>
                   </span>
                 </li>
               </ol>
@@ -726,7 +726,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
               </div>
             </div>
             <p class="text-[11px] text-[var(--lp-muted)]">
-              Apply / destroy use auto-approve — you confirm here instead of typing yes in the terminal.
+              Apply / destroy use auto-approve - you confirm here instead of typing yes in the terminal.
               On failure, use <strong class="text-[var(--lp-text)]">Ask AI to fix</strong>, then retry.
             </p>
           </div>

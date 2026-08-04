@@ -4,6 +4,8 @@ import type { Environment } from '~/types/environment'
 const route = useRoute()
 const id = computed(() => String(route.params.id))
 const { getById } = useEnvironments()
+const { reconcileEnvironment } = useNotifications()
+const toast = useToast()
 
 definePageMeta({
   layout: false,
@@ -12,10 +14,27 @@ definePageMeta({
 const environment = ref<Environment | null>(null)
 const loadError = ref<string | null>(null)
 const tick = ref(0)
+const copied = ref(false)
+const shareUrl = ref('')
+
+async function copyShareLink() {
+  const url = shareUrl.value || (import.meta.client ? window.location.href : '')
+  if (!url) return
+  try {
+    await navigator.clipboard.writeText(url)
+    copied.value = true
+    toast.success('Link copied', 'Shareable status link is on your clipboard.')
+    setTimeout(() => {
+      copied.value = false
+    }, 2000)
+  } catch {
+    toast.error('Copy failed', 'Could not copy the link - copy it from the address bar.')
+  }
+}
 
 const remainingLabel = computed(() => {
   tick.value
-  if (!environment.value) return '—'
+  if (!environment.value) return '-'
   const left = environment.value.time_remaining_seconds
   if (left <= 0) return 'Expired'
   const hours = Math.floor(left / 3600)
@@ -25,19 +44,28 @@ const remainingLabel = computed(() => {
 
 const isLive = computed(() => environment.value?.status === 'RUNNING')
 
+// Keep polling until the environment reaches a settled state so cost, time
+// remaining, and the app-ready flip stay live on this shareable page.
+const isSettled = computed(() => {
+  const s = environment.value?.status
+  return s === 'DESTROYED' || s === 'EXPIRED' || s === 'TEARDOWN_PENDING'
+})
+
 async function load() {
   try {
     environment.value = await getById(id.value)
+    reconcileEnvironment(environment.value)
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Preview not found'
   }
 }
 
 onMounted(async () => {
+  shareUrl.value = window.location.href
   await load()
   const timer = setInterval(() => {
     tick.value += 1
-    if (environment.value?.status === 'PROVISIONING') {
+    if (!isSettled.value) {
       void load()
     }
   }, 4000)
@@ -52,20 +80,32 @@ onMounted(async () => {
         <NuxtLink to="/" class="font-semibold tracking-tight text-[var(--lp-accent,#2dd4bf)]">
           Launchpad
         </NuxtLink>
-        <NuxtLink
-          v-if="environment"
-          :to="`/environments/${environment.id}`"
-          class="text-sm text-[#8fa3b8] hover:text-white"
-        >
-          Environment details →
-        </NuxtLink>
+        <div v-if="environment" class="flex items-center gap-3">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 rounded-lg border border-[#273447] px-3 py-1.5 text-sm text-[#8fa3b8] transition hover:border-[#2dd4bf]/50 hover:text-white"
+            @click="copyShareLink"
+          >
+            <span class="material-symbols-outlined text-base">{{ copied ? 'check' : 'link' }}</span>
+            {{ copied ? 'Copied' : 'Copy link' }}
+          </button>
+          <NuxtLink
+            :to="`/environments/${environment.id}`"
+            class="text-sm text-[#8fa3b8] hover:text-white"
+          >
+            Environment details →
+          </NuxtLink>
+        </div>
       </header>
 
       <p v-if="loadError" class="text-[#f87171]">{{ loadError }}</p>
 
       <template v-else-if="environment">
         <div class="mb-8 space-y-3">
-          <p class="font-mono text-xs uppercase tracking-[0.2em] text-[#2dd4bf]">Live preview</p>
+          <div class="flex items-center gap-3">
+            <p class="font-mono text-xs uppercase tracking-[0.2em] text-[#2dd4bf]">Live preview</p>
+            <EnvironmentHealthDot :environment="environment" />
+          </div>
           <h1 class="text-4xl font-semibold tracking-tight">{{ environment.name }}</h1>
           <p class="text-[#8fa3b8]">
             {{ environment.template_id || 'custom' }} · {{ environment.git_branch }}
@@ -121,7 +161,7 @@ onMounted(async () => {
           <template v-else-if="environment.status === 'PROVISIONING'">
             <span class="material-symbols-outlined mb-4 animate-pulse text-5xl text-[#f59e0b]">hourglass_top</span>
             <h2 class="text-2xl font-semibold">Provisioning…</h2>
-            <p class="mt-2 text-sm text-[#8fa3b8]">Hang tight — this page refreshes automatically.</p>
+            <p class="mt-2 text-sm text-[#8fa3b8]">Hang tight - this page refreshes automatically.</p>
           </template>
           <template v-else>
             <span class="material-symbols-outlined mb-4 text-5xl text-[#8fa3b8]">cloud_off</span>

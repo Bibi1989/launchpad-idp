@@ -354,7 +354,7 @@ const providers: Array<{
     label: 'Dev (k3s)',
     badge: 'LOCAL',
     icon: 'developer_board',
-    blurb: 'Verify Launchpad on your machine with k3s — no cloud credentials.',
+    blurb: 'Verify Launchpad on your machine with k3s - no cloud credentials.',
   },
   {
     id: 'aws',
@@ -847,13 +847,13 @@ async function onGenerate() {
       if (recoveredId) {
         selectedWorkspaceId.value = recoveredId
         fieldError.value =
-          'Workspace was created, but a later step timed out. Click Generate again to finish — a duplicate will not be created.'
+          'Workspace was created, but a later step timed out. Click Generate again to finish - a duplicate will not be created.'
         return
       }
     }
     if (timedOut && sessionCreatedWorkspaceId.value) {
       fieldError.value =
-        'A step timed out after the workspace was created. Click Generate again to continue — a duplicate will not be created.'
+        'A step timed out after the workspace was created. Click Generate again to continue - a duplicate will not be created.'
       return
     }
     fieldError.value = message
@@ -1014,7 +1014,7 @@ async function onPrimaryAction() {
                 <option value="pulumi">Pulumi</option>
               </select>
               <p v-if="isLocalProvider" class="text-xs text-[var(--lp-muted)]">
-                Dev (k3s) scaffolds Kubernetes manifests only — switch to a cloud provider for
+                Dev (k3s) scaffolds Kubernetes manifests only - switch to a cloud provider for
                 Terraform, OpenTofu, or Pulumi.
               </p>
             </label>
@@ -1026,7 +1026,7 @@ async function onPrimaryAction() {
           >
             Editing
             <strong class="text-[var(--lp-text)]">{{ selectedExisting.name }}</strong>
-            — prior resource selections are loaded on the next step. Leave credentials blank to keep
+            - prior resource selections are loaded on the next step. Leave credentials blank to keep
             the ones already stored.
           </div>
 
@@ -1102,8 +1102,8 @@ async function onPrimaryAction() {
             <label v-if="form.gcp.vpc && form.gcp.subnets" class="block space-y-2">
               <span class="lp-label">Network topology</span>
               <select v-model="form.gcp.network_topology" class="lp-input">
-                <option value="simple">Simple — one subnet (demos / previews)</option>
-                <option value="standard">Standard — public + private with Cloud NAT</option>
+                <option value="simple">Simple - one subnet (demos / previews)</option>
+                <option value="standard">Standard - public + private with Cloud NAT</option>
               </select>
             </label>
             <div class="space-y-2">
@@ -1156,8 +1156,8 @@ async function onPrimaryAction() {
             <label v-if="form.aws.vpc && form.aws.subnets" class="block space-y-2">
               <span class="lp-label">Network topology</span>
               <select v-model="form.aws.network_topology" class="lp-input">
-                <option value="simple">Simple — one public subnet + IGW</option>
-                <option value="standard">Standard — public + private with NAT Gateway</option>
+                <option value="simple">Simple - one public subnet + IGW</option>
+                <option value="standard">Standard - public + private with NAT Gateway</option>
               </select>
             </label>
             <div class="grid gap-2 sm:grid-cols-2">
@@ -1210,8 +1210,8 @@ async function onPrimaryAction() {
             <label v-if="form.azure.vnet && form.azure.subnets" class="block space-y-2">
               <span class="lp-label">Network topology</span>
               <select v-model="form.azure.network_topology" class="lp-input">
-                <option value="simple">Simple — one subnet</option>
-                <option value="standard">Standard — public + private with NAT Gateway</option>
+                <option value="simple">Simple - one subnet</option>
+                <option value="standard">Standard - public + private with NAT Gateway</option>
               </select>
             </label>
             <div class="grid gap-2 sm:grid-cols-2">
@@ -1306,7 +1306,7 @@ async function onPrimaryAction() {
                   <code class="font-mono text-xs">apps/api/.env</code>, then restart API + worker once.
                 </li>
                 <li>
-                  Open the sandbox — kubectl apply runs against kind. Destroying the last Dev
+                  Open the sandbox - kubectl apply runs against kind. Destroying the last Dev
                   workspace runs
                   <code class="font-mono text-xs text-[var(--lp-accent)]">make kind-down</code>.
                 </li>
@@ -1510,7 +1510,7 @@ async function onPrimaryAction() {
               <div>
                 <dt class="lp-label">Workspace</dt>
                 <dd class="font-mono">
-                  {{ isNewWorkspace ? (form.name || '—') : selectedExisting?.name || '—' }}
+                  {{ isNewWorkspace ? (form.name || '-') : selectedExisting?.name || '-' }}
                   <span v-if="!isNewWorkspace" class="text-[var(--lp-muted)]"> (existing)</span>
                 </dd>
               </div>

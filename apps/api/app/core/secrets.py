@@ -2,7 +2,7 @@
 
 Static cloud keys are Fernet-encrypted at rest. Prefer keyless OIDC
 (GCP Workload Identity Federation / AWS IAM Roles Anywhere web identity)
-when WIF fields are present — short-lived JWTs instead of long-lived SA JSON.
+when WIF fields are present - short-lived JWTs instead of long-lived SA JSON.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _fernet() -> Fernet:
     settings = get_settings()
     key_material = settings.secrets_encryption_key
     if not key_material:
-        # Ephemeral key for local/dev — never use empty key in production.
+        # Ephemeral key for local/dev - never use empty key in production.
         key_material = os.environ.get("LAUNCHPAD_DEV_SECRET_KEY") or secrets.token_urlsafe(32)
         logger.warning("secrets_encryption_key_missing_using_ephemeral_dev_key")
     return Fernet(_derive_fernet_key(key_material))
@@ -76,7 +76,7 @@ def decrypt_secret(ciphertext: str) -> str:
     try:
         return _fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
     except InvalidToken as exc:
-        raise ValueError("Unable to decrypt secret — invalid key or ciphertext") from exc
+        raise ValueError("Unable to decrypt secret - invalid key or ciphertext") from exc
 
 
 def mask_secret_value(value: str, *, visible: int = 4) -> str:
@@ -230,7 +230,7 @@ def credentials_to_env(
             ),
         )
         env.update(res.env_vars)
-        # Prefer keyless — do not expose long-lived SA JSON alongside WIF.
+        # Prefer keyless - do not expose long-lived SA JSON alongside WIF.
         env.pop("GCP_SA_KEY", None)
         for meta in (
             "GCP_WIF_PROJECT_NUMBER",
@@ -266,7 +266,7 @@ def credentials_to_env(
             ),
         )
         env.update(res.env_vars)
-        # Prefer keyless — strip static AWS keys when assuming a role via OIDC.
+        # Prefer keyless - strip static AWS keys when assuming a role via OIDC.
         for key in (
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",

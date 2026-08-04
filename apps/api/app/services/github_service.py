@@ -102,7 +102,7 @@ class GitHubProvisioningService:
             root_dir=root_dir,
         )
 
-        # Mirror workspace paths exactly — never rewrite under infra/.
+        # Mirror workspace paths exactly - never rewrite under infra/.
         commit_payload: dict[str, str] = dict(files)
 
         workflow_path: str | None = None
@@ -222,7 +222,7 @@ class GitHubProvisioningService:
             return Github(auth=Auth.Token(token)), None, "", "User", "github_pat"
 
         raise ValueError(
-            "GitHub App is not configured — set GITHUB_APP_ID and "
+            "GitHub App is not configured - set GITHUB_APP_ID and "
             "GITHUB_APP_PRIVATE_KEY (or GITHUB_APP_PRIVATE_KEY_PATH) on the API"
         )
 
@@ -297,7 +297,7 @@ class GitHubProvisioningService:
         if not owner_login:
             raise ValueError(
                 "GitHub App is installed on a personal account but no account login "
-                "was resolved — reconnect GitHub and retry"
+                "was resolved - reconnect GitHub and retry"
             )
 
         full_name = f"{owner_login}/{request.name}"
@@ -505,7 +505,7 @@ class GitHubProvisioningService:
         use_provider = provider or detected_provider
         use_engine = engine or detected_engine
 
-        # Mirror workspace paths exactly — never rewrite under infra/.
+        # Mirror workspace paths exactly - never rewrite under infra/.
         commit_payload: dict[str, str] = dict(files)
 
         workflow_path: str | None = None
@@ -565,11 +565,11 @@ class GitHubProvisioningService:
         if isinstance(exc.data, dict):
             message = exc.data.get("message")
             if isinstance(message, str) and message.strip():
-                detail = f" — {message.strip()}"
+                detail = f" - {message.strip()}"
 
         if exc.status == 401:
             return (
-                "GitHub App authentication failed — check GITHUB_APP_ID and private key"
+                "GitHub App authentication failed - check GITHUB_APP_ID and private key"
                 + detail
             )
         if exc.status == 403:
@@ -592,7 +592,7 @@ class GitHubProvisioningService:
             )
         if exc.status == 404:
             return (
-                "GitHub resource not found — confirm the App is installed on the target "
+                "GitHub resource not found - confirm the App is installed on the target "
                 "account/org and can access the repository"
                 + detail
             )

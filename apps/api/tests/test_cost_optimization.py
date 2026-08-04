@@ -1,4 +1,4 @@
-"""Cost optimization suite — schema sync and manifest injection."""
+"""Cost optimization suite - schema sync and manifest injection."""
 
 from __future__ import annotations
 

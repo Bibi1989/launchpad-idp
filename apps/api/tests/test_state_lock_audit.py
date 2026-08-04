@@ -106,6 +106,8 @@ def test_execution_stage_values() -> None:
     assert ExecutionStage.PLAN.value == "PLAN"
     assert ExecutionStage.BUILD.value == "BUILD"
     assert ExecutionStage.APPLY.value == "APPLY"
+    assert AuditAction.PROVISION_VALIDATED.value == "PROVISION_VALIDATED"
+    assert AuditAction.PROVISION_PLANNED.value == "PROVISION_PLANNED"
 
 
 def test_sandbox_bootstrap_emits_structured_stages() -> None:

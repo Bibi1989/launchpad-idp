@@ -486,7 +486,7 @@ def test_fullstack_wires_db_env_and_frontend_api_url(tmp_path: Path) -> None:
     assert fe_env["BACKEND_URL"] == backend_url
     assert fe_env["NEXT_PUBLIC_API_URL"] == backend_url
 
-    # The backend must NOT advertise a bogus upstream API target — API_URL is a
+    # The backend must NOT advertise a bogus upstream API target - API_URL is a
     # frontend-only wiring that points at a real Service, never "api-server".
     assert "API_URL" not in be_env
     assert "api-server" not in "".join(f"{k}={v}" for k, v in be_env.items())

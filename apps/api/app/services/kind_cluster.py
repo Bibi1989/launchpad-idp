@@ -2,8 +2,8 @@
 
 Supports two interchangeable engines, selected by ``settings.local_k8s_engine``:
 
-* ``k3s`` (default) — real k3s running in Docker via **k3d**. Context ``k3d-<name>``.
-* ``kind``          — Kubernetes-in-Docker. Context ``kind-<name>``.
+* ``k3s`` (default) - real k3s running in Docker via **k3d**. Context ``k3d-<name>``.
+* ``kind``          - Kubernetes-in-Docker. Context ``kind-<name>``.
 
 The public helpers keep their historical ``*_kind_*`` names so existing callers
 (routers, provisioning, environment) need no change; internally they dispatch to
@@ -60,7 +60,7 @@ def local_cluster_available() -> bool:
     return shutil.which(_cluster_tool()) is not None and shutil.which("kubectl") is not None
 
 
-# Back-compat alias — historical name used across the codebase.
+# Back-compat alias - historical name used across the codebase.
 def kind_available() -> bool:
     return local_cluster_available()
 
@@ -155,7 +155,7 @@ async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, s
     if not local_cluster_available():
         tool = _cluster_tool()
         install_hint = (
-            "Install k3d (https://k3d.io — `brew install k3d`)"
+            "Install k3d (https://k3d.io - `brew install k3d`)"
             if tool == "k3d"
             else "Install kind (https://kind.sigs.k8s.io/)"
         )
@@ -264,7 +264,7 @@ async def probe_kind_cluster(*, cluster_name: str | None = None) -> dict[str, ob
         status = "absent"
         message = (
             f"{engine_label} cluster '{name}' is not running yet. "
-            "Launch will start it automatically (~1–2 min first time)."
+            "Launch will start it automatically (~1-2 min first time)."
         )
         can_launch = True
     else:

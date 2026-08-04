@@ -7,14 +7,19 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: launchpad
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Build Service
+      - name: Install & Build
         run: |
-          echo "Building service"
+          npm Install
+          npm run build
+
+      - name: Rename Server
+        run: |
+          pm2 reload my-app || pm2 start npm --name launchpad-idp -- start
   # deploy:
   #   runs-on: ubuntu-latest
 

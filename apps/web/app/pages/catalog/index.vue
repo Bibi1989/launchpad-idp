@@ -184,7 +184,7 @@ onMounted(async () => {
       <section v-else class="space-y-4" role="tabpanel">
         <h2 class="sr-only">Your services</h2>
         <p v-if="!services.length" class="text-sm text-[var(--lp-muted)]">
-          No services yet — create one from an approved golden path.
+          No services yet - create one from an approved golden path.
         </p>
         <div v-else class="space-y-3">
           <div

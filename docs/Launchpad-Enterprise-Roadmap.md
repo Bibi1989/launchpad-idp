@@ -6,7 +6,7 @@ Strategic features and changes to drive company adoption.
 
 ## Executive summary
 
-Launchpad already unifies ephemeral previews, multi-cloud IaC workspaces, manifest deploy, GitHub App integration, org RBAC, OIDC SSO, audit logs, cost caps, drift scanning, and Dockerfile/CI scaffolding. The gap for company adoption is **enterprise trust, golden paths, and workflow depth**—not more isolated features.
+Launchpad already unifies ephemeral previews, multi-cloud IaC workspaces, manifest deploy, GitHub App integration, org RBAC, OIDC SSO, audit logs, cost caps, drift scanning, and Dockerfile/CI scaffolding. The gap for company adoption is **enterprise trust, golden paths, and workflow depth**-not more isolated features.
 
 ## Current strengths
 
@@ -29,7 +29,7 @@ Launchpad already unifies ephemeral previews, multi-cloud IaC workspaces, manife
 | Isolation | Namespace governance | Dedicated clusters/cells per team or env class |
 | Reliability | OCI deploy pack | HA reference arch, backup/restore, SLO monitoring |
 
-Without these, platform teams treat Launchpad as a dev toy—not something for 200+ engineers.
+Without these, platform teams treat Launchpad as a dev toy-not something for 200+ engineers.
 
 ---
 
@@ -67,7 +67,7 @@ Preview envs that only deploy the app feel hollow:
 - Internal DNS so `api` and `web` preview together
 - Preview stack from monorepo path filters
 
-Major gap vs Okteto/Humanitec—compelling for real production-like apps.
+Major gap vs Okteto/Humanitec-compelling for real production-like apps.
 
 ### 4. Promotion pipeline with approvals
 
@@ -78,7 +78,7 @@ Extend `promote_environment_to_cloud` into a governed path:
 - Approval UI + audit who approved
 - Diff of manifest/IaC between stages; rollback to known-good revision
 
-Companies buy **controlled change**—not just fast deploys.
+Companies buy **controlled change**-not just fast deploys.
 
 ### 5. FinOps that finance understands
 
@@ -101,7 +101,7 @@ Turn governance into an org admin UI:
 - Required labels/annotations on all workloads
 - Exceptions with expiry and approver
 
-Sell **governed self-service**—the phrase enterprise buyers use.
+Sell **governed self-service**-the phrase enterprise buyers use.
 
 ### 7. Platform engineering dashboard
 
@@ -112,7 +112,7 @@ Control tower for the internal platform team:
 - Drift count by workspace
 - DORA-style metrics and budget leaderboard
 
-Makes Launchpad the operational hub—not just a launch button.
+Makes Launchpad the operational hub-not just a launch button.
 
 ---
 
@@ -140,9 +140,9 @@ Each integration is a checkbox on an enterprise RFP.
 
 | Phase | Timeline | Deliverables |
 |-------|----------|--------------|
-| Phase 1 | 3–6 weeks | PR preview URLs, auto-destroy on PR close, smoke-test gate, Slack notifications |
-| Phase 2 | 6–10 weeks | Service catalog + software templates, ephemeral DB/redis, cost-before-launch |
-| Phase 3 | 10–16 weeks | Staging/prod promotion with approvals, policy UI, org audit export |
+| Phase 1 | 3-6 weeks | PR preview URLs, auto-destroy on PR close, smoke-test gate, Slack notifications |
+| Phase 2 | 6-10 weeks | Service catalog + software templates, ephemeral DB/redis, cost-before-launch |
+| Phase 3 | 10-16 weeks | Staging/prod promotion with approvals, policy UI, org audit export |
 | Phase 4 | Ongoing | SCIM, Vault integration, HA multi-tenant deployment, Terraform provider |
 
 ```mermaid
@@ -160,7 +160,7 @@ flowchart LR
 
 | Competitor | Their strength | Your angle |
 |------------|----------------|------------|
-| Backstage | Catalog, plugins | Ship previews and infra—not just docs |
+| Backstage | Catalog, plugins | Ship previews and infra-not just docs |
 | Humanitec / Qovery | Orchestration, dependencies | Multi-cloud IaC + previews without vendor lock-in |
 | Okteto / DevPod | Dev environments | Governed previews + prod promotion path |
 | Porter / Coherence | PaaS simplicity | Bring your cloud; we generate Terraform/Pulumi |

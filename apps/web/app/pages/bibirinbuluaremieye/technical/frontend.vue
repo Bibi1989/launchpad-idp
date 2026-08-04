@@ -12,7 +12,7 @@ useHead({
       <h1 class="text-3xl font-semibold tracking-tight">Nuxt 4 UI</h1>
       <p class="text-sm leading-7 text-[var(--lp-muted)]">
         The browser app is Nuxt 4 with TypeScript, Tailwind, and Zod. It never talks to Kubernetes
-        directly — everything goes through
+        directly - everything goes through
         <code class="font-mono text-xs">/api/v1</code>.
       </p>
     </header>
@@ -22,14 +22,14 @@ useHead({
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <code class="font-mono text-xs">app/pages/</code>
-          — routes (file-based). Example:
+          - routes (file-based). Example:
           <code class="font-mono text-xs">environments/[id].vue</code>
           →
           <code class="font-mono text-xs">/environments/:id</code>.
         </li>
         <li>
           <code class="font-mono text-xs">app/composables/</code>
-          — reusable logic with
+          - reusable logic with
           <code class="font-mono text-xs">use*</code>
           names (
           <code class="font-mono text-xs">useApi</code>,
@@ -38,14 +38,14 @@ useHead({
         </li>
         <li>
           <code class="font-mono text-xs">app/components/</code>
-          — UI pieces (
+          - UI pieces (
           <code class="font-mono text-xs">AppShell</code>,
           <code class="font-mono text-xs">EnvironmentCard</code>,
           <code class="font-mono text-xs">AuditTimeline</code>).
         </li>
         <li>
           <code class="font-mono text-xs">app/types/</code>
-          — shared TypeScript interfaces. No
+          - shared TypeScript interfaces. No
           <code class="font-mono text-xs">any</code>.
         </li>
       </ul>
@@ -104,11 +104,11 @@ sequenceDiagram
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <code class="font-mono text-xs">useEnvironmentLiveStream</code>
-          — status changes (PROVISIONING → RUNNING)
+          - status changes (PROVISIONING → RUNNING)
         </li>
         <li>
           <code class="font-mono text-xs">useJobLogStream</code>
-          —
+          -
           <code class="font-mono text-xs">/logs/stream</code>
           for provisioning log lines
         </li>

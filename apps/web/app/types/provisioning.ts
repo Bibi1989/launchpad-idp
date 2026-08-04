@@ -66,7 +66,7 @@ export type SpotProvisionerStrategy = 'karpenter' | 'cluster_autoscaler'
 /** Right-sizing presets for container requests/limits. */
 export type ResourceSizingPreset = 'developer' | 'balanced' | 'performance' | 'custom'
 
-/** Idle shutdown window — scale to 0 outside business hours. */
+/** Idle shutdown window - scale to 0 outside business hours. */
 export type IdleShutdownSchedule = 'weeknights_weekends'
 
 export interface SpotSchedulingConfig {
@@ -84,7 +84,7 @@ export interface CostHpaConfig {
 }
 
 export interface CostVpaConfig {
-  /** Recommendation-only (updateMode Off) — no automatic pod restarts. */
+  /** Recommendation-only (updateMode Off) - no automatic pod restarts. */
   enabled: boolean
 }
 

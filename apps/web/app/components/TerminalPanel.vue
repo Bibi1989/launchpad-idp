@@ -37,7 +37,7 @@ function handleServerMessage(msg: TerminalServerMessage) {
     term.value.write(msg.data)
     ingestTerminalOutput(msg.data)
   } else if (msg.type === 'ready') {
-    statusLabel.value = `connected (${msg.mode}) — type to interact`
+    statusLabel.value = `connected (${msg.mode}) - type to interact`
     setConnected(true)
     emit('ready', msg.session_id)
     focusTerminal()

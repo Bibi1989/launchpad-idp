@@ -212,7 +212,7 @@ class DockerfileSecurityService:
                 DockerfileSecurityIssue(
                     ruleId="RUN_AS_ROOT",
                     severity=DockerfileSeverity.CRITICAL,
-                    description="No USER directive — image defaults to root",
+                    description="No USER directive - image defaults to root",
                     lineNumber=None,
                 )
             )

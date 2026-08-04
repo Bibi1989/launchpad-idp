@@ -115,15 +115,15 @@ flowchart TB
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <code class="font-mono text-xs">provision_environment</code>
-          — VALIDATE → PLAN → optional BUILD → APPLY
+          - VALIDATE → PLAN → optional BUILD → APPLY
         </li>
         <li>
           <code class="font-mono text-xs">rebuild_environment</code>
-          — GitOps push rebuild
+          - GitOps push rebuild
         </li>
         <li>
           <code class="font-mono text-xs">teardown_environment</code>
-          — delete namespace, mark DESTROYED, free the unique name
+          - delete namespace, mark DESTROYED, free the unique name
         </li>
         <li>
           Beat:

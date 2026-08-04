@@ -455,7 +455,7 @@ class EnvironmentService:
         # extract the real workload image (preferring the exposed preview-target
         # deployment) whenever the client did NOT supply a *custom* image. The
         # launch form always sends the default nginx placeholder, which must not
-        # suppress extraction — otherwise the preview shows/uses nginx even when
+        # suppress extraction - otherwise the preview shows/uses nginx even when
         # the workspace deploys web:latest.
         client_image = (payload.workload_image or "").strip()
         client_wants_default = (
@@ -1016,7 +1016,7 @@ class EnvironmentService:
         read.app_ready = bool(environment.preview_url) and environment.status in {
             EnvironmentStatus.RUNNING,
             # Partial apply / Ready-timeout can leave the manifest image serving while
-            # status is FAILED — still allow Open so users don't hit a different nginx port.
+            # status is FAILED - still allow Open so users don't hit a different nginx port.
             EnvironmentStatus.FAILED,
         }
         read.is_local = (environment.provider or "local") == "local" or (

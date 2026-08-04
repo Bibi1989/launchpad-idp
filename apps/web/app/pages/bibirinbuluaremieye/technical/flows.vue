@@ -133,13 +133,13 @@ stateDiagram-v2
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <strong class="text-[var(--lp-text)]">Preview mode</strong>
-          — compares Deployment
+          - compares Deployment
           <code class="font-mono text-xs">app</code>
           image and git commit label/env.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Manifest mode</strong>
-          — reloads workspace YAML, patches it the same way deploy does, then compares each
+          - reloads workspace YAML, patches it the same way deploy does, then compares each
           Deployment name/image in the namespace.
         </li>
         <li>

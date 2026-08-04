@@ -1,4 +1,4 @@
-"""pkg/sandbox/exec package — Execution Sandbox Dynamic Credential Injector."""
+"""pkg/sandbox/exec package - Execution Sandbox Dynamic Credential Injector."""
 
 from pkg.sandbox.exec.credential_injector import (
     DEFAULT_GCP_CONFIG_PATH,

@@ -79,7 +79,7 @@ const features = [
           Launchpad
         </h1>
         <p class="max-w-xl text-lg leading-relaxed text-[var(--lp-muted)] md:text-xl">
-          Governed ephemeral environments and multi-cloud infrastructure from one portal —
+          Governed ephemeral environments and multi-cloud infrastructure from one portal -
           provision, ship manifests, and launch previews without leaving the control plane.
         </p>
         <div class="flex flex-wrap items-center gap-4 pt-2">

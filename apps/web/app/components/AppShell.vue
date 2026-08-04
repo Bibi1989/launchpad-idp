@@ -258,7 +258,7 @@ watch(
         <div class="mt-5 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/80 p-3">
           <p class="lp-label mb-1">Signed in</p>
           <p class="truncate text-sm font-medium text-[var(--lp-text)]">
-            {{ user?.email ?? '—' }}
+            {{ user?.email ?? '-' }}
           </p>
           <label v-if="orgs.length" class="mt-3 block space-y-1">
             <span class="lp-label">Organization</span>
@@ -422,6 +422,7 @@ watch(
             <span class="material-symbols-outlined text-base">tune</span>
             Advanced
           </NuxtLink>
+          <NotificationBell />
           <div
             class="ml-1 flex h-8 w-8 items-center justify-center rounded-full border border-[var(--lp-line)] bg-[var(--lp-panel-2)] font-mono text-xs text-[var(--lp-accent)]"
             :title="user?.email ?? ''"

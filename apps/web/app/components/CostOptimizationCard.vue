@@ -75,7 +75,7 @@ function onPresetChange(preset: ResourceSizingPreset) {
         </label>
         <label class="block space-y-2">
           <span class="lp-label">
-            Spot allocation percentage — {{ cost.spotScheduling.allocationPercent }}%
+            Spot allocation percentage - {{ cost.spotScheduling.allocationPercent }}%
           </span>
           <input
             v-model.number="cost.spotScheduling.allocationPercent"
@@ -138,7 +138,7 @@ function onPresetChange(preset: ResourceSizingPreset) {
         <span>
           <span class="block text-sm font-medium">Enable Vertical Pod Autoscaler (Recommendation Mode)</span>
           <span class="block text-xs text-[var(--lp-muted)]">
-            VPA <code class="font-mono text-[10px]">updateMode: Off</code> — observe usage without restarts.
+            VPA <code class="font-mono text-[10px]">updateMode: Off</code> - observe usage without restarts.
           </span>
         </span>
       </label>
@@ -227,7 +227,7 @@ function onPresetChange(preset: ResourceSizingPreset) {
         <span>
           <span class="block text-sm font-medium">Enable Scheduled Workspace Sleep / Auto-Teardown</span>
           <span class="block text-xs text-[var(--lp-muted)]">
-            Scale deployment to 0 outside work hours (Mon–Fri 7PM–7AM + weekends).
+            Scale deployment to 0 outside work hours (Mon-Fri 7PM-7AM + weekends).
           </span>
         </span>
       </label>
@@ -235,7 +235,7 @@ function onPresetChange(preset: ResourceSizingPreset) {
         <label class="block space-y-2">
           <span class="lp-label">Schedule</span>
           <select v-model="cost.idleShutdown.schedule" class="lp-input" :disabled="disabled">
-            <option value="weeknights_weekends">Mon–Fri 7PM–7AM + weekends</option>
+            <option value="weeknights_weekends">Mon-Fri 7PM-7AM + weekends</option>
           </select>
         </label>
       </div>

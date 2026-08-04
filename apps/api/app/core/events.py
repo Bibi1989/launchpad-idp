@@ -35,7 +35,7 @@ def env_channel(environment_id: UUID | str) -> str:
 
 
 # Celery runs asyncio.run() per task (new event loop each time). A cached Redis
-# client must not outlive its loop — otherwise publish fails with
+# client must not outlive its loop - otherwise publish fails with
 # "Future attached to a different loop" / "Event loop is closed".
 _redis_client: redis.Redis | None = None
 _redis_loop_id: int | None = None
@@ -53,7 +53,7 @@ async def get_redis() -> redis.Redis:
     loop = asyncio.get_running_loop()
     loop_id = id(loop)
     if _redis_client is not None and _redis_loop_id != loop_id:
-        # Do not await aclose() — that loop is often already closed (Celery).
+        # Do not await aclose() - that loop is often already closed (Celery).
         _reset_redis_cache()
     if _redis_client is None:
         settings = get_settings()

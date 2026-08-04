@@ -110,7 +110,7 @@ class CostHpaConfig(BaseModel):
 
 
 class CostVpaConfig(BaseModel):
-    """VPA recommendation-only mode (updateMode Off) — no automatic restarts."""
+    """VPA recommendation-only mode (updateMode Off) - no automatic restarts."""
 
     enabled: bool = False
 
@@ -389,7 +389,7 @@ CloudConfig = Annotated[
 
 
 class CloudCredentials(BaseModel):
-    """Ephemeral credentials injected into the sandbox — never logged in plaintext."""
+    """Ephemeral credentials injected into the sandbox - never logged in plaintext."""
 
     gcp_sa_key_json: str | None = None
     # GCP Workload Identity Federation (Keyless OIDC)

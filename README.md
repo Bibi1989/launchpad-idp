@@ -6,8 +6,8 @@ Internal Developer Portal for governed ephemeral environments and multi-cloud in
 
 Launchpad has two related flows:
 
-1. **Environments** — time-boxed preview deployments from a git repo and branch. Launchpad provisions an isolated namespace, streams status and logs, rebuilds on matching git pushes, and tears down when the TTL expires or you destroy the environment.
-2. **Provision** — generate a Terraform or Pulumi workspace for GCP, AWS, Azure, or Cloudflare. You attach short-lived cloud credentials per workspace, optionally bootstrap a GitHub repo, then apply the stack from an interactive sandbox terminal.
+1. **Environments** - time-boxed preview deployments from a git repo and branch. Launchpad provisions an isolated namespace, streams status and logs, rebuilds on matching git pushes, and tears down when the TTL expires or you destroy the environment.
+2. **Provision** - generate a Terraform or Pulumi workspace for GCP, AWS, Azure, or Cloudflare. You attach short-lived cloud credentials per workspace, optionally bootstrap a GitHub repo, then apply the stack from an interactive sandbox terminal.
 
 Cloud credentials are encrypted at rest and injected into the sandbox for that session. GitHub access uses a GitHub App (no personal tokens in the browser).
 
@@ -20,9 +20,9 @@ Open the app at **`/`** for the product overview, then sign in (or use **Dev log
 1. Go to **Launch** (`/launch`).
 2. Stay on **Local (kind)** (default) for a single-screen launch, or pick a cloud account.
 3. Choose a catalog template **or** your own git repo + branch.
-4. Launch — kind starts automatically when needed. When **Running**, use **Open app** for the workload URL (NodePort locally). **Status page** (`/p/{id}`) is the shareable progress link.
+4. Launch - kind starts automatically when needed. When **Running**, use **Open app** for the workload URL (NodePort locally). **Status page** (`/p/{id}`) is the shareable progress link.
 5. Push to the environment’s branch to rebuild when `WEBHOOK_SECRET` is configured.
-6. Optional: pass a GitHub PR number when launching your repo — with the GitHub App installed, Launchpad comments + sets a commit status when Running.
+6. Optional: pass a GitHub PR number when launching your repo - with the GitHub App installed, Launchpad comments + sets a commit status when Running.
 7. On the environment page: **Extend TTL**, **Deploy to cloud** (from Local), Destroy, and runtime summary (image / NodePort). Concurrent preview and soft cost caps apply (`MAX_CONCURRENT_ENVIRONMENTS`, `PREVIEW_SOFT_COST_CAP`).
 
 #### Local kind testing
@@ -43,9 +43,9 @@ With `KUBERNETES_ENABLED=false`, Local still runs the UI in simulate mode (porta
 
 ### Advanced paths
 
-- **Provision** — start with **Dev (kind)**; the API runs `kind-up` for you and `kind-down` when you destroy the last Dev workspace. Switch the wizard to GCP/AWS/Azure/Cloudflare when ready. Choose **Simple** or **Standard** network topology (public+private with NAT) when VPC/subnets are enabled.
-- **Settings** — account-level encrypted GCP/AWS/Azure/Cloudflare credentials (fallback when workspace fields are blank).
-- **Workspaces** — IDE is hidden by default; click **Advanced IDE** to edit files, run kubectl/terraform, push to GitHub.
+- **Provision** - start with **Dev (kind)**; the API runs `kind-up` for you and `kind-down` when you destroy the last Dev workspace. Switch the wizard to GCP/AWS/Azure/Cloudflare when ready. Choose **Simple** or **Standard** network topology (public+private with NAT) when VPC/subnets are enabled.
+- **Settings** - account-level encrypted GCP/AWS/Azure/Cloudflare credentials (fallback when workspace fields are blank).
+- **Workspaces** - IDE is hidden by default; click **Advanced IDE** to edit files, run kubectl/terraform, push to GitHub.
 - Classic git form remains available from the empty dashboard (“advanced git form”).
 
 Disable auto kind management with `KIND_AUTO_MANAGE=false` in `apps/api/.env` if you prefer to run `make kind-up` / `make kind-down` yourself.
@@ -54,7 +54,7 @@ Disable auto kind management with `KIND_AUTO_MANAGE=false` in `apps/api/.env` if
 
 Production-ish Compose + Caddy pack for an Ampere A1 VM (control plane only; K8s previews off by default):
 
-→ **[deploy/oci/README.md](deploy/oci/README.md)** — `cp deploy/oci/env.example deploy/oci/.env` then `make oci-up`
+→ **[deploy/oci/README.md](deploy/oci/README.md)** - `cp deploy/oci/env.example deploy/oci/.env` then `make oci-up`
 
 ## Local quick start
 

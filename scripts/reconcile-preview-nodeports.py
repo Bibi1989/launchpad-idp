@@ -2,7 +2,7 @@
 """Reconcile Launch Preview NodePort selectors so previews are reachable.
 
 Background: a multi-stack (fullstack) workspace deploys per-stack ``launch-*``
-Deployments whose pods are labelled ``app: nextjs`` / ``app: fastapi`` etc. — never
+Deployments whose pods are labelled ``app: nextjs`` / ``app: fastapi`` etc. - never
 ``app: app``. Older provisioning code created the preview ``app`` NodePort Service
 with a hardcoded ``app: app`` selector, so it had no endpoints and the browser hit
 ERR_CONNECTION_RESET.
@@ -12,7 +12,7 @@ preview-target workload), but it only applies to previews created *after* the
 Celery worker is restarted. This script repairs previews that already exist:
 for every ``launchpad-env-*`` namespace whose ``app`` NodePort Service has no
 endpoints, it re-points the Service selector (and targetPort) at the exposed
-workload — the ``launchpad.io/preview-target: "true"`` Deployment, else ``app``,
+workload - the ``launchpad.io/preview-target: "true"`` Deployment, else ``app``,
 else the first non-datastore Deployment.
 
 Usage:

@@ -40,14 +40,14 @@ k3s-up:
 k3s-down:
 	bash scripts/k3s-down.sh
 
-# Engine-dispatching targets — start/stop whichever local cluster LOCAL_K8S_ENGINE selects.
+# Engine-dispatching targets - start/stop whichever local cluster LOCAL_K8S_ENGINE selects.
 cluster-up:
 	bash scripts/$(LOCAL_K8S_ENGINE)-up.sh
 
 cluster-down:
 	bash scripts/$(LOCAL_K8S_ENGINE)-down.sh
 
-# Oracle Cloud Always Free — see deploy/oci/README.md
+# Oracle Cloud Always Free - see deploy/oci/README.md
 oci-up:
 	@test -f deploy/oci/.env || (echo "Copy deploy/oci/env.example → deploy/oci/.env and edit secrets first." && exit 1)
 	docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build

@@ -705,7 +705,7 @@ function downloadWorkflowYaml() {
           <p class="lp-label">Pipeline security</p>
           <h3 class="mt-1 text-base font-semibold">Solutions A &amp; B</h3>
           <p class="mt-1 text-sm text-[var(--lp-muted)]">
-            Toggle independently — A only, B only, both, or neither. Actions are pinned to commit
+            Toggle independently - A only, B only, both, or neither. Actions are pinned to commit
             SHAs.
           </p>
         </div>

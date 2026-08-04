@@ -97,6 +97,23 @@ const costToDate = computed(() => {
   return '0.0000'
 })
 
+const costSourceLabel = computed(() => {
+  const source = props.environment.cost_source
+  if (!source) return null
+  const labels: Record<string, string> = {
+    usage_quota: 'quota usage',
+    usage_requests: 'pod requests',
+    estimate: 'estimate',
+    idle: 'idle',
+  }
+  return labels[source] ?? source
+})
+
+const isLocal = computed(() => Boolean(props.environment.is_local))
+
+const hasPostgres = computed(() => Boolean(props.environment.enable_postgres))
+const hasRedis = computed(() => Boolean(props.environment.enable_redis))
+
 const previewHref = computed(() => {
   if (props.environment.app_ready && props.environment.preview_url) {
     return resolvePreviewUrl(props.environment)
@@ -157,7 +174,10 @@ const repoShort = computed(() => {
           </span>
         </p>
       </div>
-      <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
+      <div class="flex flex-col items-end gap-1.5">
+        <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
+        <EnvironmentHealthDot :status="displayStatus" :app-ready="environment.app_ready" />
+      </div>
     </div>
 
     <div class="flex gap-4 p-4">
@@ -168,15 +188,32 @@ const repoShort = computed(() => {
             <p class="truncate font-mono text-sm">{{ environment.namespace_name }}</p>
           </div>
           <div class="space-y-1 text-right">
-            <p class="lp-label">Cost to date</p>
+            <p class="lp-label">{{ isLocal ? 'Cost (shadow)' : 'Cost to date' }}</p>
             <p class="font-mono text-sm">${{ costToDate }}</p>
             <p class="font-mono text-[10px] text-[var(--lp-muted)]">
               ${{ environment.cost_estimate_hourly }}/hr
+              <span v-if="costSourceLabel" class="opacity-80"> · {{ costSourceLabel }}</span>
             </p>
           </div>
         </div>
 
         <div class="flex flex-wrap gap-2">
+          <span
+            v-if="hasPostgres"
+            class="inline-flex items-center gap-1 rounded border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-300"
+            title="Ephemeral Postgres in this preview namespace"
+          >
+            <span class="material-symbols-outlined text-sm">database</span>
+            Postgres
+          </span>
+          <span
+            v-if="hasRedis"
+            class="inline-flex items-center gap-1 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-300"
+            title="Ephemeral Redis in this preview namespace"
+          >
+            <span class="material-symbols-outlined text-sm">memory</span>
+            Redis
+          </span>
           <span
             class="inline-flex items-center gap-1.5 rounded border border-[var(--lp-line)] bg-[var(--lp-panel-2)] px-3 py-1.5 text-xs text-[var(--lp-accent)]"
             :title="environment.git_repo_url"
@@ -289,7 +326,7 @@ const repoShort = computed(() => {
       <span
         v-else-if="displayStatus === 'EXPIRED'"
         class="inline-flex items-center gap-1 px-3 py-1.5 text-xs uppercase tracking-wide text-[var(--lp-muted)]"
-        title="TTL expired — resume is disabled"
+        title="TTL expired - resume is disabled"
       >
         <span class="material-symbols-outlined text-sm">timer_off</span>
         Expired

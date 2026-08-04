@@ -177,7 +177,7 @@ async def _maybe_build_preview_image(
         log_repo,
         environment_id=env_uuid,
         message=(
-            f"BUILD — cloning {environment.git_repo_url} "
+            f"BUILD - cloning {environment.git_repo_url} "
             f"({environment.git_branch}) and building Dockerfile"
         ),
         status=EnvironmentStatus.PROVISIONING.value,
@@ -200,7 +200,7 @@ async def _maybe_build_preview_image(
     await _emit_log(
         log_repo,
         environment_id=env_uuid,
-        message=f"BUILD — {mode} image {result.image} (commit {result.commit_sha})",
+        message=f"BUILD - {mode} image {result.image} (commit {result.commit_sha})",
         status=EnvironmentStatus.PROVISIONING.value,
         commit_sha=result.commit_sha,
         stage=ExecutionStage.BUILD,
@@ -271,6 +271,131 @@ async def _fail_execution(
         )
 
 
+async def _attempt_rebuild_rollback(
+    session_factory: async_sessionmaker[AsyncSession],
+    provisioner: "KubernetesProvisioner",
+    *,
+    env_uuid: UUID,
+    eligible: bool,
+    previous_image: str | None,
+    previous_commit: str | None,
+    failed_commit: str | None,
+    stage: ExecutionStage,
+    actor_id: str,
+    workspace_id: UUID | None,
+    error_text: str,
+) -> bool:
+    """Restore the last known-good deployment after a failed rebuild.
+
+    Returns True when the workload was rolled back to the previous image and the
+    environment is RUNNING again; False when there is nothing to roll back to or
+    the restore itself fails (caller then marks the environment FAILED).
+    """
+    if not eligible or not (previous_image or previous_commit):
+        return False
+
+    restore_ref = previous_commit or "last-good"
+    async with session_factory() as session:
+        env_repo = EnvironmentRepository(session)
+        log_repo = DeploymentLogRepository(session)
+        user_repo = UserRepository(session)
+        environment = await env_repo.get_by_id(env_uuid)
+        if environment is None:
+            return False
+        if environment.status == EnvironmentStatus.TEARDOWN_PENDING:
+            # A delete raced in while we were failing; let teardown win.
+            return False
+
+        owner = await user_repo.get_by_id(environment.owner_id)
+        owner_label = owner.email if owner is not None else str(environment.owner_id)
+
+        await _emit_log(
+            log_repo,
+            environment_id=env_uuid,
+            message=(
+                f"ROLLBACK - rebuild of {failed_commit or 'new revision'} failed; "
+                f"restoring last working revision {restore_ref}"
+            ),
+            log_level=LogLevel.WARN,
+            status=EnvironmentStatus.PROVISIONING.value,
+            commit_sha=restore_ref,
+            stage=stage,
+        )
+        await session.commit()
+
+        try:
+            provisioner.rebuild_workload(
+                namespace=environment.namespace_name,
+                environment_id=str(environment.id),
+                name=environment.name,
+                git_branch=environment.git_branch,
+                git_repo_url=environment.git_repo_url,
+                commit_sha=previous_commit or "",
+                owner_label=owner_label,
+                image=previous_image,
+                enable_postgres=getattr(environment, "enable_postgres", False),
+                enable_redis=getattr(environment, "enable_redis", False),
+            )
+        except Exception:
+            logger.exception(
+                "rebuild_rollback_failed",
+                environment_id=str(env_uuid),
+                previous_image=previous_image,
+                previous_commit=previous_commit,
+            )
+            return False
+
+        await env_repo.update_status(
+            environment,
+            EnvironmentStatus.RUNNING,
+            latest_commit_sha=previous_commit,
+            error_message=None,
+            workload_image=previous_image or environment.workload_image,
+        )
+        await _emit_log(
+            log_repo,
+            environment_id=env_uuid,
+            message=(
+                f"ROLLBACK - restored last working revision {restore_ref}, RUNNING. "
+                f"Failed rebuild: {error_text}"
+            ),
+            log_level=LogLevel.WARN,
+            status=EnvironmentStatus.RUNNING.value,
+            commit_sha=restore_ref,
+            stage=stage,
+        )
+        # Record both the failure and the recovery so the audit trail is honest.
+        await _record_audit(
+            session,
+            action=AuditAction.REBUILD_FAILED,
+            actor_id=actor_id,
+            status=AuditStatus.FAILURE,
+            environment_id=env_uuid,
+            workspace_id=workspace_id or environment.workspace_id,
+            commit_sha=failed_commit,
+            detail=error_text,
+        )
+        await _record_audit(
+            session,
+            action=AuditAction.REBUILD_ROLLED_BACK,
+            actor_id=actor_id,
+            status=AuditStatus.SUCCESS,
+            environment_id=env_uuid,
+            workspace_id=workspace_id or environment.workspace_id,
+            commit_sha=previous_commit,
+            detail=f"Rolled back to {restore_ref} after failed rebuild of {failed_commit or 'new revision'}",
+        )
+        await session.commit()
+        await _publish_status(
+            env_uuid,
+            status=EnvironmentStatus.RUNNING,
+            commit_sha=restore_ref,
+            message=f"Rebuild failed; rolled back to last working revision {restore_ref}",
+            stage=stage,
+        )
+    return True
+
+
 async def _run_provision(environment_id: str, correlation_id: str) -> None:
     structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
     settings = get_settings()
@@ -302,7 +427,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                 await _emit_log(
                     log_repo,
                     environment_id=env_uuid,
-                    message="INIT — starting Kubernetes provision workflow",
+                    message="INIT - starting Kubernetes provision workflow",
                     status=EnvironmentStatus.PROVISIONING.value,
                     commit_sha=commit_sha,
                     stage=ExecutionStage.INIT,
@@ -312,13 +437,19 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                 try:
                     current_stage = ExecutionStage.VALIDATE
                     if settings.kubernetes_enabled:
-                        mode_msg = (
-                            f"VALIDATE — cluster mode "
-                            f"(context={settings.kubernetes_context or 'default'})"
-                        )
+                        provider = getattr(environment, "provider", None)
+                        is_local = str(provider or "").lower() == "local"
+                        ctx = settings.resolved_kubernetes_context or settings.kubernetes_context or "default"
+                        if is_local:
+                            from app.services.kind_cluster import ensure_kind_cluster
+
+                            await ensure_kind_cluster()
+                            provisioner.reload_clients()
+                        provisioner.assert_cluster_ready(timeout_seconds=5.0)
+                        mode_msg = f"VALIDATE - cluster reachable (context={ctx})"
                     else:
                         mode_msg = (
-                            "VALIDATE — simulate mode (KUBERNETES_ENABLED=false); "
+                            "VALIDATE - simulate mode (KUBERNETES_ENABLED=false); "
                             "no cluster mutations"
                         )
                     await _emit_log(
@@ -328,6 +459,16 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         status=EnvironmentStatus.PROVISIONING.value,
                         commit_sha=commit_sha,
                         stage=ExecutionStage.VALIDATE,
+                    )
+                    await _record_audit(
+                        session,
+                        action=AuditAction.PROVISION_VALIDATED,
+                        actor_id=actor_id,
+                        status=AuditStatus.SUCCESS,
+                        environment_id=env_uuid,
+                        workspace_id=workspace_id,
+                        commit_sha=commit_sha,
+                        detail=mode_msg,
                     )
                     await session.commit()
 
@@ -340,16 +481,27 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         if deploy_mode_for_plan != DeployMode.MANIFEST.value
                         else "from workspace manifests"
                     )
+                    plan_msg = (
+                        f"PLAN - namespace {environment.namespace_name}, "
+                        f"image {plan_image_note}"
+                    )
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message=(
-                            f"PLAN — namespace {environment.namespace_name}, "
-                            f"image {plan_image_note}"
-                        ),
+                        message=plan_msg,
                         status=EnvironmentStatus.PROVISIONING.value,
                         commit_sha=commit_sha,
                         stage=ExecutionStage.PLAN,
+                    )
+                    await _record_audit(
+                        session,
+                        action=AuditAction.PROVISION_PLANNED,
+                        actor_id=actor_id,
+                        status=AuditStatus.SUCCESS,
+                        environment_id=env_uuid,
+                        workspace_id=workspace_id,
+                        commit_sha=commit_sha,
+                        detail=plan_msg,
                     )
                     await session.commit()
 
@@ -401,7 +553,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         if workspace_row is not None:
                             workspace_root = Path(workspace_row.root_dir)
 
-                    _ctx = settings.kubernetes_context or ""
+                    _ctx = settings.resolved_kubernetes_context or settings.kubernetes_context or ""
                     if settings.kubernetes_enabled and (environment.provider == "local" or _ctx.startswith(("kind-", "k3d-"))) and workspace_root is not None:
                         local_cluster = (_ctx or "launchpad").removeprefix("kind-").removeprefix("k3d-")
                         _build_and_load_kind_docker_images(workspace_root, cluster_name=local_cluster)
@@ -417,7 +569,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         await _emit_log(
                             log_repo,
                             environment_id=env_uuid,
-                            message=f"APPLY — deploying workspace Kubernetes manifests{helm_note}",
+                            message=f"APPLY - deploying workspace Kubernetes manifests{helm_note}",
                             status=EnvironmentStatus.PROVISIONING.value,
                             commit_sha=commit_sha,
                             stage=ExecutionStage.APPLY,
@@ -440,7 +592,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         await _emit_log(
                             log_repo,
                             environment_id=env_uuid,
-                            message="APPLY — mutating Kubernetes resources (preview profile)",
+                            message="APPLY - mutating Kubernetes resources (preview profile)",
                             status=EnvironmentStatus.PROVISIONING.value,
                             commit_sha=commit_sha,
                             stage=ExecutionStage.APPLY,
@@ -462,6 +614,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             ttl_expires_at=environment.ttl_expires_at.isoformat(),
                             owner_label=owner_label,
                             image=deploy_image,
+                            enable_postgres=getattr(environment, "enable_postgres", False),
+                            enable_redis=getattr(environment, "enable_redis", False),
                         )
 
                     if resources.simulated:
@@ -469,7 +623,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             log_repo,
                             environment_id=env_uuid,
                             message=(
-                                "APPLY — simulated ResourceQuota, LimitRange, "
+                                "APPLY - simulated ResourceQuota, LimitRange, "
                                 "NetworkPolicy, Deployment, and Service"
                             ),
                             status=EnvironmentStatus.PROVISIONING.value,
@@ -486,7 +640,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             log_repo,
                             environment_id=env_uuid,
                             message=(
-                                f"APPLY — ResourceQuota + LimitRange + zero-trust NetworkPolicy; "
+                                f"APPLY - ResourceQuota + LimitRange + zero-trust NetworkPolicy; "
                                 f"Deployment/Service ready (image={resources.image}{port_note})"
                             ),
                             status=EnvironmentStatus.PROVISIONING.value,
@@ -523,7 +677,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message=f"APPLY — provision completed, RUNNING.{preview_note}",
+                        message=f"APPLY - provision completed, RUNNING.{preview_note}",
                         status=EnvironmentStatus.RUNNING.value,
                         commit_sha=commit_sha,
                         stage=ExecutionStage.APPLY,
@@ -628,7 +782,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                     log_repo,
                                     environment_id=env_uuid,
                                     message=(
-                                        "APPLY — provision completed after Ready deadline "
+                                        "APPLY - provision completed after Ready deadline "
                                         f"(image={resources.image}). Open app: {resources.preview_url}"
                                     ),
                                     status=EnvironmentStatus.RUNNING.value,
@@ -681,7 +835,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     await _fail_execution(
                         session_factory,
                         environment_id=env_uuid,
-                        error_text=f"Provision failed — rolling back: {error_text}",
+                        error_text=f"Provision failed - rolling back: {error_text}",
                         commit_sha=commit_sha,
                         stage=current_stage,
                         audit_action=AuditAction.PROVISION_FAILED,
@@ -742,11 +896,21 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                 workspace_id = environment.workspace_id
                 current_stage = ExecutionStage.INIT
 
+                # Snapshot the last known-good deployment before mutating anything,
+                # so a failed rebuild can roll the workload back to it. Only a
+                # previously-RUNNING preview has a working state worth restoring.
+                rollback_eligible = environment.status == EnvironmentStatus.RUNNING
+                previous_image = environment.workload_image
+                previous_commit = environment.latest_commit_sha
+                # Set once the new revision is live and healthy; past this point a
+                # failure is bookkeeping only, so we must NOT revert the workload.
+                new_rollout_ok = False
+
                 if environment.status == EnvironmentStatus.TEARDOWN_PENDING:
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message="Skipping rebuild — environment is tearing down",
+                        message="Skipping rebuild - environment is tearing down",
                         log_level=LogLevel.WARN,
                         status=environment.status.value,
                         commit_sha=short_sha,
@@ -774,7 +938,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                 await _emit_log(
                     log_repo,
                     environment_id=env_uuid,
-                    message=f"INIT — GitOps rebuild for commit {short_sha}",
+                    message=f"INIT - GitOps rebuild for commit {short_sha}",
                     status=EnvironmentStatus.PROVISIONING.value,
                     commit_sha=short_sha,
                     stage=ExecutionStage.INIT,
@@ -787,7 +951,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message=f"VALIDATE — pulling application revision {short_sha}",
+                        message=f"VALIDATE - pulling application revision {short_sha}",
                         status=EnvironmentStatus.PROVISIONING.value,
                         commit_sha=short_sha,
                         stage=ExecutionStage.VALIDATE,
@@ -800,7 +964,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         log_repo,
                         environment_id=env_uuid,
                         message=(
-                            f"PLAN — workload update in {environment.namespace_name} "
+                            f"PLAN - workload update in {environment.namespace_name} "
                             f"(kubectl set image / Deployment roll)"
                         ),
                         status=EnvironmentStatus.PROVISIONING.value,
@@ -826,7 +990,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message="APPLY — rolling Deployment",
+                        message="APPLY - rolling Deployment",
                         status=EnvironmentStatus.PROVISIONING.value,
                         commit_sha=short_sha,
                         stage=ExecutionStage.APPLY,
@@ -842,13 +1006,18 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         commit_sha=short_sha,
                         owner_label=owner_label,
                         image=rebuild_image,
+                        enable_postgres=getattr(environment, "enable_postgres", False),
+                        enable_redis=getattr(environment, "enable_redis", False),
                     )
+                    # New revision rolled out and passed readiness; from here a
+                    # failure must not roll the healthy workload back.
+                    new_rollout_ok = True
 
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message="APPLY — waiting for rollout to complete",
+                        message="APPLY - waiting for rollout to complete",
                         status=EnvironmentStatus.PROVISIONING.value,
                         commit_sha=short_sha,
                         stage=ExecutionStage.APPLY,
@@ -866,7 +1035,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message=f"APPLY — rebuild completed, RUNNING at {short_sha}",
+                        message=f"APPLY - rebuild completed, RUNNING at {short_sha}",
                         status=EnvironmentStatus.RUNNING.value,
                         commit_sha=short_sha,
                         stage=ExecutionStage.APPLY,
@@ -892,16 +1061,33 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                     logger.exception("rebuild_failed", environment_id=environment_id)
                     await session.rollback()
                     error_text = sanitize_log_message(str(exc))
-                    await _fail_execution(
+                    # Prefer restoring the last working revision over leaving the
+                    # preview broken. Fall back to FAILED only when there is no
+                    # known-good state or the rollback itself fails.
+                    rolled_back = await _attempt_rebuild_rollback(
                         session_factory,
-                        environment_id=env_uuid,
-                        error_text=f"Rebuild failed: {error_text}",
-                        commit_sha=short_sha,
+                        provisioner,
+                        env_uuid=env_uuid,
+                        eligible=rollback_eligible and not new_rollout_ok,
+                        previous_image=previous_image,
+                        previous_commit=previous_commit,
+                        failed_commit=short_sha,
                         stage=current_stage,
-                        audit_action=AuditAction.REBUILD_FAILED,
                         actor_id=actor_id,
                         workspace_id=workspace_id,
+                        error_text=error_text,
                     )
+                    if not rolled_back:
+                        await _fail_execution(
+                            session_factory,
+                            environment_id=env_uuid,
+                            error_text=f"Rebuild failed: {error_text}",
+                            commit_sha=short_sha,
+                            stage=current_stage,
+                            audit_action=AuditAction.REBUILD_FAILED,
+                            actor_id=actor_id,
+                            workspace_id=workspace_id,
+                        )
     except StateLockConflict:
         logger.warning(
             "rebuild_skipped_lock_held",
@@ -969,7 +1155,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                 await _emit_log(
                     log_repo,
                     environment_id=env_uuid,
-                    message=f"INIT — tearing down namespace {environment.namespace_name}",
+                    message=f"INIT - tearing down namespace {environment.namespace_name}",
                     status=EnvironmentStatus.TEARDOWN_PENDING.value,
                     commit_sha=environment.latest_commit_sha,
                     stage=ExecutionStage.INIT,
@@ -981,7 +1167,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message="APPLY — deleting namespace and resources",
+                        message="APPLY - deleting namespace and resources",
                         status=EnvironmentStatus.TEARDOWN_PENDING.value,
                         commit_sha=environment.latest_commit_sha,
                         stage=ExecutionStage.APPLY,
@@ -1009,7 +1195,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message="APPLY — teardown completed, DESTROYED",
+                        message="APPLY - teardown completed, DESTROYED",
                         status=EnvironmentStatus.DESTROYED.value,
                         commit_sha=environment.latest_commit_sha,
                         stage=ExecutionStage.APPLY,
@@ -1101,7 +1287,7 @@ async def pause_expired_environment(
         scaled_ok = bool(
             provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
         )
-    except Exception as e:  # noqa: BLE001 — always mark expired; retry scale next cycle
+    except Exception as e:  # noqa: BLE001 - always mark expired; retry scale next cycle
         scaled_ok = False
         logger.error("ttl_reaper_scale_failed", environment_id=str(environment.id), error=str(e))
 
@@ -1111,7 +1297,7 @@ async def pause_expired_environment(
         log_repo,
         environment_id=environment.id,
         message=(
-            f"TTL expired — environment marked expired ({scale_note}) "
+            f"TTL expired - environment marked expired ({scale_note}) "
             f"(expires_at={environment.ttl_expires_at.isoformat()})"
         ),
         log_level=LogLevel.WARN,
@@ -1210,7 +1396,7 @@ async def _run_ttl_reaper() -> int:
                 environment_id,
                 status=EnvironmentStatus.FAILED,
                 commit_sha=commit_sha,
-                message="Provisioning timed out — no active worker",
+                message="Provisioning timed out - no active worker",
                 stage=ExecutionStage.APPLY,
             )
 
@@ -1308,7 +1494,7 @@ async def _run_cost_metering() -> int:
             if provisioner is not None:
                 try:
                     usage = provisioner.read_namespace_usage(environment.namespace_name)
-                except Exception as exc:  # noqa: BLE001 — never fail the whole sweep
+                except Exception as exc:  # noqa: BLE001 - never fail the whole sweep
                     logger.warning(
                         "cost_metering_usage_failed",
                         environment_id=str(environment.id),
@@ -1525,7 +1711,7 @@ async def _attach_preview_tunnel(env_uuid: object, environment: object, resource
     No-op unless ``PREVIEW_TUNNEL_MODE=cloudflared`` and this is a local NodePort
     preview. On success it rewrites ``resources.preview_url`` in place so the caller
     persists the public ``*.trycloudflare.com`` URL as the Open-app link. Any failure
-    is swallowed — a missing tunnel just falls back to the NodePort URL.
+    is swallowed - a missing tunnel just falls back to the NodePort URL.
     """
     try:
         node_port = getattr(resources, "node_port", None)
@@ -1554,7 +1740,7 @@ async def _attach_cloud_preview_url(
     No-op for local previews. For cloud providers it reads the LoadBalancer/Ingress
     external address from the cluster and rewrites ``resources.preview_url`` so the
     Open-app link is the real production URL, not a NodePort/loopback guess. Any
-    failure is swallowed — the caller keeps its default URL.
+    failure is swallowed - the caller keeps its default URL.
     """
     try:
         if resources is None:
@@ -1709,7 +1895,7 @@ def _remove_kind_docker_images(cluster_name: str, images: "list[str] | None") ->
     Removes each image from the kind node's containerd (``crictl rmi`` inside the
     control-plane container) and from the host Docker daemon (``docker rmi``).
     Official/shared base images (postgres, redis, nginx, …) are skipped. All
-    failures are swallowed — teardown must never fail because an image is gone.
+    failures are swallowed - teardown must never fail because an image is gone.
     """
     import shutil
     import subprocess

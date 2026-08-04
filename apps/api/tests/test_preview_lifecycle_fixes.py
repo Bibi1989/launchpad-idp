@@ -95,7 +95,7 @@ def test_nginx_default_service_port_unchanged() -> None:
 
 def test_ready_timeout_capped_at_three_minutes() -> None:
     assert PREVIEW_READY_TIMEOUT_CAP_SECONDS == 180.0
-    # Non-nginx app image would otherwise get 240s — now capped at 180.
+    # Non-nginx app image would otherwise get 240s - now capped at 180.
     assert _workload_ready_timeout_seconds(image="api:latest", base_timeout_seconds=240.0) == 180.0
     # A configured base above the cap is still clamped.
     assert _workload_ready_timeout_seconds(image="nginx:1.27-alpine", base_timeout_seconds=300.0) == 180.0

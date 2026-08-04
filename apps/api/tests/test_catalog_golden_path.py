@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
+from app.services.catalog import CatalogServiceManager
 from app.services.golden_path_templates import get_golden_path_template, list_golden_path_templates
 from app.services.service_scorecard import compute_workspace_scorecard
 
@@ -74,12 +76,45 @@ def test_scorecard_passes_with_hardened_scaffold(tmp_path: Path) -> None:
     assert scorecard.passed
 
 
+def test_scorecard_accepts_gitlab_ci(tmp_path: Path) -> None:
+    (tmp_path / "dockers").mkdir()
+    (tmp_path / "dockers" / "Dockerfile.app").write_text(
+        "FROM python:3.12-slim\nUSER 10001\nCMD [\"python\"]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "stages: [test, build, scan]\n"
+        "sast:\n  script: [semgrep scan --config p/ci --error .]\n"
+        "container-security-scan:\n  script: [trivy image app]\n",
+        encoding="utf-8",
+    )
+    k8s = tmp_path / "infra" / "k8s" / "manifests"
+    k8s.mkdir(parents=True)
+    (k8s / "deployment.yaml").write_text(
+        "resources:\n  requests:\n    cpu: 100m\n    memory: 128Mi\n  limits:\n    cpu: 250m\n    memory: 256Mi\n",
+        encoding="utf-8",
+    )
+    scorecard = compute_workspace_scorecard(tmp_path)
+    assert scorecard.passed
+    ci_item = next(i for i in scorecard.items if i.id == "ci_security")
+    assert ci_item.passed
+
+
+def test_ensure_cicd_scaffold_writes_gitlab_ci(tmp_path: Path) -> None:
+    mgr = CatalogServiceManager(session=MagicMock())
+    mgr._ensure_cicd_scaffold(str(tmp_path), "demo-svc", vcs_provider="gitlab")
+    ci = (tmp_path / ".gitlab-ci.yml").read_text(encoding="utf-8")
+    assert "semgrep" in ci
+    assert "trivy" in ci
+    assert "stages:" in ci
+
+
 def test_catalog_service_create_name_normalization() -> None:
     from app.schemas.catalog import CatalogServiceCreate
+
     payload = CatalogServiceCreate(
         name="Fnep",
         template_id="fullstack-nextjs-express-postgres",
         owner="team@example.com",
     )
     assert payload.name == "fnep"
-

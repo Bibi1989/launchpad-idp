@@ -678,7 +678,7 @@ class ProvisioningService:
         """Force teardown of all preview environments belonging to a workspace.
 
         Each non-destroyed environment is marked TEARDOWN_PENDING (which also
-        cancels any in-flight provision) and its teardown task is enqueued —
+        cancels any in-flight provision) and its teardown task is enqueued -
         reusing the full teardown path (namespace + kind image cleanup + audit).
         """
         from app.models.domain import Environment, EnvironmentStatus

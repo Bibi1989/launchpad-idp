@@ -27,7 +27,7 @@ def _settings(tmp_path: Path, mode: str = "cloudflared") -> Settings:
 @pytest.fixture
 def fake_cloudflared(monkeypatch: pytest.MonkeyPatch):
     """Fake spawn + pid liveness so no real cloudflared runs."""
-    # tunnel_enabled() does `import shutil; shutil.which(bin)` — patch the global.
+    # tunnel_enabled() does `import shutil; shutil.which(bin)` - patch the global.
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda _bin: "/usr/bin/cloudflared")

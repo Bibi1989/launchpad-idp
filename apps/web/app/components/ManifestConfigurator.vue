@@ -987,14 +987,14 @@ onBeforeUnmount(() => {
           </label>
         </section>
 
-        <!-- Init containers (deployment) — read-only, shown when datastores add wait blocks -->
+        <!-- Init containers (deployment) - read-only, shown when datastores add wait blocks -->
         <section v-if="isDeployment && model.initContainers.length" class="space-y-3">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">hourglass_top</span>
             <h3 class="lp-label">Init containers ({{ model.initContainers.length }})</h3>
           </div>
           <p class="text-[11px] text-[var(--lp-muted)]">
-            Generated automatically for each in-cluster datastore — they block startup
+            Generated automatically for each in-cluster datastore - they block startup
             until the dependency is reachable. Read-only.
           </p>
           <ul class="space-y-2">
@@ -1142,7 +1142,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <!-- Networking (service / helm) — service type only persists here -->
+        <!-- Networking (service / helm) - service type only persists here -->
         <section v-if="isService || isHelm" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">hub</span>
@@ -1176,7 +1176,7 @@ onBeforeUnmount(() => {
                   NodePort: <code class="text-[var(--lp-text)]">port</code>,
                   <code class="text-[var(--lp-text)]">targetPort</code>, and optional
                   <code class="text-[var(--lp-text)]">nodePort</code>
-                  (kind local range 30080–30089; leave empty to auto-assign).
+                  (kind local range 30080-30089; leave empty to auto-assign).
                 </template>
                 <template v-else>
                   LoadBalancer: same port fields as NodePort; cloud LB may allocate externally.
@@ -1211,7 +1211,7 @@ onBeforeUnmount(() => {
                   inputmode="numeric"
                 >
                 <span class="block font-mono text-[10px] text-[var(--lp-muted)]">
-                  Host port 30000–32767; empty = Launchpad assigns
+                  Host port 30000-32767; empty = Launchpad assigns
                 </span>
               </label>
             </div>

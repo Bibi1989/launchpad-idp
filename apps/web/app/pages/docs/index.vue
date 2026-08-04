@@ -50,20 +50,20 @@ const sections = [
         </p>
         <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            <strong class="text-[var(--lp-text)]">Provision (infra)</strong> — generate a
+            <strong class="text-[var(--lp-text)]">Provision (infra)</strong> - generate a
             Terraform or Pulumi workspace for GCP, AWS, Azure, Cloudflare, or kind. You attach
             short-lived cloud credentials, pick resources, then apply the stack from the sandbox
             terminal. This stands up platform infrastructure (VPC, cluster, etc.).
           </li>
           <li>
-            <strong class="text-[var(--lp-text)]">Manifest (workload)</strong> — apply Kubernetes
+            <strong class="text-[var(--lp-text)]">Manifest (workload)</strong> - apply Kubernetes
             YAML or Helm charts from
             <code class="font-mono text-xs">infra/k8s/manifests/</code>
             in your workspace. This deploys app objects onto a cluster that already exists. In the
             sandbox terminal, manifests apply separately after Terraform/Pulumi.
           </li>
           <li>
-            <strong class="text-[var(--lp-text)]">Environment (preview)</strong> — short-lived,
+            <strong class="text-[var(--lp-text)]">Environment (preview)</strong> - short-lived,
             governed preview of an app from a git repo and branch. Launchpad creates an isolated
             namespace, deploys the workload, streams status and logs, and tears everything down when
             the TTL expires. When linked to a workspace with raw manifests, environments use
@@ -74,7 +74,7 @@ const sections = [
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
           Use
           <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
-          for a one-click preview — Local Sandbox (single screen) or cloud, catalog template or your
+          for a one-click preview - Local Sandbox (single screen) or cloud, catalog template or your
           own repo. Use
           <NuxtLink to="/environments" class="text-[var(--lp-accent)] hover:underline">Environments</NuxtLink>
           to manage running previews.
@@ -97,7 +97,7 @@ const sections = [
           <li>
             You land on the
             <NuxtLink to="/home" class="text-[var(--lp-accent)] hover:underline">Home</NuxtLink>
-            hub — from there open Environments, Provision, or Settings. The public product page is
+            hub - from there open Environments, Provision, or Settings. The public product page is
             <NuxtLink to="/" class="text-[var(--lp-accent)] hover:underline">/</NuxtLink>.
           </li>
           <li>
@@ -124,7 +124,7 @@ const sections = [
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
           An environment is a governed, time-boxed preview of your application. The fastest path is
           <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
-          — choose
+          - choose
           <strong class="text-[var(--lp-text)]">Local (Sandbox)</strong>
           to test on your machine with no cloud credentials, or connect GCP/AWS/Azure/Cloudflare.
           Provisioning runs asynchronously; the detail page shows live status and logs while it
@@ -174,7 +174,7 @@ const sections = [
             redeploys.
           </li>
           <li>
-            Watch the environment card or detail page — status, commit SHA, and logs update live.
+            Watch the environment card or detail page - status, commit SHA, and logs update live.
           </li>
         </ol>
       </section>
@@ -183,7 +183,7 @@ const sections = [
         <h2 class="text-xl font-semibold">Provision cloud infrastructure</h2>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
           The Provision wizard builds an IaC bundle for you. Launchpad does not apply cloud changes
-          by itself — you run the plan/apply commands in the sandbox after the bundle is ready.
+          by itself - you run the plan/apply commands in the sandbox after the bundle is ready.
         </p>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
@@ -201,7 +201,7 @@ const sections = [
             <strong class="text-[var(--lp-text)]">Raw K8s Manifests</strong>
             or
             <strong class="text-[var(--lp-text)]">Helm</strong>,
-            then toggle the Kubernetes objects to scaffold — Deployment, Service, Ingress, Pod,
+            then toggle the Kubernetes objects to scaffold - Deployment, Service, Ingress, Pod,
             Job, CronJob, StatefulSet, DaemonSet, ConfigMap, Secret, PVC, Role, HPA, and more.
           </li>
           <li>
@@ -252,7 +252,7 @@ const sections = [
           <li>
             To run a governed preview from those manifests, go to
             <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
-            and select the workspace — Launchpad uses
+            and select the workspace - Launchpad uses
             <strong class="text-[var(--lp-text)]">manifest deploy</strong>
             automatically.
           </li>
@@ -266,12 +266,12 @@ const sections = [
         </p>
         <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            <strong class="text-[var(--lp-text)]">Simple</strong> — one subnet (plus an internet
+            <strong class="text-[var(--lp-text)]">Simple</strong> - one subnet (plus an internet
             gateway on AWS). Best for demos and ephemeral stacks. CIDRs are auto-generated per
             environment so parallel stacks do not collide.
           </li>
           <li>
-            <strong class="text-[var(--lp-text)]">Standard</strong> — public + private subnets with
+            <strong class="text-[var(--lp-text)]">Standard</strong> - public + private subnets with
             managed NAT egress (Cloud NAT on GCP, NAT Gateway on AWS/Azure). Clusters attach to the
             private subnet. Prefer this for production-ish golden paths.
           </li>
@@ -289,12 +289,12 @@ const sections = [
               <strong class="text-[var(--lp-text)]">Account Settings</strong>
               (
               <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">/settings</NuxtLink>
-              ) — encrypted vault for GCP (SA JSON or WIF), AWS (keys or role ARN), Azure SP, and
+              ) - encrypted vault for GCP (SA JSON or WIF), AWS (keys or role ARN), Azure SP, and
               Cloudflare. Used as a fallback when workspace fields are blank.
             </li>
             <li>
               <strong class="text-[var(--lp-text)]">Per workspace</strong>
-              in the Provision wizard — overrides or fills that workspace only.
+              in the Provision wizard - overrides or fills that workspace only.
             </li>
           </ul>
           <p class="text-sm leading-7 text-[var(--lp-muted)]">
@@ -304,7 +304,7 @@ const sections = [
         </div>
 
         <div id="gcp" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">GCP — service account JSON</h3>
+          <h3 class="text-lg font-semibold">GCP - service account JSON</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>
               Open
@@ -321,7 +321,7 @@ const sections = [
               Grant roles for the resources you will provision (for example Compute Admin, Kubernetes
               Engine Admin, Secret Manager Admin).
             </li>
-            <li>Keys → Add key → Create new key → JSON — download the file.</li>
+            <li>Keys → Add key → Create new key → JSON - download the file.</li>
             <li>
               In Provision, paste the full JSON into
               <strong class="text-[var(--lp-text)]">GCP SA key JSON</strong>
@@ -331,7 +331,7 @@ const sections = [
         </div>
 
         <div id="aws" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">AWS — access keys</h3>
+          <h3 class="text-lg font-semibold">AWS - access keys</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>
               Sign in to the
@@ -355,10 +355,10 @@ const sections = [
         </div>
 
         <div id="azure" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">Azure — service principal</h3>
+          <h3 class="text-lg font-semibold">Azure - service principal</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>Azure Portal → Microsoft Entra ID → App registrations → New registration.</li>
-            <li>Certificates &amp; secrets → New client secret — copy the value immediately.</li>
+            <li>Certificates &amp; secrets → New client secret - copy the value immediately.</li>
             <li>
               Note the Application (client) ID, Directory (tenant) ID, and your Subscription ID.
             </li>
@@ -373,7 +373,7 @@ const sections = [
         </div>
 
         <div id="cloudflare" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">Cloudflare — API token</h3>
+          <h3 class="text-lg font-semibold">Cloudflare - API token</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>
               Open
@@ -411,7 +411,7 @@ const sections = [
           </li>
           <li>You are redirected back to Launchpad when installation finishes.</li>
           <li>
-            Confirm installations appear on the GitHub page — select one when bootstrapping a repo
+            Confirm installations appear on the GitHub page - select one when bootstrapping a repo
             from the Provision wizard.
           </li>
         </ol>
@@ -420,19 +420,19 @@ const sections = [
           <ul class="mb-3 list-disc space-y-1 pl-5 text-xs leading-6">
             <li>
               <strong class="text-[var(--lp-text)]">Administration</strong>
-              — create repositories
+              - create repositories
             </li>
             <li>
               <strong class="text-[var(--lp-text)]">Contents</strong>
-              — push workflow and infrastructure files
+              - push workflow and infrastructure files
             </li>
             <li>
               <strong class="text-[var(--lp-text)]">Secrets</strong>
-              — set CI cloud secrets
+              - set CI cloud secrets
             </li>
             <li>
               <strong class="text-[var(--lp-text)]">Metadata</strong>
-              — read-only
+              - read-only
             </li>
           </ul>
           <p class="text-xs leading-6">
@@ -440,7 +440,7 @@ const sections = [
             <strong class="text-[var(--lp-text)]">Accept</strong>
             the new request. Apps installed on a
             <strong class="text-[var(--lp-text)]">personal account</strong>
-            cannot create new repos via API — create an empty repo first, or install on an
+            cannot create new repos via API - create an empty repo first, or install on an
             <strong class="text-[var(--lp-text)]">Organization</strong>.
           </p>
         </div>
@@ -479,7 +479,7 @@ const sections = [
             <strong class="text-[var(--lp-text)]">kubectl apply / delete</strong>
             or Terraform
             <strong class="text-[var(--lp-text)]">plan / apply / destroy</strong>
-            — commands are sent to the sandbox terminal.
+            - commands are sent to the sandbox terminal.
           </li>
         </ol>
       </section>

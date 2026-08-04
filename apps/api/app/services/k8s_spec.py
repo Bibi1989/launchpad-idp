@@ -75,7 +75,7 @@ def governance_quota_hard(settings: Settings) -> dict[str, str]:
 
 
 def workspace_governance_quota_hard(settings: Settings) -> dict[str, str]:
-    """Workspace scaffold quotas — aligned with preview settings where possible."""
+    """Workspace scaffold quotas - aligned with preview settings where possible."""
     return {
         "requests.cpu": settings.kubernetes_cpu_request,
         "requests.memory": settings.kubernetes_memory_request,

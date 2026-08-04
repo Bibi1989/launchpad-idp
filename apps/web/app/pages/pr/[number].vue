@@ -42,7 +42,7 @@ onMounted(async () => {
     <header>
       <p class="lp-label mb-1">PR preview</p>
       <h1 class="text-2xl font-semibold">
-        Stable URL for PR #{{ prNumber ?? '—' }}
+        Stable URL for PR #{{ prNumber ?? '-' }}
       </h1>
       <p class="mt-2 text-sm text-[var(--lp-muted)]">
         This path is the Launchpad stable PR preview link. Closing the PR tears the environment down automatically.

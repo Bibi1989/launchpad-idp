@@ -60,7 +60,7 @@ function initTerminal() {
   term.value = t
   fitAddon.value = fit
 
-  // WebSocket Connection — only real Pods can be exec'd
+  // WebSocket Connection - only real Pods can be exec'd
   if (props.resource.kind !== 'Pod') {
     t.write(
       '\r\n\x1b[31m[Exec Error] Shell requires a Pod. Select a Pod from the grid (not a Deployment).\x1b[0m\r\n',

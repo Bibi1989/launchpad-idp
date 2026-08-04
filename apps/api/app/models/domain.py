@@ -51,11 +51,14 @@ class ExecutionStage(str, enum.Enum):
 
 class AuditAction(str, enum.Enum):
     PROVISION_INITIATED = "PROVISION_INITIATED"
+    PROVISION_VALIDATED = "PROVISION_VALIDATED"
+    PROVISION_PLANNED = "PROVISION_PLANNED"
     PROVISION_SUCCEEDED = "PROVISION_SUCCEEDED"
     PROVISION_FAILED = "PROVISION_FAILED"
     REBUILD_INITIATED = "REBUILD_INITIATED"
     REBUILD_SUCCEEDED = "REBUILD_SUCCEEDED"
     REBUILD_FAILED = "REBUILD_FAILED"
+    REBUILD_ROLLED_BACK = "REBUILD_ROLLED_BACK"
     PAUSE_SUCCEEDED = "PAUSE_SUCCEEDED"
     RESUME_SUCCEEDED = "RESUME_SUCCEEDED"
     TEARDOWN_INITIATED = "TEARDOWN_INITIATED"
@@ -151,7 +154,7 @@ class OrgMembership(Base):
         nullable=False,
     )
     role: Mapped[OrgRole] = mapped_column(
-        # Persist enum *values* ("owner") — migration seed + API use lowercase;
+        # Persist enum *values* ("owner") - migration seed + API use lowercase;
         # SQLAlchemy defaults to member *names* ("OWNER") which breaks reads.
         Enum(
             OrgRole,

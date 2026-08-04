@@ -1,13 +1,13 @@
 """Per-preview cloudflared quick tunnels for remote "Open app" URLs.
 
-Local previews are exposed as NodePort services on ``127.0.0.1:<node_port>`` — only
+Local previews are exposed as NodePort services on ``127.0.0.1:<node_port>`` - only
 reachable from the host machine. When Launchpad itself is reached over a cloudflared
 quick tunnel (``*.trycloudflare.com``), that tunnel only proxies its single local
 port, so a preview's ``127.0.0.1:<port>`` URL cannot open remotely.
 
 When ``PREVIEW_TUNNEL_MODE=cloudflared``, each local NodePort preview gets its own
 ``cloudflared tunnel --url http://127.0.0.1:<node_port>`` quick tunnel, yielding a
-public ``https://<random>.trycloudflare.com`` URL that opens from anywhere — with no
+public ``https://<random>.trycloudflare.com`` URL that opens from anywhere - with no
 Cloudflare account or domain required. Each app is served at the root of its own
 hostname, so relative assets / SSR redirects keep working.
 
@@ -195,7 +195,7 @@ def start_preview_tunnel(
     """Ensure a cloudflared quick tunnel for this preview; return its public URL.
 
     Idempotent: if a live tunnel already serves this env's current port it is reused.
-    Returns ``None`` (no error) when tunnels are disabled or the URL never appears —
+    Returns ``None`` (no error) when tunnels are disabled or the URL never appears -
     callers should fall back to the NodePort URL.
     """
     cfg = _settings(settings)

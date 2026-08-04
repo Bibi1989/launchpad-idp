@@ -163,7 +163,7 @@ function onOpenLogs(res: K8sResource) {
 function onOpenExec(res: K8sResource) {
   if (res.kind !== 'Pod') {
     consoleLogs.value.push(
-      `[error] Exec requires a Pod. "${res.kind}/${res.name}" is not a Pod — open a Pod row instead.`,
+      `[error] Exec requires a Pod. "${res.kind}/${res.name}" is not a Pod - open a Pod row instead.`,
     )
     errorMessage.value = `Exec is only available for Pods. Pick a Pod under ${res.name}, not the ${res.kind}.`
     return

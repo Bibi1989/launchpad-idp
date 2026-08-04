@@ -24,7 +24,7 @@ export type ApiFetchInit = Omit<RequestInit, 'body'> & {
 export function useApi() {
   const config = useRuntimeConfig()
   const correlationId = useState<string>('correlation-id', () => crypto.randomUUID())
-  // Read shared auth/org state directly — calling useAuth/useOrgs here creates
+  // Read shared auth/org state directly - calling useAuth/useOrgs here creates
   // useApi → useAuth → useOrgs → useApi and overflows the call stack.
   const token = useState<string | null>('auth-token', () => null)
   const activeOrgId = useState<string | null>('active-org-id', () => null)

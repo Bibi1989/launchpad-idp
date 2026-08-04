@@ -1,4 +1,4 @@
-"""Preview drift detection — comparator, audit resolution, and periodic scan."""
+"""Preview drift detection - comparator, audit resolution, and periodic scan."""
 
 from __future__ import annotations
 

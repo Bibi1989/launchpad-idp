@@ -4,8 +4,8 @@ Historically Launchpad emitted Dockerfiles and Kubernetes manifests that
 referenced application entrypoints (``uvicorn main:app``, ``node server.js``,
 ``npm run build``) that were never actually generated, and every Deployment
 shipped a generic ``nginx`` placeholder image. This module closes that gap for
-the *core* stacks: it generates real, buildable source code — with health
-endpoints, a live health dashboard, and database/Redis connectivity checks —
+the *core* stacks: it generates real, buildable source code - with health
+endpoints, a live health dashboard, and database/Redis connectivity checks -
 plus a tuned Dockerfile, ``.dockerignore``, build scripts, and Kind
 build/load/deploy scripts, so a workspace is immediately runnable on a local
 Kind cluster.
@@ -79,7 +79,7 @@ CORE_STACKS: frozenset[ProjectStack] = (
 )
 
 _DEFAULT_PORTS: dict[ProjectStack, int] = {
-    # static frontends serve on 8080 (nginx-unprivileged) — see resolve_app_port
+    # static frontends serve on 8080 (nginx-unprivileged) - see resolve_app_port
     ProjectStack.REACT_VITE: 8080,
     ProjectStack.VUEJS: 8080,
     ProjectStack.SVELTE: 8080,
@@ -226,7 +226,7 @@ def resolve_core_scaffold(request: ProvisioningWizardRequest) -> CoreScaffold | 
     """Return a CoreScaffold when the request selects a single core stack.
 
     Returns None for disabled scaffolding, explicit multi-service specs,
-    multi-framework (fullstack) selections, and non-core single stacks — those
+    multi-framework (fullstack) selections, and non-core single stacks - those
     keep the legacy Dockerfile-only behavior and the Nginx placeholder image.
     """
     cfg = request.container_scaffold
@@ -403,11 +403,11 @@ a:hover { text-decoration: underline; }
       </div>
       <div class="field">
         <span class="field-label">VERSION</span>
-        <div class="field-val" id="app-version">—</div>
+        <div class="field-val" id="app-version">-</div>
       </div>
       <div class="field">
         <span class="field-label">UPTIME</span>
-        <div class="field-val" id="app-uptime">—</div>
+        <div class="field-val" id="app-uptime">-</div>
       </div>
       <div class="card-footer">
         <span class="card-link">VIEW LOGS</span>
@@ -425,16 +425,16 @@ a:hover { text-decoration: underline; }
       </div>
       <div class="field">
         <span class="field-label">NAMESPACE</span>
-        <div class="field-val" id="k8s-ns">—</div>
+        <div class="field-val" id="k8s-ns">-</div>
       </div>
       <div class="flex-row">
         <div class="inset-box">
           <div class="inset-box-label">POD</div>
-          <div class="inset-box-val" id="k8s-pod" style="font-size:12px;word-break:break-all">—</div>
+          <div class="inset-box-val" id="k8s-pod" style="font-size:12px;word-break:break-all">-</div>
         </div>
         <div class="inset-box">
           <div class="inset-box-label">REPLICAS</div>
-          <div class="inset-box-val" id="k8s-replicas">—</div>
+          <div class="inset-box-val" id="k8s-replicas">-</div>
         </div>
       </div>
       <div class="card-footer">
@@ -453,7 +453,7 @@ a:hover { text-decoration: underline; }
       </div>
       <div class="field">
         <span class="field-label">LAST SUCCESS</span>
-        <div class="field-val" id="db-last">—</div>
+        <div class="field-val" id="db-last">-</div>
       </div>
       <div class="text-block" id="db-err" style="color:#f87171">
       </div>
@@ -474,11 +474,11 @@ a:hover { text-decoration: underline; }
       <div class="flex-row">
         <div class="inset-box">
           <div class="inset-box-label">LATENCY</div>
-          <div class="inset-box-val" id="redis-latency">—</div>
+          <div class="inset-box-val" id="redis-latency">-</div>
         </div>
         <div class="inset-box">
           <div class="inset-box-label">LAST SUCCESS</div>
-          <div class="inset-box-val" id="redis-last" style="font-size:12px;word-break:break-all">—</div>
+          <div class="inset-box-val" id="redis-last" style="font-size:12px;word-break:break-all">-</div>
         </div>
       </div>
       <div class="text-block" id="redis-err" style="color:#f87171">
@@ -507,7 +507,7 @@ async function refresh() {
     var res = await fetch("/api/status", { cache: "no-store" });
     var s = await res.json();
     document.getElementById("appname").textContent = s.app.name;
-    document.title = s.app.name + " — Dashboard";
+    document.title = s.app.name + " - Dashboard";
     var appDot = document.getElementById("appdot");
     var appStatus = document.getElementById("app-status");
     var up = s.app.status === "healthy";
@@ -524,7 +524,7 @@ async function refresh() {
     document.getElementById("db-last").textContent = s.database.lastSuccess || "never";
     fmtDep("redis-pill", "redis-err", s.redis);
     document.getElementById("redis-latency").textContent =
-      (s.redis.latencyMs != null) ? (s.redis.latencyMs + " ms") : "—";
+      (s.redis.latencyMs != null) ? (s.redis.latencyMs + " ms") : "-";
     document.getElementById("redis-last").textContent = s.redis.lastSuccess || "never";
     document.getElementById("db-card").style.display = s.database.configured ? "flex" : "none";
     document.getElementById("redis-card").style.display = s.redis.configured ? "flex" : "none";
@@ -574,7 +574,7 @@ _last_redis_success = None
 
 DASHBOARD_HTML = __DASHBOARD__
 
-app = FastAPI(title=APP_NAME + " — Launchpad service", version=APP_VERSION)
+app = FastAPI(title=APP_NAME + " - Launchpad service", version=APP_VERSION)
 
 
 def _now_iso():
@@ -1097,7 +1097,7 @@ export default function App() {
           </div>
           <div className="field">
             <span className="field-label">VERSION</span>
-            <div className="field-val">{c.version || '—'}</div>
+            <div className="field-val">{c.version || '-'}</div>
           </div>
           <div className="card-footer">
             <span className="card-link">VIEW LOGS</span>
@@ -1115,16 +1115,16 @@ export default function App() {
           </div>
           <div className="field">
             <span className="field-label">NAMESPACE</span>
-            <div className="field-val">{c.namespace || '—'}</div>
+            <div className="field-val">{c.namespace || '-'}</div>
           </div>
           <div className="flex-row">
             <div className="inset-box">
               <div className="inset-box-label">POD</div>
-              <div className="inset-box-val">{c.pod || '—'}</div>
+              <div className="inset-box-val">{c.pod || '-'}</div>
             </div>
             <div className="inset-box">
               <div className="inset-box-label">REPLICAS</div>
-              <div className="inset-box-val">{c.replicas || '—'}</div>
+              <div className="inset-box-val">{c.replicas || '-'}</div>
             </div>
           </div>
           <div className="card-footer">
@@ -1390,34 +1390,34 @@ def _app_readme(
     is_frontend = frontend
     dep_lines = []
     if deps.postgres.enabled:
-        dep_lines.append("- **PostgreSQL** — `DATABASE_URL`")
+        dep_lines.append("- **PostgreSQL** - `DATABASE_URL`")
     if deps.mysql.enabled:
-        dep_lines.append("- **MySQL** — `MYSQL_URL`")
+        dep_lines.append("- **MySQL** - `MYSQL_URL`")
     if deps.mariadb.enabled:
-        dep_lines.append("- **MariaDB** — `MARIADB_URL` (MySQL-compatible)")
+        dep_lines.append("- **MariaDB** - `MARIADB_URL` (MySQL-compatible)")
     if deps.mongodb.enabled:
-        dep_lines.append("- **MongoDB** — `MONGODB_URI`")
+        dep_lines.append("- **MongoDB** - `MONGODB_URI`")
     if deps.redis.enabled:
-        dep_lines.append("- **Redis** — `REDIS_URL`")
+        dep_lines.append("- **Redis** - `REDIS_URL`")
     deps_section = "\n".join(dep_lines) if dep_lines else "_None configured._"
 
     if is_frontend:
         endpoints = (
-            "- `GET /` — status dashboard (deployment metadata, health indicator, "
+            "- `GET /` - status dashboard (deployment metadata, health indicator, "
             "configured dependencies)\n"
-            "- `GET /healthz` — availability probe (used by Kubernetes liveness/readiness)\n"
-            "- `GET /config.json` — runtime deployment metadata injected at container start"
+            "- `GET /healthz` - availability probe (used by Kubernetes liveness/readiness)\n"
+            "- `GET /config.json` - runtime deployment metadata injected at container start"
         )
     else:
         endpoints = (
-            "- `GET /` — live health dashboard\n"
-            "- `GET /health` — liveness probe (process is up)\n"
-            "- `GET /ready` — readiness probe (503 when a configured dependency is down)\n"
-            "- `GET /info` — application metadata\n"
-            "- `GET /api/status` — full JSON status (app + Kubernetes + database + Redis)"
+            "- `GET /` - live health dashboard\n"
+            "- `GET /health` - liveness probe (process is up)\n"
+            "- `GET /ready` - readiness probe (503 when a configured dependency is down)\n"
+            "- `GET /info` - application metadata\n"
+            "- `GET /api/status` - full JSON status (app + Kubernetes + database + Redis)"
         )
 
-    return f"""# {app_name} — {stack_label}
+    return f"""# {app_name} - {stack_label}
 
 Launchpad-generated {stack_label} mini-application. It is containerized, wired to
 its Kubernetes manifests under `infra/k8s/manifests/`, and immediately runnable
@@ -1467,7 +1467,7 @@ docker run --rm -p {port}:{port} {app_name}:latest
 
 
 # --------------------------------------------------------------------------- #
-# Vue (Vite) — static frontend
+# Vue (Vite) - static frontend
 # --------------------------------------------------------------------------- #
 
 _VUE_INDEX_HTML = """\
@@ -1561,7 +1561,7 @@ onUnmounted(() => clearInterval(timer));
         </div>
         <div class="field">
           <span class="field-label">VERSION</span>
-          <div class="field-val">{{ config.version || '—' }}</div>
+          <div class="field-val">{{ config.version || '-' }}</div>
         </div>
         <div class="card-footer">
           <span class="card-link">VIEW LOGS</span>
@@ -1579,16 +1579,16 @@ onUnmounted(() => clearInterval(timer));
         </div>
         <div class="field">
           <span class="field-label">NAMESPACE</span>
-          <div class="field-val">{{ config.namespace || '—' }}</div>
+          <div class="field-val">{{ config.namespace || '-' }}</div>
         </div>
         <div class="flex-row">
           <div class="inset-box">
             <div class="inset-box-label">POD</div>
-            <div class="inset-box-val">{{ config.pod || '—' }}</div>
+            <div class="inset-box-val">{{ config.pod || '-' }}</div>
           </div>
           <div class="inset-box">
             <div class="inset-box-label">REPLICAS</div>
-            <div class="inset-box-val">{{ config.replicas || '—' }}</div>
+            <div class="inset-box-val">{{ config.replicas || '-' }}</div>
           </div>
         </div>
         <div class="card-footer">
@@ -1662,7 +1662,7 @@ def _vue_files(app_name: str, port: int, deps: WorkloadDependenciesConfig) -> di
 
 
 # --------------------------------------------------------------------------- #
-# Svelte (Vite) — static frontend
+# Svelte (Vite) - static frontend
 # --------------------------------------------------------------------------- #
 
 _SVELTE_INDEX_HTML = """\
@@ -1760,7 +1760,7 @@ _SVELTE_APP = r"""<script>
       </div>
       <div class="field">
         <span class="field-label">VERSION</span>
-        <div class="field-val">{config.version || '—'}</div>
+        <div class="field-val">{config.version || '-'}</div>
       </div>
       <div class="card-footer">
         <span class="card-link">VIEW LOGS</span>
@@ -1778,16 +1778,16 @@ _SVELTE_APP = r"""<script>
       </div>
       <div class="field">
         <span class="field-label">NAMESPACE</span>
-        <div class="field-val">{config.namespace || '—'}</div>
+        <div class="field-val">{config.namespace || '-'}</div>
       </div>
       <div class="flex-row">
         <div class="inset-box">
           <div class="inset-box-label">POD</div>
-          <div class="inset-box-val">{config.pod || '—'}</div>
+          <div class="inset-box-val">{config.pod || '-'}</div>
         </div>
         <div class="inset-box">
           <div class="inset-box-label">REPLICAS</div>
-          <div class="inset-box-val">{config.replicas || '—'}</div>
+          <div class="inset-box-val">{config.replicas || '-'}</div>
         </div>
       </div>
       <div class="card-footer">
@@ -1833,7 +1833,7 @@ _SVELTE_APP = r"""<script>
       </div>
     {/if}
   </div>
-  <footer>Generated by Launchpad &middot; last update {updated || '—'}</footer>
+  <footer>Generated by Launchpad &middot; last update {updated || '-'}</footer>
 </div>
 """
 
@@ -1869,7 +1869,7 @@ def _svelte_files(app_name: str, port: int, deps: WorkloadDependenciesConfig) ->
 
 
 # --------------------------------------------------------------------------- #
-# Angular — static frontend (application builder)
+# Angular - static frontend (application builder)
 # --------------------------------------------------------------------------- #
 
 _ANGULAR_INDEX_HTML = """\
@@ -1934,7 +1934,7 @@ import { CommonModule } from '@angular/common';
           </div>
           <div class="field">
             <span class="field-label">VERSION</span>
-            <div class="field-val">{{ config.version || '—' }}</div>
+            <div class="field-val">{{ config.version || '-' }}</div>
           </div>
           <div class="card-footer">
             <span class="card-link">VIEW LOGS</span>
@@ -1952,16 +1952,16 @@ import { CommonModule } from '@angular/common';
           </div>
           <div class="field">
             <span class="field-label">NAMESPACE</span>
-            <div class="field-val">{{ config.namespace || '—' }}</div>
+            <div class="field-val">{{ config.namespace || '-' }}</div>
           </div>
           <div class="flex-row">
             <div class="inset-box">
               <div class="inset-box-label">POD</div>
-              <div class="inset-box-val">{{ config.pod || '—' }}</div>
+              <div class="inset-box-val">{{ config.pod || '-' }}</div>
             </div>
             <div class="inset-box">
               <div class="inset-box-label">REPLICAS</div>
-              <div class="inset-box-val">{{ config.replicas || '—' }}</div>
+              <div class="inset-box-val">{{ config.replicas || '-' }}</div>
             </div>
           </div>
           <div class="card-footer">
@@ -2155,7 +2155,7 @@ _SSR_DASHBOARD_STYLES = _REACT_STYLES
 
 
 # --------------------------------------------------------------------------- #
-# Next.js — SSR frontend (standalone output)
+# Next.js - SSR frontend (standalone output)
 # --------------------------------------------------------------------------- #
 
 _NEXT_CONFIG = """\
@@ -2429,7 +2429,7 @@ def _next_files(app_name: str, port: int, deps: WorkloadDependenciesConfig) -> d
 
 
 # --------------------------------------------------------------------------- #
-# Nuxt — SSR frontend (Nitro node-server)
+# Nuxt - SSR frontend (Nitro node-server)
 # --------------------------------------------------------------------------- #
 
 _NUXT_CONFIG = """\
@@ -2499,7 +2499,7 @@ onUnmounted(() => clearInterval(timer));
         </div>
         <div class="field">
           <span class="field-label">VERSION</span>
-          <div class="field-val">{{ meta.version || '—' }}</div>
+          <div class="field-val">{{ meta.version || '-' }}</div>
         </div>
         <div class="card-footer">
           <span class="card-link">VIEW LOGS</span>
@@ -2517,16 +2517,16 @@ onUnmounted(() => clearInterval(timer));
         </div>
         <div class="field">
           <span class="field-label">NAMESPACE</span>
-          <div class="field-val">{{ meta.namespace || '—' }}</div>
+          <div class="field-val">{{ meta.namespace || '-' }}</div>
         </div>
         <div class="flex-row">
           <div class="inset-box">
             <div class="inset-box-label">POD</div>
-            <div class="inset-box-val">{{ meta.pod || '—' }}</div>
+            <div class="inset-box-val">{{ meta.pod || '-' }}</div>
           </div>
           <div class="inset-box">
             <div class="inset-box-label">REPLICAS</div>
-            <div class="inset-box-val">{{ meta.replicas || '—' }}</div>
+            <div class="inset-box-val">{{ meta.replicas || '-' }}</div>
           </div>
         </div>
         <div class="card-footer">

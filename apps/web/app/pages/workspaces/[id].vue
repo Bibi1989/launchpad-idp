@@ -129,7 +129,7 @@ async function ensureSandboxBackground() {
   if (wsPath.value || openingTerminal.value) return
   sandboxWarming.value = true
   try {
-    // Skip auto IaC bootstrap — the guided wizard runs init/validate/plan/apply itself.
+    // Skip auto IaC bootstrap - the guided wizard runs init/validate/plan/apply itself.
     await onOpenTerminal({ runInitOnOpen: false })
   } finally {
     sandboxWarming.value = false
@@ -431,7 +431,7 @@ watch(advancedMode, async (enabled) => {
               {{
                 workspace.created_at
                   ? new Date(workspace.created_at).toLocaleString()
-                  : '—'
+                  : '-'
               }}
             </p>
           </div>

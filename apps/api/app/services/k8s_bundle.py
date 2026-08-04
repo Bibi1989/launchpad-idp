@@ -2,8 +2,8 @@
 
 Emits either:
 
-- ``infra/k8s/manifests/`` — production-oriented raw Kubernetes objects
-- ``infra/helm/app-chart/`` — standard Helm v3 chart layout
+- ``infra/k8s/manifests/`` - production-oriented raw Kubernetes objects
+- ``infra/helm/app-chart/`` - standard Helm v3 chart layout
 
 Optional add-ons (ingress-nginx) land under ``infra/k8s/addons/``.
 """
@@ -530,7 +530,7 @@ def additional_workload_manifests(
     """Write a Deployment + Service manifest pair per extra workload.
 
     Each entry is ``{name, image, port, service_type, selector}``. This lets a
-    workspace host more than one Deployment/Service — the user picks the stack
+    workspace host more than one Deployment/Service - the user picks the stack
     (which decides the image), the Service type, and the selector label per
     workload. Every workload also receives the ``app-secrets`` connection strings
     (``DATABASE_URL`` / ``REDIS_URL``) and ``HAS_DATABASE`` / ``HAS_REDIS`` flags
@@ -621,7 +621,7 @@ def _named_deployment_yaml(
     # from app-secrets so this workload can reach the datastores and report status.
     spec = WorkloadImageSpec(image=image, container_port=port, app_version="1.0.0", replicas=1)
     env_block = _render_workload_env_block(env_name, spec, deps)
-    # Per-workload extras — e.g. a frontend's API_URL pointing at the backend
+    # Per-workload extras - e.g. a frontend's API_URL pointing at the backend
     # Service so its dashboard can display the backend's live DB/Redis status.
     for key, value in (extra_env or {}).items():
         env_block += f'\n            - name: {key}\n              value: "{value}"'

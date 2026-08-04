@@ -1,7 +1,7 @@
 """Cloud/production previews resolve their public URL from the cluster.
 
 The provisioner reads a LoadBalancer Service or Ingress external address so a cloud
-preview's Open-app link is the real production URL — never a NodePort/loopback guess.
+preview's Open-app link is the real production URL - never a NodePort/loopback guess.
 Local previews are unaffected (they keep localhost / the cloudflared tunnel).
 """
 

@@ -49,10 +49,10 @@ export interface InfraManifestModel {
   appPort: string
   /** Read-only: init containers (e.g. wait-for-postgres) surfaced for visibility. */
   initContainers: InfraInitContainer[]
-  /** launchpad.io/preview-target annotation — routes Launch Preview to this workload. */
+  /** launchpad.io/preview-target annotation - routes Launch Preview to this workload. */
   exposePreview: boolean
   targetPort: string
-  /** Host node port — only for NodePort / LoadBalancer. Empty = allocate. */
+  /** Host node port - only for NodePort / LoadBalancer. Empty = allocate. */
   nodePort: string
   serviceType: 'ClusterIP' | 'NodePort' | 'LoadBalancer'
   cpuRequest: string
@@ -479,7 +479,7 @@ function parseDataMap(content: string): KeyValueItem[] {
   return vars
 }
 
-/** Line-scan resource blocks — nested regexes here previously caused ReDoS freezes. */
+/** Line-scan resource blocks - nested regexes here previously caused ReDoS freezes. */
 function parseResourceBlock(
   content: string,
   section: 'requests' | 'limits',

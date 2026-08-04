@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import type { GoldenPathTemplate, ServiceTier } from '~/types/catalog'
-import type { GitHubAppStatus } from '~/types/provisioning'
+import type { GitHubAppStatus, GitlabStatus } from '~/types/provisioning'
 
 const route = useRoute()
 const { listTemplates, createService } = useCatalog()
-const { getGithubAppStatus } = useProvisioning()
+const { getGithubAppStatus, getGitlabStatus } = useProvisioning()
 
 const templates = ref<GoldenPathTemplate[]>([])
 const githubApp = ref<GitHubAppStatus | null>(null)
+const gitlabStatus = ref<GitlabStatus | null>(null)
 const loading = ref(true)
 const submitting = ref(false)
 const errorMessage = ref<string | null>(null)
@@ -71,6 +72,11 @@ onMounted(async () => {
     } catch {
       githubApp.value = null
     }
+    try {
+      gitlabStatus.value = await getGitlabStatus()
+    } catch {
+      gitlabStatus.value = null
+    }
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : 'Failed to load templates'
   } finally {
@@ -80,6 +86,10 @@ onMounted(async () => {
 
 async function onSubmit() {
   if (submitting.value) return
+  if (form.vcs_provider === 'gitlab' && gitlabStatus.value && !gitlabStatus.value.connected) {
+    errorMessage.value = 'Connect GitLab under Integrations before creating a GitLab-backed service.'
+    return
+  }
   submitting.value = true
   errorMessage.value = null
   try {
@@ -256,6 +266,22 @@ async function onSubmit() {
 
         <template v-if="form.vcs_provider === 'gitlab'">
           <div class="space-y-3 pt-2">
+            <p
+              v-if="gitlabStatus && !gitlabStatus.connected"
+              class="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+            >
+              GitLab is not connected.
+              <NuxtLink to="/integrations/gitlab" class="font-medium text-[var(--lp-accent)] hover:underline">
+                Connect GitLab
+              </NuxtLink>
+              under Integrations, then return here.
+            </p>
+            <p
+              v-else-if="gitlabStatus?.connected"
+              class="rounded-lg border border-[var(--lp-ok)]/30 bg-[var(--lp-ok)]/10 px-3 py-2 text-xs text-[var(--lp-ok)]"
+            >
+              Connected as {{ gitlabStatus.username }} ({{ gitlabStatus.base_url }})
+            </p>
             <label class="block space-y-2">
               <span class="lp-label">GitLab Project Name</span>
               <input v-model="form.gitlab_project_name" class="lp-input" :placeholder="form.name || 'my-service'">
@@ -264,6 +290,10 @@ async function onSubmit() {
               <input v-model="form.gitlab_private" type="checkbox" class="accent-[var(--lp-accent)]">
               Private project
             </label>
+            <p class="text-xs text-[var(--lp-muted)]">
+              Creates the project and commits a golden-path <span class="font-mono">.gitlab-ci.yml</span>
+              (Semgrep + build + Trivy).
+            </p>
           </div>
         </template>
       </div>
@@ -294,7 +324,11 @@ async function onSubmit() {
         <NuxtLink to="/catalog" class="lp-btn-ghost text-xs uppercase tracking-wide">
           Cancel
         </NuxtLink>
-        <button type="submit" class="lp-btn-primary flex-1 text-xs uppercase tracking-wide" :disabled="submitting">
+        <button
+          type="submit"
+          class="lp-btn-primary flex-1 text-xs uppercase tracking-wide"
+          :disabled="submitting || (form.vcs_provider === 'gitlab' && !!gitlabStatus && !gitlabStatus.connected)"
+        >
           {{ submitting ? 'Creating…' : 'Create service' }}
         </button>
       </div>

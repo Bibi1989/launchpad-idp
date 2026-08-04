@@ -276,7 +276,7 @@ function onClear() {
                   Apply this fix to the linked workspace, or reject it?
                 </p>
                 <p v-if="!canApplyToWorkspace" class="text-xs text-[var(--lp-muted)]">
-                  This preview has no linked workspace — open a workspace-backed preview to write
+                  This preview has no linked workspace - open a workspace-backed preview to write
                   the file, or copy the diff manually.
                 </p>
                 <div class="flex flex-wrap gap-2">
@@ -329,7 +329,7 @@ function onClear() {
             >
               <h3 class="lp-label">Telemetry ingested</h3>
               <p class="font-mono text-[11px] text-[var(--lp-muted)]">
-                sources={{ Array.isArray(telemetrySummary.sourceKinds) ? telemetrySummary.sourceKinds.join(', ') : '—' }}
+                sources={{ Array.isArray(telemetrySummary.sourceKinds) ? telemetrySummary.sourceKinds.join(', ') : '-' }}
                 · trivy={{ telemetrySummary.trivyCount ?? 0 }}
                 · sast={{ telemetrySummary.sastCount ?? 0 }}
                 · runtime={{ telemetrySummary.runtimeSignalCount ?? 0 }}

@@ -463,7 +463,7 @@ def _manifest_options_for(request: ProvisioningWizardRequest) -> "KubernetesWork
 
     When the workspace hosts explicit multi-stack services OR a multi-framework
     (fullstack) selection, the generic single-app Deployment/Service/Ingress
-    (nginx fallback) must NOT be emitted — the per-stack ``launch-*`` manifests +
+    (nginx fallback) must NOT be emitted - the per-stack ``launch-*`` manifests +
     multi-service Ingress replace them.
     """
     opts = request.kubernetes_options
@@ -974,7 +974,7 @@ class IaCGenerator:
         if packaging == KubernetesPackaging.NONE:
             packaging = KubernetesPackaging.RAW_MANIFESTS
 
-        readme = f"""# {request.name} — Dev (kind)
+        readme = f"""# {request.name} - Dev (kind)
 
 Local Kubernetes workspace for verifying Launchpad before switching to a cloud provider.
 

@@ -35,7 +35,7 @@ class DiagnosticPatch(BaseModel):
 
 
 class DiagnosticReport(BaseModel):
-    """Structured Gemini output — camelCase for UI consumption."""
+    """Structured Gemini output - camelCase for UI consumption."""
 
     summary: str
     category: DiagnosticCategory

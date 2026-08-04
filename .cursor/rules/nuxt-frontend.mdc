@@ -8,13 +8,13 @@ alwaysApply: false
 
 - Use Composition API with `<script setup lang="ts">`.
 - State: `useState` or typed Pinia stores. Prefer `shallowRef` for large non-reactive objects (terminals, log buffers).
-- Styling: Tailwind utilities only — no inline styles.
+- Styling: Tailwind utilities only - no inline styles.
 - Types: strict TypeScript; define shared types in `~/types/`. Never use `any`.
 - Validation: Zod for forms and API payloads.
 - Real-time: prefer SSE or WebSockets for deployment logs; always remove listeners in `onUnmounted()`.
 
 ```typescript
-// ❌ BAD — listener leak + any
+// ❌ BAD - listener leak + any
 onMounted(() => eventSource.addEventListener('message', (e: any) => { ... }))
 
 // ✅ GOOD

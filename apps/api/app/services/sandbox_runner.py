@@ -64,9 +64,9 @@ def build_provision_bootstrap(workspace_path: Path, *, engine: str) -> str | Non
         steps.append(
             f"{_stage_echo(ExecutionStage.INIT, 'kind / local Kubernetes context')} && "
             "if ! command -v kubectl >/dev/null 2>&1; then "
-            f"{_stage_echo(ExecutionStage.INIT, 'kubectl not installed — install kubectl and re-open the terminal', log_level='WARN')}; "
+            f"{_stage_echo(ExecutionStage.INIT, 'kubectl not installed - install kubectl and re-open the terminal', log_level='WARN')}; "
             "elif ! kubectl cluster-info >/dev/null 2>&1; then "
-            f"{_stage_echo(ExecutionStage.INIT, 'kubectl cannot reach a cluster — run make kind-up', log_level='WARN')}; "
+            f"{_stage_echo(ExecutionStage.INIT, 'kubectl cannot reach a cluster - run make kind-up', log_level='WARN')}; "
             "else "
             "echo -n '[launchpad] current context: ' && kubectl config current-context; "
             "fi"
@@ -77,10 +77,10 @@ def build_provision_bootstrap(workspace_path: Path, *, engine: str) -> str | Non
         cli = "tofu" if engine == "opentofu" else "terraform"
         label = "OpenTofu" if engine == "opentofu" else "terraform"
         steps.append(
-            f"{_stage_echo(ExecutionStage.INIT, f'cloud infra provision — {label} init (working-directory: infra/terraform)')} && "
+            f"{_stage_echo(ExecutionStage.INIT, f'cloud infra provision - {label} init (working-directory: infra/terraform)')} && "
             "cd infra/terraform && "
             f"if ! command -v {cli} >/dev/null 2>&1; then "
-            f"{_stage_echo(ExecutionStage.INIT, f'{cli} not installed — skipping apply', log_level='WARN')}; "
+            f"{_stage_echo(ExecutionStage.INIT, f'{cli} not installed - skipping apply', log_level='WARN')}; "
             "cd \"$OLDPWD\" >/dev/null 2>&1 || true; "
             "else "
             f"{cli} init -input=false && "
@@ -102,7 +102,7 @@ def build_provision_bootstrap(workspace_path: Path, *, engine: str) -> str | Non
         steps.append(
             f"{_stage_echo(ExecutionStage.INIT, 'pulumi workspace bootstrap (npm install)')} && "
             "if command -v npm >/dev/null 2>&1; then npm install; "
-            f"else {_stage_echo(ExecutionStage.INIT, 'npm not installed — skipping', log_level='WARN')}; fi"
+            f"else {_stage_echo(ExecutionStage.INIT, 'npm not installed - skipping', log_level='WARN')}; fi"
         )
 
     ingress_values = root / _INGRESS_NGINX_VALUES
@@ -110,7 +110,7 @@ def build_provision_bootstrap(workspace_path: Path, *, engine: str) -> str | Non
         steps.append(
             f"{_stage_echo(ExecutionStage.APPLY, 'helm install ingress-nginx (official chart)')} && "
             "if ! command -v helm >/dev/null 2>&1; then "
-            f"{_stage_echo(ExecutionStage.APPLY, 'helm not installed — skipping ingress-nginx', log_level='WARN')}; "
+            f"{_stage_echo(ExecutionStage.APPLY, 'helm not installed - skipping ingress-nginx', log_level='WARN')}; "
             "else "
             "helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null 2>&1 || true && "
             "helm repo update ingress-nginx >/dev/null 2>&1 || true && "
@@ -126,7 +126,7 @@ def build_provision_bootstrap(workspace_path: Path, *, engine: str) -> str | Non
         steps.append(
             f"{_stage_echo(ExecutionStage.VALIDATE, 'helm lint app-chart')} && "
             "if ! command -v helm >/dev/null 2>&1; then "
-            f"{_stage_echo(ExecutionStage.APPLY, 'helm not installed — skipping chart deploy', log_level='WARN')}; "
+            f"{_stage_echo(ExecutionStage.APPLY, 'helm not installed - skipping chart deploy', log_level='WARN')}; "
             "else "
             "helm lint infra/helm/app-chart/ >/dev/null 2>&1 || true && "
             f"{_stage_echo(ExecutionStage.APPLY, 'helm upgrade --install app-chart')} && "
@@ -137,9 +137,9 @@ def build_provision_bootstrap(workspace_path: Path, *, engine: str) -> str | Non
         steps.append(
             f"{_stage_echo(ExecutionStage.VALIDATE, 'kubectl client / cluster reachability')} && "
             "if ! command -v kubectl >/dev/null 2>&1; then "
-            f"{_stage_echo(ExecutionStage.APPLY, 'kubectl not installed — skipping manifests', log_level='WARN')}; "
+            f"{_stage_echo(ExecutionStage.APPLY, 'kubectl not installed - skipping manifests', log_level='WARN')}; "
             "else "
-            f"{_stage_echo(ExecutionStage.APPLY, 'manifest deploy — kubectl apply -f infra/k8s/manifests/')} && "
+            f"{_stage_echo(ExecutionStage.APPLY, 'manifest deploy - kubectl apply -f infra/k8s/manifests/')} && "
             "kubectl apply -f infra/k8s/manifests/; "
             "fi"
         )
@@ -155,7 +155,7 @@ def build_provision_bootstrap(workspace_path: Path, *, engine: str) -> str | Non
     return (
         joined
         + " ; "
-        + _stage_echo(ExecutionStage.APPLY, "provision pipeline finished — interactive shell ready")
+        + _stage_echo(ExecutionStage.APPLY, "provision pipeline finished - interactive shell ready")
     )
 
 
@@ -375,7 +375,7 @@ class SandboxRunner:
             **oidc_volumes,
         }
 
-        # Interactive shell only — provision bootstrap is injected from read_loop
+        # Interactive shell only - provision bootstrap is injected from read_loop
         # so terraform/kubectl/helm output streams on the attached PTY channel.
         shell_cmd = self._interactive_shell_command(environment, docker=True)
         container = client.containers.run(

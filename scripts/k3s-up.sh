@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Create a local k3s cluster (via k3d) for Launchpad preview / Dev workspaces.
-# k3d runs real k3s inside Docker — the macOS-friendly way to run k3s locally.
+# k3d runs real k3s inside Docker - the macOS-friendly way to run k3s locally.
 # Maps a small NodePort range to localhost so Open Preview hits real pods, matching
 # the kind engine's extraPortMappings behaviour.
 set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER_NAME:-${LOCAL_CLUSTER_NAME:-launchpad}}"
 CONTEXT="k3d-${CLUSTER_NAME}"
-# Keep this range small — a large host-port map is slow to bind on Docker Desktop.
+# Keep this range small - a large host-port map is slow to bind on Docker Desktop.
 PORT_MIN="${PREVIEW_NODE_PORT_MIN:-30080}"
 PORT_MAX="${PREVIEW_NODE_PORT_MAX:-30089}"
-# Optional pin, e.g. rancher/k3s:v1.31.5-k3s1 — empty uses k3d's default.
+# Optional pin, e.g. rancher/k3s:v1.31.5-k3s1 - empty uses k3d's default.
 K3S_IMAGE="${K3D_NODE_IMAGE:-}"
 PRELOAD_IMAGE="${K3D_PRELOAD_IMAGE:-1}"
 LOCK_DIR="${TMPDIR:-/tmp}/launchpad-k3s-${CLUSTER_NAME}.lockdir"
@@ -73,13 +73,13 @@ if cluster_ready; then
   echo "k3s cluster '${CLUSTER_NAME}' is already ready (context: ${CONTEXT})"
 else
   if cluster_exists; then
-    echo "k3s cluster '${CLUSTER_NAME}' exists but is unhealthy — recreating…"
+    echo "k3s cluster '${CLUSTER_NAME}' exists but is unhealthy - recreating…"
     k3d cluster delete "${CLUSTER_NAME}" || true
     sleep 2
   fi
 
   # Bind the host NodePort range straight to the server node so NodePort Services
-  # on those ports are reachable at 127.0.0.1 — the same contract as kind.
+  # on those ports are reachable at 127.0.0.1 - the same contract as kind.
   CREATE_ARGS=(
     cluster create "${CLUSTER_NAME}"
     --servers 1

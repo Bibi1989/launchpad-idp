@@ -79,7 +79,7 @@ def build_and_push_sync(
 
     if not _docker_available():
         raise DockerfileRegistryError(
-            "Docker is not available — start Docker Desktop or the Docker daemon"
+            "Docker is not available - start Docker Desktop or the Docker daemon"
         )
 
     work_context = context

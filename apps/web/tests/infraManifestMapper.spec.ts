@@ -176,7 +176,7 @@ spec:
     const next = serializeInfraManifest('infra/k8s/manifests/deployment.yaml', DEPLOYMENT_YAML, model)
     expect(next).toContain('image: tiangolo/node-frontend:latest')
     expect(next).toMatch(/^\s{10}resources:\n\s{12}requests:\n\s{14}cpu: 100m$/m)
-    // Must remain valid nested YAML — unindented resources previously broke parse.
+    // Must remain valid nested YAML - unindented resources previously broke parse.
     expect(next).not.toMatch(/^resources:/m)
     expect(next).not.toMatch(/^  requests:/m)
 

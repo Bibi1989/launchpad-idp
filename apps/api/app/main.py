@@ -40,7 +40,7 @@ async def _ttl_reaper_loop(stop: asyncio.Event) -> None:
             reaped = await _run_ttl_reaper()
             if reaped:
                 logger.info("in_process_ttl_reaper", reaped=reaped)
-        except Exception as exc:  # noqa: BLE001 — never crash the API loop
+        except Exception as exc:  # noqa: BLE001 - never crash the API loop
             logger.error("in_process_ttl_reaper_failed", error=str(exc))
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)

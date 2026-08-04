@@ -22,16 +22,16 @@ useHead({
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <strong class="text-[var(--lp-text)]">Password</strong>
-          — register / login; password stored as a hash.
+          - register / login; password stored as a hash.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Dev login</strong>
-          — one-click local account when
+          - one-click local account when
           <code class="font-mono text-xs">AUTH_DEV_LOGIN_ENABLED=true</code>.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">OIDC SSO</strong>
-          — Authorization Code flow (
+          - Authorization Code flow (
           <code class="font-mono text-xs">/auth/oidc/start</code>
           → IdP →
           <code class="font-mono text-xs">/auth/callback</code>).

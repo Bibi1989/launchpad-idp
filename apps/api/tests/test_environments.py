@@ -420,7 +420,7 @@ async def test_retry_failed_environment_requeues_provision(
         await repo.update_status(
             environment,
             EnvironmentStatus.FAILED,
-            error_message="Provision failed — rolling back: timeout",
+            error_message="Provision failed - rolling back: timeout",
         )
         await session.commit()
         env_id = environment.id
@@ -496,7 +496,7 @@ async def test_manifest_launch_extracts_image_despite_default_nginx(
             ttl_hours=1,
             workspace_id=ws_id,
             provider="local",
-            # The launch form always sends the default placeholder — must NOT win.
+            # The launch form always sends the default placeholder - must NOT win.
             workload_image="nginx:1.27-alpine",
         )
         with patch("app.services.environment.enqueue_provision_environment"):
@@ -570,7 +570,7 @@ async def test_force_teardown_cancels_provisioning(
                 environment_id=str(env_id), correlation_id="corr-force"
             )
 
-        # Status flips to TEARDOWN_PENDING — the provision task observes this at
+        # Status flips to TEARDOWN_PENDING - the provision task observes this at
         # its next checkpoint and aborts (cooperative cancellation signal).
         await session.refresh(environment)
         assert environment.status == EnvironmentStatus.TEARDOWN_PENDING

@@ -5,7 +5,7 @@ Uses the workspace service-account JSON against Service Usage so APIs such as
 ``google_project_service`` during the same apply, which races with GKE create).
 
 Terraform's ``google_project_service`` also requires
-``cloudresourcemanager.googleapis.com`` already enabled — otherwise apply fails
+``cloudresourcemanager.googleapis.com`` already enabled - otherwise apply fails
 with ``accessNotConfigured`` even when ``apis.tf`` lists the right services.
 This module bootstraps Resource Manager + Service Usage first, then the rest.
 """
@@ -193,7 +193,7 @@ def enable_gcp_apis(
         raise GcpApiEnablementError(
             "GCP project_id is required (from the service account JSON or workspace config)"
         )
-    # Always ensure bootstrap APIs are present — Terraform cannot manage
+    # Always ensure bootstrap APIs are present - Terraform cannot manage
     # google_project_service without Cloud Resource Manager.
     merged: list[str] = []
     seen: set[str] = set()

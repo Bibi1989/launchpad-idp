@@ -78,7 +78,7 @@ async def preview_build_status(user: CurrentUser) -> PreviewBuildStatus:
             message += " Images load into the local kind cluster after build."
     else:
         message = (
-            "Preview builds are disabled — launches use the configured workload image. "
+            "Preview builds are disabled - launches use the configured workload image. "
             "Set PREVIEW_BUILD_ENABLED=true to build from Dockerfile."
         )
     return PreviewBuildStatus(

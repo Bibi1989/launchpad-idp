@@ -10,7 +10,7 @@ from app.schemas.cloud import CloudCredentials
 
 
 class UserCloudCredentialsStatus(BaseModel):
-    """Safe summary — never includes secret values."""
+    """Safe summary - never includes secret values."""
 
     has_gcp: bool = False
     has_aws: bool = False
@@ -24,7 +24,7 @@ class UserCloudCredentialsStatus(BaseModel):
 
 
 class UserCloudCredentialsUpdate(BaseModel):
-    """Partial update — empty fields leave existing secrets unchanged."""
+    """Partial update - empty fields leave existing secrets unchanged."""
 
     credentials: CloudCredentials = Field(default_factory=CloudCredentials)
     clear_gcp: bool = False

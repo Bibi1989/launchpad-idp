@@ -83,21 +83,21 @@ flowchart TB
       <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <strong class="text-[var(--lp-text)]">Postgres</strong>
-          — source of truth for users, orgs, environments, workspaces, audits, invites.
+          - source of truth for users, orgs, environments, workspaces, audits, invites.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Redis</strong>
-          — Celery queues, distributed locks, and live
+          - Celery queues, distributed locks, and live
           <code class="font-mono text-xs">env_channel:{id}</code> pub/sub for SSE.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Disk workspace root</strong>
-          (<code class="font-mono text-xs">IAC_WORKSPACE_ROOT</code>) — generated Terraform/Pulumi
+          (<code class="font-mono text-xs">IAC_WORKSPACE_ROOT</code>) - generated Terraform/Pulumi
           and manifest files for each provisioning workspace.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Kubernetes</strong>
-          — where preview namespaces actually run (or simulated when
+          - where preview namespaces actually run (or simulated when
           <code class="font-mono text-xs">KUBERNETES_ENABLED=false</code>).
         </li>
       </ul>
@@ -113,22 +113,22 @@ flowchart TB
       <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
         <li>
           <strong class="text-[var(--lp-text)]">Routers</strong>
-          — HTTP endpoints (thin). Example:
+          - HTTP endpoints (thin). Example:
           <code class="font-mono text-xs">routers/api.py</code>.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Services</strong>
-          — business rules. Example:
+          - business rules. Example:
           <code class="font-mono text-xs">services/environment.py</code>.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Repositories</strong>
-          — database queries. Example:
+          - database queries. Example:
           <code class="font-mono text-xs">repositories/environment.py</code>.
         </li>
         <li>
           <strong class="text-[var(--lp-text)]">Models / schemas</strong>
-          — SQLAlchemy tables and Pydantic request/response shapes.
+          - SQLAlchemy tables and Pydantic request/response shapes.
         </li>
       </ol>
       <p class="text-sm leading-7 text-[var(--lp-muted)]">

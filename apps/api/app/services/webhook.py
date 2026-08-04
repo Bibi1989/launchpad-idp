@@ -244,7 +244,7 @@ class GitHubWebhookService:
                 matched_environment_ids=[],
                 message=(
                     f"No active PR preview for {details.repository_full_name}"
-                    f"#{details.pr_number} — launch once from Launchpad with this PR number"
+                    f"#{details.pr_number} - launch once from Launchpad with this PR number"
                 ),
             )
 
@@ -352,7 +352,7 @@ class GitHubWebhookService:
                 await self._logs.create(
                     environment_id=candidate.id,
                     message=(
-                        f"PR #{details.pr_number} {reason}: teardown deferred — "
+                        f"PR #{details.pr_number} {reason}: teardown deferred - "
                         f"{PROVISIONING_IN_PROGRESS_MESSAGE}"
                     ),
                     log_level=LogLevel.WARN,

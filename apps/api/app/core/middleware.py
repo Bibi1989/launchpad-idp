@@ -10,7 +10,7 @@ from app.core.config import get_settings
 
 
 class CorrelationIdMiddleware:
-    """Pure ASGI middleware — avoids BaseHTTPMiddleware dropping CORS on errors."""
+    """Pure ASGI middleware - avoids BaseHTTPMiddleware dropping CORS on errors."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app

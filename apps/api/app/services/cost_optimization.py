@@ -167,7 +167,7 @@ tolerations:
 
 
 def idle_shutdown_cronjobs_yaml(ns: str, name: str, app: str) -> str:
-    """CronJobs that scale the deployment to 0 outside Mon–Fri 07:00–19:00."""
+    """CronJobs that scale the deployment to 0 outside Mon-Fri 07:00-19:00."""
     labels = f"""\
   labels:
     app: {app}
@@ -184,7 +184,7 @@ metadata:
   namespace: {ns}
 {labels.rstrip()}
 spec:
-  # Mon–Fri 19:00 — sleep for evenings + weekends until Monday scale-up
+  # Mon-Fri 19:00 - sleep for evenings + weekends until Monday scale-up
   schedule: "0 19 * * 1-5"
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
@@ -209,7 +209,7 @@ metadata:
   namespace: {ns}
 {labels.rstrip()}
 spec:
-  # Mon–Fri 07:00 — wake for business hours
+  # Mon-Fri 07:00 - wake for business hours
   schedule: "0 7 * * 1-5"
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1

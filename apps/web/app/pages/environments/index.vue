@@ -3,6 +3,7 @@ import type { OrgCostSummary } from '~/types/auth'
 
 const { environments, loading, error, refresh, destroy, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
 const { activeOrgId, fetchOrgCosts } = useOrgs()
+const toast = useToast()
 const route = useRoute()
 const createEnvOpen = useState('lp-create-env-open', () => false)
 const destroyingId = ref<string | null>(null)
@@ -11,19 +12,25 @@ const retryingId = ref<string | null>(null)
 const recentLogLines = ref<string[]>([])
 const orgCosts = ref<OrgCostSummary | null>(null)
 
+function envName(id: string) {
+  return environments.value.find((env) => env.id === id)?.name ?? 'environment'
+}
+
 async function onPause(id: string) {
   try {
     await pauseEnvironment(id)
+    toast.success('Environment paused', `${envName(id)} was paused.`)
   } catch (err) {
-    console.error('Pause failed:', err)
+    toast.error('Pause failed', toastError(err, 'Could not pause the environment.'))
   }
 }
 
 async function onResume(id: string) {
   try {
     await resumeEnvironment(id)
+    toast.success('Environment resumed', `${envName(id)} is resuming.`)
   } catch (err) {
-    console.error('Resume failed:', err)
+    toast.error('Resume failed', toastError(err, 'Could not resume the environment.'))
   }
 }
 
@@ -138,12 +145,14 @@ async function onDestroy() {
   if (!id || destroyingId.value) return
   confirmDestroyId.value = null
   destroyingId.value = id
+  const name = envName(id)
   try {
     await destroy(id)
     await refresh()
     await loadOrgCosts()
-  } catch {
-    // error surfaced on list refresh
+    toast.success('Teardown queued', `${name} is being destroyed.`)
+  } catch (err) {
+    toast.error('Destroy failed', toastError(err, `Could not destroy ${name}.`))
   } finally {
     destroyingId.value = null
   }
@@ -156,8 +165,9 @@ async function onRetry(id: string) {
     const updated = await retryProvision(id)
     onCardUpdate({ id: updated.id, status: updated.status })
     await refresh()
-  } catch {
-    // error surfaced on list refresh
+    toast.info('Retrying provision', `${envName(id)} is provisioning again.`)
+  } catch (err) {
+    toast.error('Retry failed', toastError(err, 'Could not retry provisioning.'))
   } finally {
     retryingId.value = null
   }

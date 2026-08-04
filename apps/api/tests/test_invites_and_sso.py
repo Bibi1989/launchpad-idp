@@ -96,7 +96,7 @@ async def test_invite_create_accept_and_sso_mapping(
         },
     )
     assert invitee_resp.status_code == 201
-    # Auto-accept on register should already join — also exercise explicit accept path on second invite.
+    # Auto-accept on register should already join - also exercise explicit accept path on second invite.
     orgs = {org["id"] for org in invitee_resp.json()["orgs"]}
     assert org_id in orgs
 

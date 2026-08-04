@@ -5,10 +5,10 @@ set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER_NAME:-launchpad}"
 CONTEXT="kind-${CLUSTER_NAME}"
-# Keep this range small — Docker Desktop + many hostPort maps often breaks kubeadm init.
+# Keep this range small - Docker Desktop + many hostPort maps often breaks kubeadm init.
 PORT_MIN="${PREVIEW_NODE_PORT_MIN:-30080}"
 PORT_MAX="${PREVIEW_NODE_PORT_MAX:-30089}"
-# Optional pin, e.g. kindest/node:v1.32.2 — empty uses kind's default.
+# Optional pin, e.g. kindest/node:v1.32.2 - empty uses kind's default.
 NODE_IMAGE="${KIND_NODE_IMAGE:-}"
 PRELOAD_IMAGE="${KIND_PRELOAD_IMAGE:-1}"
 LOCK_DIR="${TMPDIR:-/tmp}/launchpad-kind-${CLUSTER_NAME}.lockdir"
@@ -71,7 +71,7 @@ if cluster_ready; then
   echo "kind cluster '${CLUSTER_NAME}' is already ready (context: ${CONTEXT})"
 else
   if kind get clusters 2>/dev/null | grep -qx "${CLUSTER_NAME}"; then
-    echo "kind cluster '${CLUSTER_NAME}' exists but is unhealthy — recreating…"
+    echo "kind cluster '${CLUSTER_NAME}' exists but is unhealthy - recreating…"
     kind delete cluster --name "${CLUSTER_NAME}" || true
     # Give Docker Desktop a moment to release hostPort binds.
     sleep 2

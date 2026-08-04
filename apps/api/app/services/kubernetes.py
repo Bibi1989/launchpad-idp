@@ -69,7 +69,7 @@ def _inspect_image_exposed_ports(image: str) -> list[int]:
         return []
 
     if completed.returncode != 0:
-        # Image may not be local yet — best-effort pull then re-inspect.
+        # Image may not be local yet - best-effort pull then re-inspect.
         pull = subprocess.run(
             ["docker", "pull", image],
             capture_output=True,
@@ -188,6 +188,11 @@ class KubernetesProvisioner:
     def _load_clients(self) -> None:
         from kubernetes import client, config
 
+        self._core = None
+        self._networking = None
+        self._apps = None
+        self._autoscaling = None
+
         if self._settings.kubernetes_in_cluster:
             try:
                 config.load_incluster_config()
@@ -195,30 +200,80 @@ class KubernetesProvisioner:
                 logger.warning("kubernetes_in_cluster_load_failed", error=str(exc))
                 return
         else:
-            load_kwargs: dict[str, str] = {}
+            load_kwargs: dict[str, object] = {}
             if self._settings.kubernetes_kubeconfig_path:
                 load_kwargs["config_file"] = self._settings.kubernetes_kubeconfig_path
-            ctx = self._settings.resolved_kubernetes_context
-            if ctx:
-                load_kwargs["context"] = ctx
+            requested_ctx = self._settings.resolved_kubernetes_context
+            if requested_ctx:
+                load_kwargs["context"] = requested_ctx
             try:
                 config.load_kube_config(**load_kwargs)
             except Exception as exc:
-                logger.warning("kubeconfig_context_load_failed", context=ctx, error=str(exc))
-                load_kwargs.pop("context", None)
+                # Never fall back to kubectl current-context when a specific context
+                # was requested. That previously routed local launches at a remote
+                # GKE API (ConnectTimeout) when kind/k3d was down or misnamed.
+                logger.warning(
+                    "kubeconfig_context_load_failed",
+                    context=requested_ctx,
+                    error=str(exc),
+                )
+                if requested_ctx:
+                    return
                 try:
-                    config.load_kube_config(**load_kwargs)
+                    config.load_kube_config(
+                        **{k: v for k, v in load_kwargs.items() if k != "context"}
+                    )
                 except Exception as exc2:
                     logger.warning("kubeconfig_fallback_load_failed", error=str(exc2))
                     return
 
         try:
+            configuration = client.Configuration.get_default_copy()
+            # Fail fast instead of hanging forever (urllib3 default timeout=None).
+            configuration.retries = 1
+            client.Configuration.set_default(configuration)
             self._core = client.CoreV1Api()
             self._networking = client.NetworkingV1Api()
             self._apps = client.AppsV1Api()
             self._autoscaling = client.AutoscalingV2Api()
         except Exception as exc:
             logger.warning("kubernetes_client_init_failed", error=str(exc))
+            self._core = None
+            self._networking = None
+            self._apps = None
+            self._autoscaling = None
+
+    def assert_cluster_ready(self, *, timeout_seconds: float = 5.0) -> None:
+        """Verify the configured kube-context is reachable before APPLY.
+
+        Raises ``RuntimeError`` with an actionable message when the local cluster
+        context is missing or the API server is unreachable (e.g. stale GKE current-context).
+        """
+        if not self._settings.kubernetes_enabled:
+            return
+        ctx = self._settings.resolved_kubernetes_context or "default"
+        engine = self._settings.local_k8s_engine
+        up_hint = f"make {engine}-up" if engine in {"k3s", "kind"} else "make k3s-up"
+        if self._core is None:
+            raise RuntimeError(
+                f"Kubernetes client not connected (context={ctx}). "
+                f"Start the local cluster with `{up_hint}` and ensure kubectl context "
+                f"'{ctx}' exists. Do not leave kubectl on a remote GKE context for local previews."
+            )
+        try:
+            self._core.list_namespace(limit=1, _request_timeout=timeout_seconds)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot reach Kubernetes API for context '{ctx}' "
+                f"(timed out or refused after {timeout_seconds:.0f}s): {exc}. "
+                f"For local previews run `{up_hint}` and set KUBERNETES_CONTEXT={ctx} "
+                f"(or unset a remote KUBERNETES_CONTEXT)."
+            ) from exc
+
+    def reload_clients(self) -> None:
+        """Re-read kubeconfig (e.g. after auto-managing the local cluster)."""
+        if self._settings.kubernetes_enabled:
+            self._load_clients()
 
     def provision(
         self,
@@ -231,6 +286,8 @@ class KubernetesProvisioner:
         ttl_expires_at: str,
         owner_label: str = "launchpad",
         image: str | None = None,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
     ) -> ProvisionedResources:
         workload_image = image or self._settings.default_workload_image
         listen_port = _resolve_listen_port_from_image(workload_image)
@@ -258,6 +315,8 @@ class KubernetesProvisioner:
                 environment_id=environment_id,
                 git_repo_url=git_repo_url,
                 git_branch=git_branch,
+                enable_postgres=enable_postgres,
+                enable_redis=enable_redis,
             )
             resources.created_namespace = True
             resources.created_quota = True
@@ -298,6 +357,8 @@ class KubernetesProvisioner:
             listen_port=listen_port,
             node_port=node_port,
             used_ports=used_ports,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
         )
         resources.created_workload = True
         resources.node_port = node_port
@@ -495,7 +556,7 @@ class KubernetesProvisioner:
         from kubernetes.client.rest import ApiException
 
         try:
-            self._core.read_namespace(namespace)
+            self._core.read_namespace(namespace, _request_timeout=10)
             logger.info("kubernetes_namespace_exists", namespace=namespace)
         except ApiException as exc:
             if exc.status != 404:
@@ -503,7 +564,7 @@ class KubernetesProvisioner:
             body = client.V1Namespace(
                 metadata=client.V1ObjectMeta(name=namespace, labels=labels),
             )
-            self._core.create_namespace(body)
+            self._core.create_namespace(body, _request_timeout=10)
             resources.created_namespace = True
             logger.info("kubernetes_namespace_created", namespace=namespace)
 
@@ -659,8 +720,8 @@ class KubernetesProvisioner:
         Ready replicas from a previous ReplicaSet (e.g. nginx still serving while a
         new image is ImagePullBackOff) must not count as success.
 
-        Fails fast (``RuntimeError``) on terminal pod states — ImagePullBackOff,
-        CrashLoopBackOff, CreateContainerError — instead of spinning to the
+        Fails fast (``RuntimeError``) on terminal pod states - ImagePullBackOff,
+        CrashLoopBackOff, CreateContainerError - instead of spinning to the
         deadline. If ``cancel_check`` is provided and returns True (e.g. the user
         requested force-delete mid-provision), raises ``PreviewCancelled`` so the
         provision task aborts immediately.
@@ -749,7 +810,7 @@ class KubernetesProvisioner:
     def _deployment_ready_snapshot(self, *, namespace: str) -> dict[str, object]:
         """Aggregate rollout readiness across *all* Deployments in the namespace.
 
-        Workspaces no longer contain a single hardcoded ``app`` Deployment — they
+        Workspaces no longer contain a single hardcoded ``app`` Deployment - they
         may ship ``launch-web``, ``launch-server``, ``postgres``, etc. The preview
         is Ready only when every Deployment has completed its current-revision
         rollout (``readyReplicas >= specReplicas`` with no lingering old pods).
@@ -920,7 +981,7 @@ class KubernetesProvisioner:
                 if detail:
                     return (
                         f"Failed to pull image {image} for pod {pod_name}: "
-                        f"{waiting.reason} — {detail}"
+                        f"{waiting.reason} - {detail}"
                     )
                 return f"Failed to pull image {image} for pod {pod_name}: {waiting.reason}"
         return None
@@ -929,9 +990,9 @@ class KubernetesProvisioner:
         """Detect terminal crash states so provisioning fails fast (not on deadline).
 
         - CreateContainer*/RunContainerError: config errors that never self-heal
-          (e.g. runAsNonRoot without a UID) — fail immediately.
+          (e.g. runAsNonRoot without a UID) - fail immediately.
         - CrashLoopBackOff after >= 2 restarts: the container keeps exiting
-          (e.g. "postgres: Error", app crash) — fail with the last exit detail.
+          (e.g. "postgres: Error", app crash) - fail with the last exit detail.
         """
         if self._core is None:
             return None
@@ -956,7 +1017,7 @@ class KubernetesProvisioner:
                         f"Container {status.name} in pod {pod_name} failed to start: "
                         f"{waiting.reason}"
                     )
-                    return f"{base} — {detail}" if detail else base
+                    return f"{base} - {detail}" if detail else base
                 if waiting and waiting.reason == "CrashLoopBackOff" and restarts >= 2:
                     last = status.last_state.terminated if status.last_state else None
                     detail = ""
@@ -966,7 +1027,7 @@ class KubernetesProvisioner:
                         f"Container {status.name} in pod {pod_name} is crash-looping "
                         f"(CrashLoopBackOff after {restarts} restarts)"
                     )
-                    return f"{base} — {detail}" if detail else base
+                    return f"{base} - {detail}" if detail else base
         return None
 
     def _first_pod_probe_hint(self, *, namespace: str) -> str | None:
@@ -995,7 +1056,7 @@ class KubernetesProvisioner:
                 if condition.type == "Ready" and condition.status != "True" and condition.message:
                     return f"Pod {pod_name}: {condition.message}"
         return (
-            "Check readiness/liveness probes and containerPort — "
+            "Check readiness/liveness probes and containerPort - "
             "apps that listen on a non-80 port need matching probes/Service targetPort. "
             "Dev servers (Vite/Node) often need TCP probes: HTTP GET can hang awaiting headers "
             "while the process is compiling."
@@ -1105,7 +1166,7 @@ class KubernetesProvisioner:
         """Resolve a cloud/production preview's public URL from the cluster.
 
         Reads the external address of a LoadBalancer Service (``status.loadBalancer``)
-        or an Ingress (its host rule / load-balancer address) in the namespace — e.g.
+        or an Ingress (its host rule / load-balancer address) in the namespace - e.g.
         ``http://34.120.10.5`` or ``https://preview.example.com``. Cloud load balancers
         take time to allocate an address, so this polls while a candidate exists but has
         no address yet; it returns ``None`` immediately when nothing is externally
@@ -1172,6 +1233,58 @@ class KubernetesProvisioner:
             return None
         return int(existing.spec.ports[0].node_port)
 
+    @staticmethod
+    def _datastore_init_containers(
+        *,
+        enable_postgres: bool,
+        enable_redis: bool,
+    ) -> list[object]:
+        """Wait for in-cluster Postgres/Redis before the app container starts."""
+        from kubernetes import client
+
+        waits: list[tuple[str, str, int]] = []
+        if enable_postgres:
+            waits.append(("wait-for-postgres", "postgres", 5432))
+        if enable_redis:
+            waits.append(("wait-for-redis", "redis", 6379))
+        containers: list[object] = []
+        for name, host, port in waits:
+            containers.append(
+                client.V1Container(
+                    name=name,
+                    image="busybox:1.36",
+                    image_pull_policy="IfNotPresent",
+                    command=[
+                        "sh",
+                        "-c",
+                        (
+                            "count=0\n"
+                            f"until nc -z {host} {port}; do\n"
+                            "  count=$((count+1))\n"
+                            "  if [ $count -ge 30 ]; then\n"
+                            f'    echo "Timed out waiting for {host}:{port} after 60s"\n'
+                            "    exit 1\n"
+                            "  fi\n"
+                            f'  echo "waiting for {host}:{port} ($count/30)..."\n'
+                            "  sleep 2\n"
+                            "done\n"
+                        ),
+                    ],
+                    resources=client.V1ResourceRequirements(
+                        requests={"cpu": "10m", "memory": "16Mi"},
+                        limits={"cpu": "50m", "memory": "32Mi"},
+                    ),
+                    security_context=client.V1SecurityContext(
+                        allow_privilege_escalation=False,
+                        read_only_root_filesystem=True,
+                        run_as_non_root=True,
+                        run_as_user=65534,
+                        capabilities=client.V1Capabilities(drop=["ALL"]),
+                    ),
+                )
+            )
+        return containers
+
     def _build_app_container(
         self,
         *,
@@ -1180,12 +1293,15 @@ class KubernetesProvisioner:
         git_branch: str,
         commit_sha: str | None = None,
         listen_port: int,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
     ) -> object:
         """Hardened app container spec shared by provision and rebuild paths."""
         from kubernetes import client
 
         effective_port = 80 if "http-echo" in image else listen_port
         nginx = _is_nginx_image(image)
+        wants_secrets = enable_postgres or enable_redis
 
         env = [
             client.V1EnvVar(name="GIT_REPO_URL", value=git_repo_url),
@@ -1194,6 +1310,19 @@ class KubernetesProvisioner:
         ]
         if commit_sha:
             env.append(client.V1EnvVar(name="GIT_COMMIT_SHA", value=commit_sha))
+        if wants_secrets:
+            env.extend(
+                [
+                    client.V1EnvVar(
+                        name="HAS_DATABASE",
+                        value="true" if enable_postgres else "false",
+                    ),
+                    client.V1EnvVar(
+                        name="HAS_REDIS",
+                        value="true" if enable_redis else "false",
+                    ),
+                ]
+            )
         if not nginx and not "http-echo" in image:
             # Frontend dev servers often require binding to all interfaces for probes.
             env.extend(
@@ -1217,6 +1346,11 @@ class KubernetesProvisioner:
         )
 
         read_only_root_filesystem = nginx and "http-echo" not in image
+        env_from = (
+            [client.V1EnvFromSource(secret_ref=client.V1SecretEnvSource(name="app-secrets"))]
+            if wants_secrets
+            else None
+        )
 
         container = client.V1Container(
             name="app",
@@ -1253,6 +1387,7 @@ class KubernetesProvisioner:
             if not nginx
             else None,
             env=env,
+            env_from=env_from,
             security_context=client.V1SecurityContext(
                 allow_privilege_escalation=False,
                 read_only_root_filesystem=bool(read_only_root_filesystem),
@@ -1285,6 +1420,8 @@ class KubernetesProvisioner:
         git_branch: str,
         commit_sha: str | None = None,
         listen_port: int,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
     ) -> object:
         from kubernetes import client
 
@@ -1295,6 +1432,8 @@ class KubernetesProvisioner:
             git_branch=git_branch,
             commit_sha=commit_sha,
             listen_port=listen_port,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
         )
         volumes = [
             client.V1Volume(name="tmp", empty_dir=client.V1EmptyDirVolumeSource()),
@@ -1312,12 +1451,22 @@ class KubernetesProvisioner:
             volumes = []
             pod_security = None
 
+        init_containers = self._datastore_init_containers(
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
+        ) or None
+        merged_annotations = {
+            **annotations,
+            "launchpad.io/enable-postgres": "true" if enable_postgres else "false",
+            "launchpad.io/enable-redis": "true" if enable_redis else "false",
+        }
+
         return client.V1Deployment(
             metadata=client.V1ObjectMeta(
                 name="app",
                 namespace=namespace,
                 labels=labels,
-                annotations=annotations,
+                annotations=merged_annotations,
             ),
             spec=client.V1DeploymentSpec(
                 replicas=1,
@@ -1325,9 +1474,10 @@ class KubernetesProvisioner:
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(
                         labels={**labels, **selector},
-                        annotations=annotations,
+                        annotations=merged_annotations,
                     ),
                     spec=client.V1PodSpec(
+                        init_containers=init_containers,
                         containers=[container],
                         volumes=volumes or None,
                         security_context=pod_security,
@@ -1348,6 +1498,8 @@ class KubernetesProvisioner:
         node_port: int,
         used_ports: set[int] | None = None,
         environment_id: str | None = None,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
     ) -> int:
         assert self._core is not None and self._apps is not None
         from kubernetes import client
@@ -1365,6 +1517,8 @@ class KubernetesProvisioner:
             git_repo_url=git_repo_url,
             git_branch=git_branch,
             listen_port=listen_port,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
         )
         selector = preview_workload_selector()
         try:
@@ -1474,6 +1628,8 @@ class KubernetesProvisioner:
         commit_sha: str,
         owner_label: str = "launchpad",
         image: str | None = None,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
     ) -> None:
         """Roll the app Deployment to a commit-tagged image annotation/env."""
         resolved_image = image or self._image_for_commit(commit_sha)
@@ -1497,6 +1653,8 @@ class KubernetesProvisioner:
                 environment_id=environment_id,
                 commit_sha=commit_sha,
                 image=resolved_image,
+                enable_postgres=enable_postgres,
+                enable_redis=enable_redis,
             )
             return
 
@@ -1517,6 +1675,8 @@ class KubernetesProvisioner:
             git_branch=git_branch,
             commit_sha=commit_sha,
             listen_port=listen_port,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
         )
         try:
             self._apps.read_namespaced_deployment("app", namespace)
@@ -1632,7 +1792,7 @@ def _detect_kind_forwarded_node_ports(cluster_name: str | None = None) -> list[i
         return []
     from app.services.manifest_deploy import resolve_local_cluster_name
     real_cluster = resolve_local_cluster_name(cluster_name)
-    # Only probe THIS cluster's containers — generic fallback names (e.g.
+    # Only probe THIS cluster's containers - generic fallback names (e.g.
     # "launchpad-control-plane") would leak another local cluster's host ports and
     # hand previews a NodePort that isn't actually forwarded here.
     # k3d publishes the host NodePort range on its loadbalancer (serverlb), not the
@@ -1694,7 +1854,7 @@ def resolve_preview_node_port(
 ) -> int:
     """Keep an in-range sticky NodePort; otherwise allocate inside the mapped window.
 
-    Kubernetes auto-assigns NodePorts in 30000–32767 when a Service is created as
+    Kubernetes auto-assigns NodePorts in 30000-32767 when a Service is created as
     NodePort without an explicit ``nodePort``. Those ports are usually outside the
     kind ``extraPortMappings`` range and will not load from the host.
     """

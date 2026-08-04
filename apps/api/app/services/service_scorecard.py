@@ -31,6 +31,7 @@ def compute_workspace_scorecard(workspace_root: str | Path) -> ServiceScorecard:
 
     ci_files = list(root.glob("ci/**/*.yml")) + list(root.glob("ci/**/*.yaml"))
     ci_files += list(root.glob(".github/workflows/*.yml"))
+    ci_files += list(root.glob(".gitlab-ci.yml"))
     ci_text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in ci_files[:8])
     has_scan = any(token in ci_text.lower() for token in ("trivy", "semgrep", "codeql", "container-security-scan"))
     items.append(

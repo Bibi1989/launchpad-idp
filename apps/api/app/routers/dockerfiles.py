@@ -1,4 +1,4 @@
-"""Dockerfile management API — scan, scaffold, AI review, GitHub push, registry build."""
+"""Dockerfile management API - scan, scaffold, AI review, GitHub push, registry build."""
 
 from __future__ import annotations
 

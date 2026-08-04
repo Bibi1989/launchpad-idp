@@ -219,7 +219,7 @@ class OrganizationService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
                     "code": "user_not_found",
-                    "message": "No user with that email — create an invite instead",
+                    "message": "No user with that email - create an invite instead",
                 },
             )
         existing = await self.get_membership(org_id=org_id, user_id=user.id)

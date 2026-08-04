@@ -19,7 +19,7 @@ MAX_AUDIT_LIMIT = 200
 
 
 class AuditService:
-    """Audit trail service. Rows are append-only — never update or delete."""
+    """Audit trail service. Rows are append-only - never update or delete."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session

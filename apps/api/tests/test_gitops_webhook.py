@@ -174,3 +174,158 @@ async def test_rebuild_task_marks_running(monkeypatch: pytest.MonkeyPatch) -> No
     assert env_repo.update_status.await_count >= 1
     final_call = env_repo.update_status.await_args_list[-1]
     assert final_call.args[1] == EnvironmentStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_rebuild_failure_rolls_back_to_last_good(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed rebuild restores the previous image and keeps the env RUNNING."""
+    from app.models.domain import AuditAction, EnvironmentStatus
+    from app.workers import tasks as task_module
+
+    env_id = uuid4()
+    environment = MagicMock()
+    environment.id = env_id
+    environment.name = "demo"
+    environment.namespace_name = "launchpad-env-demo"
+    environment.git_branch = "main"
+    environment.git_repo_url = "https://github.com/acme/demo.git"
+    # Previously RUNNING on a known-good image + commit.
+    environment.status = EnvironmentStatus.RUNNING
+    environment.latest_commit_sha = "good123"
+    environment.workload_image = "registry/app:good123"
+    environment.enable_postgres = False
+    environment.enable_redis = False
+    environment.owner_id = uuid4()
+    environment.workspace_id = None
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.refresh = AsyncMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    session_factory = MagicMock(return_value=session)
+
+    env_repo = MagicMock()
+    env_repo.get_by_id = AsyncMock(return_value=environment)
+    env_repo.update_status = AsyncMock(return_value=environment)
+
+    log_repo = MagicMock()
+    log_repo.create = AsyncMock()
+
+    user_repo = MagicMock()
+    user_repo.get_by_id = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(task_module, "_session_factory", lambda: session_factory)
+    monkeypatch.setattr(task_module, "EnvironmentRepository", lambda _s: env_repo)
+    monkeypatch.setattr(task_module, "DeploymentLogRepository", lambda _s: log_repo)
+    monkeypatch.setattr(task_module, "UserRepository", lambda _s: user_repo)
+    monkeypatch.setattr(task_module.asyncio, "sleep", AsyncMock())
+    fail_execution = AsyncMock()
+    monkeypatch.setattr(task_module, "_fail_execution", fail_execution)
+    record_audit = AsyncMock()
+    monkeypatch.setattr(task_module, "_record_audit", record_audit)
+
+    provisioner = MagicMock()
+    # First call = the failing rebuild; second call = the rollback restore.
+    provisioner.rebuild_workload.side_effect = [RuntimeError("rollout timed out"), None]
+    monkeypatch.setattr(task_module, "KubernetesProvisioner", lambda _s: provisioner)
+
+    lock_cm = AsyncMock()
+    lock_cm.__aenter__ = AsyncMock(return_value=None)
+    lock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("app.workers.tasks.publish_env_event", new_callable=AsyncMock),
+        patch("app.workers.tasks.acquire_state_lock", return_value=lock_cm),
+    ):
+        await task_module._run_rebuild(str(env_id), "bad999", "corr-rollback")
+
+    # Rebuild attempted, then rolled back with the previous image.
+    assert provisioner.rebuild_workload.call_count == 2
+    restore_call = provisioner.rebuild_workload.call_args_list[-1]
+    assert restore_call.kwargs["image"] == "registry/app:good123"
+    assert restore_call.kwargs["commit_sha"] == "good123"
+
+    # Env ends RUNNING on the last-good revision, never marked FAILED.
+    final_call = env_repo.update_status.await_args_list[-1]
+    assert final_call.args[1] == EnvironmentStatus.RUNNING
+    assert final_call.kwargs["latest_commit_sha"] == "good123"
+    assert final_call.kwargs["workload_image"] == "registry/app:good123"
+    fail_execution.assert_not_awaited()
+
+    recorded = {call.kwargs.get("action") for call in record_audit.await_args_list}
+    assert AuditAction.REBUILD_ROLLED_BACK in recorded
+
+
+@pytest.mark.asyncio
+async def test_rebuild_failure_without_prior_image_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no known-good state, a failed rebuild still marks the env FAILED."""
+    from app.models.domain import EnvironmentStatus
+    from app.workers import tasks as task_module
+
+    env_id = uuid4()
+    environment = MagicMock()
+    environment.id = env_id
+    environment.name = "demo"
+    environment.namespace_name = "launchpad-env-demo"
+    environment.git_branch = "main"
+    environment.git_repo_url = "https://github.com/acme/demo.git"
+    # Never reached a working state (still provisioning), nothing to restore.
+    environment.status = EnvironmentStatus.PROVISIONING
+    environment.latest_commit_sha = None
+    environment.workload_image = None
+    environment.enable_postgres = False
+    environment.enable_redis = False
+    environment.owner_id = uuid4()
+    environment.workspace_id = None
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.refresh = AsyncMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    session_factory = MagicMock(return_value=session)
+
+    env_repo = MagicMock()
+    env_repo.get_by_id = AsyncMock(return_value=environment)
+    env_repo.update_status = AsyncMock(return_value=environment)
+
+    log_repo = MagicMock()
+    log_repo.create = AsyncMock()
+
+    user_repo = MagicMock()
+    user_repo.get_by_id = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(task_module, "_session_factory", lambda: session_factory)
+    monkeypatch.setattr(task_module, "EnvironmentRepository", lambda _s: env_repo)
+    monkeypatch.setattr(task_module, "DeploymentLogRepository", lambda _s: log_repo)
+    monkeypatch.setattr(task_module, "UserRepository", lambda _s: user_repo)
+    monkeypatch.setattr(task_module.asyncio, "sleep", AsyncMock())
+    fail_execution = AsyncMock()
+    monkeypatch.setattr(task_module, "_fail_execution", fail_execution)
+
+    provisioner = MagicMock()
+    provisioner.rebuild_workload.side_effect = RuntimeError("build failed")
+    monkeypatch.setattr(task_module, "KubernetesProvisioner", lambda _s: provisioner)
+
+    lock_cm = AsyncMock()
+    lock_cm.__aenter__ = AsyncMock(return_value=None)
+    lock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("app.workers.tasks.publish_env_event", new_callable=AsyncMock),
+        patch("app.workers.tasks.acquire_state_lock", return_value=lock_cm),
+    ):
+        await task_module._run_rebuild(str(env_id), "bad999", "corr-fail")
+
+    # No rollback restore attempted (only the one failing rebuild), env FAILED.
+    assert provisioner.rebuild_workload.call_count == 1
+    fail_execution.assert_awaited_once()

@@ -34,7 +34,7 @@ def run_preview_smoke_check(
     timeout = max(1.0, float(cfg.preview_smoke_timeout_seconds))
     req = Request(url, method="GET", headers={"User-Agent": "Launchpad-Preview-Smoke/1.0"})
     try:
-        with urlopen(req, timeout=timeout) as response:  # noqa: S310 — intentional outbound smoke
+        with urlopen(req, timeout=timeout) as response:  # noqa: S310 - intentional outbound smoke
             code = int(getattr(response, "status", 200) or 200)
             if 200 <= code < 400:
                 return SmokeCheckResult(True, code, "ok")
@@ -50,6 +50,6 @@ def run_preview_smoke_check(
         return SmokeCheckResult(False, None, f"url_error:{exc.reason}")
     except TimeoutError:
         return SmokeCheckResult(False, None, "timeout")
-    except Exception as exc:  # noqa: BLE001 — surface any smoke failure
+    except Exception as exc:  # noqa: BLE001 - surface any smoke failure
         logger.warning("preview_smoke_failed", url=url, error=str(exc))
         return SmokeCheckResult(False, None, f"error:{exc}")

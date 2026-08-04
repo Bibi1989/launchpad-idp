@@ -26,4 +26,5 @@ const bareShell = computed(() => {
       <NuxtPage />
     </AppShell>
   </template>
+  <ToastHost />
 </template>

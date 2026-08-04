@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
 
-    # Distributed state lock (Redis) — guards concurrent provision / rebuild / teardown
+    # Distributed state lock (Redis) - guards concurrent provision / rebuild / teardown
     state_lock_timeout_seconds: float = 900.0
     state_lock_blocking_timeout_seconds: float = 0.0
 
@@ -75,10 +75,10 @@ class Settings(BaseSettings):
     sse_poll_interval_seconds: float = 0.5
     ttl_reaper_interval_seconds: float = 300.0
 
-    # Secrets encryption (Fernet key material — prefer 32+ char random string)
+    # Secrets encryption (Fernet key material - prefer 32+ char random string)
     secrets_encryption_key: str | None = None
 
-    # Ephemeral IaC workspaces (durable path — /tmp is wiped on reboot/cleanup)
+    # Ephemeral IaC workspaces (durable path - /tmp is wiped on reboot/cleanup)
     iac_workspace_root: str = str(Path.home() / ".launchpad" / "workspaces")
 
     # Sandbox execution
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     sandbox_memory_limit: str = "2g"
     sandbox_cpu_limit: float = 1.0
 
-    # GitHub App (preferred) — short-lived installation tokens for repo bootstrap
+    # GitHub App (preferred) - short-lived installation tokens for repo bootstrap
     github_app_id: int | None = None
     github_app_private_key: str | None = None
     github_app_private_key_path: str | None = None
@@ -100,13 +100,13 @@ class Settings(BaseSettings):
     # Deprecated: long-lived PAT fallback (prefer GitHub App)
     github_pat: str | None = None
 
-    # GitLab — OAuth Application and/or per-user PAT (stored encrypted)
+    # GitLab - OAuth Application and/or per-user PAT (stored encrypted)
     gitlab_base_url: str = "https://gitlab.com"
     gitlab_oauth_client_id: str | None = None
     gitlab_oauth_client_secret: str | None = None
     gitlab_oauth_redirect_uri: str = "http://localhost:3000/integrations/gitlab"
 
-    # GitHub webhook (GitOps rebuild) — HMAC SHA-256 shared secret
+    # GitHub webhook (GitOps rebuild) - HMAC SHA-256 shared secret
     webhook_secret: str | None = None
 
     # Auth (HS256 JWT; shape claims for future OIDC: sub, iss, email)
@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24
     auth_dev_login_enabled: bool = True
 
-    # OIDC (Authorization Code) — when enabled, /auth/oidc/* becomes available
+    # OIDC (Authorization Code) - when enabled, /auth/oidc/* becomes available
     oidc_enabled: bool = False
     oidc_issuer_url: str | None = None
     oidc_client_id: str | None = None
@@ -180,7 +180,7 @@ class Settings(BaseSettings):
     preview_smoke_timeout_seconds: float = 8.0
 
     # When kubernetes_enabled, Open Preview uses NodePort on this host.
-    # Keep the range small (≤10 ports) — large maps often break kind on Docker Desktop.
+    # Keep the range small (≤10 ports) - large maps often break kind on Docker Desktop.
     preview_node_host: str | None = None
     preview_node_port_min: int = 30080
     preview_node_port_max: int = 30089
@@ -228,7 +228,7 @@ class Settings(BaseSettings):
         if ctx:
             # A context that still names the *other* engine's local cluster (or the
             # bare "k3s" sentinel) follows the active engine instead, so one env
-            # var — LOCAL_K8S_ENGINE — flips both the runtime and its context.
+            # var - LOCAL_K8S_ENGINE - flips both the runtime and its context.
             engine_local = {
                 f"kind-{self.kind_cluster_name}",
                 f"k3d-{self.kind_cluster_name}",

@@ -1,4 +1,4 @@
-"""Golden path service catalog — list templates and create services."""
+"""Golden path service catalog - list templates and create services."""
 
 from __future__ import annotations
 
@@ -189,7 +189,11 @@ class CatalogServiceManager:
         )
 
         if template.includes_cicd:
-            self._ensure_cicd_scaffold(bundle.root_dir, payload.name)
+            self._ensure_cicd_scaffold(
+                bundle.root_dir,
+                payload.name,
+                vcs_provider=payload.vcs_provider,
+            )
 
         scorecard = compute_workspace_scorecard(bundle.root_dir)
         if payload.enforce_scorecard_gate and not scorecard.passed:
@@ -447,11 +451,49 @@ class CatalogServiceManager:
         )
         path.write_text(content, encoding="utf-8")
 
-    def _ensure_cicd_scaffold(self, root_dir: str, app_name: str) -> None:
+    def _ensure_cicd_scaffold(
+        self,
+        root_dir: str,
+        app_name: str,
+        *,
+        vcs_provider: str = "github",
+    ) -> None:
         """Write a minimal CI workflow if the IaC generator did not emit one."""
         root = Path(root_dir)
+        if vcs_provider == "gitlab":
+            gitlab_ci = root / ".gitlab-ci.yml"
+            if gitlab_ci.is_file() or list(root.glob("ci/gitlab/**/*.yml")):
+                return
+            # Stronger golden-path CI: SAST + build + Trivy (matches scorecard).
+            content = (
+                f"# Golden path GitLab CI for {app_name}\n"
+                "stages:\n"
+                "  - test\n"
+                "  - build\n"
+                "  - scan\n"
+                "sast:\n"
+                "  stage: test\n"
+                "  image: returntocorp/semgrep:1.97.0\n"
+                "  script:\n"
+                "    - semgrep scan --config p/ci --error .\n"
+                "build:\n"
+                "  stage: build\n"
+                "  image: docker:27\n"
+                "  services: [docker:27-dind]\n"
+                "  script:\n"
+                "    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .\n"
+                "container-security-scan:\n"
+                "  stage: scan\n"
+                "  image: aquasec/trivy:0.58.1\n"
+                "  script:\n"
+                "    - trivy image --exit-code 0 $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA\n"
+                "  allow_failure: true\n"
+            )
+            gitlab_ci.write_text(content, encoding="utf-8")
+            return
+
         existing = list(root.glob("ci/**/*.yml")) + list(root.glob(".github/workflows/*.yml"))
-        if existing:
+        if existing or (root / ".gitlab-ci.yml").is_file():
             return
         workflow_dir = root / "ci" / "github" / "workflows"
         workflow_dir.mkdir(parents=True, exist_ok=True)

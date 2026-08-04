@@ -63,7 +63,7 @@ const form = reactive({
 const PROVIDER_STORAGE_KEY = 'launchpad.lastPreviewProvider'
 
 const providers: Array<{ id: PreviewTarget; label: string; hint: string }> = [
-  { id: 'local', label: 'Local (Sandbox)', hint: 'On your machine — we start the local cluster if needed' },
+  { id: 'local', label: 'Local (Sandbox)', hint: 'On your machine - we start the local cluster if needed' },
   { id: 'gcp', label: 'Google Cloud', hint: 'SA JSON or keyless WIF' },
   { id: 'aws', label: 'AWS', hint: 'Access keys or role ARN' },
   { id: 'azure', label: 'Azure', hint: 'Service principal' },
@@ -149,7 +149,7 @@ const sourceSummary = computed(() => {
   if (sourceMode.value === 'repo') {
     return form.git_repo_url.trim() || 'Your repository'
   }
-  return selectedTemplate.value?.title || '—'
+  return selectedTemplate.value?.title || '-'
 })
 
 const imageSummary = computed(() => {
@@ -363,7 +363,7 @@ async function launch() {
   errorMessage.value = null
   const name = form.name.trim().toLowerCase()
   if (!/^[a-z][a-z0-9-]{2,63}$/.test(name)) {
-    errorMessage.value = 'Name must be lowercase, start with a letter, 3–64 chars'
+    errorMessage.value = 'Name must be lowercase, start with a letter, 3-64 chars'
     return
   }
   if (!sourceValid()) {
@@ -438,7 +438,7 @@ async function launch() {
         <NuxtLink to="/provision" class="font-medium text-[var(--lp-accent)] hover:underline">
           Use Provision →
         </NuxtLink>
-        — Launch stays for ephemeral app URLs; Provision is for IaC workspaces.
+        - Launch stays for ephemeral app URLs; Provision is for IaC workspaces.
       </p>
     </header>
 
@@ -486,7 +486,7 @@ async function launch() {
       <div>
         <h2 class="text-lg font-semibold">Local (Sandbox)</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          Launchpad starts the local cluster if needed (~1–2 min first time). No cloud credentials.
+          Launchpad starts the local cluster if needed (~1-2 min first time). No cloud credentials.
           Open app uses the NodePort URL once the pod is Ready.
         </p>
       </div>
@@ -557,7 +557,7 @@ async function launch() {
           <template v-if="usesWorkspaceSource && selectedWorkspace">
             Launching from workspace
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            — if the workspace has raw manifests, Launchpad applies them into a preview namespace
+            - if the workspace has raw manifests, Launchpad applies them into a preview namespace
             (manifest deploy). Otherwise it uses the built-in preview profile.
           </template>
           <template v-else>
@@ -723,7 +723,7 @@ async function launch() {
       <label class="block space-y-2">
         <span class="lp-label">Workspace</span>
         <select v-model="form.workspace_id" class="lp-input" :disabled="loadingWorkspaces">
-          <option :value="null">None — use catalog or git repo</option>
+          <option :value="null">None - use catalog or git repo</option>
           <option v-for="ws in workspaces" :key="ws.id" :value="ws.id">
             {{ ws.name }} · {{ ws.provider }}/{{ ws.engine }}
           </option>
@@ -732,12 +732,12 @@ async function launch() {
           <template v-if="usesWorkspaceSource">
             Launching from workspace
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            — skip catalog/git on the next step.
+            - skip catalog/git on the next step.
           </template>
           <template v-else>
             Using stored credentials from
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            when available — skip credential fields below.
+            when available - skip credential fields below.
           </template>
         </p>
       </label>

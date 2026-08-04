@@ -125,7 +125,7 @@ export function usePreviewAnalyzer() {
   function rejectPatch() {
     if (patchDecision.value !== 'pending') return
     patchDecision.value = 'rejected'
-    patchMessage.value = 'Fix rejected — no files were changed.'
+    patchMessage.value = 'Fix rejected - no files were changed.'
     lastApplyMode.value = null
   }
 

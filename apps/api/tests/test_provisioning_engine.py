@@ -361,7 +361,7 @@ def test_iac_generator_writes_selected_workload_options() -> None:
         assert "infra/k8s/manifests/service.yaml" in files
         assert "infra/k8s/manifests/vpa.yaml" in files
         assert "infra/k8s/manifests/namespace.yaml" in files
-        # Governance files follow option flags — not forced on.
+        # Governance files follow option flags - not forced on.
         assert "infra/k8s/manifests/networkpolicy.yaml" not in files
         assert "infra/k8s/manifests/resourcequota.yaml" not in files
         assert "infra/k8s/manifests/limitrange.yaml" not in files

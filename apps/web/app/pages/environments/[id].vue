@@ -7,6 +7,8 @@ const route = useRoute()
 const id = computed(() => String(route.params.id))
 const environmentId = computed(() => id.value || null)
 const { getById, destroy, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
+const { reconcileEnvironment } = useNotifications()
+const toast = useToast()
 const {
   open: analyzerOpen,
   loading: analyzing,
@@ -30,8 +32,10 @@ async function onPause() {
   loadError.value = null
   try {
     environment.value = await pauseEnvironment(environment.value.id)
+    toast.success('Environment paused', `${environment.value.name} was paused.`)
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Pause failed'
+    toast.error('Pause failed', toastError(err, 'Could not pause the environment.'))
   } finally {
     pausing.value = false
   }
@@ -43,8 +47,10 @@ async function onResume() {
   loadError.value = null
   try {
     environment.value = await resumeEnvironment(environment.value.id)
+    toast.success('Environment resumed', `${environment.value.name} is resuming.`)
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Resume failed'
+    toast.error('Resume failed', toastError(err, 'Could not resume the environment.'))
   } finally {
     resuming.value = false
   }
@@ -82,7 +88,7 @@ const { lines, connected, done, connect } = useEnvironmentLogStream(environmentI
 
 const remainingLabel = computed(() => {
   tick.value
-  if (!environment.value) return '—'
+  if (!environment.value) return '-'
   const left = environment.value.time_remaining_seconds
     ?? Math.max(
       Math.floor((new Date(environment.value.ttl_expires_at).getTime() - Date.now()) / 1000),
@@ -139,6 +145,18 @@ const openAppTitle = computed(() => {
 
 const isProvisioning = computed(() => environment.value?.status === 'PROVISIONING')
 const isLocal = computed(() => Boolean(environment.value?.is_local))
+
+function formatCostSource(source: string | null | undefined): string {
+  if (!source) return ''
+  const labels: Record<string, string> = {
+    usage_quota: 'quota usage',
+    usage_requests: 'pod requests',
+    estimate: 'estimate',
+    idle: 'idle',
+  }
+  return labels[source] ?? source
+}
+
 const canExtend = computed(() => {
   const s = environment.value?.status
   return s === 'RUNNING' || s === 'FAILED'
@@ -180,8 +198,10 @@ async function onRetry() {
   try {
     environment.value = await retryProvision(environment.value.id)
     connect(environment.value.id)
+    toast.info('Retrying provision', `${environment.value.name} is provisioning again.`)
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Retry failed'
+    toast.error('Retry failed', toastError(err, 'Could not retry provisioning.'))
   } finally {
     retrying.value = false
   }
@@ -191,6 +211,7 @@ async function load(opts: { softAudits?: boolean } = {}) {
   loadError.value = null
   try {
     environment.value = await getById(id.value)
+    reconcileEnvironment(environment.value)
     const soft = opts.softAudits && audits.value.length > 0
     if (!soft) auditsLoading.value = true
     try {
@@ -222,11 +243,14 @@ async function onDestroy() {
   if (!environment.value || destroying.value) return
   confirmDestroyOpen.value = false
   destroying.value = true
+  const name = environment.value.name
   try {
     environment.value = await destroy(environment.value.id)
     connect(environment.value.id)
+    toast.success('Teardown queued', `${name} is being destroyed.`)
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Destroy failed'
+    toast.error('Destroy failed', toastError(err, `Could not destroy ${name}.`))
   } finally {
     destroying.value = false
   }
@@ -237,8 +261,10 @@ async function onExtend() {
   extending.value = true
   try {
     environment.value = await extendTtl(environment.value.id, {})
+    toast.success('TTL extended', `${environment.value.name} will live longer.`)
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Extend failed'
+    toast.error('Extend failed', toastError(err, 'Could not extend the TTL.'))
   } finally {
     extending.value = false
   }
@@ -259,8 +285,14 @@ async function onScanDrift() {
     } finally {
       auditsLoading.value = false
     }
+    if (environment.value.drift_detected) {
+      toast.warning('Drift detected', 'Live cluster state differs from Launchpad.')
+    } else {
+      toast.success('No drift', 'Live state matches Launchpad.')
+    }
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Drift scan failed'
+    toast.error('Drift scan failed', toastError(err, 'Could not scan for drift.'))
   } finally {
     scanningDrift.value = false
   }
@@ -276,9 +308,11 @@ async function onPromote() {
       credentials: { ...promoteCredentials },
     })
     showPromote.value = false
+    toast.success('Cloud preview launching', `Deploying to ${promoteForm.provider.toUpperCase()}.`)
     await navigateTo(`/environments/${created.id}`)
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Promote failed'
+    toast.error('Deploy failed', toastError(err, 'Could not launch the cloud preview.'))
   } finally {
     promoting.value = false
   }
@@ -290,11 +324,13 @@ async function copyAppUrl() {
     await navigator.clipboard.writeText(appHref.value)
     copied.value = true
     closeActionsMenu()
+    toast.success('URL copied', 'App URL is on your clipboard.')
     setTimeout(() => {
       copied.value = false
     }, 2000)
   } catch {
     loadError.value = 'Could not copy URL'
+    toast.error('Copy failed', 'Could not copy the app URL.')
   }
 }
 
@@ -366,7 +402,7 @@ onMounted(() => {
         v-if="environment.ttl_warning"
         class="rounded-lg border border-[var(--lp-warn)]/40 bg-[var(--lp-warn)]/10 px-4 py-3 text-sm text-[var(--lp-warn)]"
       >
-        TTL under 2 hours — extend now or this preview will be reaped.
+        TTL under 2 hours - extend now or this preview will be reaped.
       </p>
       <p
         v-if="environment.soft_cost_cap_exceeded"
@@ -379,7 +415,7 @@ onMounted(() => {
         v-if="environment.drift_detected"
         class="rounded-lg border border-[var(--lp-warn)]/40 bg-[var(--lp-warn)]/10 px-4 py-3 text-sm text-[var(--lp-warn)]"
       >
-        Configuration drift detected — live cluster state differs from Launchpad.
+        Configuration drift detected - live cluster state differs from Launchpad.
         <span v-if="environment.drift_summary" class="mt-1 block font-mono text-xs">
           {{ environment.drift_summary }}
         </span>
@@ -391,6 +427,7 @@ onMounted(() => {
             <h1 class="text-3xl font-semibold tracking-tight">{{ environment.name }}</h1>
             <div class="flex flex-wrap items-center gap-3">
               <StatusBadge :status="displayStatus" />
+              <EnvironmentHealthDot :status="displayStatus" :app-ready="environment.app_ready" />
               <span class="break-all font-mono text-xs text-[var(--lp-muted)]">{{ environment.namespace_name }}</span>
             </div>
             <p v-if="environment.runtime_summary" class="font-mono text-xs text-[var(--lp-muted)]">
@@ -449,7 +486,7 @@ onMounted(() => {
               <span
                 v-else-if="displayStatus === 'EXPIRED'"
                 class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[var(--lp-line)] px-3 py-2 text-sm text-[var(--lp-muted)]"
-                title="TTL expired — resume is disabled"
+                title="TTL expired - resume is disabled"
               >
                 <span class="material-symbols-outlined text-base">timer_off</span>
                 Expired
@@ -613,7 +650,7 @@ onMounted(() => {
               {{ appHref }}
             </a>
             <p v-else-if="isProvisioning" class="mt-1 text-sm text-[var(--lp-muted)]">
-              Available when Running — watch logs below
+              Available when Running - watch logs below
             </p>
             <p v-else class="mt-1 text-sm text-[var(--lp-muted)]">Not available</p>
           </div>
@@ -637,7 +674,7 @@ onMounted(() => {
             <p class="text-xs text-[var(--lp-muted)]">
               ${{ environment.cost_estimate_hourly }}/hr
               <span v-if="environment.cost_source" class="ml-1 opacity-80">
-                · {{ environment.cost_source }}
+                · {{ formatCostSource(environment.cost_source) }}
               </span>
             </p>
           </div>
@@ -647,7 +684,7 @@ onMounted(() => {
               Local shadow
               <span class="font-mono"> ${{ environment.cost_accrued ?? '0.00' }}</span>
               <span v-if="environment.cost_source" class="opacity-80">
-                · {{ environment.cost_source }}
+                · {{ formatCostSource(environment.cost_source) }}
               </span>
             </p>
           </div>
@@ -658,6 +695,28 @@ onMounted(() => {
           <div>
             <p class="lp-label">Git branch</p>
             <p class="mt-1 font-mono text-sm">{{ environment.git_branch }}</p>
+          </div>
+          <div v-if="environment.enable_postgres || environment.enable_redis">
+            <p class="lp-label">Ephemeral datastores</p>
+            <div class="mt-1 flex flex-wrap gap-2">
+              <span
+                v-if="environment.enable_postgres"
+                class="inline-flex items-center gap-1 rounded border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-300"
+              >
+                <span class="material-symbols-outlined text-sm">database</span>
+                Postgres
+              </span>
+              <span
+                v-if="environment.enable_redis"
+                class="inline-flex items-center gap-1 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-300"
+              >
+                <span class="material-symbols-outlined text-sm">memory</span>
+                Redis
+              </span>
+            </div>
+            <p class="mt-1 text-[10px] text-[var(--lp-muted)]">
+              Injected via <span class="font-mono">app-secrets</span> (DATABASE_URL / REDIS_URL)
+            </p>
           </div>
           <div v-if="environment.stable_pr_url">
             <p class="lp-label">Stable PR URL</p>
@@ -713,7 +772,7 @@ onMounted(() => {
             <span class="font-mono text-[var(--lp-text)]">{{ environment.git_branch }}</span>
             on this repo to rebuild while the environment is active.
             <template v-if="environment.gitops_rebuild_enabled">
-              Webhook is configured —
+              Webhook is configured -
               <NuxtLink to="/docs#rebuild" class="text-[var(--lp-accent)] hover:underline">docs</NuxtLink>.
             </template>
             <template v-else>
@@ -721,7 +780,7 @@ onMounted(() => {
               <code class="font-mono text-xs text-[var(--lp-accent)]">WEBHOOK_SECRET</code>
               and point GitHub at
               <code class="font-mono text-xs">/api/v1/webhooks/github</code>
-              —
+              -
               <NuxtLink to="/docs#rebuild" class="text-[var(--lp-accent)] hover:underline">docs</NuxtLink>.
             </template>
           </p>
@@ -736,7 +795,7 @@ onMounted(() => {
             class="mt-2 text-xs text-[var(--lp-muted)]"
           >
             Concurrent previews:
-            {{ environment.concurrent_active_count ?? '—' }}
+            {{ environment.concurrent_active_count ?? '-' }}
             /
             {{ environment.max_concurrent_environments }}
           </p>
@@ -745,7 +804,7 @@ onMounted(() => {
         <div class="border-t border-[var(--lp-line)] px-5 py-3 text-sm text-[var(--lp-muted)]">
           Need custom manifests or Terraform?
           <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">Open Provision</NuxtLink>
-          for an IaC workspace — this page is for the live preview only.
+          for an IaC workspace - this page is for the live preview only.
         </div>
 
         <p v-if="environment.error_message" class="border-t border-[var(--lp-line)] px-5 py-3 text-sm text-[var(--lp-danger)]">

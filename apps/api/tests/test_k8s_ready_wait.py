@@ -1,6 +1,6 @@
 """Deployment readiness aggregates across ALL namespace deployments.
 
-Workspaces no longer ship a single hardcoded ``app`` Deployment — they may ship
+Workspaces no longer ship a single hardcoded ``app`` Deployment - they may ship
 ``launch-web``, ``launch-server``, ``postgres``, etc. Readiness must list all
 Deployments and wait for every one to complete its current-revision rollout,
 never ``read_namespaced_deployment("app")`` (which 404s for launch-* workspaces).

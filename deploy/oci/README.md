@@ -52,8 +52,8 @@ nano deploy/oci/.env   # or vim
 
 Set at least:
 
-- `POSTGRES_PASSWORD`, `JWT_SECRET`, `SECRETS_ENCRYPTION_KEY` — long random strings
-- `LAUNCHPAD_PUBLIC_ORIGIN` — how users open the app, e.g. `http://130.61.x.x` or `https://launchpad.example.com`
+- `POSTGRES_PASSWORD`, `JWT_SECRET`, `SECRETS_ENCRYPTION_KEY` - long random strings
+- `LAUNCHPAD_PUBLIC_ORIGIN` - how users open the app, e.g. `http://130.61.x.x` or `https://launchpad.example.com`
 - `LAUNCHPAD_SITE_ADDRESS`:
   - no DNS yet → `:80`
   - DNS A record → your hostname (Caddy will request a Let's Encrypt cert); set `ACME_EMAIL`
@@ -128,7 +128,7 @@ docker system df
 | Real preview pods (kind / k3s) | Not enabled; needs more RAM / a second VM |
 | Heavy concurrent Celery builds | Keep concurrency low |
 
-To enable Kubernetes later, install k3s on a second A1 (or the same host if you have 24 GB), set `KUBERNETES_ENABLED=true`, and mount a kubeconfig into `api` / `worker` — that is out of scope for this minimal pack.
+To enable Kubernetes later, install k3s on a second A1 (or the same host if you have 24 GB), set `KUBERNETES_ENABLED=true`, and mount a kubeconfig into `api` / `worker` - that is out of scope for this minimal pack.
 
 ## Troubleshooting
 

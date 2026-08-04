@@ -129,7 +129,7 @@ def on_page(canvas, doc) -> None:
     canvas.saveState()
     canvas.setFont("Helvetica", 8)
     canvas.setFillColor(MUTED)
-    canvas.drawString(inch, 0.45 * inch, "Launchpad — Enterprise Roadmap")
+    canvas.drawString(inch, 0.45 * inch, "Launchpad - Enterprise Roadmap")
     canvas.drawRightString(
         letter[0] - inch,
         0.45 * inch,
@@ -146,7 +146,7 @@ def build_pdf() -> Path:
     story.append(p("Launchpad Enterprise Roadmap", "title", styles))
     story.append(
         p(
-            f"Strategic features and changes to drive company adoption — {date.today():%B %d, %Y}",
+            f"Strategic features and changes to drive company adoption - {date.today():%B %d, %Y}",
             "subtitle",
             styles,
         )
@@ -160,7 +160,7 @@ def build_pdf() -> Path:
             "Launchpad already unifies ephemeral previews, multi-cloud IaC workspaces, manifest deploy, "
             "GitHub App integration, org RBAC, OIDC SSO, audit logs, cost caps, drift scanning, and "
             "Dockerfile/CI scaffolding. The gap for company adoption is enterprise trust, golden paths, "
-            "and workflow depth—not more isolated features.",
+            "and workflow depth-not more isolated features.",
             "body",
             styles,
         )
@@ -224,7 +224,7 @@ def build_pdf() -> Path:
     story.append(Spacer(1, 10))
     story.append(
         p(
-            "Without these, platform teams treat Launchpad as a dev toy—not something for 200+ engineers.",
+            "Without these, platform teams treat Launchpad as a dev toy-not something for 200+ engineers.",
             "body",
             styles,
         )
@@ -267,7 +267,7 @@ def build_pdf() -> Path:
                 "Internal DNS so api and web preview together",
                 "Preview stack from monorepo path filters",
             ],
-            "Major gap vs Okteto/Humanitec—compelling for real production-like apps.",
+            "Major gap vs Okteto/Humanitec-compelling for real production-like apps.",
         ),
         (
             "4. Promotion pipeline with approvals",
@@ -278,7 +278,7 @@ def build_pdf() -> Path:
                 "Approval UI + audit who approved",
                 "Diff of manifest/IaC between stages; rollback to known-good revision",
             ],
-            "Companies buy controlled change—not just fast deploys.",
+            "Companies buy controlled change-not just fast deploys.",
         ),
         (
             "5. FinOps that finance understands",
@@ -301,7 +301,7 @@ def build_pdf() -> Path:
                 "Required labels/annotations on all workloads",
                 "Exceptions with expiry and approver",
             ],
-            "Sell governed self-service—the phrase enterprise buyers use.",
+            "Sell governed self-service-the phrase enterprise buyers use.",
         ),
         (
             "7. Platform engineering dashboard",
@@ -312,7 +312,7 @@ def build_pdf() -> Path:
                 "Drift count by workspace",
                 "DORA-style metrics and budget leaderboard",
             ],
-            "Makes Launchpad the operational hub—not just a launch button.",
+            "Makes Launchpad the operational hub-not just a launch button.",
         ),
     ]
 
@@ -363,17 +363,17 @@ def build_pdf() -> Path:
                 ["Phase", "Timeline", "Deliverables"],
                 [
                     "Phase 1",
-                    "3–6 weeks",
+                    "3-6 weeks",
                     "PR preview URLs, auto-destroy on PR close, smoke-test gate, Slack notifications",
                 ],
                 [
                     "Phase 2",
-                    "6–10 weeks",
+                    "6-10 weeks",
                     "Service catalog + software templates, ephemeral DB/redis, cost-before-launch",
                 ],
                 [
                     "Phase 3",
-                    "10–16 weeks",
+                    "10-16 weeks",
                     "Staging/prod promotion with approvals, policy UI, org audit export",
                 ],
                 [
@@ -395,7 +395,7 @@ def build_pdf() -> Path:
                 [
                     "Backstage",
                     "Catalog, plugins",
-                    "Ship previews and infra—not just docs",
+                    "Ship previews and infra-not just docs",
                 ],
                 [
                     "Humanitec / Qovery",

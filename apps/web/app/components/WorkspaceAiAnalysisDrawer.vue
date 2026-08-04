@@ -20,7 +20,7 @@ const props = defineProps<{
   /** Single-file mode (legacy / init wizard). */
   path?: string | null
   content?: string
-  /** Multi-file / folder mode — preferred when set. */
+  /** Multi-file / folder mode - preferred when set. */
   targets?: WorkspaceAnalysisTarget[]
   /** Optional sandbox/CLI failure text for targeted AI fixes. */
   errorContext?: string | null
