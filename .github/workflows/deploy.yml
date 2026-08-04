@@ -1,47 +1,87 @@
-name: Deploy to OCI
+name: Deploy full stack
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
-  build:
+  deploy:
     runs-on: [self-hosted, macOS]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install & Build
+      - name: Verify Docker
         run: |
-          npm Install
-          npm run build
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "Docker is required. Install Docker Desktop on the self-hosted runner."
+            exit 1
+          fi
+          docker version
+          docker compose version
 
-      - name: Rename Server
+      - name: Write compose env
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
+          LAUNCHPAD_PUBLIC_ORIGIN: ${{ secrets.LAUNCHPAD_PUBLIC_ORIGIN }}
+          LAUNCHPAD_SITE_ADDRESS: ${{ secrets.LAUNCHPAD_SITE_ADDRESS }}
+          ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
+          AUTH_DEV_LOGIN_ENABLED: ${{ secrets.AUTH_DEV_LOGIN_ENABLED }}
         run: |
-          pm2 reload my-app || pm2 start npm --name launchpad -- start
-  # deploy:
-  #   runs-on: ubuntu-latest
+          set -euo pipefail
+          if [ -z "${POSTGRES_PASSWORD:-}" ] || [ -z "${JWT_SECRET:-}" ] || [ -z "${SECRETS_ENCRYPTION_KEY:-}" ]; then
+            echo "Missing required GitHub secrets: POSTGRES_PASSWORD, JWT_SECRET, SECRETS_ENCRYPTION_KEY"
+            echo "Optional: LAUNCHPAD_PUBLIC_ORIGIN, LAUNCHPAD_SITE_ADDRESS, ACME_EMAIL, AUTH_DEV_LOGIN_ENABLED"
+            exit 1
+          fi
+          cat > deploy/oci/.env <<EOF
+          POSTGRES_USER=launchpad
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_DB=launchpad
+          JWT_SECRET=${JWT_SECRET}
+          SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
+          LAUNCHPAD_PUBLIC_ORIGIN=${LAUNCHPAD_PUBLIC_ORIGIN:-http://127.0.0.1}
+          LAUNCHPAD_SITE_ADDRESS=${LAUNCHPAD_SITE_ADDRESS:-:80}
+          ACME_EMAIL=${ACME_EMAIL:-}
+          AUTH_DEV_LOGIN_ENABLED=${AUTH_DEV_LOGIN_ENABLED:-true}
+          LOG_LEVEL=INFO
+          KUBERNETES_ENABLED=false
+          DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
+          TTL_REAPER_INTERVAL_SECONDS=300
+          EOF
+          # Strip leading spaces from heredoc indentation
+          sed -i.bak 's/^[[:space:]]*//' deploy/oci/.env && rm -f deploy/oci/.env.bak
 
-  #   steps:
-  #     - name: Deploy to Oracle Cloud via SSH
-  #       uses: appleboy/ssh-action@v1.0.3
-  #       with:
-  #         host: ${{ secrets.OCI_HOST }}
-  #         username: ${{ secrets.OCI_USERNAME }}
-  #         key: ${{ secrets.OCI_SSH_KEY }}
-  #         port: 22
-  #         script: |
-  #           set -euo pipefail
-  #           if [ ! -d ~/launchpad-idp ]; then
-  #             git clone https://github.com/Bibi1989/launchpad-idp.git ~/launchpad-idp
-  #           fi
-  #           cd ~/launchpad-idp
+      - name: Build and start full stack
+        run: |
+          docker compose \
+            -f deploy/oci/docker-compose.yml \
+            --env-file deploy/oci/.env \
+            up -d --build
 
-  #           git fetch origin main
-  #           git checkout main
-  #           git reset --hard origin/main
+      - name: Show service status
+        run: |
+          docker compose \
+            -f deploy/oci/docker-compose.yml \
+            --env-file deploy/oci/.env \
+            ps
 
-  #           docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env build
-  #           docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --no-build
-  #           docker image prune -f
+      - name: Wait for API health
+        run: |
+          set -e
+          for i in $(seq 1 36); do
+            if docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env \
+              exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"; then
+              echo "API healthy"
+              exit 0
+            fi
+            echo "waiting for API ($i/36)..."
+            sleep 5
+          done
+          echo "API did not become healthy in time"
+          docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=80 api
+          exit 1
