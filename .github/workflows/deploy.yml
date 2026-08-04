@@ -6,28 +6,37 @@ on:
       - main
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Deploy to Oracle Cloud via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.OCI_HOST }}
-          username: ${{ secrets.OCI_USERNAME }}
-          key: ${{ secrets.OCI_SSH_KEY }}
-          port: 22
-          script: |
-            set -euo pipefail
-            if [ ! -d ~/launchpad-idp ]; then
-              git clone https://github.com/Bibi1989/launchpad-idp.git ~/launchpad-idp
-            fi
-            cd ~/launchpad-idp
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-            git fetch origin main
-            git checkout main
-            git reset --hard origin/main
+      - name: Build Service
+        run: |
+          echo "Building service"
+  # deploy:
+  #   runs-on: ubuntu-latest
 
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env build
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --no-build
-            docker image prune -f
+  #   steps:
+  #     - name: Deploy to Oracle Cloud via SSH
+  #       uses: appleboy/ssh-action@v1.0.3
+  #       with:
+  #         host: ${{ secrets.OCI_HOST }}
+  #         username: ${{ secrets.OCI_USERNAME }}
+  #         key: ${{ secrets.OCI_SSH_KEY }}
+  #         port: 22
+  #         script: |
+  #           set -euo pipefail
+  #           if [ ! -d ~/launchpad-idp ]; then
+  #             git clone https://github.com/Bibi1989/launchpad-idp.git ~/launchpad-idp
+  #           fi
+  #           cd ~/launchpad-idp
+
+  #           git fetch origin main
+  #           git checkout main
+  #           git reset --hard origin/main
+
+  #           docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env build
+  #           docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --no-build
+  #           docker image prune -f
