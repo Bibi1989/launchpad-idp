@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ensure ingress-nginx is installed for Cloudflare / Host-based preview URLs.
 # Expects PREVIEW_INGRESS_NODE_PORT (default 30090) to be published on the k3d server
-# (see scripts/k3s-up.sh --port HOST:NODEPORT mapping).
+# as host PREVIEW_INGRESS_HTTP_PORT (default 3080) (see scripts/k3s-up.sh).
 set -euo pipefail
 
 CONTEXT="${1:-${KUBECONFIG_CONTEXT:-k3d-launchpad}}"

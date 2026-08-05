@@ -190,8 +190,9 @@ class Settings(BaseSettings):
 
     # Optional Ingress host template when kubernetes_enabled (e.g. "{name}.localtest.me")
     preview_ingress_host_template: str | None = None
-    # IngressClass for Host-based preview URLs (ingress-nginx installed by k3s-up).
     preview_ingress_class: str = "nginx"
+    # Host port published by k3d for ingress-nginx HTTP (Cloudflare → this port).
+    preview_ingress_http_port: int = 3080
 
     # Cloudflare Tunnel (homelab prod): public HTTPS/443 is routed straight to the
     # in-cluster Ingress controller, so preview URLs must be host-only (no NodePort)

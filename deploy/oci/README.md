@@ -152,10 +152,15 @@ Open-app NodePorts use host ports `30080-30089` (created by k3d on the Docker ho
 
 1. Recreate the cluster once so port 3080 is mapped: `k3d cluster delete launchpad` then Launch / `scripts/k3s-up.sh`
 2. In `deploy/oci/.env`: `USE_CLOUDFLARE_TUNNEL=true`, `PREVIEW_BASE_DOMAIN=launchpad-idp.online`
-3. Cloudflare Tunnel public hostnames:
+3. Cloudflare Tunnel public hostnames (cloudflared **in Docker** on this same host):
    - `launchpad-idp.online` → `http://caddy:80`
    - `*.launchpad-idp.online` → `http://host.docker.internal:3080`
+   - Spelling: **`host.docker.internal`** (not `docker.host.internal`)
+   - On Linux, give the cloudflared container `extra_hosts: ["host.docker.internal:host-gateway"]`
 4. DNS: wildcard `*` (or `*.preview`) CNAME to the same tunnel (Proxied)
+
+Do **not** point `*` at Caddy or at NodePort `30080`.
+
 
 ## Troubleshooting
 

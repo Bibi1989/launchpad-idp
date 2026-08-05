@@ -91,9 +91,11 @@ else
     cluster create "${CLUSTER_NAME}"
     --servers 1
     --port "${PORT_MIN}-${PORT_MAX}:${PORT_MIN}-${PORT_MAX}@server:0"
+    # Cloudflare Tunnel Host-based previews: host :3080 → ingress-nginx NodePort 30090.
     --port "${INGRESS_HTTP_PORT}:${INGRESS_NODE_PORT}@server:0"
     # Match the kind engine: no bundled Traefik. Launchpad installs ingress-nginx
     # via scripts/ensure-ingress-nginx.sh for Host-based preview URLs.
+
     --k3s-arg "--disable=traefik@server:0"
     --wait
     --timeout 150s
@@ -147,9 +149,10 @@ kubectl cluster-info --context "${CONTEXT}"
 
 # Ingress controller for Host-based preview URLs (Cloudflare *.domain → :3080).
 if [[ "${SKIP_INGRESS_NGINX:-0}" != "1" ]]; then
-  if ! bash "${SCRIPT_DIR}/ensure-ingress-nginx.sh" "${CONTEXT}"; then
-    echo "Warning: ingress-nginx install failed (Host-based preview URLs may not work)." >&2
-  fi
+  echo "Ensuring ingress-nginx (NodePort ${INGRESS_NODE_PORT} ← host ${INGRESS_HTTP_PORT})…"
+  PREVIEW_INGRESS_NODE_PORT="${INGRESS_NODE_PORT}" \
+    bash "${SCRIPT_DIR}/ensure-ingress-nginx.sh" "${CONTEXT}" \
+    || echo "Warning: ingress-nginx install failed (Host-based preview URLs may not work)." >&2
   # Existing clusters created before ingress port mapping need a recreate.
   SERVER_CONTAINER="k3d-${CLUSTER_NAME}-server-0"
   if docker ps --format '{{.Names}}' | grep -qx "${SERVER_CONTAINER}"; then
@@ -164,6 +167,7 @@ if [[ "${SKIP_INGRESS_NGINX:-0}" != "1" ]]; then
     fi
   fi
 fi
+
 
 # Prefetch workload image (best-effort; multi-arch digests often fail on Apple Silicon).
 if [[ "${PRELOAD_IMAGE}" != "0" ]]; then
@@ -197,9 +201,11 @@ Enable real Kubernetes provisioning in apps/api/.env (or deploy/oci/.env):
   PREVIEW_BASE_DOMAIN=launchpad-idp.online
   PROVISION_STEP_DELAY_SECONDS=0
 
-Cloudflare Tunnel public hostnames:
+Cloudflare Tunnel public hostnames (cloudflared in Docker on this host):
   launchpad-idp.online          → http://caddy:80
   *.launchpad-idp.online        → http://host.docker.internal:${INGRESS_HTTP_PORT}
+  (spelling: host.docker.internal, not docker.host.internal; not :30080 NodePorts)
+
 
 Then restart the API and Celery worker.
 
