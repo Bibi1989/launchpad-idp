@@ -19,6 +19,8 @@ jobs:
   deploy-oci:
     if: ${{ github.event_name == 'push' || inputs.target == 'oci' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Require SSH deploy secrets
         env:
@@ -56,13 +58,14 @@ jobs:
           KUBERNETES_ENABLED: ${{ secrets.KUBERNETES_ENABLED }}
           REPO_URL: ${{ secrets.LAUNCHPAD_REPO_URL }}
           OCI_HOST: ${{ secrets.OCI_HOST }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.OCI_HOST }}
           username: ${{ secrets.OCI_USERNAME }}
           key: ${{ secrets.OCI_SSH_KEY }}
           port: 22
           command_timeout: 45m
-          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,AUTH_DEV_LOGIN_ENABLED,USE_CLOUDFLARE_TUNNEL,PREVIEW_BASE_DOMAIN,PREVIEW_TUNNEL_MODE,CADDY_HTTP_PORT,CADDY_HTTPS_PORT,KUBERNETES_ENABLED,REPO_URL,OCI_HOST
+          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,AUTH_DEV_LOGIN_ENABLED,USE_CLOUDFLARE_TUNNEL,PREVIEW_BASE_DOMAIN,PREVIEW_TUNNEL_MODE,CADDY_HTTP_PORT,CADDY_HTTPS_PORT,KUBERNETES_ENABLED,REPO_URL,OCI_HOST,GH_TOKEN
           script: |
             set -euo pipefail
             APP_DIR="${HOME}/launchpad-idp"
@@ -176,14 +179,31 @@ jobs:
               cp -a "$EXISTING_ENV" /tmp/launchpad-oci.env.bak
             fi
 
+            # Private repos need auth for git over HTTPS (otherwise git prompts for a
+            # username and dies with "could not read Username ... exit 128"). Use the
+            # workflow's short-lived GITHUB_TOKEN via a tokenized URL, then scrub it
+            # from .git/config so no credential is persisted on the server. Falls back
+            # to the plain URL when no token is present (public repo).
+            AUTH_REPO="$REPO"
+            case "$REPO" in
+              http://*|https://*)
+                if [ -n "${GH_TOKEN:-}" ]; then
+                  AUTH_REPO="https://x-access-token:${GH_TOKEN}@${REPO#http*://}"
+                fi
+                ;;
+            esac
+
             if [ ! -d "$APP_DIR/.git" ]; then
-              git clone "$REPO" "$APP_DIR"
+              git clone "$AUTH_REPO" "$APP_DIR"
             fi
             cd "$APP_DIR"
             git config --global --add safe.directory "$APP_DIR" || true
+            git remote set-url origin "$AUTH_REPO"
             git fetch origin main
             git checkout main
             git reset --hard origin/main
+            # Leave the clean (token-free) URL persisted as origin.
+            git remote set-url origin "$REPO"
 
             mkdir -p deploy/oci
             umask 077
