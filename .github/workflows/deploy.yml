@@ -60,13 +60,17 @@ jobs:
           REPO_URL: ${{ secrets.LAUNCHPAD_REPO_URL }}
           OCI_HOST: ${{ secrets.OCI_HOST }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_APP_SLUG: ${{ secrets.GH_APP_SLUG }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         with:
           host: ${{ secrets.OCI_HOST }}
           username: ${{ secrets.OCI_USERNAME }}
           key: ${{ secrets.OCI_SSH_KEY }}
           port: 22
           command_timeout: 45m
-          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,AUTH_DEV_LOGIN_ENABLED,USE_CLOUDFLARE_TUNNEL,PREVIEW_BASE_DOMAIN,PREVIEW_TUNNEL_MODE,CADDY_HTTP_PORT,CADDY_HTTPS_PORT,KUBERNETES_ENABLED,REPO_URL,OCI_HOST,GH_TOKEN
+          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,AUTH_DEV_LOGIN_ENABLED,USE_CLOUDFLARE_TUNNEL,PREVIEW_BASE_DOMAIN,PREVIEW_TUNNEL_MODE,CADDY_HTTP_PORT,CADDY_HTTPS_PORT,KUBERNETES_ENABLED,REPO_URL,OCI_HOST,GH_TOKEN,GITHUB_APP_ID,GITHUB_APP_PRIVATE_KEY,GITHUB_APP_SLUG,WEBHOOK_SECRET
           script: |
             set -euo pipefail
             APP_DIR="${HOME}/launchpad-idp"
@@ -175,6 +179,24 @@ jobs:
             DEV_LOGIN="${AUTH_DEV_LOGIN_ENABLED:-$(env_get AUTH_DEV_LOGIN_ENABLED "${EXISTING_ENV}")}"
             DEV_LOGIN="${DEV_LOGIN:-false}"
 
+            # GitHub App credentials for "GitHub Connect". Prefer the GitHub Actions
+            # secret; otherwise reuse the value already on the server so it survives a
+            # redeploy. The private key is stored as single-line base64 (a compose .env
+            # cannot hold a multiline value); the API base64-decodes it. A raw PEM
+            # (multiline or with \n escapes) or an already-base64 value are both accepted.
+            GH_APP_ID_V="${GITHUB_APP_ID:-$(env_get GITHUB_APP_ID "${EXISTING_ENV}")}"
+            GH_APP_SLUG_V="${GITHUB_APP_SLUG:-$(env_get GITHUB_APP_SLUG "${EXISTING_ENV}")}"
+            WEBHOOK_SECRET_V="${WEBHOOK_SECRET:-$(env_get WEBHOOK_SECRET "${EXISTING_ENV}")}"
+            if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then
+              if printf '%s' "$GITHUB_APP_PRIVATE_KEY" | grep -q "BEGIN"; then
+                GH_APP_KEY_V="$(printf '%b' "$GITHUB_APP_PRIVATE_KEY" | base64 | tr -d '\n')"
+              else
+                GH_APP_KEY_V="$GITHUB_APP_PRIVATE_KEY"
+              fi
+            else
+              GH_APP_KEY_V="$(env_get GITHUB_APP_PRIVATE_KEY "${EXISTING_ENV}")"
+            fi
+
             # Preserve .env across reset (file is gitignored; still back it up).
             if [ -n "$EXISTING_ENV" ]; then
               cp -a "$EXISTING_ENV" /tmp/launchpad-oci.env.bak
@@ -234,6 +256,10 @@ jobs:
             K3D_API_BIND_HOST=0.0.0.0
             DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
             TTL_REAPER_INTERVAL_SECONDS=300
+            GITHUB_APP_ID=${GH_APP_ID_V}
+            GITHUB_APP_PRIVATE_KEY=${GH_APP_KEY_V}
+            GITHUB_APP_SLUG=${GH_APP_SLUG_V}
+            WEBHOOK_SECRET=${WEBHOOK_SECRET_V}
             EOF
             sed -i 's/^[[:space:]]*//' deploy/oci/.env
 
@@ -354,6 +380,10 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_APP_SLUG: ${{ secrets.GH_APP_SLUG }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
           # actions/checkout wipes the workspace each run, so persist secrets OUTSIDE it.
@@ -373,6 +403,22 @@ jobs:
           if is_placeholder "$POSTGRES_PASSWORD"; then POSTGRES_PASSWORD="$(gen_secret)"; fi
           if is_placeholder "$JWT_SECRET"; then JWT_SECRET="$(gen_secret)"; fi
           if is_placeholder "$SECRETS_ENCRYPTION_KEY"; then SECRETS_ENCRYPTION_KEY="$(gen_secret)"; fi
+
+          # GitHub App credentials for "GitHub Connect". Prefer the GitHub Actions
+          # secret; else reuse the persisted value. Private key stored as single-line
+          # base64 (a compose .env cannot hold multiline); the API base64-decodes it.
+          GH_APP_ID_V="${GITHUB_APP_ID:-$(env_get GITHUB_APP_ID "$STABLE_ENV")}"
+          GH_APP_SLUG_V="${GITHUB_APP_SLUG:-$(env_get GITHUB_APP_SLUG "$STABLE_ENV")}"
+          WEBHOOK_SECRET_V="${WEBHOOK_SECRET:-$(env_get WEBHOOK_SECRET "$STABLE_ENV")}"
+          if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then
+            if printf '%s' "$GITHUB_APP_PRIVATE_KEY" | grep -q "BEGIN"; then
+              GH_APP_KEY_V="$(printf '%b' "$GITHUB_APP_PRIVATE_KEY" | base64 | tr -d '\n')"
+            else
+              GH_APP_KEY_V="$GITHUB_APP_PRIVATE_KEY"
+            fi
+          else
+            GH_APP_KEY_V="$(env_get GITHUB_APP_PRIVATE_KEY "$STABLE_ENV")"
+          fi
 
           umask 077
           cat > "$STABLE_ENV" <<EOF
@@ -401,6 +447,10 @@ jobs:
           K3D_API_BIND_HOST=0.0.0.0
           DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
           TTL_REAPER_INTERVAL_SECONDS=300
+          GITHUB_APP_ID=${GH_APP_ID_V}
+          GITHUB_APP_PRIVATE_KEY=${GH_APP_KEY_V}
+          GITHUB_APP_SLUG=${GH_APP_SLUG_V}
+          WEBHOOK_SECRET=${WEBHOOK_SECRET_V}
           EOF
           sed -i.bak 's/^[[:space:]]*//' "$STABLE_ENV" && rm -f "$STABLE_ENV.bak"
           # Hand the stable env-file path to later steps.
