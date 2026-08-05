@@ -70,7 +70,6 @@ jobs:
           PREVIEW_INGRESS_TCP_PORT: ${{ secrets.PREVIEW_INGRESS_TCP_PORT }}
           PREVIEW_INGRESS_UDP_PORT: ${{ secrets.PREVIEW_INGRESS_UDP_PORT }}
           PREVIEW_INGRESS_TLS_PORT: ${{ secrets.PREVIEW_INGRESS_TLS_PORT }}
-          PREVIEW_INGRESS_TLS_PORT: ${{ secrets.PREVIEW_INGRESS_TLS_PORT }}
         with:
           host: ${{ secrets.OCI_HOST }}
           username: ${{ secrets.OCI_USERNAME }}
