@@ -108,6 +108,7 @@ jobs:
           TTL_REAPER_INTERVAL_SECONDS=300
           USE_CLOUDFLARE_TUNNEL=true
           ENVIRONMENT=production
+          PREVIEW_BASE_DOMAIN=launchpad-idp.online
           EOF
           sed -i.bak 's/^[[:space:]]*//' deploy/oci/.env && rm -f deploy/oci/.env.bak
 
