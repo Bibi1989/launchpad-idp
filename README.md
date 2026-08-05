@@ -50,11 +50,13 @@ With `KUBERNETES_ENABLED=false`, Local still runs the UI in simulate mode (porta
 
 Disable auto kind management with `KIND_AUTO_MANAGE=false` in `apps/api/.env` if you prefer to run `make kind-up` / `make kind-down` yourself.
 
-## Deploy on Oracle Cloud (Always Free)
+## Deploy on Oracle Cloud / homelab
 
-Production-ish Compose + Caddy pack for an Ampere A1 VM (control plane only; K8s previews off by default):
+Production-ish Compose + Caddy. Push to `main` SSHs to the host in `OCI_HOST` and runs `docker compose up -d --build`.
 
 → **[deploy/oci/README.md](deploy/oci/README.md)** - `cp deploy/oci/env.example deploy/oci/.env` then `make oci-up`
+
+Required GitHub Actions secrets for remote deploy: `OCI_HOST`, `OCI_USERNAME`, `OCI_SSH_KEY`, `POSTGRES_PASSWORD`, `JWT_SECRET`, `SECRETS_ENCRYPTION_KEY`. Optional: `LAUNCHPAD_PUBLIC_ORIGIN` (e.g. `https://launchpad-idp.online`), `CADDY_HTTP_PORT` (default `8080`).
 
 ## Local quick start
 

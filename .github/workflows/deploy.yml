@@ -10,14 +10,141 @@ on:
         description: Where to deploy
         type: choice
         options:
-          - local-mac
           - oci
-        default: local-mac
+          - local-mac
+        default: oci
 
 jobs:
-  # Default for now: full stack on the Mac self-hosted runner (Docker Desktop).
+  # Push to main (and manual target=oci): SSH to the homelab/server and recreate Compose.
+  deploy-oci:
+    if: ${{ github.event_name == 'push' || inputs.target == 'oci' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require remote deploy secrets
+        env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+          OCI_USERNAME: ${{ secrets.OCI_USERNAME }}
+          OCI_SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
+        run: |
+          missing=0
+          for v in OCI_HOST OCI_USERNAME OCI_SSH_KEY POSTGRES_PASSWORD JWT_SECRET SECRETS_ENCRYPTION_KEY; do
+            if [ -z "${!v}" ]; then
+              echo "Missing secret: $v"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Homelab deploy needs those GitHub Actions secrets."
+            echo "For Mac-only deploys: Actions → Run workflow → target=local-mac."
+            exit 1
+          fi
+
+      - name: Deploy over SSH (git pull + compose up)
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
+          LAUNCHPAD_PUBLIC_ORIGIN: ${{ secrets.LAUNCHPAD_PUBLIC_ORIGIN }}
+          LAUNCHPAD_SITE_ADDRESS: ${{ secrets.LAUNCHPAD_SITE_ADDRESS }}
+          AUTH_DEV_LOGIN_ENABLED: ${{ secrets.AUTH_DEV_LOGIN_ENABLED }}
+          USE_CLOUDFLARE_TUNNEL: ${{ secrets.USE_CLOUDFLARE_TUNNEL }}
+          PREVIEW_BASE_DOMAIN: ${{ secrets.PREVIEW_BASE_DOMAIN }}
+          PREVIEW_TUNNEL_MODE: ${{ secrets.PREVIEW_TUNNEL_MODE }}
+          CADDY_HTTP_PORT: ${{ secrets.CADDY_HTTP_PORT }}
+          CADDY_HTTPS_PORT: ${{ secrets.CADDY_HTTPS_PORT }}
+          KUBERNETES_ENABLED: ${{ secrets.KUBERNETES_ENABLED }}
+          REPO_URL: ${{ secrets.LAUNCHPAD_REPO_URL }}
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USERNAME }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          port: 22
+          command_timeout: 45m
+          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,AUTH_DEV_LOGIN_ENABLED,USE_CLOUDFLARE_TUNNEL,PREVIEW_BASE_DOMAIN,PREVIEW_TUNNEL_MODE,CADDY_HTTP_PORT,CADDY_HTTPS_PORT,KUBERNETES_ENABLED,REPO_URL,OCI_HOST
+          script: |
+            set -euo pipefail
+            APP_DIR="${HOME}/launchpad-idp"
+            REPO="${REPO_URL:-https://github.com/Bibi1989/launchpad-idp.git}"
+
+            # Cloudflare Tunnel: Caddy stays on :80 inside Docker; host maps 8080 for local checks.
+            PUBLIC_ORIGIN="${LAUNCHPAD_PUBLIC_ORIGIN:-https://launchpad-idp.online}"
+            SITE_ADDRESS="${LAUNCHPAD_SITE_ADDRESS:-:80}"
+            case "$SITE_ADDRESS" in
+              http://*|https://*|localhost|localhost:*|"") SITE_ADDRESS=":80" ;;
+            esac
+            HTTP_PORT="${CADDY_HTTP_PORT:-8080}"
+            HTTPS_PORT="${CADDY_HTTPS_PORT:-8443}"
+            CF_TUNNEL="${USE_CLOUDFLARE_TUNNEL:-true}"
+            PREVIEW_DOMAIN="${PREVIEW_BASE_DOMAIN:-launchpad-idp.online}"
+            PREVIEW_MODE="${PREVIEW_TUNNEL_MODE:-off}"
+            K8S_ENABLED="${KUBERNETES_ENABLED:-true}"
+            DEV_LOGIN="${AUTH_DEV_LOGIN_ENABLED:-false}"
+
+            if [ ! -d "$APP_DIR/.git" ]; then
+              git clone "$REPO" "$APP_DIR"
+            fi
+            cd "$APP_DIR"
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+
+            mkdir -p deploy/oci
+            umask 077
+            cat > deploy/oci/.env <<EOF
+            POSTGRES_USER=launchpad
+            POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            POSTGRES_DB=launchpad
+            JWT_SECRET=${JWT_SECRET}
+            SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
+            LAUNCHPAD_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
+            LAUNCHPAD_SITE_ADDRESS=${SITE_ADDRESS}
+            CADDY_HTTP_PORT=${HTTP_PORT}
+            CADDY_HTTPS_PORT=${HTTPS_PORT}
+            AUTH_DEV_LOGIN_ENABLED=${DEV_LOGIN}
+            USE_CLOUDFLARE_TUNNEL=${CF_TUNNEL}
+            ENVIRONMENT=production
+            PREVIEW_BASE_DOMAIN=${PREVIEW_DOMAIN}
+            PREVIEW_TUNNEL_MODE=${PREVIEW_MODE}
+            LOG_LEVEL=INFO
+            KUBERNETES_ENABLED=${K8S_ENABLED}
+            LOCAL_K8S_ENGINE=k3s
+            KIND_AUTO_MANAGE=true
+            KIND_CLUSTER_NAME=launchpad
+            DOCKER_SOCK=/var/run/docker.sock
+            K3D_API_HOST=host.docker.internal
+            K3D_API_PORT=6445
+            K3D_API_BIND_HOST=0.0.0.0
+            DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
+            TTL_REAPER_INTERVAL_SECONDS=300
+            EOF
+            sed -i 's/^[[:space:]]*//' deploy/oci/.env
+
+            chmod +x deploy/oci/caddy-entrypoint.sh || true
+            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build
+            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env ps
+            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=40 caddy
+
+            # Optional health check inside the api container
+            for i in $(seq 1 36); do
+              if docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env \
+                exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"; then
+                echo "API healthy"
+                exit 0
+              fi
+              echo "waiting for API ($i/36)..."
+              sleep 5
+            done
+            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=80 api
+            exit 1
+
+  # Manual only: full stack on a Mac self-hosted runner (Docker Desktop).
   deploy-local-mac:
-    if: ${{ github.event_name == 'push' || inputs.target == 'local-mac' }}
+    if: ${{ inputs.target == 'local-mac' }}
     runs-on: [self-hosted, macOS]
     steps:
       - name: Checkout Code
@@ -54,15 +181,7 @@ jobs:
           fi
 
           if ! docker info >/dev/null 2>&1; then
-            echo ""
-            echo "Still cannot reach the Docker daemon."
-            echo "1. Open Docker Desktop on this Mac and wait until it says Running"
-            echo "2. In a terminal run: docker info"
-            echo "3. Re-run this workflow"
-            echo ""
-            echo "Note: if the Actions runner runs as a LaunchAgent/service user,"
-            echo "it may not see your GUI Docker Desktop. Run the runner in a"
-            echo "normal Terminal session after Docker Desktop is up."
+            echo "Still cannot reach the Docker daemon on this Mac runner."
             exit 1
           fi
 
@@ -75,12 +194,9 @@ jobs:
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
           LAUNCHPAD_PUBLIC_ORIGIN: ${{ secrets.LAUNCHPAD_PUBLIC_ORIGIN }}
-          LAUNCHPAD_SITE_ADDRESS: ${{ secrets.LAUNCHPAD_SITE_ADDRESS }}
-          ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
           AUTH_DEV_LOGIN_ENABLED: ${{ secrets.AUTH_DEV_LOGIN_ENABLED }}
         run: |
           set -euo pipefail
-          # Local defaults so you can run without OCI secrets.
           POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-launchpad-local-db}"
           JWT_SECRET="${JWT_SECRET:-launchpad-local-jwt-change-me}"
           SECRETS_ENCRYPTION_KEY="${SECRETS_ENCRYPTION_KEY:-launchpad-local-secrets-key-32b}"
@@ -91,11 +207,12 @@ jobs:
           JWT_SECRET=${JWT_SECRET}
           SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
           LAUNCHPAD_PUBLIC_ORIGIN=${LAUNCHPAD_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
-          LAUNCHPAD_SITE_ADDRESS=${LAUNCHPAD_SITE_ADDRESS:-:80}
-          # Avoid macOS AirPlay / other services binding host :80
-          CADDY_HTTP_PORT=${CADDY_HTTP_PORT:-8080}
-          CADDY_HTTPS_PORT=${CADDY_HTTPS_PORT:-8443}
+          LAUNCHPAD_SITE_ADDRESS=:80
+          CADDY_HTTP_PORT=8080
+          CADDY_HTTPS_PORT=8443
           AUTH_DEV_LOGIN_ENABLED=${AUTH_DEV_LOGIN_ENABLED:-true}
+          USE_CLOUDFLARE_TUNNEL=false
+          ENVIRONMENT=development
           LOG_LEVEL=INFO
           KUBERNETES_ENABLED=true
           LOCAL_K8S_ENGINE=k3s
@@ -104,14 +221,9 @@ jobs:
           DOCKER_SOCK=/var/run/docker.sock
           K3D_API_HOST=host.docker.internal
           K3D_API_PORT=6445
+          K3D_API_BIND_HOST=0.0.0.0
           DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
           TTL_REAPER_INTERVAL_SECONDS=300
-          # USE_CLOUDFLARE_TUNNEL=true
-          ENVIRONMENT=production
-          PREVIEW_BASE_DOMAIN=launchpad-idp.online
-          LAUNCHPAD_SITE_ADDRESS=launchpad-idp.online
-          LAUNCHPAD_PUBLIC_ORIGIN=https://launchpad-idp.online
-          ACME_EMAIL=your-email@example.com
           EOF
           sed -i.bak 's/^[[:space:]]*//' deploy/oci/.env && rm -f deploy/oci/.env.bak
 
@@ -144,92 +256,3 @@ jobs:
           done
           docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=80 api
           exit 1
-
-  # Later: set OCI_HOST / OCI_USERNAME / OCI_SSH_KEY and choose target=oci
-  deploy-oci:
-    if: ${{ inputs.target == 'oci' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require OCI deploy secrets
-        env:
-          OCI_HOST: ${{ secrets.OCI_HOST }}
-          OCI_USERNAME: ${{ secrets.OCI_USERNAME }}
-          OCI_SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
-        run: |
-          missing=0
-          for v in OCI_HOST OCI_USERNAME OCI_SSH_KEY POSTGRES_PASSWORD JWT_SECRET SECRETS_ENCRYPTION_KEY; do
-            if [ -z "${!v}" ]; then
-              echo "Missing secret: $v"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "OCI deploy needs those GitHub Actions secrets."
-            echo "Until then use target=local-mac (default on push)."
-            exit 1
-          fi
-
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
-          LAUNCHPAD_PUBLIC_ORIGIN: ${{ secrets.LAUNCHPAD_PUBLIC_ORIGIN }}
-          LAUNCHPAD_SITE_ADDRESS: ${{ secrets.LAUNCHPAD_SITE_ADDRESS }}
-          ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
-          AUTH_DEV_LOGIN_ENABLED: ${{ secrets.AUTH_DEV_LOGIN_ENABLED }}
-          REPO_URL: ${{ secrets.LAUNCHPAD_REPO_URL }}
-          OCI_HOST: ${{ secrets.OCI_HOST }}
-        with:
-          host: ${{ secrets.OCI_HOST }}
-          username: ${{ secrets.OCI_USERNAME }}
-          key: ${{ secrets.OCI_SSH_KEY }}
-          port: 22
-          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,ACME_EMAIL,AUTH_DEV_LOGIN_ENABLED,REPO_URL,OCI_HOST
-          script: |
-            set -euo pipefail
-            APP_DIR="${HOME}/launchpad-idp"
-            REPO="${REPO_URL:-https://github.com/Bibi1989/launchpad-idp.git}"
-            PUBLIC_ORIGIN="${LAUNCHPAD_PUBLIC_ORIGIN:-http://${OCI_HOST}}"
-            # Site address must be :80 or a DNS hostname - never http:// or a bare IP.
-            SITE_ADDRESS="${LAUNCHPAD_SITE_ADDRESS:-:80}"
-            case "$SITE_ADDRESS" in
-              http://*|https://*|"") SITE_ADDRESS=":80" ;;
-            esac
-
-            if [ ! -d "$APP_DIR/.git" ]; then
-              git clone "$REPO" "$APP_DIR"
-            fi
-            cd "$APP_DIR"
-            git fetch origin main
-            git checkout main
-            git reset --hard origin/main
-
-            mkdir -p deploy/oci
-            umask 077
-            cat > deploy/oci/.env <<EOF
-            POSTGRES_USER=launchpad
-            POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-            POSTGRES_DB=launchpad
-            JWT_SECRET=${JWT_SECRET}
-            SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
-            LAUNCHPAD_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
-            LAUNCHPAD_SITE_ADDRESS=${SITE_ADDRESS}
-            CADDY_HTTP_PORT=80
-            CADDY_HTTPS_PORT=443
-            AUTH_DEV_LOGIN_ENABLED=${AUTH_DEV_LOGIN_ENABLED:-false}
-            LOG_LEVEL=INFO
-            KUBERNETES_ENABLED=false
-            DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
-            TTL_REAPER_INTERVAL_SECONDS=300
-            EOF
-            sed -i 's/^[[:space:]]*//' deploy/oci/.env
-
-            chmod +x deploy/oci/caddy-entrypoint.sh || true
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env ps
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=40 caddy
