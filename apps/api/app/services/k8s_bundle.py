@@ -53,25 +53,19 @@ INGRESS_NGINX_VALUES = K8S_ADDONS_ROOT / "ingress-nginx-values.yaml"
 class WorkloadImageSpec:
     """Describes the container image + runtime shape the workload manifests deploy.
 
-    The default value reproduces the historical Nginx placeholder exactly so
-    manifests generated without a scaffolded application are byte-for-byte
-    unchanged. When Launchpad scaffolds a runnable mini-application it passes a
-    populated spec so the Deployment/Pod deploy the built image (with correct
-    port, health-probe paths, non-root UID, and writable mounts) instead of the
-    generic Nginx container.
+    Callers that scaffold a runnable app must pass an explicit image. There is no
+    nginx placeholder default anymore.
     """
 
-    image: str = "nginx:1.27-alpine"
+    image: str = "app:latest"
     image_pull_policy: str = "IfNotPresent"
-    container_port: int = 80
+    container_port: int = 8080
     liveness_path: str = "/"
     readiness_path: str = "/"
-    run_as_user: int = 101
-    read_only_root_fs: bool = True
+    run_as_user: int = 1000
+    read_only_root_fs: bool = False
     writable_mounts: tuple[tuple[str, str], ...] = (
         ("tmp", "/tmp"),
-        ("cache", "/var/cache/nginx"),
-        ("run", "/var/run"),
     )
     app_version: str = "1.0.0"
     replicas: int = 2

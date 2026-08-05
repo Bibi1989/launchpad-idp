@@ -146,6 +146,17 @@ Requirements on the **host**:
 
 Open-app NodePorts use host ports `30080-30089` (created by k3d on the Docker host).
 
+#### Host-based previews (Cloudflare `ws-*.yourdomain`)
+
+`scripts/k3s-up.sh` publishes ingress HTTP on host port **3080** (NodePort 30090) and installs **ingress-nginx**.
+
+1. Recreate the cluster once so port 3080 is mapped: `k3d cluster delete launchpad` then Launch / `scripts/k3s-up.sh`
+2. In `deploy/oci/.env`: `USE_CLOUDFLARE_TUNNEL=true`, `PREVIEW_BASE_DOMAIN=launchpad-idp.online`
+3. Cloudflare Tunnel public hostnames:
+   - `launchpad-idp.online` → `http://caddy:80`
+   - `*.launchpad-idp.online` → `http://host.docker.internal:3080`
+4. DNS: wildcard `*` (or `*.preview`) CNAME to the same tunnel (Proxied)
+
 ## Troubleshooting
 
 - **Out of capacity** creating A1: try another region or availability domain.

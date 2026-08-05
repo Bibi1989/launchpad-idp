@@ -405,16 +405,82 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
     return loaded
 
 
+def workspace_has_application_source(workspace_root: Path) -> bool:
+    """True when the workspace still has app source (not only a hollow nginx scaffold)."""
+    root = Path(workspace_root)
+    if not root.is_dir():
+        return False
+    markers = (
+        root / "Dockerfile",
+        root / "package.json",
+        root / "pyproject.toml",
+        root / "requirements.txt",
+        root / "go.mod",
+        root / "Cargo.toml",
+        root / ".launchpad" / "image-builds.json",
+        root / ".launchpad" / "detected-stack.json",
+        root / ".launchpad" / "detection.json",
+    )
+    if any(path.is_file() for path in markers):
+        return True
+    for sub in ("apps", "packages", "services", "dockers"):
+        base = root / sub
+        if not base.is_dir():
+            continue
+        if any(base.rglob("Dockerfile")) or any(base.rglob("package.json")):
+            return True
+    return False
+
+
+def workspace_is_nginx_scaffold_only(
+    workspace_root: Path,
+    *,
+    default_image: str = "",
+) -> bool:
+    """Detect empty / wiped workspaces that only ship a leftover nginx Deployment."""
+    if workspace_has_application_source(workspace_root):
+        return False
+    if not workspace_has_deployable_k8s(workspace_root):
+        return True
+    try:
+        docs = load_workspace_manifest_documents(workspace_root)
+    except Exception:
+        return True
+    images: list[str] = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        if str(doc.get("kind") or "").lower() != "deployment":
+            continue
+        image = _deployment_container_image(doc)
+        if image:
+            images.append(image.strip())
+    if not images:
+        return True
+    default = (default_image or "").strip().lower()
+    return all(
+        (default and img.lower() == default)
+        or img.lower().startswith("nginx:")
+        for img in images
+    )
+
+
 def ensure_workspace_k8s_manifests(
     workspace_root: Path,
     image: str | None = None,
 ) -> None:
     if workspace_has_deployable_k8s(workspace_root):
         return
+    if not workspace_has_application_source(workspace_root):
+        raise FileNotFoundError(
+            "Workspace has no application source (Dockerfile, package.json, or "
+            ".launchpad metadata). Re-import the repository or restore workspace "
+            f"files before Launch. root={workspace_root}"
+        )
     manifest_dir = workspace_root / K8S_MANIFESTS_DIR
     manifest_dir.mkdir(parents=True, exist_ok=True)
     target_image = (image or "").strip()
-    if not target_image:
+    if not target_image or target_image.startswith("nginx:"):
         target_image = "app:latest"
     deployment_yaml = f"""apiVersion: apps/v1
 kind: Deployment
@@ -1003,6 +1069,7 @@ def patch_manifest_documents(
         if _is_launch_workload(doc):
             meta_labels = metadata.setdefault("labels", {})
             meta_labels.update(labels)
+            _stamp_launch_workload_pod_labels(doc, labels)
             _pin_local_image_pull_policy(doc)
             patched.append(doc)
             continue
@@ -1063,6 +1130,28 @@ def _is_datastore_workload(doc: dict[str, Any]) -> bool:
     return str(labels.get("launchpad.io/component") or "").lower() == "datastore"
 
 
+def _stamp_launch_workload_pod_labels(doc: dict[str, Any], labels: dict[str, str]) -> None:
+    """Copy governance labels onto launch-* pod templates so preview Services match.
+
+    The synthetic NodePort Service ``app`` (and Host-based Ingress behind it) selects
+    ``app=<workload>`` plus ``launchpad.io/managed-by=launchpad-idp``. Generator
+    manifests only set ``app`` on the pod template - without this stamp the Service
+    has zero endpoints and ingress-nginx serves its default nginx backend.
+    """
+    if str(doc.get("kind") or "") != "Deployment":
+        return
+    template = (doc.get("spec") or {}).setdefault("template", {})
+    tmpl_meta = template.setdefault("metadata", {})
+    pod_labels = tmpl_meta.setdefault("labels", {})
+    if not isinstance(pod_labels, dict):
+        pod_labels = {}
+        tmpl_meta["labels"] = pod_labels
+    # Keep the stack's app label; add Launchpad governance labels for selectors.
+    for key, value in labels.items():
+        pod_labels.setdefault(key, value)
+    pod_labels.setdefault("launchpad.io/managed-by", "launchpad-idp")
+
+
 def _is_launch_workload(doc: dict[str, Any]) -> bool:
     """Return True for a per-stack ``launch-*`` Deployment/Service.
 
@@ -1098,6 +1187,36 @@ def _pin_local_image_pull_policy(doc: dict[str, Any]) -> None:
 def _has_preview_target_annotation(doc: dict[str, Any]) -> bool:
     ann = (doc.get("metadata") or {}).get("annotations") or {}
     return str(ann.get("launchpad.io/preview-target") or "").lower() == "true"
+
+
+def _resolve_preview_ingress_backend(
+    documents: list[dict[str, Any]],
+    *,
+    preview_app_label: str,
+    listen_port: int,
+) -> tuple[str, int]:
+    """Return (service_name, service_port) for Host-based Ingress.
+
+    Prefer the generated ``{label}-service`` ClusterIP (correct port for launch-*
+    stacks). Fall back to the synthetic NodePort Service ``app`` on port 80.
+    """
+    wanted = f"{preview_app_label}-service"
+    for doc in documents:
+        if not isinstance(doc, dict) or doc.get("kind") != "Service":
+            continue
+        name = str((doc.get("metadata") or {}).get("name") or "").strip()
+        if name != wanted:
+            continue
+        ports = (doc.get("spec") or {}).get("ports") or []
+        if ports and isinstance(ports[0], dict):
+            raw = ports[0].get("port")
+            try:
+                port = int(raw)
+            except (TypeError, ValueError):
+                port = listen_port
+            return name, port if port > 0 else listen_port
+        return name, listen_port
+    return APP_NAME, 80
 
 
 def _resolve_preview_target(documents: list[dict[str, Any]]) -> tuple[str, int]:
@@ -1187,20 +1306,23 @@ def _patch_deployment(
     existing_image = str(container.get("image") or "").strip()
     provided_image = (image or "").strip()
     generic_placeholders = {"app:latest", "app", "latest", "api-server:latest", "web-ui:latest", "paygo:latest", "api:latest", "web:latest"}
-    if provided_image and provided_image.lower() not in {"nginx:1.27-alpine"}:
+    if provided_image:
         target_image = provided_image
     elif existing_image:
         target_image = existing_image
     else:
-        target_image = provided_image or "app:latest"
+        target_image = "app:latest"
 
     settings = get_settings()
     is_kind_cluster = settings.kubernetes_enabled and ((settings.kubernetes_context or "").startswith("kind-") or not settings.kubernetes_context)
     if is_kind_cluster and "/" not in target_image and target_image.lower() in generic_placeholders:
         cluster_name = (settings.kubernetes_context or "launchpad").removeprefix("kind-")
         if not _is_image_in_kind(target_image, cluster_name=cluster_name):
-            logger.warning("local_kind_image_not_found_fallback", image=target_image)
-            target_image = "nginx:1.27-alpine"
+            logger.warning("local_kind_image_not_found", image=target_image)
+            raise FileNotFoundError(
+                f"Local cluster is missing image {target_image}. "
+                "Build/load the workspace image or set an explicit workload_image."
+            )
 
     container["image"] = target_image
     container["imagePullPolicy"] = "IfNotPresent"
@@ -1363,6 +1485,15 @@ class ManifestDeployer:
                 f"{HELM_CHART_DIR.as_posix()}/Chart.yaml "
                 f"in workspace {workspace_root}"
             )
+        if workspace_is_nginx_scaffold_only(
+            workspace_root,
+            default_image=self._settings.default_workload_image,
+        ):
+            raise FileNotFoundError(
+                "Workspace only contains the default nginx scaffold and no "
+                "application source. Re-import the repository (or Launch the "
+                f"imported workspace) instead of an empty scaffold. root={workspace_root}"
+            )
 
         if not self._settings.kubernetes_enabled:
             logger.info(
@@ -1456,7 +1587,18 @@ class ManifestDeployer:
             name=name, environment_id=environment_id, namespace=namespace
         )
         if host:
-            self._provisioner.apply_ingress(namespace=namespace, labels=labels, host=host)
+            backend_service, backend_port = _resolve_preview_ingress_backend(
+                patched,
+                preview_app_label=preview_app_label,
+                listen_port=listen_port,
+            )
+            self._provisioner.apply_ingress(
+                namespace=namespace,
+                labels=labels,
+                host=host,
+                backend_service=backend_service,
+                backend_port=backend_port,
+            )
             resources.preview_url = self._provisioner.ingress_preview_url(host=host)
         else:
             resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
@@ -1737,7 +1879,6 @@ class ManifestDeployer:
 
         selector = {
             "app": selector_app,
-            "launchpad.io/managed-by": "launchpad-idp",
         }
         svc_labels = dict(labels or {})
         svc_labels.setdefault("app", APP_NAME)

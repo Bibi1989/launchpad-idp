@@ -849,17 +849,65 @@ def test_patch_manifest_documents_sets_if_not_present_for_tagged_custom_image() 
     assert container["imagePullPolicy"] == "IfNotPresent"
 
 
-def test_ensure_workspace_k8s_manifests_scaffolds_when_missing(tmp_path: Path) -> None:
-    from app.services.manifest_deploy import (
-        ensure_workspace_k8s_manifests,
-        workspace_has_deployable_k8s,
+def test_patch_launch_workload_stamps_pod_managed_by_label() -> None:
+    docs = [
+        {
+            "kind": "Deployment",
+            "metadata": {"name": "launch-web"},
+            "spec": {
+                "selector": {"matchLabels": {"app": "launch-web"}},
+                "template": {
+                    "metadata": {"labels": {"app": "launch-web"}},
+                    "spec": {
+                        "containers": [
+                            {"name": "launch-web", "image": "launch-web:latest", "ports": [{"containerPort": 8080}]}
+                        ]
+                    },
+                },
+            },
+        },
+        {
+            "kind": "Service",
+            "metadata": {"name": "launch-web-service"},
+            "spec": {
+                "selector": {"app": "launch-web"},
+                "ports": [{"port": 8080, "targetPort": 8080}],
+            },
+        },
+    ]
+    patched = patch_manifest_documents(
+        docs,
+        target_namespace="ns",
+        environment_id="abc",
+        name="preview",
+        git_branch="main",
+        git_repo_url="https://example.com/app.git",
+        ttl_expires_at="2099-01-01T00:00:00+00:00",
+        owner_label="dev",
+        image="nginx:1.27-alpine",
     )
+    dep = next(d for d in patched if d["kind"] == "Deployment")
+    pod_labels = dep["spec"]["template"]["metadata"]["labels"]
+    assert pod_labels["app"] == "launch-web"
+    assert pod_labels["launchpad.io/managed-by"] == "launchpad-idp"
+    # Must not rewrite the stack image to the env default nginx.
+    assert dep["spec"]["template"]["spec"]["containers"][0]["image"] == "launch-web:latest"
 
-    assert workspace_has_deployable_k8s(tmp_path) is False
-    ensure_workspace_k8s_manifests(tmp_path, image="custom-app:v1")
-    assert workspace_has_deployable_k8s(tmp_path) is True
-    deploy_file = tmp_path / "infra" / "k8s" / "manifests" / "deployment.yaml"
-    assert deploy_file.is_file()
-    assert "custom-app:v1" in deploy_file.read_text(encoding="utf-8")
+
+def test_resolve_preview_ingress_backend_prefers_launch_service() -> None:
+    from app.services.manifest_deploy import _resolve_preview_ingress_backend
+
+    docs = [
+        {
+            "kind": "Service",
+            "metadata": {"name": "launch-web-service"},
+            "spec": {"ports": [{"port": 8080}]},
+        }
+    ]
+    name, port = _resolve_preview_ingress_backend(
+        docs, preview_app_label="launch-web", listen_port=8080
+    )
+    assert name == "launch-web-service"
+    assert port == 8080
 
 

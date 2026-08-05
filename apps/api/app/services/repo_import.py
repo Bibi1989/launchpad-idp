@@ -242,6 +242,103 @@ class RepoImportService:
         del owner
         self._importer.cleanup(import_id)
 
+    def needs_rehydrate(self, workspace: ProvisioningWorkspace) -> bool:
+        """True when an imported workspace lost its source tree (e.g. /tmp wipe)."""
+        snapshot = self._repo_import_snapshot(workspace)
+        if snapshot is None:
+            return False
+        from app.services.manifest_deploy import (
+            workspace_has_application_source,
+            workspace_is_nginx_scaffold_only,
+        )
+
+        root = Path(workspace.root_dir)
+        if not root.is_dir():
+            return True
+        if not workspace_has_application_source(root):
+            return True
+        return workspace_is_nginx_scaffold_only(
+            root,
+            default_image=self._settings.default_workload_image,
+        )
+
+    def rehydrate_workspace(self, workspace: ProvisioningWorkspace) -> Path:
+        """Re-clone a repo_import workspace into the durable IaC root and regenerate manifests."""
+        snapshot = self._repo_import_snapshot(workspace)
+        if snapshot is None:
+            raise ValueError("Workspace is not a repository import; cannot rehydrate")
+
+        repo_url = str(snapshot.get("git_repo_url") or "").strip()
+        branch = str(snapshot.get("git_branch") or "main").strip() or "main"
+        if not repo_url:
+            raise ValueError("Repository import snapshot is missing git_repo_url")
+
+        detection_raw = snapshot.get("detection")
+        if not isinstance(detection_raw, dict):
+            raise ValueError("Repository import snapshot is missing detection metadata")
+        detection = DetectionResult.model_validate(detection_raw)
+        services = [s for s in detection.services if s.enabled]
+        if not services:
+            raise ValueError("Repository import snapshot has no enabled services")
+
+        token = self._resolve_token(True)
+        try:
+            cloned = self._importer.clone(
+                repo_url=repo_url,
+                branch=branch,
+                token=token,
+            )
+        except GitImporterError as exc:
+            raise RuntimeError(f"Failed to re-clone imported repository: {exc}") from exc
+
+        durable = self._allocate_durable_dir(workspace.name)
+        if durable.exists():
+            shutil.rmtree(durable, ignore_errors=True)
+        try:
+            shutil.copytree(
+                cloned.root_dir,
+                durable,
+                symlinks=False,
+                ignore_dangling_symlinks=True,
+            )
+        finally:
+            self._importer.cleanup(cloned.import_id)
+
+        generated = self._generator.generate(
+            durable,
+            detection,
+            workspace_name=workspace.name,
+            services=services,
+        )
+        self._write_detection(durable, detection)
+
+        old_root = Path(workspace.root_dir)
+        workspace.root_dir = str(durable)
+        logger.info(
+            "repo_import_workspace_rehydrated",
+            workspace_id=str(workspace.id),
+            from_dir=str(old_root),
+            to_dir=str(durable),
+            files=len(generated.files),
+            preview_service=generated.preview_service,
+        )
+        return durable
+
+    @staticmethod
+    def _repo_import_snapshot(workspace: ProvisioningWorkspace) -> dict[str, object] | None:
+        raw = workspace.wizard_config_json
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("source") != "repo_import":
+            return None
+        return payload
+
     def _allocate_durable_dir(self, name: str) -> Path:
         root = Path(self._settings.iac_workspace_root).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)

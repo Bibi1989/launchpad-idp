@@ -68,6 +68,24 @@ TERMINAL_STATUSES = {
     EnvironmentStatus.DESTROYED,
 }
 
+_LEGACY_PLACEHOLDER_IMAGES = frozenset({"nginx:1.27-alpine", "app:latest", "app"})
+
+
+def _is_placeholder_workload_image(
+    image: str | None,
+    *,
+    default_image: str = "",
+) -> bool:
+    """True when the client did not supply a real override image."""
+    value = (image or "").strip()
+    if not value:
+        return True
+    lowered = value.lower()
+    default = (default_image or "").strip().lower()
+    if default and lowered == default:
+        return True
+    return lowered in _LEGACY_PLACEHOLDER_IMAGES
+
 
 def _ttl_timedelta(*, ttl_hours: int | None, ttl_minutes: int | None) -> timedelta:
     if ttl_minutes is not None:
@@ -277,7 +295,7 @@ class EnvironmentService:
     ) -> EnvironmentRead:
         """Connect cloud (workspace) + pick template, own repo, or workspace → queue preview."""
         template = None
-        workload_image = self._settings.default_workload_image
+        workload_image = (self._settings.default_workload_image or "").strip() or None
         if payload.workspace_id is not None:
             git_repo_url, git_branch = self._workspace_git_source(payload.workspace_id)
             template_id = None
@@ -316,7 +334,10 @@ class EnvironmentService:
             cost_from_template = None
             if payload.workload_image:
                 workload_image = payload.workload_image
-        if payload.workload_image and payload.workload_image.lower() not in {"nginx:1.27-alpine", "app:latest", "app"}:
+        if payload.workload_image and not _is_placeholder_workload_image(
+            payload.workload_image,
+            default_image=self._settings.default_workload_image,
+        ):
             workload_image = payload.workload_image
 
         existing = await self._environments.get_by_name(payload.name)
@@ -442,8 +463,11 @@ class EnvironmentService:
                 except KeyError:
                     pass
 
-        workload_image = payload.workload_image or self._settings.default_workload_image
-        if payload.template_id and (not payload.workload_image or payload.workload_image.lower() in {"nginx:1.27-alpine", "app:latest", "app"}):
+        workload_image = (payload.workload_image or self._settings.default_workload_image or "").strip() or None
+        if payload.template_id and _is_placeholder_workload_image(
+            payload.workload_image,
+            default_image=self._settings.default_workload_image,
+        ):
             try:
                 workload_image = get_preview_template(payload.template_id).workload_image
             except KeyError:
@@ -451,13 +475,11 @@ class EnvironmentService:
 
         # Workspace manifests are the source of truth for MANIFEST deploys, so
         # extract the real workload image (preferring the exposed preview-target
-        # deployment) whenever the client did NOT supply a *custom* image. The
-        # launch form always sends the default nginx placeholder, which must not
-        # suppress extraction - otherwise the preview shows/uses nginx even when
-        # the workspace deploys web:latest.
+        # deployment) whenever the client did NOT supply a *custom* image.
         client_image = (payload.workload_image or "").strip()
-        client_wants_default = (
-            not client_image or client_image == self._settings.default_workload_image
+        client_wants_default = _is_placeholder_workload_image(
+            client_image,
+            default_image=self._settings.default_workload_image,
         )
         if deploy_mode == DeployMode.MANIFEST and payload.workspace_id and client_wants_default:
             try:
@@ -480,10 +502,12 @@ class EnvironmentService:
                     error=str(exc),
                 )
 
-        workload_image_for_log = workload_image
-        if deploy_mode == DeployMode.MANIFEST and payload.workload_image is None and workload_image == self._settings.default_workload_image:
-            # For MANIFEST deploys (raw manifests/Helm), the real image is resolved later from the
-            # workspace manifests. Until then, `workload_image` may still be the default preview image.
+        workload_image_for_log = workload_image or "from workspace manifests"
+        if deploy_mode == DeployMode.MANIFEST and _is_placeholder_workload_image(
+            payload.workload_image,
+            default_image=self._settings.default_workload_image,
+        ):
+            # For MANIFEST deploys, the real image is resolved later from workspace manifests.
             workload_image_for_log = "from workspace manifests"
 
         environment = await self._environments.create(
@@ -1032,8 +1056,8 @@ class EnvironmentService:
         read.concurrent_active_count = concurrent_active_count
 
         parts: list[str] = [f"ns={environment.namespace_name}"]
-        image = environment.workload_image or self._settings.default_workload_image
-        parts.append(f"image={image}")
+        image = (environment.workload_image or self._settings.default_workload_image or "").strip()
+        parts.append(f"image={image or 'from manifests'}")
         if environment.node_port is not None:
             parts.append(f"nodePort={environment.node_port}")
         if environment.provider:

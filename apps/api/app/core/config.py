@@ -78,9 +78,9 @@ class Settings(BaseSettings):
     # Secrets encryption (Fernet key material - prefer 32+ char random string)
     secrets_encryption_key: str | None = None
 
-    # Ephemeral IaC workspaces (durable path - /tmp is wiped on reboot/cleanup)
+    # Durable IaC / import workspaces. Never use /tmp: macOS and many hosts wipe it.
     iac_workspace_root: str = str(Path.home() / ".launchpad" / "workspaces")
-    # Temporary clone root for repository import sessions
+    # Temporary clone root for repository import sessions (ok under /tmp; short-lived)
     repo_import_root: str = "/tmp/launchpad/imports"
 
     # Sandbox execution
@@ -152,7 +152,8 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
 
     # Default container image applied into ephemeral namespaces
-    default_workload_image: str = "nginx:1.27-alpine"
+    # Empty: image must come from workspace manifests, a build, or an explicit Launch override.
+    default_workload_image: str = ""
 
     # Preview image build (clone repo + Dockerfile + kind load / registry push)
     preview_build_enabled: bool = False
@@ -189,6 +190,8 @@ class Settings(BaseSettings):
 
     # Optional Ingress host template when kubernetes_enabled (e.g. "{name}.localtest.me")
     preview_ingress_host_template: str | None = None
+    # IngressClass for Host-based preview URLs (ingress-nginx installed by k3s-up).
+    preview_ingress_class: str = "nginx"
 
     # Cloudflare Tunnel (homelab prod): public HTTPS/443 is routed straight to the
     # in-cluster Ingress controller, so preview URLs must be host-only (no NodePort)
@@ -200,6 +203,8 @@ class Settings(BaseSettings):
     # (matches the *.preview.mydomain.com CNAME in Cloudflare DNS). Combined as
     # ws-{workspace_id}.{preview_base_domain}.
     preview_base_domain: str | None = None
+    # Host port published by k3d for ingress-nginx HTTP (Cloudflare Tunnel target).
+    preview_ingress_http_port: int = 3080
 
     # Per-preview cloudflared quick tunnels so "Open app" works remotely, not just on
     # 127.0.0.1. "off" (default) keeps the NodePort URL + client-side host detection;
@@ -265,6 +270,25 @@ class Settings(BaseSettings):
                 return [item.strip() for item in value.split(",") if item.strip()]
             return parsed
         return value
+
+    @field_validator("iac_workspace_root", mode="after")
+    @classmethod
+    def reject_ephemeral_iac_root(cls, value: str) -> str:
+        """Keep workspaces off /tmp so imports survive reboot and OS cleanup."""
+        raw = (value or "").strip() or str(Path.home() / ".launchpad" / "workspaces")
+        path = Path(raw).expanduser()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        tmp_roots = (
+            Path("/tmp").resolve(),
+            Path("/var/tmp").resolve(),
+            Path("/private/tmp").resolve(),
+        )
+        if any(resolved == tmp or tmp in resolved.parents for tmp in tmp_roots):
+            return str(Path.home() / ".launchpad" / "workspaces")
+        return str(path)
 
     @field_validator(
         "github_app_id",

@@ -831,9 +831,9 @@ class IaCGenerator:
                             encoding="utf-8",
                         )
                         written.append(rel_dockerfile)
-                    image = "nginx:1.27-alpine"
+                    image = "app:latest"
                     health_path = "/"
-                    run_as_user = 101
+                    run_as_user = 1000
                     compose_services.append(
                         {
                             "name": app_slug,
@@ -918,9 +918,9 @@ class IaCGenerator:
                                 encoding="utf-8",
                             )
                             written.append(rel_dockerfile)
-                        image = "nginx:1.27-alpine"
+                        image = "app:latest"
                         health_path = "/"
-                        run_as_user = 101
+                        run_as_user = 1000
                         compose_services.append(
                             {"name": app_slug, "listen_port": port, "dockerfile_path": rel_dockerfile}
                         )

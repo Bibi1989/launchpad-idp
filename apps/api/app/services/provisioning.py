@@ -892,17 +892,19 @@ class ProvisioningService:
             resolved = root.expanduser().resolve()
         except OSError:
             resolved = root
-        tmp_roots = (Path("/tmp").resolve(), Path("/var/tmp").resolve())
+        tmp_roots = (
+            Path("/tmp").resolve(),
+            Path("/var/tmp").resolve(),
+            Path("/private/tmp").resolve(),
+        )
         under_tmp = any(
             resolved == tmp or tmp in resolved.parents for tmp in tmp_roots
         )
-        settings_under_tmp = any(
-            settings_root == tmp or tmp in settings_root.parents for tmp in tmp_roots
-        )
-        if not under_tmp or settings_under_tmp:
+        if not under_tmp:
             return root
+        # Always leave /tmp, even if a bad IAC_WORKSPACE_ROOT pointed there before.
         candidate = settings_root / root.name
-        if candidate.exists():
+        if candidate.exists() and candidate.resolve() != resolved:
             candidate = settings_root / f"{root.name}-{row.id.hex[:8]}"
         row.root_dir = str(candidate)
         logger.info(
@@ -912,6 +914,57 @@ class ProvisioningService:
             to_dir=str(candidate),
         )
         return candidate
+
+    async def _ensure_workspace_on_disk(
+        self,
+        workspace: ProvisioningWorkspace,
+        owner: User,
+    ) -> ProvisioningWorkspace:
+        from app.services.manifest_deploy import workspace_has_application_source
+        from app.services.repo_import import RepoImportService
+
+        importer = RepoImportService(self._session)
+        if importer.needs_rehydrate(workspace):
+            try:
+                importer.rehydrate_workspace(workspace)
+            except Exception as exc:
+                logger.warning(
+                    "repo_import_rehydrate_failed",
+                    workspace_id=str(workspace.id),
+                    error=str(exc),
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "workspace_source_missing",
+                        "message": (
+                            "Imported workspace files are missing on disk and could not "
+                            f"be re-cloned: {exc}"
+                        ),
+                    },
+                ) from exc
+            await self._session.commit()
+            return await self.get_workspace(workspace.id)
+
+        root = self._workspace_root(workspace)
+        if root.is_dir() and workspace_has_application_source(root):
+            # Still move off /tmp when present so the next reboot does not wipe it.
+            relocated = self._relocate_ephemeral_root(workspace)
+            if relocated != root and not relocated.exists() and root.exists():
+                relocated.parent.mkdir(parents=True, exist_ok=True)
+                import shutil
+
+                shutil.move(str(root), str(relocated))
+                await self._session.commit()
+                return await self.get_workspace(workspace.id)
+            return workspace
+
+        if root.is_dir():
+            # Hollow scaffold (nginx only, no source) without repo_import metadata.
+            return workspace
+
+        await self.restore_workspace_files(workspace.id, owner)
+        return await self.get_workspace_for_owner(workspace.id, owner)
 
     def _request_from_wizard_config(
         self,
@@ -939,6 +992,29 @@ class ProvisioningService:
     ) -> IaCBundleSummary:
         """Recreate missing on-disk workspace files from the DB wizard snapshot."""
         row = await self.get_workspace_for_owner(workspace_id, owner)
+        from app.services.repo_import import RepoImportService
+
+        importer = RepoImportService(self._session)
+        if importer.needs_rehydrate(row):
+            root = importer.rehydrate_workspace(row)
+            row.status = "ready"
+            await self._session.commit()
+            return IaCBundleSummary(
+                workspace_id=str(row.id),
+                engine=IaCEngine(row.engine),
+                provider=CloudProvider(row.provider),
+                root_dir=str(root),
+                files=sorted(
+                    str(p.relative_to(root))
+                    for p in root.rglob("*")
+                    if p.is_file()
+                )[:200],
+                artifact_mode=WorkspaceArtifactsMode.MANIFEST_ONLY,
+                name=row.name,
+                status=row.status,
+                created_at=row.created_at,
+            )
+
         root = self._relocate_ephemeral_root(row)
         config = await self.get_wizard_config(workspace_id, owner)
 
@@ -998,16 +1074,6 @@ class ProvisioningService:
             status=row.status,
             created_at=row.created_at,
         )
-
-    async def _ensure_workspace_on_disk(
-        self,
-        workspace: ProvisioningWorkspace,
-        owner: User,
-    ) -> ProvisioningWorkspace:
-        if self._workspace_root(workspace).is_dir():
-            return workspace
-        await self.restore_workspace_files(workspace.id, owner)
-        return await self.get_workspace_for_owner(workspace.id, owner)
 
     def get_workspace_kubernetes_packaging(
         self,

@@ -31,7 +31,7 @@ const form = reactive({
   provider: 'local' as PreviewTarget,
   ttl_unit: 'hours' as 'hours' | 'minutes',
   ttl_value: 8,
-  workload_image: 'nginx:1.27-alpine',
+  workload_image: '',
   workspace_id: null as string | null,
   git_repo_url: '',
   git_branch: 'main',
@@ -141,7 +141,9 @@ const sourceSummary = computed(() => {
   if (form.git_repo_url.trim()) {
     return form.git_repo_url.trim()
   }
-  return `Image ${form.workload_image.trim() || 'nginx:1.27-alpine'}`
+  return form.workload_image.trim()
+    ? `Image ${form.workload_image.trim()}`
+    : 'No image (set container image or use a workspace/repo)'
 })
 
 const imageSummary = computed(() => {
@@ -151,7 +153,7 @@ const imageSummary = computed(() => {
   if (workspaceHasManifests.value) {
     return 'From workspace manifests'
   }
-  return form.workload_image.trim() || 'nginx:1.27-alpine'
+  return form.workload_image.trim() || 'Required'
 })
 
 async function refreshKindStatus() {
@@ -384,7 +386,12 @@ async function launch() {
       payload.ttl_hours = form.ttl_value
     }
     if (!buildsFromRepo.value && !workspaceHasManifests.value) {
-      payload.workload_image = form.workload_image.trim() || 'nginx:1.27-alpine'
+      const image = form.workload_image.trim()
+      if (!image) {
+        errorMessage.value = 'Container image is required when not launching from a workspace or repo build'
+        return
+      }
+      payload.workload_image = image
     }
     if (form.workspace_id) {
       payload.workspace_id = form.workspace_id
@@ -395,8 +402,12 @@ async function launch() {
         payload.github_pr_number = form.github_pr_number
       }
     } else {
-      // Local image-only (no catalog templates).
-      payload.workload_image = form.workload_image.trim() || 'nginx:1.27-alpine'
+      const image = form.workload_image.trim()
+      if (!image) {
+        errorMessage.value = 'Container image is required for image-only launches'
+        return
+      }
+      payload.workload_image = image
     }
     if (form.provider !== 'local') {
       payload.credentials = { ...form.credentials }
@@ -619,11 +630,12 @@ async function launch() {
           <input
             v-model="form.workload_image"
             class="lp-input font-mono text-xs"
-            placeholder="nginx:1.27-alpine"
+            placeholder="ghcr.io/org/app:tag"
             autocomplete="off"
+            required
           >
           <p class="text-xs text-[var(--lp-muted)]">
-            Default stays <span class="font-mono">nginx:1.27-alpine</span>.
+            Required unless you launch from a workspace or repo build.
           </p>
         </label>
       </div>
@@ -788,8 +800,9 @@ async function launch() {
         <input
           v-model="form.workload_image"
           class="lp-input font-mono text-xs"
-          placeholder="nginx:1.27-alpine"
+          placeholder="ghcr.io/org/app:tag"
           autocomplete="off"
+          required
         >
       </label>
       <div class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4">

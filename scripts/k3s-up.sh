@@ -10,11 +10,16 @@ CONTEXT="k3d-${CLUSTER_NAME}"
 # Keep this range small - a large host-port map is slow to bind on Docker Desktop.
 PORT_MIN="${PREVIEW_NODE_PORT_MIN:-30080}"
 PORT_MAX="${PREVIEW_NODE_PORT_MAX:-30089}"
+# Host port Cloudflare Tunnel should target for *.preview / ws-* Host-based previews.
+INGRESS_HTTP_PORT="${PREVIEW_INGRESS_HTTP_PORT:-3080}"
+# NodePort on the k3d server that ingress-nginx will use (must match ensure-ingress-nginx.sh).
+INGRESS_NODE_PORT="${PREVIEW_INGRESS_NODE_PORT:-30090}"
 # Optional pin, e.g. rancher/k3s:v1.31.5-k3s1 - empty uses k3d's default.
 K3S_IMAGE="${K3D_NODE_IMAGE:-}"
 PRELOAD_IMAGE="${K3D_PRELOAD_IMAGE:-1}"
 LOCK_DIR="${TMPDIR:-/tmp}/launchpad-k3s-${CLUSTER_NAME}.lockdir"
 LOCK_WAIT_SECONDS="${K3S_LOCK_WAIT_SECONDS:-300}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if ! command -v k3d >/dev/null 2>&1; then
   echo "k3d is not installed. Install: https://k3d.io/#installation (brew install k3d)" >&2
@@ -80,12 +85,15 @@ else
 
   # Bind the host NodePort range straight to the server node so NodePort Services
   # on those ports are reachable at 127.0.0.1 - the same contract as kind.
+  # Also publish ingress HTTP (default host 3080 → NodePort 30090) for Cloudflare
+  # Tunnel Host-based previews (ws-*.yourdomain → host.docker.internal:3080).
   CREATE_ARGS=(
     cluster create "${CLUSTER_NAME}"
     --servers 1
     --port "${PORT_MIN}-${PORT_MAX}:${PORT_MIN}-${PORT_MAX}@server:0"
-    # Match the kind engine: no bundled ingress controller (Launchpad installs
-    # its own when requested). Keep servicelb for optional LoadBalancer support.
+    --port "${INGRESS_HTTP_PORT}:${INGRESS_NODE_PORT}@server:0"
+    # Match the kind engine: no bundled Traefik. Launchpad installs ingress-nginx
+    # via scripts/ensure-ingress-nginx.sh for Host-based preview URLs.
     --k3s-arg "--disable=traefik@server:0"
     --wait
     --timeout 150s
@@ -137,6 +145,26 @@ fi
 # k3d merges + switches kubeconfig context on create; make sure it exists.
 kubectl cluster-info --context "${CONTEXT}"
 
+# Ingress controller for Host-based preview URLs (Cloudflare *.domain → :3080).
+if [[ "${SKIP_INGRESS_NGINX:-0}" != "1" ]]; then
+  if ! bash "${SCRIPT_DIR}/ensure-ingress-nginx.sh" "${CONTEXT}"; then
+    echo "Warning: ingress-nginx install failed (Host-based preview URLs may not work)." >&2
+  fi
+  # Existing clusters created before ingress port mapping need a recreate.
+  SERVER_CONTAINER="k3d-${CLUSTER_NAME}-server-0"
+  if docker ps --format '{{.Names}}' | grep -qx "${SERVER_CONTAINER}"; then
+    # docker port prints e.g. "30090/tcp -> 0.0.0.0:3080"
+    if ! docker port "${SERVER_CONTAINER}" 2>/dev/null | grep -q ":${INGRESS_HTTP_PORT}"; then
+      echo >&2
+      echo "WARNING: host port ${INGRESS_HTTP_PORT} is not published on ${SERVER_CONTAINER}." >&2
+      echo "Recreate the cluster once so Cloudflare can reach ingress:" >&2
+      echo "  k3d cluster delete ${CLUSTER_NAME}" >&2
+      echo "  # then re-run this script / Launch again" >&2
+      echo >&2
+    fi
+  fi
+fi
+
 # Prefetch workload image (best-effort; multi-arch digests often fail on Apple Silicon).
 if [[ "${PRELOAD_IMAGE}" != "0" ]]; then
   IMAGE="${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine}"
@@ -155,7 +183,7 @@ cat <<EOF
 
 k3s cluster ready (context: ${CONTEXT}).
 
-Enable real Kubernetes provisioning in apps/api/.env:
+Enable real Kubernetes provisioning in apps/api/.env (or deploy/oci/.env):
 
   KUBERNETES_ENABLED=true
   KUBERNETES_IN_CLUSTER=false
@@ -164,7 +192,14 @@ Enable real Kubernetes provisioning in apps/api/.env:
   PREVIEW_NODE_HOST=127.0.0.1
   PREVIEW_NODE_PORT_MIN=${PORT_MIN}
   PREVIEW_NODE_PORT_MAX=${PORT_MAX}
+  PREVIEW_INGRESS_HTTP_PORT=${INGRESS_HTTP_PORT}
+  USE_CLOUDFLARE_TUNNEL=true
+  PREVIEW_BASE_DOMAIN=launchpad-idp.online
   PROVISION_STEP_DELAY_SECONDS=0
+
+Cloudflare Tunnel public hostnames:
+  launchpad-idp.online          → http://caddy:80
+  *.launchpad-idp.online        → http://host.docker.internal:${INGRESS_HTTP_PORT}
 
 Then restart the API and Celery worker.
 

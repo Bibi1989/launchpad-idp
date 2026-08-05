@@ -19,6 +19,7 @@ from app.models.domain import (
     ExecutionStage,
     LogLevel,
     ProvisioningWorkspace,
+    User,
 )
 from app.repositories.environment import DeploymentLogRepository, EnvironmentRepository
 from app.repositories.user import UserRepository
@@ -579,6 +580,25 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     if workspace_id is not None:
                         workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
                         if workspace_row is not None:
+                            from app.services.provisioning import ProvisioningService
+
+                            owner_row = await session.get(User, environment.owner_id)
+                            if owner_row is not None:
+                                from fastapi import HTTPException
+
+                                provisioning = ProvisioningService(session)
+                                try:
+                                    workspace_row = await provisioning._ensure_workspace_on_disk(
+                                        workspace_row,
+                                        owner_row,
+                                    )
+                                except HTTPException as exc:
+                                    detail = exc.detail
+                                    if isinstance(detail, dict):
+                                        message = str(detail.get("message") or detail)
+                                    else:
+                                        message = str(detail)
+                                    raise RuntimeError(message) from exc
                             workspace_root = Path(workspace_row.root_dir)
 
                     _ctx = settings.resolved_kubernetes_context or settings.kubernetes_context or ""
