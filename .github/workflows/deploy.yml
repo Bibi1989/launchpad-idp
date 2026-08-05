@@ -328,6 +328,7 @@ jobs:
   # Push to main (and manual target=local-mac): deploy the PRODUCTION stack directly on the
   # server laptop's self-hosted macOS runner - no SSH. Requires the runner to carry both the
   # "self-hosted" and "macOS" labels (GitHub adds "macOS" automatically on a Mac).
+  # TODO: add a step to check if the server is reachable by pinging the IP address of the server.
   deploy-local-mac:
     if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'local-mac') }}
     runs-on: [self-hosted, macOS]
