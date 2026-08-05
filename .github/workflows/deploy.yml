@@ -180,6 +180,7 @@ jobs:
               git clone "$REPO" "$APP_DIR"
             fi
             cd "$APP_DIR"
+            git config --global --add safe.directory "$APP_DIR" || true
             git fetch origin main
             git checkout main
             git reset --hard origin/main
@@ -216,20 +217,41 @@ jobs:
             sed -i 's/^[[:space:]]*//' deploy/oci/.env
 
             chmod +x deploy/oci/caddy-entrypoint.sh || true
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env up -d --build
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env ps
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=40 caddy
 
-            for i in $(seq 1 36); do
-              if docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env \
-                exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"; then
+            # Single source of truth for the compose invocation.
+            dc() { docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env "$@"; }
+
+            # Dump the full stack state so any failure is diagnosable from the run log
+            # (previously only the api tail was printed, hiding build/dependency errors).
+            dump_diagnostics() {
+              echo "===== docker compose ps (all) ====="; dc ps -a || true
+              echo "===== docker compose logs (all services, tail 150) ====="; dc logs --tail=150 || true
+            }
+            trap 'echo "Deploy failed at line ${LINENO}."; dump_diagnostics' ERR
+
+            # 1) Build first: a build failure is reported on its own and leaves the
+            #    currently-running stack untouched instead of half-restarting it.
+            dc build
+
+            # 2) Recreate the stack. --remove-orphans drops services no longer in compose.
+            dc up -d --remove-orphans
+            dc ps
+
+            # 3) Wait for the API to report healthy. Homelab cold starts (image pulls,
+            #    DB migrations, k3s warmup) can exceed the old 180s window; use 300s.
+            for i in $(seq 1 60); do
+              if dc exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)" 2>/dev/null; then
                 echo "API healthy"
+                trap - ERR
+                dc ps
                 exit 0
               fi
-              echo "waiting for API ($i/36)..."
+              echo "waiting for API ($i/60)..."
               sleep 5
             done
-            docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=80 api
+
+            echo "API did not become healthy within 300s."
+            dump_diagnostics
             exit 1
 
   # Manual only: full stack on a Mac self-hosted runner (Docker Desktop).
