@@ -911,3 +911,66 @@ def test_resolve_preview_ingress_backend_prefers_launch_service() -> None:
     assert port == 8080
 
 
+def test_patch_rewrites_scaffold_ingress_host_and_skips_without_host() -> None:
+    from app.services.manifest_deploy import patch_manifest_documents
+
+    ingress = {
+        "kind": "Ingress",
+        "metadata": {
+            "name": "launch-preview",
+            "annotations": {
+                "nginx.ingress.kubernetes.io/rewrite-target": "/",
+            },
+        },
+        "spec": {
+            "rules": [
+                {
+                    "host": "full.preview.127.0.0.1.nip.io",
+                    "http": {
+                        "paths": [
+                            {
+                                "path": "/",
+                                "pathType": "Prefix",
+                                "backend": {
+                                    "service": {
+                                        "name": "launch-nextjs-service",
+                                        "port": {"number": 3000},
+                                    }
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+    skipped = patch_manifest_documents(
+        [ingress],
+        target_namespace="ns-a",
+        environment_id="aaa",
+        name="full",
+        git_branch="main",
+        git_repo_url="https://example.com/app.git",
+        ttl_expires_at="2099-01-01T00:00:00+00:00",
+        owner_label="dev",
+        image="launch-nextjs:latest",
+    )
+    assert skipped == []
+
+    patched = patch_manifest_documents(
+        [ingress],
+        target_namespace="ns-b",
+        environment_id="bbb",
+        name="full",
+        git_branch="main",
+        git_repo_url="https://example.com/app.git",
+        ttl_expires_at="2099-01-01T00:00:00+00:00",
+        owner_label="dev",
+        image="launch-nextjs:latest",
+        preview_host="ws-bbb.launchpad-idp.online",
+    )
+    assert len(patched) == 1
+    assert patched[0]["spec"]["rules"][0]["host"] == "ws-bbb.launchpad-idp.online"
+    assert patched[0]["metadata"]["namespace"] == "ns-b"
+    assert "rewrite-target" not in (patched[0]["metadata"].get("annotations") or {})
+

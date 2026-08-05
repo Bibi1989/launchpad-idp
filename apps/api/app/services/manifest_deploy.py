@@ -1005,6 +1005,7 @@ def patch_manifest_documents(
     ttl_expires_at: str,
     owner_label: str,
     image: str,
+    preview_host: str | None = None,
 ) -> list[dict[str, Any]]:
     labels = build_preview_labels(
         environment_id=environment_id,
@@ -1051,6 +1052,16 @@ def patch_manifest_documents(
             or _is_preview_skipped_workload_document(doc)
         ):
             continue
+        # Scaffold Ingress uses a shared nip.io host per workspace name. Without a
+        # unique preview_host that collides across concurrent previews.
+        if kind == "Ingress":
+            if not preview_host:
+                continue
+            metadata = doc.setdefault("metadata", {})
+            metadata["namespace"] = target_namespace
+            _patch_ingress_for_preview(doc, host=preview_host, labels=labels)
+            patched.append(doc)
+            continue
         metadata = doc.setdefault("metadata", {})
         metadata["namespace"] = target_namespace
         # Datastore companions (postgres/redis/…) keep their own official image,
@@ -1087,6 +1098,28 @@ def patch_manifest_documents(
             _patch_service_for_preview(doc, target_port=listen_port)
         patched.append(doc)
     return patched
+
+
+def _patch_ingress_for_preview(
+    doc: dict[str, Any],
+    *,
+    host: str,
+    labels: dict[str, str],
+) -> None:
+    """Rewrite scaffold Ingress hosts to the unique per-environment preview host."""
+    metadata = doc.setdefault("metadata", {})
+    meta_labels = metadata.setdefault("labels", {})
+    meta_labels.update(labels)
+    annotations = metadata.get("annotations")
+    if isinstance(annotations, dict):
+        annotations.pop("nginx.ingress.kubernetes.io/rewrite-target", None)
+    spec = doc.setdefault("spec", {})
+    rules = spec.get("rules") or []
+    if not isinstance(rules, list):
+        return
+    for rule in rules:
+        if isinstance(rule, dict):
+            rule["host"] = host
 
 
 def _is_preview_governance_document(doc: dict[str, Any]) -> bool:
@@ -1536,6 +1569,9 @@ class ManifestDeployer:
             default_image=self._settings.default_workload_image,
         )
         resources.image = workload_image
+        host = self._provisioner.workspace_preview_host(
+            name=name, environment_id=environment_id, namespace=namespace
+        )
         patched = patch_manifest_documents(
             documents,
             target_namespace=namespace,
@@ -1546,6 +1582,7 @@ class ManifestDeployer:
             ttl_expires_at=ttl_expires_at,
             owner_label=owner_label,
             image=workload_image,
+            preview_host=host,
         )
         # Resolve which workload the preview NodePort exposes (the annotated
         # preview-target, else "app", else the first app workload) so the Service
@@ -1583,22 +1620,23 @@ class ManifestDeployer:
         )
         resources.node_port = node_port
 
-        host = self._provisioner.workspace_preview_host(
-            name=name, environment_id=environment_id, namespace=namespace
+        has_workspace_ingress = any(
+            str(doc.get("kind") or "") == "Ingress" for doc in patched
         )
         if host:
-            backend_service, backend_port = _resolve_preview_ingress_backend(
-                patched,
-                preview_app_label=preview_app_label,
-                listen_port=listen_port,
-            )
-            self._provisioner.apply_ingress(
-                namespace=namespace,
-                labels=labels,
-                host=host,
-                backend_service=backend_service,
-                backend_port=backend_port,
-            )
+            if not has_workspace_ingress:
+                backend_service, backend_port = _resolve_preview_ingress_backend(
+                    patched,
+                    preview_app_label=preview_app_label,
+                    listen_port=listen_port,
+                )
+                self._provisioner.apply_ingress(
+                    namespace=namespace,
+                    labels=labels,
+                    host=host,
+                    backend_service=backend_service,
+                    backend_port=backend_port,
+                )
             resources.preview_url = self._provisioner.ingress_preview_url(host=host)
         else:
             resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
