@@ -106,6 +106,8 @@ jobs:
           K3D_API_PORT=6445
           DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
           TTL_REAPER_INTERVAL_SECONDS=300
+          USE_CLOUDFLARE_TUNNEL=true
+          ENVIRONMENT=production
           EOF
           sed -i.bak 's/^[[:space:]]*//' deploy/oci/.env && rm -f deploy/oci/.env.bak
 
