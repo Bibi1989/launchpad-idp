@@ -26,8 +26,8 @@ services:
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     ports:
-      # macOS often has AirPlay on :80 - set CADDY_HTTP_PORT=8080 locally.
-      - "${CADDY_HTTP_PORT:-80}:80"
+      # Homelab: CADDY_HTTP_PORT=8080 → http://localhost:8080 (maps to container :80).
+      - "${CADDY_HTTP_PORT:-8080}:80"
       - "${CADDY_HTTPS_PORT:-443}:443"
       - "${CADDY_HTTPS_PORT:-443}:443/udp"
     environment:

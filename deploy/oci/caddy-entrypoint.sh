@@ -1,6 +1,7 @@
 #!/bin/sh
 # Sanitize LAUNCHPAD_SITE_ADDRESS before Caddy starts.
-# Invalid values (empty, http(s) URL, bare IP) crash-loop Caddy on OCI.
+# Invalid values (empty, http(s) URL, bare IP, localhost) crash-loop or HTTPS-redirect
+# localhost checks - force plain :80 for those cases.
 
 set -eu
 
@@ -12,6 +13,10 @@ case "$ADDR" in
   echo "caddy-entrypoint: invalid LAUNCHPAD_SITE_ADDRESS='${LAUNCHPAD_SITE_ADDRESS:-}'; using :80"
   ADDR=":80"
   ;;
+localhost | localhost:* | Localhost | LOCALHOST)
+  echo "caddy-entrypoint: localhost site address enables HTTPS redirects; using :80"
+  ADDR=":80"
+  ;;
 esac
 
 # Bare IPv4 → listen on :80 (Let's Encrypt needs a DNS name, not a raw IP).
@@ -20,7 +25,7 @@ if printf '%s' "$ADDR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$'; 
   ADDR=":80"
 fi
 
-# Hostname without scheme is OK (e.g. launchpad.example.com).
+# Hostname without scheme is OK (e.g. launchpad.example.com) when auto_https is enabled.
 export LAUNCHPAD_SITE_ADDRESS="$ADDR"
 echo "caddy-entrypoint: LAUNCHPAD_SITE_ADDRESS=${LAUNCHPAD_SITE_ADDRESS}"
 

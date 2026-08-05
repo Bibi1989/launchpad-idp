@@ -1,9 +1,16 @@
 # Launchpad edge proxy.
 #
+# Homelab / Cloudflare Tunnel: TLS terminates at Cloudflare. Caddy stays HTTP-only
+# so http://localhost:8080 (and tunnel → caddy:80) never redirect to https://localhost.
+#
 # LAUNCHPAD_SITE_ADDRESS (set by caddy-entrypoint.sh):
-#   - No DNS yet:              :80
-#   - Real DNS hostname only:  launchpad.example.com
-# Never use http://... or a bare IP here.
+#   - Prefer :80 for tunnel / local checks
+#   - Real hostname only when you want Caddy to obtain Let's Encrypt itself
+#     (then set auto_https back on - see comment below)
+
+{
+	auto_https off
+}
 
 {$LAUNCHPAD_SITE_ADDRESS} {
 	encode gzip zstd
