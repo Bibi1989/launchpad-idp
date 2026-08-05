@@ -198,14 +198,14 @@ def test_kind_scripts_build_load_and_deploy(tmp_path: Path) -> None:
     assert (root / "scripts/deploy-kind.sh").stat().st_mode & 0o111
 
 
-def test_non_core_stack_keeps_legacy_nginx_placeholder(tmp_path: Path) -> None:
+def test_non_core_stack_uses_app_latest_placeholder(tmp_path: Path) -> None:
     # Single non-core stack (Rust) has no source generator -> legacy Dockerfile
-    # + generic nginx placeholder Deployment (no real image to build).
+    # + app:latest until the workspace image is built.
     root = _generate(tmp_path, name="rust-app", stack="rust", frameworks=["rust"])
     assert (root / "dockers/rust-app/Dockerfile").is_file()
     assert not (root / "apps/rust-app").exists()
     _, container = _deployment_container(root)
-    assert container["image"] == "nginx:1.27-alpine"
+    assert container["image"] == "app:latest"
 
 
 def test_multi_framework_generates_launch_manifests_not_nginx(tmp_path: Path) -> None:
@@ -442,7 +442,7 @@ def test_scaffold_disabled_uses_placeholder(tmp_path: Path) -> None:
     )
     root = Path(gen.generate(request).root_dir)
     _, container = _deployment_container(root)
-    assert container["image"] == "nginx:1.27-alpine"
+    assert container["image"] == "app:latest"
     assert not (root / "apps").exists()
 
 

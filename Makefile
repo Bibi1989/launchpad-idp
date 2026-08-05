@@ -28,6 +28,8 @@ beat:
 web:
 	cd apps/web && npm run dev
 
+up-all: up api worker beat web test
+
 kind-up:
 	bash scripts/kind-up.sh
 

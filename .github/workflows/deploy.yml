@@ -254,7 +254,7 @@ jobs:
             K3D_API_HOST=host.docker.internal
             K3D_API_PORT=6445
             K3D_API_BIND_HOST=0.0.0.0
-            DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
+            DEFAULT_WORKLOAD_IMAGE=
             TTL_REAPER_INTERVAL_SECONDS=300
             GITHUB_APP_ID=${GH_APP_ID_V}
             GITHUB_APP_PRIVATE_KEY=${GH_APP_KEY_V}
@@ -436,6 +436,7 @@ jobs:
           USE_CLOUDFLARE_TUNNEL=true
           ENVIRONMENT=production
           PREVIEW_BASE_DOMAIN=launchpad-idp.online
+          PREVIEW_INGRESS_HTTP_PORT=3080
           PREVIEW_TUNNEL_MODE=off
           LOG_LEVEL=INFO
           KUBERNETES_ENABLED=true
@@ -446,7 +447,7 @@ jobs:
           K3D_API_HOST=host.docker.internal
           K3D_API_PORT=6445
           K3D_API_BIND_HOST=0.0.0.0
-          DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
+          DEFAULT_WORKLOAD_IMAGE=
           TTL_REAPER_INTERVAL_SECONDS=300
           GITHUB_APP_ID=${GH_APP_ID_V}
           GITHUB_APP_PRIVATE_KEY=${GH_APP_KEY_V}
@@ -517,5 +518,5 @@ jobs:
             echo "waiting for API ($i/60)..."
             sleep 5
           done
-          
+
           fail "API did not become healthy within 300s"

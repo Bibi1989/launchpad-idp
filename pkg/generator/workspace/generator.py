@@ -363,7 +363,9 @@ metadata:
   namespace: {ns}
   annotations:
     launchpad.io/generated-by: repo-import
+    kubernetes.io/ingress.class: nginx
 spec:
+  ingressClassName: nginx
   rules:
     - http:
         paths:{"".join(paths)}

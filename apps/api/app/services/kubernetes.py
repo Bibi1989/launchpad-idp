@@ -324,6 +324,10 @@ class KubernetesProvisioner:
         enable_redis: bool = False,
     ) -> ProvisionedResources:
         workload_image = image or self._settings.default_workload_image
+        if not (workload_image or "").strip():
+            raise ValueError(
+                "workload image is required (set workload_image or DEFAULT_WORKLOAD_IMAGE)"
+            )
         listen_port = _resolve_listen_port_from_image(workload_image)
         ready_timeout = _workload_ready_timeout_seconds(
             image=workload_image, base_timeout_seconds=self._settings.kubernetes_ready_timeout_seconds
@@ -1191,14 +1195,27 @@ class KubernetesProvisioner:
         namespace: str,
         labels: dict[str, str],
         host: str,
+        backend_service: str = "app",
+        backend_port: int = 80,
     ) -> None:
         assert self._networking is not None
         from kubernetes import client
         from kubernetes.client.rest import ApiException
 
+        ingress_class = (self._settings.preview_ingress_class or "nginx").strip() or "nginx"
+        service_name = (backend_service or "app").strip() or "app"
+        port_number = backend_port if backend_port and backend_port > 0 else 80
         ingress = client.V1Ingress(
-            metadata=client.V1ObjectMeta(name="app", namespace=namespace, labels=labels),
+            metadata=client.V1ObjectMeta(
+                name="app",
+                namespace=namespace,
+                labels=labels,
+                annotations={
+                    "kubernetes.io/ingress.class": ingress_class,
+                },
+            ),
             spec=client.V1IngressSpec(
+                ingress_class_name=ingress_class,
                 rules=[
                     client.V1IngressRule(
                         host=host,
@@ -1209,8 +1226,8 @@ class KubernetesProvisioner:
                                     path_type="Prefix",
                                     backend=client.V1IngressBackend(
                                         service=client.V1IngressServiceBackend(
-                                            name="app",
-                                            port=client.V1ServiceBackendPort(number=80),
+                                            name=service_name,
+                                            port=client.V1ServiceBackendPort(number=port_number),
                                         )
                                     ),
                                 )
@@ -1227,7 +1244,14 @@ class KubernetesProvisioner:
             if exc.status != 404:
                 raise
             self._networking.create_namespaced_ingress(namespace, ingress)
-        logger.info("kubernetes_ingress_applied", namespace=namespace, host=host)
+        logger.info(
+            "kubernetes_ingress_applied",
+            namespace=namespace,
+            host=host,
+            ingress_class=ingress_class,
+            backend_service=service_name,
+            backend_port=port_number,
+        )
 
     def list_allocated_node_ports(self, *, exclude_namespace: str | None = None) -> set[int]:
         """Return NodePorts already claimed by Services cluster-wide."""
@@ -1812,7 +1836,7 @@ class KubernetesProvisioner:
         )
 
     def _image_for_commit(self, commit_sha: str) -> str:
-        base = self._settings.default_workload_image
+        base = (self._settings.default_workload_image or "app").strip() or "app"
         if ":" in base.rsplit("/", 1)[-1]:
             repo = base.rsplit(":", 1)[0]
         else:
