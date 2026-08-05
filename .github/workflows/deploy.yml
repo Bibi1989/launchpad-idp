@@ -246,6 +246,7 @@ jobs:
             # (previously only the api tail was printed, hiding build/dependency errors).
             dump_diagnostics() {
               echo "===== docker compose ps (all) ====="; dc ps -a || true
+              echo "===== migrate service log (alembic upgrade head) ====="; dc logs --no-log-prefix migrate || true
               echo "===== docker compose logs (all services, tail 150) ====="; dc logs --tail=150 || true
             }
             trap 'echo "Deploy failed at line ${LINENO}."; dump_diagnostics' ERR
@@ -390,6 +391,7 @@ jobs:
 
           dump_diagnostics() {
             echo "===== docker compose ps (all) ====="; dc ps -a || true
+            echo "===== migrate service log (alembic upgrade head) ====="; dc logs --no-log-prefix migrate || true
             echo "===== docker compose logs (all services, tail 150) ====="; dc logs --tail=150 || true
           }
           trap 'echo "Deploy failed at line ${LINENO}."; dump_diagnostics' ERR
