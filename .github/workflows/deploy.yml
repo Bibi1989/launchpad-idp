@@ -517,4 +517,5 @@ jobs:
             echo "waiting for API ($i/60)..."
             sleep 5
           done
+          
           fail "API did not become healthy within 300s"
