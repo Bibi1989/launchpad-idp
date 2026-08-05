@@ -15,9 +15,10 @@ on:
         default: oci
 
 jobs:
-  # Push to main (and manual target=oci): SSH to the homelab/server and recreate Compose.
+  # Manual only (workflow_dispatch, target=oci): SSH to a remote server and recreate Compose.
+  # Push-to-main deploys go to the self-hosted Mac runner (deploy-local-mac) instead.
   deploy-oci:
-    if: ${{ github.event_name == 'push' || inputs.target == 'oci' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'oci' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -274,10 +275,14 @@ jobs:
             dump_diagnostics
             exit 1
 
-  # Manual only: full stack on a Mac self-hosted runner (Docker Desktop).
+  # Push to main (and manual target=local-mac): deploy the PRODUCTION stack directly on the
+  # server laptop's self-hosted macOS runner - no SSH. Requires the runner to carry both the
+  # "self-hosted" and "macOS" labels (GitHub adds "macOS" automatically on a Mac).
   deploy-local-mac:
-    if: ${{ inputs.target == 'local-mac' }}
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'local-mac') }}
     runs-on: [self-hosted, macOS]
+    permissions:
+      contents: read
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -320,31 +325,47 @@ jobs:
           docker version
           docker compose version
 
-      - name: Write compose env
+      - name: Write production compose env
         env:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
-          LAUNCHPAD_PUBLIC_ORIGIN: ${{ secrets.LAUNCHPAD_PUBLIC_ORIGIN }}
-          AUTH_DEV_LOGIN_ENABLED: ${{ secrets.AUTH_DEV_LOGIN_ENABLED }}
         run: |
           set -euo pipefail
-          POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-launchpad-local-db}"
-          JWT_SECRET="${JWT_SECRET:-launchpad-local-jwt-change-me}"
-          SECRETS_ENCRYPTION_KEY="${SECRETS_ENCRYPTION_KEY:-launchpad-local-secrets-key-32b}"
-          cat > deploy/oci/.env <<EOF
+          # actions/checkout wipes the workspace each run, so persist secrets OUTSIDE it.
+          # Prefer a GitHub secret; else reuse the value already on this server; else
+          # generate once and keep it stable across future deploys.
+          STABLE_DIR="${HOME}/.launchpad"
+          STABLE_ENV="${STABLE_DIR}/oci.env"
+          mkdir -p "$STABLE_DIR" && chmod 700 "$STABLE_DIR"
+
+          env_get() { if [ -f "$2" ]; then grep -E "^$1=" "$2" | head -1 | cut -d= -f2- || true; fi; }
+          is_placeholder() { case "$1" in ""|change-me*|changeme*|replace-me*|TODO*|todo*) return 0 ;; *) return 1 ;; esac; }
+          gen_secret() { if command -v openssl >/dev/null 2>&1; then openssl rand -base64 48 | tr -d '\n'; else head -c 48 /dev/urandom | base64 | tr -d '\n'; fi; }
+
+          POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_get POSTGRES_PASSWORD "$STABLE_ENV")}"
+          JWT_SECRET="${JWT_SECRET:-$(env_get JWT_SECRET "$STABLE_ENV")}"
+          SECRETS_ENCRYPTION_KEY="${SECRETS_ENCRYPTION_KEY:-$(env_get SECRETS_ENCRYPTION_KEY "$STABLE_ENV")}"
+          if is_placeholder "$POSTGRES_PASSWORD"; then POSTGRES_PASSWORD="$(gen_secret)"; fi
+          if is_placeholder "$JWT_SECRET"; then JWT_SECRET="$(gen_secret)"; fi
+          if is_placeholder "$SECRETS_ENCRYPTION_KEY"; then SECRETS_ENCRYPTION_KEY="$(gen_secret)"; fi
+
+          umask 077
+          cat > "$STABLE_ENV" <<EOF
           POSTGRES_USER=launchpad
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
           POSTGRES_DB=launchpad
           JWT_SECRET=${JWT_SECRET}
           SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
-          LAUNCHPAD_PUBLIC_ORIGIN=${LAUNCHPAD_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
+          LAUNCHPAD_PUBLIC_ORIGIN=https://launchpad-idp.online
           LAUNCHPAD_SITE_ADDRESS=:80
           CADDY_HTTP_PORT=8080
           CADDY_HTTPS_PORT=8443
-          AUTH_DEV_LOGIN_ENABLED=${AUTH_DEV_LOGIN_ENABLED:-true}
-          USE_CLOUDFLARE_TUNNEL=false
-          ENVIRONMENT=development
+          AUTH_DEV_LOGIN_ENABLED=false
+          USE_CLOUDFLARE_TUNNEL=true
+          ENVIRONMENT=production
+          PREVIEW_BASE_DOMAIN=launchpad-idp.online
+          PREVIEW_TUNNEL_MODE=off
           LOG_LEVEL=INFO
           KUBERNETES_ENABLED=true
           LOCAL_K8S_ENGINE=k3s
@@ -357,34 +378,42 @@ jobs:
           DEFAULT_WORKLOAD_IMAGE=nginx:1.27-alpine
           TTL_REAPER_INTERVAL_SECONDS=300
           EOF
-          sed -i.bak 's/^[[:space:]]*//' deploy/oci/.env && rm -f deploy/oci/.env.bak
+          sed -i.bak 's/^[[:space:]]*//' "$STABLE_ENV" && rm -f "$STABLE_ENV.bak"
+          # Hand the stable env-file path to later steps.
+          echo "COMPOSE_ENV_FILE=$STABLE_ENV" >> "$GITHUB_ENV"
 
-      - name: Build and start full stack
+      - name: Build, deploy and health-check
         run: |
-          docker compose \
-            -f deploy/oci/docker-compose.yml \
-            --env-file deploy/oci/.env \
-            up -d --build
+          set -euo pipefail
+          ENV_FILE="${COMPOSE_ENV_FILE:-$HOME/.launchpad/oci.env}"
+          dc() { docker compose -f deploy/oci/docker-compose.yml --env-file "$ENV_FILE" "$@"; }
 
-      - name: Show status
-        run: |
-          docker compose \
-            -f deploy/oci/docker-compose.yml \
-            --env-file deploy/oci/.env \
-            ps
-          echo "Open http://127.0.0.1:8080 when healthy (Caddy on host port 8080)."
+          dump_diagnostics() {
+            echo "===== docker compose ps (all) ====="; dc ps -a || true
+            echo "===== docker compose logs (all services, tail 150) ====="; dc logs --tail=150 || true
+          }
+          trap 'echo "Deploy failed at line ${LINENO}."; dump_diagnostics' ERR
 
-      - name: Wait for API health
-        run: |
-          set -e
-          for i in $(seq 1 36); do
-            if docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env \
-              exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"; then
-              echo "API healthy"
+          chmod +x deploy/oci/caddy-entrypoint.sh || true
+
+          # Build first so a build failure leaves the running stack untouched (no half-restart).
+          dc build
+          # Recreate the stack. --remove-orphans drops services no longer in compose.
+          dc up -d --remove-orphans
+          dc ps
+
+          # Wait for the API to report healthy (cold starts: image pulls, migrations, k3d warmup).
+          for i in $(seq 1 60); do
+            if dc exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)" 2>/dev/null; then
+              echo "API healthy - https://launchpad-idp.online (Caddy on host port 8080)"
+              trap - ERR
+              dc ps
               exit 0
             fi
-            echo "waiting for API ($i/36)..."
+            echo "waiting for API ($i/60)..."
             sleep 5
           done
-          docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=80 api
+
+          echo "API did not become healthy within 300s."
+          dump_diagnostics
           exit 1
