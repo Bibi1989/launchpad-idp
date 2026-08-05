@@ -18,7 +18,7 @@ jobs:
   # Manual only (workflow_dispatch, target=oci): SSH to a remote server and recreate Compose.
   # Push-to-main deploys go to the self-hosted Mac runner (deploy-local-mac) instead.
   deploy-oci:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'oci' }}
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'oci') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,6 +64,13 @@ jobs:
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_SLUG: ${{ secrets.GH_APP_SLUG }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          PREVIEW_INGRESS_CLASS: ${{ secrets.PREVIEW_INGRESS_CLASS }}
+          PREVIEW_INGRESS_HTTP_PORT: ${{ secrets.PREVIEW_INGRESS_HTTP_PORT }}
+          PREVIEW_INGRESS_HTTPS_PORT: ${{ secrets.PREVIEW_INGRESS_HTTPS_PORT }}
+          PREVIEW_INGRESS_TCP_PORT: ${{ secrets.PREVIEW_INGRESS_TCP_PORT }}
+          PREVIEW_INGRESS_UDP_PORT: ${{ secrets.PREVIEW_INGRESS_UDP_PORT }}
+          PREVIEW_INGRESS_TLS_PORT: ${{ secrets.PREVIEW_INGRESS_TLS_PORT }}
+          PREVIEW_INGRESS_TLS_PORT: ${{ secrets.PREVIEW_INGRESS_TLS_PORT }}
         with:
           host: ${{ secrets.OCI_HOST }}
           username: ${{ secrets.OCI_USERNAME }}
