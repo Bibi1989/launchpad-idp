@@ -56,7 +56,7 @@ Production-ish Compose + Caddy. Push to `main` SSHs to the host in `OCI_HOST` an
 
 → **[deploy/oci/README.md](deploy/oci/README.md)** - `cp deploy/oci/env.example deploy/oci/.env` then `make oci-up`
 
-Required GitHub Actions secrets for remote deploy: `OCI_HOST`, `OCI_USERNAME`, `OCI_SSH_KEY`, `POSTGRES_PASSWORD`, `JWT_SECRET`, `SECRETS_ENCRYPTION_KEY`. Optional: `LAUNCHPAD_PUBLIC_ORIGIN` (e.g. `https://launchpad-idp.online`), `CADDY_HTTP_PORT` (default `8080`).
+Required GitHub Actions secrets for remote deploy: `OCI_HOST`, `OCI_USERNAME`, `OCI_SSH_KEY`. App secrets (`POSTGRES_PASSWORD`, `JWT_SECRET`, `SECRETS_ENCRYPTION_KEY`) can live only on the server in `deploy/oci/.env` (optional as GitHub secrets to override). Optional: `LAUNCHPAD_PUBLIC_ORIGIN` (e.g. `https://launchpad-idp.online`), `CADDY_HTTP_PORT` (default `8080`).
 
 ## Local quick start
 

@@ -20,25 +20,22 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.target == 'oci' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require remote deploy secrets
+      - name: Require SSH deploy secrets
         env:
           OCI_HOST: ${{ secrets.OCI_HOST }}
           OCI_USERNAME: ${{ secrets.OCI_USERNAME }}
           OCI_SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
         run: |
           missing=0
-          for v in OCI_HOST OCI_USERNAME OCI_SSH_KEY POSTGRES_PASSWORD JWT_SECRET SECRETS_ENCRYPTION_KEY; do
+          for v in OCI_HOST OCI_USERNAME OCI_SSH_KEY; do
             if [ -z "${!v}" ]; then
               echo "Missing secret: $v"
               missing=1
             fi
           done
           if [ "$missing" -ne 0 ]; then
-            echo "Homelab deploy needs those GitHub Actions secrets."
-            echo "For Mac-only deploys: Actions → Run workflow → target=local-mac."
+            echo "Homelab deploy needs OCI_HOST, OCI_USERNAME, and OCI_SSH_KEY."
+            echo "App secrets (POSTGRES_PASSWORD, JWT_SECRET, …) are kept on the server in deploy/oci/.env when GitHub secrets are unset."
             exit 1
           fi
 
@@ -70,20 +67,53 @@ jobs:
             set -euo pipefail
             APP_DIR="${HOME}/launchpad-idp"
             REPO="${REPO_URL:-https://github.com/Bibi1989/launchpad-idp.git}"
+            ENV_FILE="deploy/oci/.env"
 
-            # Cloudflare Tunnel: Caddy stays on :80 inside Docker; host maps 8080 for local checks.
-            PUBLIC_ORIGIN="${LAUNCHPAD_PUBLIC_ORIGIN:-https://launchpad-idp.online}"
-            SITE_ADDRESS="${LAUNCHPAD_SITE_ADDRESS:-:80}"
+            env_get() {
+              # Read KEY from existing on-server .env (survives git reset when gitignored).
+              key="$1"
+              if [ -f "$APP_DIR/$ENV_FILE" ]; then
+                grep -E "^${key}=" "$APP_DIR/$ENV_FILE" | head -1 | cut -d= -f2- || true
+              fi
+            }
+
+            # Prefer GitHub secret when set; otherwise keep the value already on the server.
+            POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_get POSTGRES_PASSWORD)}"
+            JWT_SECRET="${JWT_SECRET:-$(env_get JWT_SECRET)}"
+            SECRETS_ENCRYPTION_KEY="${SECRETS_ENCRYPTION_KEY:-$(env_get SECRETS_ENCRYPTION_KEY)}"
+
+            if [ -z "${POSTGRES_PASSWORD}" ] || [ -z "${JWT_SECRET}" ] || [ -z "${SECRETS_ENCRYPTION_KEY}" ]; then
+              echo "Missing POSTGRES_PASSWORD / JWT_SECRET / SECRETS_ENCRYPTION_KEY."
+              echo "Add them as GitHub Actions secrets, or create $APP_DIR/$ENV_FILE on the server once."
+              exit 1
+            fi
+
+            PUBLIC_ORIGIN="${LAUNCHPAD_PUBLIC_ORIGIN:-$(env_get LAUNCHPAD_PUBLIC_ORIGIN)}"
+            PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-https://launchpad-idp.online}"
+            SITE_ADDRESS="${LAUNCHPAD_SITE_ADDRESS:-$(env_get LAUNCHPAD_SITE_ADDRESS)}"
+            SITE_ADDRESS="${SITE_ADDRESS:-:80}"
             case "$SITE_ADDRESS" in
               http://*|https://*|localhost|localhost:*|"") SITE_ADDRESS=":80" ;;
             esac
-            HTTP_PORT="${CADDY_HTTP_PORT:-8080}"
-            HTTPS_PORT="${CADDY_HTTPS_PORT:-8443}"
-            CF_TUNNEL="${USE_CLOUDFLARE_TUNNEL:-true}"
-            PREVIEW_DOMAIN="${PREVIEW_BASE_DOMAIN:-launchpad-idp.online}"
-            PREVIEW_MODE="${PREVIEW_TUNNEL_MODE:-off}"
-            K8S_ENABLED="${KUBERNETES_ENABLED:-true}"
-            DEV_LOGIN="${AUTH_DEV_LOGIN_ENABLED:-false}"
+            HTTP_PORT="${CADDY_HTTP_PORT:-$(env_get CADDY_HTTP_PORT)}"
+            HTTP_PORT="${HTTP_PORT:-8080}"
+            HTTPS_PORT="${CADDY_HTTPS_PORT:-$(env_get CADDY_HTTPS_PORT)}"
+            HTTPS_PORT="${HTTPS_PORT:-8443}"
+            CF_TUNNEL="${USE_CLOUDFLARE_TUNNEL:-$(env_get USE_CLOUDFLARE_TUNNEL)}"
+            CF_TUNNEL="${CF_TUNNEL:-true}"
+            PREVIEW_DOMAIN="${PREVIEW_BASE_DOMAIN:-$(env_get PREVIEW_BASE_DOMAIN)}"
+            PREVIEW_DOMAIN="${PREVIEW_DOMAIN:-launchpad-idp.online}"
+            PREVIEW_MODE="${PREVIEW_TUNNEL_MODE:-$(env_get PREVIEW_TUNNEL_MODE)}"
+            PREVIEW_MODE="${PREVIEW_MODE:-off}"
+            K8S_ENABLED="${KUBERNETES_ENABLED:-$(env_get KUBERNETES_ENABLED)}"
+            K8S_ENABLED="${K8S_ENABLED:-true}"
+            DEV_LOGIN="${AUTH_DEV_LOGIN_ENABLED:-$(env_get AUTH_DEV_LOGIN_ENABLED)}"
+            DEV_LOGIN="${DEV_LOGIN:-false}"
+
+            # Preserve .env across reset (file is gitignored; still back it up).
+            if [ -f "$APP_DIR/$ENV_FILE" ]; then
+              cp -a "$APP_DIR/$ENV_FILE" /tmp/launchpad-oci.env.bak
+            fi
 
             if [ ! -d "$APP_DIR/.git" ]; then
               git clone "$REPO" "$APP_DIR"
@@ -129,7 +159,6 @@ jobs:
             docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env ps
             docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env logs --tail=40 caddy
 
-            # Optional health check inside the api container
             for i in $(seq 1 36); do
               if docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env \
                 exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"; then
