@@ -72,47 +72,108 @@ jobs:
             env_get() {
               # Read KEY from existing on-server .env (survives git reset when gitignored).
               key="$1"
-              if [ -f "$APP_DIR/$ENV_FILE" ]; then
-                grep -E "^${key}=" "$APP_DIR/$ENV_FILE" | head -1 | cut -d= -f2- || true
+              file="$2"
+              if [ -f "$file" ]; then
+                grep -E "^${key}=" "$file" | head -1 | cut -d= -f2- || true
               fi
             }
 
-            # Prefer GitHub secret when set; otherwise keep the value already on the server.
-            POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_get POSTGRES_PASSWORD)}"
-            JWT_SECRET="${JWT_SECRET:-$(env_get JWT_SECRET)}"
-            SECRETS_ENCRYPTION_KEY="${SECRETS_ENCRYPTION_KEY:-$(env_get SECRETS_ENCRYPTION_KEY)}"
+            is_placeholder() {
+              val="$1"
+              case "$val" in
+                ""|change-me*|changeme*|replace-me*|TODO*|todo*) return 0 ;;
+                *) return 1 ;;
+              esac
+            }
 
-            if [ -z "${POSTGRES_PASSWORD}" ] || [ -z "${JWT_SECRET}" ] || [ -z "${SECRETS_ENCRYPTION_KEY}" ]; then
-              echo "Missing POSTGRES_PASSWORD / JWT_SECRET / SECRETS_ENCRYPTION_KEY."
-              echo "Add them as GitHub Actions secrets, or create $APP_DIR/$ENV_FILE on the server once."
-              exit 1
+            gen_secret() {
+              if command -v openssl >/dev/null 2>&1; then
+                openssl rand -base64 48 | tr -d '\n'
+              else
+                head -c 48 /dev/urandom | base64 | tr -d '\n'
+              fi
+            }
+
+            # Prefer an existing env file (gitignored) before clone/reset.
+            EXISTING_ENV=""
+            for candidate in \
+              "$APP_DIR/$ENV_FILE" \
+              "$HOME/launchpad/deploy/oci/.env" \
+              "$HOME/launchpad-idp/deploy/oci/.env"
+            do
+              if [ -f "$candidate" ]; then
+                EXISTING_ENV="$candidate"
+                break
+              fi
+            done
+
+            # Prefer GitHub secret when set; otherwise keep the value already on the server.
+            POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_get POSTGRES_PASSWORD "${EXISTING_ENV}")}"
+            JWT_SECRET="${JWT_SECRET:-$(env_get JWT_SECRET "${EXISTING_ENV}")}"
+            SECRETS_ENCRYPTION_KEY="${SECRETS_ENCRYPTION_KEY:-$(env_get SECRETS_ENCRYPTION_KEY "${EXISTING_ENV}")}"
+
+            # Fallback: pull from a running compose stack (same host) before generating new values.
+            if [ -d "$APP_DIR" ] && [ -f "$APP_DIR/deploy/oci/docker-compose.yml" ]; then
+              cd "$APP_DIR"
+              if is_placeholder "$POSTGRES_PASSWORD"; then
+                POSTGRES_PASSWORD="$(docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env exec -T postgres printenv POSTGRES_PASSWORD 2>/dev/null || true)"
+              fi
+              if is_placeholder "$JWT_SECRET"; then
+                JWT_SECRET="$(docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env exec -T api printenv JWT_SECRET 2>/dev/null || true)"
+              fi
+              if is_placeholder "$SECRETS_ENCRYPTION_KEY"; then
+                SECRETS_ENCRYPTION_KEY="$(docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env exec -T api printenv SECRETS_ENCRYPTION_KEY 2>/dev/null || true)"
+              fi
+              cd - >/dev/null
             fi
 
-            PUBLIC_ORIGIN="${LAUNCHPAD_PUBLIC_ORIGIN:-$(env_get LAUNCHPAD_PUBLIC_ORIGIN)}"
+            if is_placeholder "$POSTGRES_PASSWORD"; then POSTGRES_PASSWORD=""; fi
+            if is_placeholder "$JWT_SECRET"; then JWT_SECRET=""; fi
+            if is_placeholder "$SECRETS_ENCRYPTION_KEY"; then SECRETS_ENCRYPTION_KEY=""; fi
+
+            GENERATED=0
+            if [ -z "${POSTGRES_PASSWORD}" ]; then
+              POSTGRES_PASSWORD="$(gen_secret)"
+              GENERATED=1
+            fi
+            if [ -z "${JWT_SECRET}" ]; then
+              JWT_SECRET="$(gen_secret)"
+              GENERATED=1
+            fi
+            if [ -z "${SECRETS_ENCRYPTION_KEY}" ]; then
+              SECRETS_ENCRYPTION_KEY="$(gen_secret)"
+              GENERATED=1
+            fi
+            if [ "$GENERATED" -eq 1 ]; then
+              echo "Generated missing app secrets on the server and will write them to $APP_DIR/$ENV_FILE"
+              echo "(Re-used on later deploys. Optionally store the same values as GitHub Actions secrets.)"
+            fi
+
+            PUBLIC_ORIGIN="${LAUNCHPAD_PUBLIC_ORIGIN:-$(env_get LAUNCHPAD_PUBLIC_ORIGIN "${EXISTING_ENV}")}"
             PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-https://launchpad-idp.online}"
-            SITE_ADDRESS="${LAUNCHPAD_SITE_ADDRESS:-$(env_get LAUNCHPAD_SITE_ADDRESS)}"
+            SITE_ADDRESS="${LAUNCHPAD_SITE_ADDRESS:-$(env_get LAUNCHPAD_SITE_ADDRESS "${EXISTING_ENV}")}"
             SITE_ADDRESS="${SITE_ADDRESS:-:80}"
             case "$SITE_ADDRESS" in
               http://*|https://*|localhost|localhost:*|"") SITE_ADDRESS=":80" ;;
             esac
-            HTTP_PORT="${CADDY_HTTP_PORT:-$(env_get CADDY_HTTP_PORT)}"
+            HTTP_PORT="${CADDY_HTTP_PORT:-$(env_get CADDY_HTTP_PORT "${EXISTING_ENV}")}"
             HTTP_PORT="${HTTP_PORT:-8080}"
-            HTTPS_PORT="${CADDY_HTTPS_PORT:-$(env_get CADDY_HTTPS_PORT)}"
+            HTTPS_PORT="${CADDY_HTTPS_PORT:-$(env_get CADDY_HTTPS_PORT "${EXISTING_ENV}")}"
             HTTPS_PORT="${HTTPS_PORT:-8443}"
-            CF_TUNNEL="${USE_CLOUDFLARE_TUNNEL:-$(env_get USE_CLOUDFLARE_TUNNEL)}"
+            CF_TUNNEL="${USE_CLOUDFLARE_TUNNEL:-$(env_get USE_CLOUDFLARE_TUNNEL "${EXISTING_ENV}")}"
             CF_TUNNEL="${CF_TUNNEL:-true}"
-            PREVIEW_DOMAIN="${PREVIEW_BASE_DOMAIN:-$(env_get PREVIEW_BASE_DOMAIN)}"
+            PREVIEW_DOMAIN="${PREVIEW_BASE_DOMAIN:-$(env_get PREVIEW_BASE_DOMAIN "${EXISTING_ENV}")}"
             PREVIEW_DOMAIN="${PREVIEW_DOMAIN:-launchpad-idp.online}"
-            PREVIEW_MODE="${PREVIEW_TUNNEL_MODE:-$(env_get PREVIEW_TUNNEL_MODE)}"
+            PREVIEW_MODE="${PREVIEW_TUNNEL_MODE:-$(env_get PREVIEW_TUNNEL_MODE "${EXISTING_ENV}")}"
             PREVIEW_MODE="${PREVIEW_MODE:-off}"
-            K8S_ENABLED="${KUBERNETES_ENABLED:-$(env_get KUBERNETES_ENABLED)}"
+            K8S_ENABLED="${KUBERNETES_ENABLED:-$(env_get KUBERNETES_ENABLED "${EXISTING_ENV}")}"
             K8S_ENABLED="${K8S_ENABLED:-true}"
-            DEV_LOGIN="${AUTH_DEV_LOGIN_ENABLED:-$(env_get AUTH_DEV_LOGIN_ENABLED)}"
+            DEV_LOGIN="${AUTH_DEV_LOGIN_ENABLED:-$(env_get AUTH_DEV_LOGIN_ENABLED "${EXISTING_ENV}")}"
             DEV_LOGIN="${DEV_LOGIN:-false}"
 
             # Preserve .env across reset (file is gitignored; still back it up).
-            if [ -f "$APP_DIR/$ENV_FILE" ]; then
-              cp -a "$APP_DIR/$ENV_FILE" /tmp/launchpad-oci.env.bak
+            if [ -n "$EXISTING_ENV" ]; then
+              cp -a "$EXISTING_ENV" /tmp/launchpad-oci.env.bak
             fi
 
             if [ ! -d "$APP_DIR/.git" ]; then
