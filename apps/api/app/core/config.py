@@ -190,6 +190,17 @@ class Settings(BaseSettings):
     # Optional Ingress host template when kubernetes_enabled (e.g. "{name}.localtest.me")
     preview_ingress_host_template: str | None = None
 
+    # Cloudflare Tunnel (homelab prod): public HTTPS/443 is routed straight to the
+    # in-cluster Ingress controller, so preview URLs must be host-only (no NodePort)
+    # and served over https. Toggle with USE_CLOUDFLARE_TUNNEL=true; ENVIRONMENT=
+    # production enables it implicitly. NodePort URLs are retained only when neither
+    # is active (local offline development).
+    use_cloudflare_tunnel: bool = False
+    # Wildcard base domain for per-workspace ingress hosts, e.g. "preview.mydomain.com"
+    # (matches the *.preview.mydomain.com CNAME in Cloudflare DNS). Combined as
+    # ws-{workspace_id}.{preview_base_domain}.
+    preview_base_domain: str | None = None
+
     # Per-preview cloudflared quick tunnels so "Open app" works remotely, not just on
     # 127.0.0.1. "off" (default) keeps the NodePort URL + client-side host detection;
     # "cloudflared" starts a `cloudflared tunnel --url` quick tunnel per local preview
@@ -344,6 +355,15 @@ class Settings(BaseSettings):
             except Exception:
                 self.preview_node_host = "127.0.0.1"
         return self
+
+    @property
+    def preview_tunnel_active(self) -> bool:
+        """True when preview URLs must be host-only https (Cloudflare Tunnel / prod).
+
+        Retains NodePort URLs only for local offline development, where neither the
+        explicit toggle nor ENVIRONMENT=production is set.
+        """
+        return self.use_cloudflare_tunnel or self.environment.strip().lower() == "production"
 
 
 @lru_cache

@@ -996,9 +996,14 @@ def patch_manifest_documents(
         # Per-stack launch-* workloads carry their own built image + selector and
         # are routed by the multi-service Ingress. Stamp governance labels but
         # never rewrite their image or force them onto the single-app selector.
+        # Their images are built and loaded straight into the local cluster, so
+        # pin imagePullPolicy=IfNotPresent - otherwise a :latest tag defaults to
+        # Always and the kubelet tries (and fails) to pull the bare name from
+        # Docker Hub (docker.io/library/launch-web:latest), causing ImagePullBackOff.
         if _is_launch_workload(doc):
             meta_labels = metadata.setdefault("labels", {})
             meta_labels.update(labels)
+            _pin_local_image_pull_policy(doc)
             patched.append(doc)
             continue
         meta_labels = metadata.setdefault("labels", {})
@@ -1067,6 +1072,27 @@ def _is_launch_workload(doc: dict[str, Any]) -> bool:
     """
     name = str((doc.get("metadata") or {}).get("name") or "").strip().lower()
     return name.startswith("launch-")
+
+
+def _pin_local_image_pull_policy(doc: dict[str, Any]) -> None:
+    """Force imagePullPolicy=IfNotPresent on every container of a Deployment.
+
+    Locally-built workloads (launch-*) are loaded straight into the cluster node,
+    so the kubelet must be told to honor that local copy. Without this an image
+    tagged ``:latest`` defaults to imagePullPolicy=Always and the kubelet tries to
+    pull the bare name from Docker Hub (docker.io/library/<name>:latest), which
+    does not exist -> ImagePullBackOff. Only touches the pull policy; the image,
+    name, selector and ports are left exactly as generated.
+    """
+    if str(doc.get("kind") or "") != "Deployment":
+        return
+    pod_spec = (
+        ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+    )
+    for group in ("initContainers", "containers"):
+        for container in pod_spec.get(group) or []:
+            if isinstance(container, dict):
+                container["imagePullPolicy"] = "IfNotPresent"
 
 
 def _has_preview_target_annotation(doc: dict[str, Any]) -> bool:
@@ -1426,14 +1452,12 @@ class ManifestDeployer:
         )
         resources.node_port = node_port
 
-        if self._settings.preview_ingress_host_template:
-            host = self._settings.preview_ingress_host_template.format(
-                name=name,
-                environment_id=environment_id,
-                namespace=namespace,
-            )
+        host = self._provisioner.workspace_preview_host(
+            name=name, environment_id=environment_id, namespace=namespace
+        )
+        if host:
             self._provisioner.apply_ingress(namespace=namespace, labels=labels, host=host)
-            resources.preview_url = f"http://{host}"
+            resources.preview_url = self._provisioner.ingress_preview_url(host=host)
         else:
             resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
 

@@ -294,6 +294,7 @@ metadata:
       containers:
         - name: {svc.name}
           image: {svc.name}:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: {svc.port}
 """,

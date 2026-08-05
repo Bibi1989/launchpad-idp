@@ -409,14 +409,12 @@ class KubernetesProvisioner:
         resources.created_workload = True
         resources.node_port = node_port
 
-        if self._settings.preview_ingress_host_template:
-            host = self._settings.preview_ingress_host_template.format(
-                name=name,
-                environment_id=environment_id,
-                namespace=namespace,
-            )
+        host = self.workspace_preview_host(
+            name=name, environment_id=environment_id, namespace=namespace
+        )
+        if host:
             self.apply_ingress(namespace=namespace, labels=labels, host=host)
-            resources.preview_url = f"http://{host}"
+            resources.preview_url = self.ingress_preview_url(host=host)
         else:
             resources.preview_url = self.node_port_preview_url(node_port=node_port)
 
@@ -743,6 +741,40 @@ class KubernetesProvisioner:
     def portal_preview_url(self, *, environment_id: str) -> str:
         base = self._settings.preview_public_base_url.rstrip("/")
         return f"{base}/p/{environment_id}"
+
+    def workspace_preview_host(
+        self, *, name: str, environment_id: str, namespace: str
+    ) -> str | None:
+        """Public ingress host for a preview, or None to fall back to NodePort.
+
+        Prefers an explicit ``preview_ingress_host_template``. Otherwise, when a
+        Cloudflare Tunnel / production is active and a base domain is configured,
+        derives ``ws-{workspace_id}.{base_domain}`` to match the wildcard CNAME in
+        Cloudflare DNS. Returns None in local offline development so the caller
+        falls back to a NodePort URL.
+        """
+        template = self._settings.preview_ingress_host_template
+        if (
+            not template
+            and self._settings.preview_tunnel_active
+            and self._settings.preview_base_domain
+        ):
+            template = "ws-{workspace_id}.{base_domain}"
+        if not template:
+            return None
+        return template.format(
+            name=name,
+            environment_id=environment_id,
+            workspace_id=environment_id,
+            namespace=namespace,
+            base_domain=(self._settings.preview_base_domain or "").strip("."),
+        )
+
+    def ingress_preview_url(self, *, host: str) -> str:
+        # Cloudflare Tunnel serves the public host over https (443 -> ingress :80),
+        # so the URL is host-only with no NodePort suffix.
+        scheme = "https" if self._settings.preview_tunnel_active else "http"
+        return f"{scheme}://{host}"
 
     def node_port_preview_url(self, *, node_port: int) -> str:
         from urllib.parse import urlparse

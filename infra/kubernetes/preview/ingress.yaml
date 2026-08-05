@@ -2,17 +2,21 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: preview-ingress
-  namespace: pr-${PR_NUMBER}
+  namespace: ws-${WORKSPACE_ID}
   annotations:
-    kubernetes.io/ingress.class: nginx
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # TLS terminates at the Cloudflare edge; the tunnel forwards plain http to the
+    # ingress (443 -> :80), so an origin ssl-redirect would cause a redirect loop.
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
     nginx.ingress.kubernetes.io/use-regex: "true"
     # Set proxy timeouts to allow long-lived WebSockets for live logging/streaming
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
+  # Wildcard *.${BASE_DOMAIN} CNAME in Cloudflare DNS routes to the tunnel, which
+  # forwards to this NGINX ingress. Host must match the ws-{workspaceId} convention.
+  ingressClassName: nginx
   rules:
-    - host: pr-${PR_NUMBER}.preview.mydomain.com
+    - host: ws-${WORKSPACE_ID}.${BASE_DOMAIN}
       http:
         paths:
           - path: /api
@@ -29,7 +33,3 @@ spec:
                 name: web
                 port:
                   number: 3000
-  tls:
-    - hosts:
-        - pr-${PR_NUMBER}.preview.mydomain.com
-      secretName: preview-tls-cert
