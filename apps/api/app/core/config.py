@@ -327,7 +327,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _compute_preview_node_host(self) -> "Settings":
-        if self.preview_node_host is None:
+        # Treat an unset (None), empty, or whitespace-only value as "not
+        # configured" so an empty env var (e.g. PREVIEW_NODE_HOST= from
+        # docker-compose) still gets backfilled instead of producing
+        # "http://:30087" preview URLs.
+        if self.preview_node_host is not None:
+            self.preview_node_host = self.preview_node_host.strip()
+        if not self.preview_node_host:
             from urllib.parse import urlparse
             try:
                 parsed = urlparse(self.preview_public_base_url)

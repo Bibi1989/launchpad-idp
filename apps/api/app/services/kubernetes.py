@@ -745,10 +745,29 @@ class KubernetesProvisioner:
         return f"{base}/p/{environment_id}"
 
     def node_port_preview_url(self, *, node_port: int) -> str:
-        host = self._settings.preview_node_host.rstrip("/")
+        from urllib.parse import urlparse
+
+        host = (self._settings.preview_node_host or "").strip().rstrip("/")
+        # Follow the scheme Launchpad itself is served on (https in prod) so the
+        # preview link isn't blocked as mixed content; default to http locally.
+        scheme = "http"
+        try:
+            base_scheme = urlparse(self._settings.preview_public_base_url).scheme
+            if base_scheme:
+                scheme = base_scheme
+        except Exception:
+            pass
+        if not host:
+            # Never emit a hostless "http://:30087". Fall back to the
+            # preview base URL host, then to loopback.
+            try:
+                host = urlparse(self._settings.preview_public_base_url).hostname or ""
+            except Exception:
+                host = ""
+            host = host or "127.0.0.1"
         if "://" in host:
             return f"{host}:{node_port}"
-        return f"http://{host}:{node_port}"
+        return f"{scheme}://{host}:{node_port}"
     def wait_for_workload_ready(
         self,
         *,
