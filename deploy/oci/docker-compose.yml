@@ -64,6 +64,10 @@ services:
 
   api:
     build: *api_build
+    # Serve only. Schema migration is handled once by the `migrate` service below,
+    # which this service waits on (see depends_on), so the API never runs against an
+    # un-migrated database and a migration error can't crash-loop the API.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -124,9 +128,26 @@ services:
       retries: 12
       start_period: 40s
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+
+  # One-shot database migration. Runs `alembic upgrade head` to completion BEFORE
+  # api/worker/beat start (they gate on service_completed_successfully), so no service
+  # ever serves against an un-migrated schema, migrations run exactly once (no races
+  # between api/worker/beat), and a migration failure surfaces here instead of
+  # crash-looping the API.
+  migrate:
+    build: *api_build
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    environment:
+      <<: *api_env
+    depends_on:
+      postgres:
         condition: service_healthy
 
   worker:
@@ -139,6 +160,8 @@ services:
       <<: *api_env
     volumes: *k8s_volumes
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -156,6 +179,8 @@ services:
     volumes:
       - workspace_data:/var/lib/launchpad/workspaces
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
