@@ -14,6 +14,10 @@ on:
           - local-mac
         default: oci
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Manual only (workflow_dispatch, target=oci): SSH to a remote server and recreate Compose.
   # Push-to-main deploys go to the self-hosted Mac runner (deploy-local-mac) instead.
