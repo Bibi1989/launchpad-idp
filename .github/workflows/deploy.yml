@@ -343,7 +343,7 @@ jobs:
   # TODO: add a step to check if the server is reachable by pinging the IP address of the server.
   deploy-local-mac:
     if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'local-mac') }}
-    runs-on: macOS
+    runs-on: [self-hosted, macOS, launchpad]
     permissions:
       contents: read
     steps:
