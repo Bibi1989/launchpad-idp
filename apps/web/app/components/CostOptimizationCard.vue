@@ -7,6 +7,8 @@ import {
 
 const cost = defineModel<CostOptimizationConfig>('cost', { required: true })
 
+const { t } = useI18n()
+
 const props = withDefaults(
   defineProps<{
     disabled?: boolean
@@ -14,12 +16,12 @@ const props = withDefaults(
   { disabled: false },
 )
 
-const presets: Array<{ value: ResourceSizingPreset; title: string; hint: string }> = [
-  { value: 'developer', title: 'Developer / Lean', hint: '100m CPU / 128Mi RAM' },
-  { value: 'balanced', title: 'Balanced', hint: '250m CPU / 512Mi RAM' },
-  { value: 'performance', title: 'Performance', hint: '1 Core / 2Gi RAM' },
-  { value: 'custom', title: 'Custom', hint: 'Override requests & limits' },
-]
+const presets = computed(() => [
+  { value: 'developer' as ResourceSizingPreset, title: t('scaffold.cost.presets.developer'), hint: '100m CPU / 128Mi RAM' },
+  { value: 'balanced' as ResourceSizingPreset, title: t('scaffold.cost.presets.balanced'), hint: '250m CPU / 512Mi RAM' },
+  { value: 'performance' as ResourceSizingPreset, title: t('scaffold.cost.presets.performance'), hint: '1 Core / 2Gi RAM' },
+  { value: 'custom' as ResourceSizingPreset, title: t('scaffold.cost.presets.custom'), hint: 'Override requests & limits' },
+])
 
 function ensureCost(): CostOptimizationConfig {
   return cost.value ?? defaultCostOptimizationConfig()
@@ -40,11 +42,10 @@ function onPresetChange(preset: ResourceSizingPreset) {
 <template>
   <section class="space-y-4 rounded-xl border border-[var(--lp-line)] p-4">
     <div>
-      <p class="lp-label">Cost optimization</p>
-      <h3 class="mt-1 text-lg font-semibold">Cost Optimization & Right-Sizing</h3>
+      <p class="lp-label">{{ t('scaffold.cost.label') }}</p>
+      <h3 class="mt-1 text-lg font-semibold">{{ t('scaffold.cost.title') }}</h3>
       <p class="mt-1 text-sm text-[var(--lp-muted)]">
-        Inject spot scheduling, HPA/VPA, resource presets, and idle shutdown into
-        <code class="font-mono text-xs">infra/</code> manifests.
+        {{ t('scaffold.cost.blurb') }}
       </p>
     </div>
 
@@ -58,16 +59,16 @@ function onPresetChange(preset: ResourceSizingPreset) {
           :disabled="disabled"
         >
         <span>
-          <span class="block text-sm font-medium">Enable Spot / Preemptible VM Scheduling</span>
+          <span class="block text-sm font-medium">{{ t('scaffold.cost.spot') }}</span>
           <span class="block text-xs text-[var(--lp-muted)]">
-            Prefer spot capacity with node affinity and tolerations.
+            {{ t('scaffold.cost.spotBlurb') }}
           </span>
         </span>
       </label>
 
       <div v-if="cost.spotScheduling.enabled" class="space-y-3 border-t border-[var(--lp-line)] pt-3 pl-7">
         <label class="block space-y-2">
-          <span class="lp-label">Target workload placement</span>
+          <span class="lp-label">{{ t('scaffold.cost.spotPlacement') }}</span>
           <select v-model="cost.spotScheduling.placement" class="lp-input" :disabled="disabled">
             <option value="stateless_nonprod">Stateless / Non-prod</option>
             <option value="production_ondemand_fallback">Production with On-Demand Fallback</option>
@@ -75,7 +76,7 @@ function onPresetChange(preset: ResourceSizingPreset) {
         </label>
         <label class="block space-y-2">
           <span class="lp-label">
-            Spot allocation percentage - {{ cost.spotScheduling.allocationPercent }}%
+            {{ t('scaffold.cost.spotAllocation', { percent: cost.spotScheduling.allocationPercent }) }}
           </span>
           <input
             v-model.number="cost.spotScheduling.allocationPercent"
@@ -88,7 +89,7 @@ function onPresetChange(preset: ResourceSizingPreset) {
           >
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Node scaler / provisioner</span>
+          <span class="lp-label">{{ t('scaffold.cost.spotProvisioner') }}</span>
           <select v-model="cost.spotScheduling.provisioner" class="lp-input" :disabled="disabled">
             <option value="karpenter">Karpenter / Dynamic Provisioner</option>
             <option value="cluster_autoscaler">Standard Cluster Autoscaler</option>
@@ -107,9 +108,9 @@ function onPresetChange(preset: ResourceSizingPreset) {
           :disabled="disabled"
         >
         <span>
-          <span class="block text-sm font-medium">Enable Horizontal Pod Autoscaling (HPA)</span>
+          <span class="block text-sm font-medium">{{ t('scaffold.cost.hpa') }}</span>
           <span class="block text-xs text-[var(--lp-muted)]">
-            Writes <code class="font-mono text-[10px]">hpa.yaml</code> with CPU target utilization.
+            {{ t('scaffold.cost.hpaBlurb') }}
           </span>
         </span>
       </label>
@@ -136,9 +137,9 @@ function onPresetChange(preset: ResourceSizingPreset) {
           :disabled="disabled"
         >
         <span>
-          <span class="block text-sm font-medium">Enable Vertical Pod Autoscaler (Recommendation Mode)</span>
+          <span class="block text-sm font-medium">{{ t('scaffold.cost.vpa') }}</span>
           <span class="block text-xs text-[var(--lp-muted)]">
-            VPA <code class="font-mono text-[10px]">updateMode: Off</code> - observe usage without restarts.
+            {{ t('scaffold.cost.vpaBlurb') }}
           </span>
         </span>
       </label>
@@ -146,7 +147,7 @@ function onPresetChange(preset: ResourceSizingPreset) {
 
     <!-- C. Resources -->
     <div class="space-y-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 p-4">
-      <p class="text-sm font-medium">Resource limits & quotas</p>
+      <p class="text-sm font-medium">{{ t('scaffold.cost.resources') }}</p>
       <div class="grid gap-2 sm:grid-cols-2">
         <label
           v-for="preset in presets"
@@ -225,15 +226,15 @@ function onPresetChange(preset: ResourceSizingPreset) {
           :disabled="disabled"
         >
         <span>
-          <span class="block text-sm font-medium">Enable Scheduled Workspace Sleep / Auto-Teardown</span>
+          <span class="block text-sm font-medium">{{ t('scaffold.cost.idleShutdown') }}</span>
           <span class="block text-xs text-[var(--lp-muted)]">
-            Scale deployment to 0 outside work hours (Mon-Fri 7PM-7AM + weekends).
+            {{ t('scaffold.cost.idleBlurb') }}
           </span>
         </span>
       </label>
       <div v-if="cost.idleShutdown.enabled" class="border-t border-[var(--lp-line)] pt-3 pl-7">
         <label class="block space-y-2">
-          <span class="lp-label">Schedule</span>
+          <span class="lp-label">{{ t('scaffold.cost.schedule') }}</span>
           <select v-model="cost.idleShutdown.schedule" class="lp-input" :disabled="disabled">
             <option value="weeknights_weekends">Mon-Fri 7PM-7AM + weekends</option>
           </select>

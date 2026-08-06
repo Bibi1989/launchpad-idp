@@ -37,6 +37,7 @@ const emit = defineEmits<{
 }>()
 
 const { analyzeWorkspaceFile } = useProvisioning()
+const { t } = useI18n()
 
 const analyzing = ref(false)
 const entries = ref<WorkspaceFileAnalysisEntry[]>([])
@@ -169,6 +170,24 @@ function severityClass(severity: string): string {
   return 'text-[var(--lp-muted)]'
 }
 
+function issueCountLabel(count: number): string {
+  return count === 1
+    ? t('analyzer.workspace.issueCountOne', { count })
+    : t('analyzer.workspace.issueCountMany', { count })
+}
+
+function reviewingLabel(count: number): string {
+  return count === 1
+    ? t('analyzer.workspace.reviewingOne', { count })
+    : t('analyzer.workspace.reviewingMany', { count })
+}
+
+function fixableFooterLabel(count: number): string {
+  return count === 1
+    ? t('analyzer.workspace.fixableFooterOne', { count })
+    : t('analyzer.workspace.fixableFooterMany', { count })
+}
+
 function shortName(path: string): string {
   return path.split('/').pop() || path
 }
@@ -184,38 +203,38 @@ function shortName(path: string): string {
       <aside class="flex h-full w-full max-w-xl flex-col border-l border-[var(--lp-line)] bg-[var(--lp-panel)] shadow-2xl">
         <header class="flex items-start justify-between gap-3 border-b border-[var(--lp-line)] px-5 py-4">
           <div>
-            <p class="text-[11px] uppercase tracking-wide text-[var(--lp-muted)]">AI analysis</p>
+            <p class="text-[11px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('analyzer.workspace.eyebrow') }}</p>
             <h3 class="text-base font-semibold text-[var(--lp-text)]">
               <template v-if="isMulti">
-                {{ resolvedTargets.length }} files
+                {{ t('analyzer.workspace.filesCount', { count: resolvedTargets.length }) }}
               </template>
               <template v-else>
-                {{ path ? path.split('/').pop() : (resolvedTargets[0]?.path.split('/').pop() || 'Workspace file') }}
+                {{ path ? path.split('/').pop() : (resolvedTargets[0]?.path.split('/').pop() || t('analyzer.workspace.workspaceFile')) }}
               </template>
             </h3>
             <p class="mt-1 text-[12px] text-[var(--lp-muted)]">
-              <template v-if="analyzing">Scanning…</template>
+              <template v-if="analyzing">{{ t('analyzer.workspace.scanning') }}</template>
               <template v-else-if="entries.length">
-                {{ issueCount }} issue{{ issueCount === 1 ? '' : 's' }}
-                <span v-if="fixableCount"> · {{ fixableCount }} fixable</span>
+                {{ issueCountLabel(issueCount) }}
+                <span v-if="fixableCount">{{ t('analyzer.workspace.fixable', { count: fixableCount }) }}</span>
               </template>
             </p>
             <p v-if="errorContext" class="mt-2 text-[11px] text-[var(--lp-warn)]">
-              Using sandbox error context to target the fix.
+              {{ t('analyzer.workspace.sandboxContext') }}
             </p>
           </div>
           <button type="button" class="lp-btn-ghost px-2 py-1 text-[12px]" @click="close">
-            Close
+            {{ t('common.close') }}
           </button>
         </header>
 
         <div class="flex items-center gap-2 border-b border-[var(--lp-line)] px-5 py-3">
           <select v-model="kindOverride" class="lp-input flex-1 text-xs">
-            <option value="auto">Auto-detect domain</option>
-            <option value="cicd">CI/CD</option>
-            <option value="docker">Docker</option>
-            <option value="iac">IaC</option>
-            <option value="kubernetes">Kubernetes</option>
+            <option value="auto">{{ t('analyzer.workspace.autoDetect') }}</option>
+            <option value="cicd">{{ t('analyzer.workspace.cicd') }}</option>
+            <option value="docker">{{ t('analyzer.workspace.docker') }}</option>
+            <option value="iac">{{ t('analyzer.workspace.iac') }}</option>
+            <option value="kubernetes">{{ t('analyzer.workspace.kubernetes') }}</option>
           </select>
           <button
             type="button"
@@ -223,7 +242,7 @@ function shortName(path: string): string {
             :disabled="analyzing || !resolvedTargets.length"
             @click="runAnalysis"
           >
-            {{ analyzing ? 'Analyzing…' : 'Re-run' }}
+            {{ analyzing ? t('analyzer.workspace.analyzing') : t('analyzer.workspace.rerun') }}
           </button>
         </div>
 
@@ -252,7 +271,7 @@ function shortName(path: string): string {
               v-if="entry.report?.improvedContent"
               class="shrink-0 text-[10px] uppercase tracking-wide text-[var(--lp-accent)]"
             >
-              Fix
+              {{ t('analyzer.workspace.fix') }}
             </span>
             <span v-else-if="entry.report" class="shrink-0 text-[10px] text-[var(--lp-muted)]">
               {{ entry.report.issues.length }}
@@ -262,7 +281,7 @@ function shortName(path: string): string {
 
         <div class="flex-1 space-y-4 overflow-y-auto px-5 py-4">
           <p v-if="analyzing && !activeEntry?.report" class="text-sm text-[var(--lp-muted)]">
-            Reviewing {{ resolvedTargets.length }} file{{ resolvedTargets.length === 1 ? '' : 's' }}…
+            {{ reviewingLabel(resolvedTargets.length) }}
           </p>
 
           <template v-else-if="activeEntry">
@@ -286,7 +305,7 @@ function shortName(path: string): string {
 
               <section v-if="activeEntry.report.issues.length" class="space-y-2">
                 <h4 class="text-[11px] font-semibold uppercase tracking-wide text-[var(--lp-muted)]">
-                  Issues
+                  {{ t('analyzer.workspace.issues') }}
                 </h4>
                 <ul class="space-y-2">
                   <li
@@ -307,7 +326,7 @@ function shortName(path: string): string {
 
               <section v-if="activeEntry.report.suggestions.length" class="space-y-2">
                 <h4 class="text-[11px] font-semibold uppercase tracking-wide text-[var(--lp-muted)]">
-                  Suggestions
+                  {{ t('analyzer.workspace.suggestions') }}
                 </h4>
                 <ul class="list-disc space-y-1 pl-5 text-[13px] text-[var(--lp-text)]">
                   <li v-for="(tip, idx) in activeEntry.report.suggestions" :key="idx">
@@ -319,7 +338,7 @@ function shortName(path: string): string {
               <section v-if="activeEntry.report.improvedContent" class="space-y-2">
                 <div class="flex items-center justify-between gap-2">
                   <h4 class="text-[11px] font-semibold uppercase tracking-wide text-[var(--lp-muted)]">
-                    Suggested rewrite
+                    {{ t('analyzer.workspace.suggestedRewrite') }}
                   </h4>
                   <button
                     type="button"
@@ -327,7 +346,7 @@ function shortName(path: string): string {
                     :disabled="applyingPath === activeEntry.path"
                     @click="void applyImproved(activeEntry)"
                   >
-                    {{ applyingPath === activeEntry.path ? 'Applying…' : 'Apply fix to workspace' }}
+                    {{ applyingPath === activeEntry.path ? t('common.working') : t('analyzer.workspace.applyFixWorkspace') }}
                   </button>
                 </div>
                 <pre class="max-h-64 overflow-auto rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/70 p-3 font-mono text-[11px] text-[var(--lp-text)]">{{ activeEntry.report.improvedContent }}</pre>
@@ -339,10 +358,10 @@ function shortName(path: string): string {
               >
                 <div class="min-w-0">
                   <p class="truncate text-xs font-semibold text-[var(--lp-text)]">
-                    Target File: <code class="text-[var(--lp-accent)]">{{ activeEntry.path }}</code>
+                    {{ t('analyzer.workspace.targetFile') }} <code class="text-[var(--lp-accent)]">{{ activeEntry.path }}</code>
                   </p>
                   <p class="text-[11px] text-[var(--lp-muted)]">
-                    Targeted file analyzed for errors. Click below to apply fixes directly to this file.
+                    {{ t('analyzer.workspace.targetBlurb') }}
                   </p>
                 </div>
                 <button
@@ -351,7 +370,7 @@ function shortName(path: string): string {
                   :disabled="applyingPath === activeEntry.path"
                   @click="void applyImproved({ ...activeEntry, report: { ...activeEntry.report, improvedContent: activeEntry.content } as any })"
                 >
-                  {{ applyingPath === activeEntry.path ? 'Applying…' : 'Apply fix to file' }}
+                  {{ applyingPath === activeEntry.path ? t('common.working') : t('analyzer.workspace.applyFixFile') }}
                 </button>
               </div>
             </template>
@@ -363,7 +382,7 @@ function shortName(path: string): string {
           class="flex items-center justify-between gap-3 border-t border-[var(--lp-line)] px-5 py-3"
         >
           <p class="text-[12px] text-[var(--lp-muted)]">
-            {{ fixableCount }} file{{ fixableCount === 1 ? '' : 's' }} with suggested fixes
+            {{ fixableFooterLabel(fixableCount) }}
           </p>
           <button
             type="button"
@@ -371,7 +390,7 @@ function shortName(path: string): string {
             :disabled="Boolean(applyingPath)"
             @click="void applyAllImproved()"
           >
-            {{ applyingPath ? 'Applying…' : 'Apply all fixes' }}
+            {{ applyingPath ? t('common.working') : t('analyzer.workspace.applyAllFixes') }}
           </button>
         </footer>
       </aside>

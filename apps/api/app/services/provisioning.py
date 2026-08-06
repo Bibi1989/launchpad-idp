@@ -646,6 +646,27 @@ class ProvisioningService:
             await self._sandbox.kill(str(record.id))
             record.status = "destroyed"
 
+        # Collect Docker tags before cascading teardown / deleting the workspace
+        # tree (image-builds.json and Dockerfiles would otherwise be gone).
+        from app.models.domain import Environment
+        from app.services.image_cleanup import (
+            collect_workspace_destroy_images,
+            remove_local_docker_images,
+            resolve_local_cluster_short_name,
+        )
+
+        env_rows = (
+            await self._session.execute(
+                select(Environment).where(Environment.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+        destroy_images = collect_workspace_destroy_images(
+            row.root_dir,
+            workload_images=[
+                env.workload_image for env in env_rows if env.workload_image
+            ],
+        )
+
         # Cascade: force-tear-down every Launch Preview tied to this workspace so
         # its namespace, ingress, PVCs, secrets and kind images are reclaimed
         # (the Environment.workspace_id FK is SET NULL, which would otherwise
@@ -665,6 +686,19 @@ class ProvisioningService:
                 workspace_id=str(workspace_id),
                 count=removed,
             )
+
+        if destroy_images:
+            try:
+                remove_local_docker_images(
+                    destroy_images,
+                    cluster_name=resolve_local_cluster_short_name(),
+                    remove_from_cluster=was_local,
+                )
+            except Exception:
+                logger.exception(
+                    "workspace_image_cleanup_failed",
+                    workspace_id=str(workspace_id),
+                )
 
         self._iac.destroy_workspace(row.root_dir)
         await self._session.delete(row)

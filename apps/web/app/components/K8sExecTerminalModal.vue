@@ -15,6 +15,8 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+const { t } = useI18n()
+
 const { getExecWsUrl } = useKubernetesSuite()
 
 const terminalContainer = ref<HTMLElement | null>(null)
@@ -155,10 +157,10 @@ onBeforeUnmount(() => {
             <span class="material-symbols-outlined text-xl text-[var(--lp-accent)]">terminal</span>
             <div>
               <h3 class="font-bold text-sm text-zinc-100">
-                Container Shell: {{ resource?.name }}
+                {{ t('k8s.exec.title', { name: resource?.name }) }}
               </h3>
               <p class="text-[11px] text-zinc-400">
-                Interactive PTY WebSocket (`kubectl exec -it`)
+                {{ t('k8s.exec.subtitle') }}
               </p>
             </div>
           </div>
@@ -166,7 +168,7 @@ onBeforeUnmount(() => {
           <div class="flex items-center gap-3">
             <span class="flex items-center gap-1 text-[11px]" :class="connected ? 'text-emerald-400' : 'text-amber-400'">
               <span class="h-2 w-2 rounded-full" :class="connected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'" />
-              {{ connected ? 'Connected' : 'Connecting…' }}
+              {{ connected ? t('k8s.exec.connected') : t('k8s.exec.connecting') }}
             </span>
             <button
               type="button"

@@ -4,6 +4,7 @@ import type { CatalogService } from '~/types/catalog'
 import type { WorkspaceListItem } from '~/types/provisioning'
 
 const route = useRoute()
+const { t } = useI18n()
 const { user, logout } = useAuth()
 const { orgs, activeOrgId, setActiveOrg } = useOrgs()
 const { environments, refresh: refreshEnvironments } = useEnvironments()
@@ -15,18 +16,18 @@ const createEnvOpen = useState('lp-create-env-open', () => false)
 const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
 const mobileNavOpen = ref(false)
 
-const navItems = [
-  { label: 'Home', to: '/home', icon: 'home', match: (path: string) => path === '/home' },
-  { label: 'Environments', to: '/environments', icon: 'dashboard', match: (path: string) => path.startsWith('/environments') },
-  { label: 'Launch', to: '/launch', icon: 'rocket_launch', match: (path: string) => path.startsWith('/launch') },
-  { label: 'Catalog', to: '/catalog', icon: 'inventory_2', match: (path: string) => path.startsWith('/catalog') },
-  { label: 'Workspaces', to: '/workspaces', icon: 'layers', match: (path: string) => path.startsWith('/workspaces') },
-  { label: 'Provision', to: '/provision', icon: 'schema', match: (path: string) => path.startsWith('/provision') },
-  { label: 'Integrations', to: '/integrations', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
-  { label: 'Organization', to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
-  { label: 'Settings', to: '/settings', icon: 'settings', match: (path: string) => path.startsWith('/settings') },
-  { label: 'Docs', to: '/docs', icon: 'menu_book', match: (path: string) => path.startsWith('/docs') },
-] as const
+const navItems = computed(() => [
+  { key: 'home', label: t('nav.home'), to: '/home', icon: 'home', match: (path: string) => path === '/home' },
+  { key: 'environments', label: t('nav.environments'), to: '/environments', icon: 'dashboard', match: (path: string) => path.startsWith('/environments') },
+  { key: 'launch', label: t('nav.launch'), to: '/launch', icon: 'rocket_launch', match: (path: string) => path.startsWith('/launch') },
+  { key: 'catalog', label: t('nav.catalog'), to: '/catalog', icon: 'inventory_2', match: (path: string) => path.startsWith('/catalog') },
+  { key: 'workspaces', label: t('nav.workspaces'), to: '/workspaces', icon: 'layers', match: (path: string) => path.startsWith('/workspaces') },
+  { key: 'provision', label: t('nav.provision'), to: '/provision', icon: 'schema', match: (path: string) => path.startsWith('/provision') },
+  { key: 'integrations', label: t('nav.integrations'), to: '/integrations', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
+  { key: 'organization', label: t('nav.organization'), to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
+  { key: 'settings', label: t('nav.settings'), to: '/settings', icon: 'settings', match: (path: string) => path.startsWith('/settings') },
+  { key: 'docs', label: t('nav.docs'), to: '/docs', icon: 'menu_book', match: (path: string) => path.startsWith('/docs') },
+])
 
 type NavSearchHit = {
   id: string
@@ -48,8 +49,8 @@ const searchIndexReady = ref(false)
 
 const filteredNavItems = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
-  if (!q) return navItems
-  return navItems.filter((item) => item.label.toLowerCase().includes(q))
+  if (!q) return navItems.value
+  return navItems.value.filter((item) => item.label.toLowerCase().includes(q))
 })
 
 const searchHits = computed((): NavSearchHit[] => {
@@ -58,7 +59,7 @@ const searchHits = computed((): NavSearchHit[] => {
 
   const hits: NavSearchHit[] = []
 
-  for (const item of navItems) {
+  for (const item of navItems.value) {
     if (item.label.toLowerCase().includes(q) || item.to.toLowerCase().includes(q)) {
       hits.push({
         id: `nav-${item.to}`,
@@ -237,7 +238,7 @@ watch(
       v-if="mobileNavOpen"
       type="button"
       class="fixed inset-0 z-40 bg-[var(--lp-ink)]/70 backdrop-blur-sm lg:hidden"
-      aria-label="Close navigation"
+      :aria-label="t('shell.closeNav')"
       @click="mobileNavOpen = false"
     />
 
@@ -248,20 +249,15 @@ watch(
     >
       <div class="px-6 mb-6">
         <NuxtLink to="/" class="block">
-          <h2 class="text-xl font-semibold tracking-tight text-[var(--lp-accent)]">
-            Launchpad
-          </h2>
-          <p class="mt-0.5 font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--lp-muted)]">
-            IDP
-          </p>
+          <BrandLogo size="sm" />
         </NuxtLink>
         <div class="mt-5 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/80 p-3">
-          <p class="lp-label mb-1">Signed in</p>
+          <p class="lp-label mb-1">{{ t('shell.signedIn') }}</p>
           <p class="truncate text-sm font-medium text-[var(--lp-text)]">
             {{ user?.email ?? '-' }}
           </p>
           <label v-if="orgs.length" class="mt-3 block space-y-1">
-            <span class="lp-label">Organization</span>
+            <span class="lp-label">{{ t('shell.organization') }}</span>
             <select
               class="lp-input py-1.5 text-xs"
               :value="activeOrgId ?? ''"
@@ -284,8 +280,8 @@ watch(
             v-model="searchQuery"
             type="search"
             class="lp-input pl-10"
-            placeholder="Filter menu…"
-            aria-label="Filter navigation"
+            :placeholder="t('shell.filterMenu')"
+            :aria-label="t('shell.filterNav')"
             @focus="onSearchFocus"
           >
         </div>
@@ -293,7 +289,7 @@ watch(
           v-if="searchQuery.trim() && !filteredNavItems.length"
           class="px-3 py-2 text-xs text-[var(--lp-muted)]"
         >
-          No menu matches
+          {{ t('shell.noMenuMatches') }}
         </p>
         <NuxtLink
           v-for="item in filteredNavItems"
@@ -318,18 +314,18 @@ watch(
           class="lp-nav-link"
         >
           <span class="material-symbols-outlined text-[1.1rem]">description</span>
-          <span>API Docs</span>
+          <span>{{ t('shell.apiDocs') }}</span>
         </a>
       </nav>
 
       <div class="mt-auto space-y-1 border-t border-[var(--lp-line)] px-3 pt-4">
         <button type="button" class="lp-btn-primary mb-3 w-full text-xs uppercase tracking-wide" @click="openCreateEnv">
           <span class="material-symbols-outlined text-base">add</span>
-          New Environment
+          {{ t('shell.newEnvironment') }}
         </button>
         <button type="button" class="lp-nav-link w-full text-left" @click="toggleTerminal">
           <span class="material-symbols-outlined text-[1.1rem]">terminal</span>
-          <span>Terminal</span>
+          <span>{{ t('shell.terminal') }}</span>
         </button>
         <button
           v-if="user"
@@ -338,7 +334,7 @@ watch(
           @click="onLogout"
         >
           <span class="material-symbols-outlined text-[1.1rem]">logout</span>
-          <span>Logout</span>
+          <span>{{ t('shell.logout') }}</span>
         </button>
       </div>
     </aside>
@@ -352,7 +348,7 @@ watch(
           <button
             type="button"
             class="rounded-lg p-2 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)] lg:hidden"
-            aria-label="Open navigation"
+            :aria-label="t('shell.openNav')"
             @click="mobileNavOpen = true"
           >
             <span class="material-symbols-outlined">menu</span>
@@ -366,8 +362,8 @@ watch(
               v-model="searchQuery"
               type="search"
               class="lp-input pl-10"
-              placeholder="Search pages, environments, workspaces…"
-              aria-label="Search"
+              :placeholder="t('shell.searchPlaceholder')"
+              :aria-label="t('shell.searchAria')"
               aria-autocomplete="list"
               :aria-expanded="showSearchPanel"
               @focus="onSearchFocus"
@@ -383,7 +379,7 @@ watch(
                 v-if="!searchHits.length"
                 class="px-4 py-3 text-sm text-[var(--lp-muted)]"
               >
-                No matches for “{{ searchQuery.trim() }}”
+                {{ t('shell.noMatches', { query: searchQuery.trim() }) }}
               </p>
               <template v-else>
                 <button
@@ -402,7 +398,7 @@ watch(
                   <span class="min-w-0 flex-1">
                     <span class="block truncate text-sm font-medium text-[var(--lp-text)]">{{ hit.label }}</span>
                     <span class="mt-0.5 block truncate font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
-                      {{ hit.group }} · {{ hit.subtitle }}
+                      {{ t(`shell.groups.${hit.group}`) }} · {{ hit.subtitle }}
                     </span>
                   </span>
                 </button>
@@ -412,15 +408,16 @@ watch(
         </div>
 
         <div class="flex items-center gap-2 sm:gap-3">
+          <PreferenceControls compact />
           <button type="button" class="lp-btn-primary hidden text-xs uppercase tracking-wide sm:inline-flex" @click="openCreateEnv">
-            Launch preview
+            {{ t('shell.launchPreview') }}
           </button>
           <NuxtLink
             to="/provision"
             class="lp-btn-ghost hidden text-xs uppercase tracking-wide md:inline-flex"
           >
             <span class="material-symbols-outlined text-base">tune</span>
-            Advanced
+            {{ t('common.advanced') }}
           </NuxtLink>
           <NotificationBell />
           <div
@@ -443,7 +440,7 @@ watch(
     <button
       type="button"
       class="fixed bottom-8 right-8 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--lp-accent)] text-[var(--lp-ink)] shadow-lg shadow-[var(--lp-accent)]/25 transition hover:scale-105 active:scale-95"
-      aria-label="Toggle terminal"
+      :aria-label="t('shell.toggleTerminal')"
       @click="toggleTerminal"
     >
       <span class="material-symbols-outlined filled text-2xl">terminal</span>
@@ -453,7 +450,7 @@ watch(
     <Teleport to="body">
       <div
         v-if="terminalOpen"
-        class="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm transition-opacity"
+        class="fixed inset-0 z-[60] bg-[var(--lp-ink)]/50 backdrop-blur-sm transition-opacity"
         @click.self="terminalOpen = false"
       />
       <aside
@@ -463,19 +460,19 @@ watch(
       >
         <div class="flex h-16 items-center justify-between border-b border-[var(--lp-line)] px-5">
           <div>
-            <h3 class="text-lg font-semibold text-[var(--lp-accent)]">Terminal Sandbox</h3>
+            <h3 class="text-lg font-semibold text-[var(--lp-accent)]">{{ t('shell.terminalSandbox') }}</h3>
             <p class="font-mono text-[10px] text-[var(--lp-muted)]">
               {{
                 activeTerminalWsPath
-                  ? 'Live session attached'
-                  : 'Open Provision → Generate to attach a live session'
+                  ? t('shell.liveSessionAttached')
+                  : t('shell.openProvisionToAttach')
               }}
             </p>
           </div>
           <button
             type="button"
             class="rounded-lg p-2 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
-            aria-label="Close terminal"
+            :aria-label="t('shell.closeTerminal')"
             @click="terminalOpen = false"
           >
             <span class="material-symbols-outlined">close</span>
@@ -491,19 +488,19 @@ watch(
               v-else-if="activeTerminalWsPath && (route.path.startsWith('/provision') || route.path.startsWith('/workspaces/'))"
               class="lp-panel space-y-3 p-5 text-sm text-[var(--lp-muted)]"
             >
-              <p>Live session is attached on this page’s terminal panel.</p>
+              <p>{{ t('shell.liveSessionOnPage') }}</p>
               <button type="button" class="lp-btn-ghost" @click="terminalOpen = false">
-                Close drawer
+                {{ t('shell.closeDrawer') }}
               </button>
             </div>
             <div v-else class="lp-panel space-y-3 p-5 text-sm text-[var(--lp-muted)]">
-              <p>No active sandbox session.</p>
+              <p>{{ t('shell.noSandboxSession') }}</p>
               <NuxtLink
                 to="/provision"
                 class="lp-btn-primary inline-flex"
                 @click="terminalOpen = false"
               >
-                Go to Provision
+                {{ t('shell.goToProvision') }}
               </NuxtLink>
             </div>
           </ClientOnly>
@@ -521,15 +518,15 @@ watch(
         <div class="lp-glass flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl shadow-2xl">
           <div class="flex items-start justify-between border-b border-[var(--lp-line)] px-6 py-5">
             <div>
-              <h2 class="text-xl font-semibold text-[var(--lp-accent)]">Launch Environment</h2>
+              <h2 class="text-xl font-semibold text-[var(--lp-accent)]">{{ t('shell.launchEnvironment') }}</h2>
               <p class="mt-1 text-sm text-[var(--lp-muted)]">
-                Provision an isolated namespace with TTL governance.
+                {{ t('shell.launchEnvironmentBlurb') }}
               </p>
             </div>
             <button
               type="button"
               class="rounded-lg p-2 text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
-              aria-label="Close"
+              :aria-label="t('common.close')"
               @click="createEnvOpen = false"
             >
               <span class="material-symbols-outlined">close</span>

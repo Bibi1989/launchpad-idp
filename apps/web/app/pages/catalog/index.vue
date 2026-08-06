@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { CatalogService, GoldenPathTemplate } from '~/types/catalog'
 
+const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const { listTemplates, listServices, deleteService } = useCatalog()
@@ -43,7 +44,7 @@ async function confirmDeleteServiceRun() {
     services.value = services.value.filter((row) => row.id !== svc.id)
     confirmDeleteService.value = null
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to delete service'
+    errorMessage.value = err instanceof Error ? err.message : t('catalog.errors.delete')
   } finally {
     deletingId.value = null
   }
@@ -53,11 +54,11 @@ onMounted(async () => {
   loading.value = true
   errorMessage.value = null
   try {
-    const [t, s] = await Promise.all([listTemplates(), listServices()])
-    templates.value = t
-    services.value = s
+    const [tplList, svcList] = await Promise.all([listTemplates(), listServices()])
+    templates.value = tplList
+    services.value = svcList
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to load catalog'
+    errorMessage.value = err instanceof Error ? err.message : t('catalog.errors.load')
   } finally {
     loading.value = false
   }
@@ -68,27 +69,26 @@ onMounted(async () => {
   <div class="mx-auto max-w-5xl animate-fade-up space-y-8 pb-12">
     <header class="flex flex-wrap items-end justify-between gap-4">
       <div>
-        <p class="lp-label mb-1">Golden paths</p>
-        <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">Service catalog</h1>
+        <p class="lp-label mb-1">{{ t('catalog.index.eyebrow') }}</p>
+        <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">{{ t('catalog.index.title') }}</h1>
         <p class="mt-2 max-w-2xl text-sm text-[var(--lp-muted)]">
-          Org-approved stacks with owner, tier, SLO, and scorecards. One click scaffolds repo-ready
-          Dockerfile, Kubernetes, CI/CD, and a workspace.
+          {{ t('pages.catalog.blurb') }}
         </p>
       </div>
       <NuxtLink to="/catalog/create" class="lp-btn-primary text-xs uppercase tracking-wide">
         <span class="material-symbols-outlined text-base">add</span>
-        Create service
+        {{ t('catalog.index.create') }}
       </NuxtLink>
     </header>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Loading catalog…</p>
+    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('catalog.index.loading') }}</p>
     <p v-else-if="errorMessage" class="text-sm text-[var(--lp-danger)]">{{ errorMessage }}</p>
 
     <template v-else>
       <div
         class="inline-flex rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/60 p-1"
         role="tablist"
-        aria-label="Catalog sections"
+        :aria-label="t('catalog.index.tabsAria')"
       >
         <button
           type="button"
@@ -100,7 +100,7 @@ onMounted(async () => {
           :aria-selected="activeTab === 'templates'"
           @click="setTab('templates')"
         >
-          Approved Templates
+          {{ t('catalog.index.approved') }}
           <span class="ml-1.5 font-mono text-[10px] opacity-70">{{ templates.length }}</span>
         </button>
         <button
@@ -113,13 +113,13 @@ onMounted(async () => {
           :aria-selected="activeTab === 'services'"
           @click="setTab('services')"
         >
-          Your services
+          {{ t('catalog.index.yours') }}
           <span class="ml-1.5 font-mono text-[10px] opacity-70">{{ services.length }}</span>
         </button>
       </div>
 
       <section v-if="activeTab === 'templates'" class="space-y-4" role="tabpanel">
-        <h2 class="sr-only">Approved templates</h2>
+        <h2 class="sr-only">{{ t('catalog.index.approved') }}</h2>
         <div class="grid gap-4 sm:grid-cols-2">
           <article
             v-for="tpl in templates"
@@ -136,7 +136,7 @@ onMounted(async () => {
                 <p class="mt-2 text-sm text-[var(--lp-muted)]">{{ tpl.description }}</p>
                 <div class="mt-3 space-y-2">
                   <div v-if="tpl.frameworks.length" class="space-y-1">
-                    <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">Stacks</p>
+                    <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('catalog.index.stacks') }}</p>
                     <div class="flex flex-wrap gap-1">
                       <span
                         v-for="fw in tpl.frameworks"
@@ -148,7 +148,7 @@ onMounted(async () => {
                     </div>
                   </div>
                   <div v-if="tpl.docker_images?.length" class="space-y-1">
-                    <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">Docker images</p>
+                    <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('catalog.index.dockerImages') }}</p>
                     <div class="flex flex-wrap gap-1">
                       <span
                         v-for="image in tpl.docker_images"
@@ -173,7 +173,7 @@ onMounted(async () => {
                   :to="`/catalog/create?template=${tpl.id}`"
                   class="mt-4 inline-flex lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
                 >
-                  Use template
+                  {{ t('catalog.index.useTemplate') }}
                 </NuxtLink>
               </div>
             </div>
@@ -182,9 +182,9 @@ onMounted(async () => {
       </section>
 
       <section v-else class="space-y-4" role="tabpanel">
-        <h2 class="sr-only">Your services</h2>
+        <h2 class="sr-only">{{ t('catalog.index.yours') }}</h2>
         <p v-if="!services.length" class="text-sm text-[var(--lp-muted)]">
-          No services yet - create one from an approved golden path.
+          {{ t('catalog.index.empty') }}
         </p>
         <div v-else class="space-y-3">
           <div
@@ -209,7 +209,7 @@ onMounted(async () => {
                     ? 'border-[var(--lp-ok)]/40 text-[var(--lp-ok)]'
                     : 'border-amber-500/40 text-amber-400'"
                 >
-                  Score {{ svc.compliance_score }}
+                  {{ t('catalog.index.score', { score: svc.compliance_score }) }}
                 </span>
               </div>
             </NuxtLink>
@@ -218,11 +218,11 @@ onMounted(async () => {
                 type="button"
                 class="lp-btn-danger px-3 py-1.5 text-[10px] uppercase tracking-wide"
                 :disabled="deletingId === svc.id"
-                :title="`Delete ${svc.name}`"
+                :title="`${t('common.delete')} ${svc.name}`"
                 @click="requestDeleteService(svc, $event)"
               >
                 <span class="material-symbols-outlined text-sm">delete</span>
-                {{ deletingId === svc.id ? '…' : 'Delete' }}
+                {{ deletingId === svc.id ? '…' : t('common.delete') }}
               </button>
             </div>
           </div>
@@ -232,12 +232,12 @@ onMounted(async () => {
 
     <ConfirmDialog
       :open="confirmDeleteService !== null"
-      title="Delete service?"
+      :title="t('catalog.detail.deleteTitle')"
       :message="confirmDeleteService
-        ? `Delete “${confirmDeleteService.name}” from Your services? This removes the catalog entry only. Linked workspace (if any) is kept unless you destroy it separately.`
+        ? t('catalog.index.deleteConfirm', { name: confirmDeleteService.name })
         : ''"
-      confirm-label="Yes, delete"
-      cancel-label="Cancel"
+      :confirm-label="t('common.confirmDelete')"
+      :cancel-label="t('common.cancel')"
       :busy="deletingId !== null"
       @update:open="(value) => { if (!value) confirmDeleteService = null }"
       @confirm="confirmDeleteServiceRun"

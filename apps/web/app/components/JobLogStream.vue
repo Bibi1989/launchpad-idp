@@ -11,6 +11,8 @@ const emit = defineEmits<{
   analyze: []
 }>()
 
+const { t } = useI18n()
+
 const scroller = ref<HTMLElement | null>(null)
 
 watch(
@@ -28,7 +30,7 @@ watch(
   <section class="lp-glass overflow-hidden rounded-xl">
     <div class="flex items-center justify-between gap-3 bg-[var(--lp-panel-2)] px-4 py-2">
       <div class="flex items-center gap-4">
-        <span class="lp-label">Provisioning logs</span>
+        <span class="lp-label">{{ t('jobLog.title') }}</span>
         <div class="flex gap-1.5">
           <span class="h-2 w-2 rounded-full bg-[var(--lp-danger)]" />
           <span class="h-2 w-2 rounded-full bg-[var(--lp-warn)]" />
@@ -44,18 +46,18 @@ watch(
           @click="emit('analyze')"
         >
           <span class="material-symbols-outlined text-sm">psychology</span>
-          {{ analyzing ? 'Analyzing…' : 'Analyze failure' }}
+          {{ analyzing ? t('jobLog.analyzing') : t('jobLog.analyzeFailure') }}
         </button>
         <span class="font-mono text-xs text-[var(--lp-muted)]">
-          <template v-if="connected">streaming</template>
-          <template v-else-if="done">complete</template>
-          <template v-else>idle</template>
+          <template v-if="connected">{{ t('jobLog.streaming') }}</template>
+          <template v-else-if="done">{{ t('jobLog.complete') }}</template>
+          <template v-else>{{ t('jobLog.idle') }}</template>
         </span>
       </div>
     </div>
     <pre
       ref="scroller"
-      class="max-h-80 overflow-auto bg-black/70 p-4 font-mono text-xs leading-6 text-[var(--lp-text)]"
-    ><code>{{ lines.length ? lines.join('\n') : 'Waiting for worker output…' }}</code></pre>
+      class="lp-console max-h-80 overflow-auto p-4 font-mono text-xs leading-6"
+    ><code class="lp-console-line">{{ lines.length ? lines.join('\n') : t('jobLog.waiting') }}</code></pre>
   </section>
 </template>

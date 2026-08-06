@@ -8,6 +8,16 @@ const props = defineProps<{
   title?: string
 }>()
 
+const { t } = useI18n()
+
+const displayTitle = computed(() => props.title ?? t('audit.title'))
+const displayEmpty = computed(() => props.emptyLabel ?? t('audit.empty'))
+const eventsSummary = computed(() => {
+  if (props.loading) return t('audit.loadingShort')
+  if (props.entries.length === 1) return t('audit.eventsTotalOne')
+  return t('audit.eventsTotal', { count: props.entries.length })
+})
+
 function statusTone(status: string): 'ok' | 'danger' | 'warn' | 'muted' {
   if (status === 'SUCCESS') return 'ok'
   if (status === 'FAILURE' || status === 'REJECTED') return 'danger'
@@ -39,18 +49,18 @@ function isLive(index: number, entry: AuditLogEntry): boolean {
 <template>
   <section class="lp-glass overflow-hidden rounded-xl">
     <div class="flex items-center justify-between border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/80 px-5 py-3">
-      <span class="lp-label">{{ title || 'Execution pipeline' }}</span>
+      <span class="lp-label">{{ displayTitle }}</span>
       <span class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
-        {{ loading ? 'loading…' : `${entries.length} event${entries.length === 1 ? '' : 's'} total` }}
+        {{ eventsSummary }}
       </span>
     </div>
 
     <div class="max-h-[28rem] overflow-auto p-5">
       <p v-if="loading && !entries.length" class="text-sm text-[var(--lp-muted)]">
-        Loading audit events…
+        {{ t('audit.loading') }}
       </p>
       <p v-else-if="!entries.length" class="text-sm text-[var(--lp-muted)]">
-        {{ emptyLabel || 'No audit events yet.' }}
+        {{ displayEmpty }}
       </p>
 
       <ol v-else class="relative space-y-0">
@@ -91,7 +101,7 @@ function isLive(index: number, entry: AuditLogEntry): boolean {
             :class="entry.status === 'FAILURE' || entry.status === 'REJECTED'
               ? 'border-[var(--lp-danger)]/40 bg-[var(--lp-danger)]/5'
               : isLive(index, entry)
-                ? 'border-[var(--lp-accent)]/50 bg-[var(--lp-accent)]/5 shadow-[0_0_0_1px_rgba(45,212,191,0.08)]'
+                ? 'border-[var(--lp-accent)]/50 bg-[var(--lp-accent)]/5 shadow-[0_0_0_1px_color-mix(in_srgb,var(--lp-accent)_8%,transparent)]'
                 : 'border-[var(--lp-line)] bg-[var(--lp-panel)]/50'"
           >
             <div class="flex flex-wrap items-start justify-between gap-2">
@@ -103,7 +113,7 @@ function isLive(index: number, entry: AuditLogEntry): boolean {
                   v-if="isLive(index, entry)"
                   class="rounded border border-[var(--lp-ok)]/40 bg-[var(--lp-ok)]/15 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-[var(--lp-ok)]"
                 >
-                  Live
+                  {{ t('audit.live') }}
                 </span>
               </div>
               <p class="shrink-0 font-mono text-[10px] text-[var(--lp-muted)]">

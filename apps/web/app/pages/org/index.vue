@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { OrgInvite, OrgMember, OrgSsoMapping } from '~/types/auth'
 
+const { t } = useI18n()
 const {
   orgs,
   activeOrgId,
@@ -46,7 +47,7 @@ async function load() {
     invites.value = inviteRows
     mappings.value = mappingRows
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load organization'
+    error.value = err instanceof Error ? err.message : t('org.errors.load')
   } finally {
     loading.value = false
   }
@@ -65,14 +66,14 @@ async function onInvite() {
     inviteForm.email = ''
     await load()
     if (created.email_sent) {
-      notice.value = `Invite emailed to ${created.email}`
+      notice.value = t('org.inviteEmailed', { email: created.email })
     } else if (created.invite_url) {
-      notice.value = `Invite created (SMTP unset). Share: ${created.invite_url}`
+      notice.value = t('org.inviteCreatedSmtp', { url: created.invite_url })
     } else {
-      notice.value = `Invite created for ${created.email}`
+      notice.value = t('org.inviteCreatedFor', { email: created.email })
     }
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Invite failed'
+    error.value = err instanceof Error ? err.message : t('org.errors.invite')
   } finally {
     inviting.value = false
   }
@@ -84,7 +85,7 @@ async function onRevoke(inviteId: string) {
     await revokeInvite(orgId.value, inviteId)
     await load()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Revoke failed'
+    error.value = err instanceof Error ? err.message : t('org.errors.revoke')
   }
 }
 
@@ -100,7 +101,7 @@ async function onAddMapping() {
     mappingForm.group_name = ''
     await load()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'SSO mapping failed'
+    error.value = err instanceof Error ? err.message : t('org.errors.mapping')
   } finally {
     mappingBusy.value = false
   }
@@ -112,7 +113,7 @@ async function onDeleteMapping(mappingId: string) {
     await deleteSsoMapping(orgId.value, mappingId)
     await load()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Delete failed'
+    error.value = err instanceof Error ? err.message : t('org.errors.deleteMapping')
   }
 }
 
@@ -124,12 +125,12 @@ watch(orgId, () => {
 <template>
   <div class="space-y-8 animate-fade-up">
     <header class="space-y-2">
-      <p class="lp-label">Organization</p>
+      <p class="lp-label">{{ t('nav.organization') }}</p>
       <h1 class="text-3xl font-semibold tracking-tight">
-        {{ activeOrg?.name || 'Organization settings' }}
+        {{ activeOrg?.name || t('org.settings') }}
       </h1>
       <p class="text-sm text-[var(--lp-muted)]">
-        Members, email invites, and SSO group → role mappings for the active org.
+        {{ t('org.blurbDetail') }}
       </p>
     </header>
 
@@ -137,11 +138,11 @@ watch(orgId, () => {
     <p v-if="notice" class="rounded-lg border border-[var(--lp-ok)]/30 bg-[var(--lp-ok)]/10 px-4 py-3 text-sm text-[var(--lp-ok)]">
       {{ notice }}
     </p>
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Loading…</p>
+    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
 
     <section class="lp-glass space-y-4 rounded-xl p-5">
       <div class="flex items-center justify-between gap-3">
-        <h2 class="text-lg font-semibold">Members</h2>
+        <h2 class="text-lg font-semibold">{{ t('org.members') }}</h2>
         <span class="font-mono text-xs text-[var(--lp-muted)]">{{ members.length }}</span>
       </div>
       <ul class="divide-y divide-[var(--lp-line)]">
@@ -162,10 +163,10 @@ watch(orgId, () => {
     </section>
 
     <section v-if="canAdmin" class="lp-glass space-y-4 rounded-xl p-5">
-      <h2 class="text-lg font-semibold">Invite by email</h2>
+      <h2 class="text-lg font-semibold">{{ t('org.inviteEmail') }}</h2>
       <form class="flex flex-wrap items-end gap-3" @submit.prevent="onInvite">
         <label class="block min-w-[16rem] flex-1 space-y-1">
-          <span class="lp-label">Email</span>
+          <span class="lp-label">{{ t('common.email') }}</span>
           <input
             v-model="inviteForm.email"
             type="email"
@@ -175,7 +176,7 @@ watch(orgId, () => {
           >
         </label>
         <label class="block space-y-1">
-          <span class="lp-label">Role</span>
+          <span class="lp-label">{{ t('common.role') }}</span>
           <select v-model="inviteForm.role" class="lp-input">
             <option value="viewer">viewer</option>
             <option value="member">member</option>
@@ -184,7 +185,7 @@ watch(orgId, () => {
           </select>
         </label>
         <button type="submit" class="lp-btn-primary" :disabled="inviting">
-          {{ inviting ? 'Sending…' : 'Send invite' }}
+          {{ inviting ? t('org.sending') : t('org.sendInvite') }}
         </button>
       </form>
 
@@ -197,25 +198,24 @@ watch(orgId, () => {
           <div>
             <p class="font-mono text-sm">{{ invite.email }}</p>
             <p class="text-xs text-[var(--lp-muted)]">
-              {{ invite.role }} · expires {{ new Date(invite.expires_at).toLocaleString() }}
+              {{ invite.role }} · {{ t('org.inviteExpires') }} {{ new Date(invite.expires_at).toLocaleString() }}
             </p>
           </div>
           <button type="button" class="lp-btn-ghost text-xs" @click="onRevoke(invite.id)">
-            Revoke
+            {{ t('org.revoke') }}
           </button>
         </li>
       </ul>
     </section>
 
     <section v-if="canAdmin" class="lp-glass space-y-4 rounded-xl p-5">
-      <h2 class="text-lg font-semibold">SSO group → role</h2>
+      <h2 class="text-lg font-semibold">{{ t('org.ssoTitle') }}</h2>
       <p class="text-sm text-[var(--lp-muted)]">
-        Map IdP group claims (from <code class="font-mono text-xs">OIDC_GROUP_CLAIM</code>) to org roles.
-        On SSO login, matching groups grant or promote membership.
+        {{ t('org.ssoBlurbDetail') }}
       </p>
       <form class="flex flex-wrap items-end gap-3" @submit.prevent="onAddMapping">
         <label class="block min-w-[16rem] flex-1 space-y-1">
-          <span class="lp-label">Group name</span>
+          <span class="lp-label">{{ t('org.groupName') }}</span>
           <input
             v-model="mappingForm.group_name"
             type="text"
@@ -225,7 +225,7 @@ watch(orgId, () => {
           >
         </label>
         <label class="block space-y-1">
-          <span class="lp-label">Role</span>
+          <span class="lp-label">{{ t('common.role') }}</span>
           <select v-model="mappingForm.role" class="lp-input">
             <option value="viewer">viewer</option>
             <option value="member">member</option>
@@ -234,7 +234,7 @@ watch(orgId, () => {
           </select>
         </label>
         <button type="submit" class="lp-btn-primary" :disabled="mappingBusy">
-          {{ mappingBusy ? 'Saving…' : 'Save mapping' }}
+          {{ mappingBusy ? t('common.saving') : t('org.saveMapping') }}
         </button>
       </form>
 
@@ -249,7 +249,7 @@ watch(orgId, () => {
             <p class="text-xs text-[var(--lp-muted)]">→ {{ mapping.role }}</p>
           </div>
           <button type="button" class="lp-btn-ghost text-xs" @click="onDeleteMapping(mapping.id)">
-            Remove
+            {{ t('org.remove') }}
           </button>
         </li>
       </ul>

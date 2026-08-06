@@ -1,6 +1,7 @@
 <script setup lang="ts">
 definePageMeta({ layout: false })
 
+const { t } = useI18n()
 const route = useRoute()
 const { token } = useAuth()
 const { acceptInvite } = useOrgs()
@@ -16,13 +17,13 @@ async function accept() {
   try {
     const member = await acceptInvite(inviteToken.value)
     status.value = 'ok'
-    message.value = `Joined as ${member.role}. Redirecting…`
+    message.value = t('invite.joinedAs', { role: member.role })
     setTimeout(() => {
       void navigateTo('/home')
     }, 1200)
   } catch (err) {
     status.value = 'error'
-    message.value = err instanceof Error ? err.message : 'Could not accept invite'
+    message.value = err instanceof Error ? err.message : t('invite.failed')
   }
 }
 
@@ -39,9 +40,9 @@ onMounted(() => {
 
 <template>
   <div class="mx-auto flex min-h-screen max-w-lg flex-col justify-center space-y-6 px-6 py-16 animate-fade-up">
-    <h1 class="text-3xl font-semibold tracking-tight">Organization invite</h1>
+    <h1 class="text-3xl font-semibold tracking-tight">{{ t('invite.title') }}</h1>
     <p class="text-sm text-[var(--lp-muted)]">
-      Accepting invitation token
+      {{ t('invite.blurb') }}
       <span class="font-mono text-xs">{{ inviteToken.slice(0, 12) }}…</span>
     </p>
     <p
@@ -55,6 +56,6 @@ onMounted(() => {
     >
       {{ message }}
     </p>
-    <p v-else class="text-sm text-[var(--lp-muted)]">Working…</p>
+    <p v-else class="text-sm text-[var(--lp-muted)]">{{ t('invite.working') }}</p>
   </div>
 </template>

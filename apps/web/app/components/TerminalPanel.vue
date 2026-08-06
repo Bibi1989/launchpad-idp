@@ -9,6 +9,8 @@ const props = defineProps<{
   wsPath: string | null
 }>()
 
+const { t } = useI18n()
+
 const emit = defineEmits<{
   ready: [sessionId: string]
   exit: []
@@ -17,7 +19,7 @@ const emit = defineEmits<{
 const host = ref<HTMLElement | null>(null)
 const term = shallowRef<Terminal | null>(null)
 const fitAddon = shallowRef<FitAddon | null>(null)
-const statusLabel = ref('idle')
+const statusLabel = ref(t('terminal.status.idle'))
 const startedForPath = ref<string | null>(null)
 
 const { connected, error, connect, sendInput, resize, kill, disconnect } = useTerminalSession()
@@ -31,13 +33,39 @@ watch(
   { immediate: true },
 )
 
+function xtermTheme() {
+  // Keep the sandbox terminal dark in both themes for readable ANSI output.
+  return {
+    background: '#0b1219',
+    foreground: '#e8eef5',
+    cursor: '#2dd4bf',
+    selectionBackground: '#2dd4bf55',
+    black: '#0b1219',
+    red: '#f87171',
+    green: '#34d399',
+    yellow: '#fbbf24',
+    blue: '#7dd3fc',
+    magenta: '#c4b5fd',
+    cyan: '#2dd4bf',
+    white: '#e8eef5',
+    brightBlack: '#8fa3b8',
+    brightRed: '#fca5a5',
+    brightGreen: '#6ee7b7',
+    brightYellow: '#fcd34d',
+    brightBlue: '#bae6fd',
+    brightMagenta: '#ddd6fe',
+    brightCyan: '#5eead4',
+    brightWhite: '#ffffff',
+  }
+}
+
 function handleServerMessage(msg: TerminalServerMessage) {
   if (!term.value) return
   if (msg.type === 'output') {
     term.value.write(msg.data)
     ingestTerminalOutput(msg.data)
   } else if (msg.type === 'ready') {
-    statusLabel.value = `connected (${msg.mode}) - type to interact`
+    statusLabel.value = t('terminal.status.connected', { mode: msg.mode })
     setConnected(true)
     emit('ready', msg.session_id)
     focusTerminal()
@@ -47,10 +75,10 @@ function handleServerMessage(msg: TerminalServerMessage) {
     }
   } else if (msg.type === 'error') {
     term.value.writeln(`\r\n\x1b[31m[error] ${msg.message}\x1b[0m`)
-    statusLabel.value = 'error'
+    statusLabel.value = t('terminal.status.error')
     ingestTerminalOutput(`\n[error] ${msg.message}\n__LP_EXIT_CODE:1__\n`)
   } else if (msg.type === 'status') {
-    statusLabel.value = msg.status
+    statusLabel.value = msg.status === 'killed' ? t('terminal.status.killed') : msg.status
     if (msg.status === 'killed') {
       setConnected(false)
       emit('exit')
@@ -81,12 +109,7 @@ function bootTerminal() {
     fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
     fontSize: 13,
     scrollback: 5000,
-    theme: {
-      background: '#0b1219',
-      foreground: '#e8eef5',
-      cursor: '#2dd4bf',
-      selectionBackground: '#2dd4bf55',
-    },
+    theme: xtermTheme(),
   })
   const fit = new FitAddon()
   instance.loadAddon(fit)
@@ -114,7 +137,7 @@ function clearTerminal() {
 
 function killSession() {
   kill()
-  statusLabel.value = 'killed'
+  statusLabel.value = t('terminal.status.killed')
   startedForPath.value = null
   emit('exit')
 }
@@ -124,7 +147,7 @@ function startSession(path: string) {
   if (!term.value) return
   connect(path, handleServerMessage)
   startedForPath.value = path
-  statusLabel.value = 'connecting'
+  statusLabel.value = t('terminal.status.connecting')
   nextTick(() => {
     if (term.value && fitAddon.value) {
       fitAddon.value.fit()
@@ -138,14 +161,14 @@ function restartSession() {
   if (!props.wsPath) return
   disconnect()
   term.value?.clear()
-  term.value?.writeln('\r\n\x1b[33m[launchpad] restarting session…\x1b[0m\r\n')
+  term.value?.writeln(`\r\n\x1b[33m[launchpad] ${t('terminal.restarting')}\x1b[0m\r\n`)
   startedForPath.value = null
   startSession(props.wsPath)
 }
 
 function runCommand(command: string) {
   if (!connected.value) {
-    term.value?.writeln(`\r\n\x1b[31m[launchpad] terminal not connected\x1b[0m`)
+    term.value?.writeln(`\r\n\x1b[31m[launchpad] ${t('terminal.notConnected')}\x1b[0m`)
     return
   }
   // Send the command followed by Enter so the shell executes it.
@@ -205,30 +228,30 @@ onUnmounted(() => {
       <div>
         <h2 class="flex items-center gap-2 text-sm font-medium tracking-wide text-[var(--lp-accent)]">
           <span class="material-symbols-outlined text-base">terminal</span>
-          Sandbox terminal
+          {{ t('terminal.title') }}
         </h2>
         <p class="font-mono text-xs" :class="error ? 'text-[var(--lp-danger)]' : 'text-[var(--lp-muted)]'">
-          {{ error || (connected ? statusLabel : statusLabel) }}
+          {{ error || statusLabel }}
         </p>
       </div>
       <div class="flex items-center gap-2">
         <button type="button" class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide" @click="clearTerminal">
-          Clear
+          {{ t('terminal.clear') }}
         </button>
         <button type="button" class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide" @click="restartSession">
-          Restart
+          {{ t('terminal.restart') }}
         </button>
         <button type="button" class="lp-btn-danger py-1.5 text-xs uppercase tracking-wide" @click="killSession">
-          Kill
+          {{ t('terminal.kill') }}
         </button>
       </div>
     </div>
     <div
       ref="host"
-      class="h-[420px] w-full cursor-text bg-[#0b1219] p-2 outline-none"
+      class="lp-console h-[420px] w-full cursor-text p-2 outline-none"
       tabindex="0"
       role="application"
-      aria-label="Interactive sandbox terminal"
+      :aria-label="t('terminal.ariaLabel')"
       @click="focusTerminal"
       @focus="focusTerminal"
     />

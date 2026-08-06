@@ -30,6 +30,7 @@ const emit = defineEmits<{
 }>()
 
 const { getGithubAppStatus, listGithubRepositories } = useProvisioning()
+const { t } = useI18n()
 const route = useRoute()
 
 const status = ref<GitHubAppStatus | null>(null)
@@ -177,25 +178,24 @@ onMounted(async () => {
           </svg>
         </div>
         <div class="min-w-0 flex-1 space-y-1">
-          <h2 class="text-lg font-semibold">Connect GitHub</h2>
+          <h2 class="text-lg font-semibold">{{ t('integrations.connectGithub') }}</h2>
           <p class="text-sm text-[var(--lp-muted)]">
-            Authorize Launchpad on GitHub to create repositories and push deploy workflows - same
-            flow as Vercel.
+            {{ t('integrations.connectGithubBlurb') }}
           </p>
         </div>
       </div>
 
       <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
       <p v-else-if="status && !status.configured" class="text-sm text-[var(--lp-warn)]">
-        {{ status.message }}
-        <NuxtLink to="/docs#github" class="text-[var(--lp-accent)] hover:underline">Setup guide</NuxtLink>
+        {{ status.message || t('integrations.needAppId') }}
+        <NuxtLink to="/docs#github" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.setupGuide') }}</NuxtLink>
       </p>
       <p
         v-else-if="status?.configured && !status.install_url"
         class="text-sm text-[var(--lp-warn)]"
       >
         {{ status.message }}
-        <NuxtLink to="/docs#github" class="text-[var(--lp-accent)] hover:underline">Setup guide</NuxtLink>
+        <NuxtLink to="/docs#github" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.setupGuide') }}</NuxtLink>
       </p>
 
       <button
@@ -209,7 +209,7 @@ onMounted(async () => {
             d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
           />
         </svg>
-        Connect GitHub
+        {{ t('integrations.connectGithub') }}
       </button>
       <button
         v-else-if="status?.configured"
@@ -217,11 +217,11 @@ onMounted(async () => {
         class="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--lp-line)] px-4 py-3 text-sm font-semibold text-[var(--lp-muted)] sm:w-auto sm:min-w-[220px]"
         disabled
       >
-        Connect GitHub
+        {{ t('integrations.connectGithub') }}
       </button>
     </div>
 
-    <p v-else-if="loading" class="text-sm text-[var(--lp-muted)]">Checking GitHub connection…</p>
+    <p v-else-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('integrations.checkingGithub') }}</p>
 
     <!-- Connected - account switcher + optional repo picker -->
     <div v-else class="space-y-5">
@@ -234,24 +234,24 @@ onMounted(async () => {
           </div>
           <div>
             <p class="text-sm font-semibold text-[var(--lp-text)]">
-              Connected to GitHub
+              {{ t('integrations.connectedGithub') }}
               <span class="ml-2 inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-ok)]">
                 <span class="h-1.5 w-1.5 rounded-full bg-[var(--lp-ok)]" />
-                Live
+                {{ t('integrations.live') }}
               </span>
             </p>
             <p class="text-xs text-[var(--lp-muted)]">
-              {{ selectedInstallation?.account_login || 'Select an account' }}
-              <span v-if="justConnected"> · just authorized</span>
+              {{ selectedInstallation?.account_login || t('integrations.selectAccount') }}
+              <span v-if="justConnected"> � {{ t('integrations.justAuthorized') }}</span>
             </p>
           </div>
         </div>
         <div class="flex flex-wrap gap-2">
           <button type="button" class="lp-btn-ghost py-1.5 text-xs" @click="connectGithub">
-            {{ status?.installations.length ? 'Add account' : 'Reconnect' }}
+            {{ status?.installations.length ? t('integrations.addAccount') : t('integrations.reconnect') }}
           </button>
           <button type="button" class="lp-btn-ghost py-1.5 text-xs" :disabled="loading" @click="refresh">
-            Refresh
+            {{ t('common.refresh') }}
           </button>
         </div>
       </div>
@@ -268,10 +268,7 @@ onMounted(async () => {
           v-if="isPersonalAccount"
           class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/60 px-3 py-2 text-xs leading-5 text-[var(--lp-muted)]"
         >
-          Personal GitHub accounts can’t create new repos via App installation tokens.
-          Prefer <strong class="text-[var(--lp-text)]">Import Git Repository</strong>, or create an
-          empty repo on GitHub first then use Create with the same name. Org installs can create repos
-          directly.
+          {{ t('integrations.personalWarning') }}
         </p>
         <div class="flex flex-wrap gap-3">
           <button
@@ -280,7 +277,7 @@ onMounted(async () => {
             :class="repoMode === 'create' ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]' : 'text-[var(--lp-muted)]'"
             @click="onRepoModeCreate"
           >
-            Create new repository
+            {{ t('integrations.createRepo') }}
           </button>
           <button
             type="button"
@@ -289,12 +286,12 @@ onMounted(async () => {
             :disabled="!repos.length && !reposLoading"
             @click="onRepoModeExisting"
           >
-            Import Git Repository
+            {{ t('integrations.importGitRepo') }}
           </button>
         </div>
 
         <label v-if="repoMode === 'create'" class="block space-y-2">
-          <span class="lp-label">New repository name</span>
+          <span class="lp-label">{{ t('integrations.newRepoName') }}</span>
           <input
             class="lp-input"
             :value="modelRepoName"
@@ -304,7 +301,7 @@ onMounted(async () => {
         </label>
 
         <div v-else class="block space-y-2">
-          <span class="lp-label">Select repository</span>
+          <span class="lp-label">{{ t('integrations.selectRepo') }}</span>
           <GithubRepoPicker
             v-model="selectedFullName"
             :installation-id="modelInstallationId"
@@ -312,8 +309,7 @@ onMounted(async () => {
             @select-repo="(repo) => emit('update:modelRepoName', repo.name)"
           />
           <p v-if="!reposLoading && !repos.length" class="text-xs text-[var(--lp-muted)]">
-            No repositories visible to this installation. Create a new repo instead, or grant the
-            app access to more repositories on GitHub.
+            {{ t('integrations.noReposVisible') }}
           </p>
         </div>
       </div>

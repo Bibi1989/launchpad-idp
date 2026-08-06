@@ -13,6 +13,8 @@ const props = withDefaults(
   },
 )
 
+const { t } = useI18n()
+
 const gcpAuthMode = ref<'sa' | 'wif'>('sa')
 const awsAuthMode = ref<'keys' | 'oidc'>('keys')
 
@@ -39,7 +41,7 @@ watch(
           "
           @click="gcpAuthMode = 'sa'"
         >
-          Service account JSON
+          {{ t('credentials.fields.serviceAccountJson') }}
         </button>
         <button
           type="button"
@@ -51,12 +53,12 @@ watch(
           "
           @click="gcpAuthMode = 'wif'"
         >
-          Keyless (WIF / OIDC)
+          {{ t('credentials.fields.keylessWif') }}
         </button>
       </div>
 
       <label v-if="gcpAuthMode === 'sa'" class="block space-y-2">
-        <span class="lp-label">GCP SA key JSON</span>
+        <span class="lp-label">{{ t('credentials.fields.gcpSaKeyJson') }}</span>
         <textarea
           v-model="credentials.gcp_sa_key_json"
           rows="4"
@@ -70,7 +72,7 @@ watch(
           Minted short-lived OIDC tokens via Workload Identity Federation - no long-lived keys in the sandbox.
         </p>
         <label class="block space-y-2">
-          <span class="lp-label">GCP project number</span>
+          <span class="lp-label">{{ t('credentials.fields.gcpProjectNumber') }}</span>
           <input
             v-model="credentials.gcp_wif_project_number"
             class="lp-input font-mono text-xs"
@@ -79,7 +81,7 @@ watch(
           >
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">WIF pool ID</span>
+          <span class="lp-label">{{ t('credentials.fields.wifPoolId') }}</span>
           <input
             v-model="credentials.gcp_wif_pool_id"
             class="lp-input font-mono text-xs"
@@ -88,7 +90,7 @@ watch(
           >
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">WIF provider ID</span>
+          <span class="lp-label">{{ t('credentials.fields.wifProviderId') }}</span>
           <input
             v-model="credentials.gcp_wif_provider_id"
             class="lp-input font-mono text-xs"
@@ -97,7 +99,7 @@ watch(
           >
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Target SA email</span>
+          <span class="lp-label">{{ t('credentials.fields.targetSaEmail') }}</span>
           <input
             v-model="credentials.gcp_wif_target_sa_email"
             class="lp-input font-mono text-xs"
@@ -120,7 +122,7 @@ watch(
           "
           @click="awsAuthMode = 'keys'"
         >
-          Access keys
+          {{ t('credentials.fields.accessKeys') }}
         </button>
         <button
           type="button"
@@ -132,17 +134,17 @@ watch(
           "
           @click="awsAuthMode = 'oidc'"
         >
-          Keyless (role ARN / OIDC)
+          {{ t('credentials.fields.keylessOidc') }}
         </button>
       </div>
 
       <div v-if="awsAuthMode === 'keys'" class="grid gap-3 sm:grid-cols-2">
         <label class="block space-y-2">
-          <span class="lp-label">Access key ID</span>
+          <span class="lp-label">{{ t('credentials.fields.accessKeyId') }}</span>
           <input v-model="credentials.aws_access_key_id" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Secret access key</span>
+          <span class="lp-label">{{ t('credentials.fields.secretAccessKey') }}</span>
           <input
             v-model="credentials.aws_secret_access_key"
             type="password"
@@ -151,7 +153,7 @@ watch(
           >
         </label>
         <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">Session token (optional)</span>
+          <span class="lp-label">{{ t('credentials.fields.sessionTokenOptional') }}</span>
           <input v-model="credentials.aws_session_token" class="lp-input" autocomplete="off">
         </label>
       </div>
@@ -161,7 +163,7 @@ watch(
           Assume an IAM role with a short-lived Launchpad OIDC web-identity token.
         </p>
         <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">IAM role ARN</span>
+          <span class="lp-label">{{ t('credentials.fields.iamRoleArn') }}</span>
           <input
             v-model="credentials.aws_role_arn"
             class="lp-input font-mono text-xs"
@@ -170,7 +172,7 @@ watch(
           >
         </label>
         <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">Role session name (optional)</span>
+          <span class="lp-label">{{ t('credentials.fields.roleSessionNameOptional') }}</span>
           <input
             v-model="credentials.aws_role_session_name"
             class="lp-input font-mono text-xs"
@@ -184,11 +186,11 @@ watch(
     <template v-else-if="provider === 'azure'">
       <div class="grid gap-3 sm:grid-cols-2">
         <label class="block space-y-2">
-          <span class="lp-label">Client ID</span>
+          <span class="lp-label">{{ t('credentials.fields.clientId') }}</span>
           <input v-model="credentials.azure_client_id" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Client secret</span>
+          <span class="lp-label">{{ t('credentials.fields.clientSecret') }}</span>
           <input
             v-model="credentials.azure_client_secret"
             type="password"
@@ -197,11 +199,11 @@ watch(
           >
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Tenant ID</span>
+          <span class="lp-label">{{ t('credentials.fields.tenantId') }}</span>
           <input v-model="credentials.azure_tenant_id" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Subscription ID</span>
+          <span class="lp-label">{{ t('credentials.fields.subscriptionId') }}</span>
           <input v-model="credentials.azure_subscription_id" class="lp-input" autocomplete="off">
         </label>
       </div>
@@ -209,7 +211,7 @@ watch(
 
     <template v-else-if="provider === 'cloudflare'">
       <label class="block space-y-2">
-        <span class="lp-label">API token</span>
+        <span class="lp-label">{{ t('credentials.fields.apiToken') }}</span>
         <input
           v-model="credentials.cloudflare_api_token"
           type="password"

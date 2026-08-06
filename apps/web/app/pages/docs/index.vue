@@ -1,24 +1,26 @@
 <script setup lang="ts">
-const sections = [
-  { id: 'overview', label: 'How it works' },
-  { id: 'getting-started', label: 'Getting started' },
-  { id: 'home-settings', label: 'Home & settings' },
-  { id: 'environments', label: 'Launch an environment' },
-  { id: 'rebuild', label: 'Git push rebuilds' },
-  { id: 'manifest', label: 'Apply manifests' },
-  { id: 'provision', label: 'Provision cloud infra' },
-  { id: 'network', label: 'Network topology' },
-  { id: 'credentials', label: 'Cloud credentials' },
-  { id: 'github', label: 'GitHub Connect' },
-  { id: 'workspaces', label: 'Workspaces & terminal' },
-  { id: 'teardown', label: 'Teardown & TTL' },
-] as const
+const { t } = useI18n()
+
+const sections = computed(() => [
+  { id: 'overview', label: t('docs.howItWorks') },
+  { id: 'getting-started', label: t('docs.gettingStarted') },
+  { id: 'home-settings', label: t('docs.homeSettings') },
+  { id: 'environments', label: t('docs.launchEnvironment') },
+  { id: 'rebuild', label: t('docs.gitPushRebuilds') },
+  { id: 'manifest', label: t('docs.applyManifests') },
+  { id: 'provision', label: t('docs.provisionCloudInfra') },
+  { id: 'network', label: t('docs.networkTopology') },
+  { id: 'credentials', label: t('docs.cloudCredentials') },
+  { id: 'github', label: t('docs.githubConnect') },
+  { id: 'workspaces', label: t('docs.workspacesTerminal') },
+  { id: 'teardown', label: t('docs.teardownTtl') },
+] as const)
 </script>
 
 <template>
   <div class="grid gap-8 lg:grid-cols-[220px_1fr] animate-fade-up">
     <aside class="lg:sticky lg:top-24 lg:self-start">
-      <p class="lp-label mb-3">Guide</p>
+      <p class="lp-label mb-3">{{ t('docs.guide') }}</p>
       <nav class="space-y-1">
         <a
           v-for="section in sections"
@@ -33,474 +35,502 @@ const sections = [
 
     <article class="space-y-12 max-w-3xl">
       <header class="space-y-3">
-        <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">Documentation</p>
-        <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">Using Launchpad</h1>
+        <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">{{ t('docs.title') }}</p>
+        <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">{{ t('docs.pageTitle') }}</h1>
         <p class="text-[var(--lp-muted)]">
-          Launchpad is an internal developer portal for governed ephemeral app environments and
-          multi-cloud infrastructure. This guide explains how the product works and walks through
-          each flow step by step.
+          {{ t('docs.pageBlurb') }}
         </p>
       </header>
 
       <section id="overview" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">How it works</h2>
+        <h2 class="text-xl font-semibold">{{ t('docs.howItWorks') }}</h2>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          Launchpad has three distinct jobs. They share the same UI and can be linked, but they run
-          on different lifecycles:
+          {{ t('docs.overview.intro') }}
         </p>
         <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            <strong class="text-[var(--lp-text)]">Provision (infra)</strong> - generate a
-            Terraform or Pulumi workspace for GCP, AWS, Azure, Cloudflare, or kind. You attach
-            short-lived cloud credentials, pick resources, then apply the stack from the sandbox
-            terminal. This stands up platform infrastructure (VPC, cluster, etc.).
+            <strong class="text-[var(--lp-text)]">{{ t('docs.provisionInfraLabel') }}</strong>
+            - {{ t('docs.overview.provisionBody') }}
           </li>
           <li>
-            <strong class="text-[var(--lp-text)]">Manifest (workload)</strong> - apply Kubernetes
-            YAML or Helm charts from
-            <code class="font-mono text-xs">infra/k8s/manifests/</code>
-            in your workspace. This deploys app objects onto a cluster that already exists. In the
-            sandbox terminal, manifests apply separately after Terraform/Pulumi.
+            <strong class="text-[var(--lp-text)]">{{ t('docs.manifestWorkloadLabel') }}</strong>
+            -
+            <i18n-t keypath="docs.overview.manifestBody" tag="span">
+              <template #path>
+                <code class="font-mono text-xs">infra/k8s/manifests/</code>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            <strong class="text-[var(--lp-text)]">Environment (preview)</strong> - short-lived,
-            governed preview of an app from a git repo and branch. Launchpad creates an isolated
-            namespace, deploys the workload, streams status and logs, and tears everything down when
-            the TTL expires. When linked to a workspace with raw manifests, environments use
-            <strong class="text-[var(--lp-text)]">manifest deploy</strong>
-            instead of the built-in preview profile.
+            <strong class="text-[var(--lp-text)]">{{ t('docs.environmentPreviewLabel') }}</strong>
+            -
+            <i18n-t keypath="docs.overview.environmentBody" tag="span">
+              <template #manifestDeploy>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.manifestDeploy') }}</strong>
+              </template>
+            </i18n-t>
           </li>
         </ul>
-        <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          Use
-          <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
-          for a one-click preview - Local Sandbox (single screen) or cloud, catalog template or your
-          own repo. Use
-          <NuxtLink to="/environments" class="text-[var(--lp-accent)] hover:underline">Environments</NuxtLink>
-          to manage running previews.
-          Use
-          <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">Provision</NuxtLink>
-          to create a new cloud stack, and
-          <NuxtLink to="/workspaces" class="text-[var(--lp-accent)] hover:underline">Workspaces</NuxtLink>
-          to reopen one you already generated.
-        </p>
+        <i18n-t keypath="docs.overview.useFlows" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #launch>
+            <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.launch') }}</NuxtLink>
+          </template>
+          <template #environments>
+            <NuxtLink to="/environments" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.environments') }}</NuxtLink>
+          </template>
+          <template #provision>
+            <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.provision') }}</NuxtLink>
+          </template>
+          <template #workspaces>
+            <NuxtLink to="/workspaces" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.workspaces') }}</NuxtLink>
+          </template>
+        </i18n-t>
       </section>
 
       <section id="getting-started" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Getting started</h2>
+        <h2 class="text-xl font-semibold">{{ t('docs.gettingStarted') }}</h2>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
-          <li>Open Launchpad in your browser.</li>
+          <li>{{ t('docs.gettingStartedSteps.step1') }}</li>
           <li>
-            Sign in with your account, or use
-            <strong class="text-[var(--lp-text)]">Dev login</strong> when that option is available.
+            <i18n-t keypath="docs.gettingStartedSteps.step2" tag="span">
+              <template #devLogin>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.devLogin') }}</strong>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            You land on the
-            <NuxtLink to="/home" class="text-[var(--lp-accent)] hover:underline">Home</NuxtLink>
-            hub - from there open Environments, Provision, or Settings. The public product page is
-            <NuxtLink to="/" class="text-[var(--lp-accent)] hover:underline">/</NuxtLink>.
+            <i18n-t keypath="docs.gettingStartedSteps.step3" tag="span">
+              <template #home>
+                <NuxtLink to="/home" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.home') }}</NuxtLink>
+              </template>
+              <template #root>
+                <NuxtLink to="/" class="text-[var(--lp-accent)] hover:underline">/</NuxtLink>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            Optionally add GCP / AWS / Azure / Cloudflare keys under
-            <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">Settings</NuxtLink>
-            so workspaces can reuse them.
+            <i18n-t keypath="docs.gettingStartedSteps.step4" tag="span">
+              <template #settings>
+                <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.settings') }}</NuxtLink>
+              </template>
+            </i18n-t>
           </li>
         </ol>
       </section>
 
       <section id="home-settings" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Home & settings</h2>
-        <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          <NuxtLink to="/home" class="text-[var(--lp-accent)] hover:underline">Home</NuxtLink>
-          shows active environment and workspace counts plus whether account cloud keys are configured.
-          <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">Settings</NuxtLink>
-          stores encrypted cloud credentials for your user (SA JSON, WIF, AWS keys/roles, Azure SP,
-          Cloudflare token). Blank credential fields in Provision fall back to this vault.
-        </p>
+        <h2 class="text-xl font-semibold">{{ t('docs.homeSettings') }}</h2>
+        <i18n-t keypath="docs.homeSettingsSection.body" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #home>
+            <NuxtLink to="/home" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.home') }}</NuxtLink>
+          </template>
+          <template #settings>
+            <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.settings') }}</NuxtLink>
+          </template>
+        </i18n-t>
       </section>
 
       <section id="environments" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Launch an environment</h2>
-        <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          An environment is a governed, time-boxed preview of your application. The fastest path is
-          <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
-          - choose
-          <strong class="text-[var(--lp-text)]">Local (Sandbox)</strong>
-          to test on your machine with no cloud credentials, or connect GCP/AWS/Azure/Cloudflare.
-          Provisioning runs asynchronously; the detail page shows live status and logs while it
-          comes up.
-        </p>
+        <h2 class="text-xl font-semibold">{{ t('docs.launchEnvironment') }}</h2>
+        <i18n-t keypath="docs.environmentsSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #launch>
+            <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.launch') }}</NuxtLink>
+          </template>
+          <template #localSandbox>
+            <strong class="text-[var(--lp-text)]">{{ t('docs.localSandbox') }}</strong>
+          </template>
+        </i18n-t>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            Open
-            <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">/launch</NuxtLink>
-            and pick a target (Local Sandbox is the default for local testing).
+            <i18n-t keypath="docs.environmentsSection.step1" tag="span">
+              <template #launchPath>
+                <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">/launch</NuxtLink>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            For Local: run
-            <code class="font-mono text-xs text-[var(--lp-text)]">make kind-down && make kind-up</code>
-            (maps NodePorts to localhost), set
-            <code class="font-mono text-xs text-[var(--lp-text)]">KUBERNETES_ENABLED=true</code>
-            and
-            <code class="font-mono text-xs text-[var(--lp-text)]">KUBERNETES_CONTEXT=kind-launchpad</code>
-            in the API
-            <code class="font-mono text-xs text-[var(--lp-text)]">.env</code>,
-            then restart API + worker. Open Preview hits the real pod at
-            <code class="font-mono text-xs text-[var(--lp-text)]">http://127.0.0.1:&lt;nodePort&gt;</code>.
+            <i18n-t keypath="docs.environmentsSection.step2" tag="span">
+              <template #kindCmd>
+                <code class="font-mono text-xs text-[var(--lp-text)]">make kind-down && make kind-up</code>
+              </template>
+              <template #k8sEnabled>
+                <code class="font-mono text-xs text-[var(--lp-text)]">KUBERNETES_ENABLED=true</code>
+              </template>
+              <template #k8sContext>
+                <code class="font-mono text-xs text-[var(--lp-text)]">KUBERNETES_CONTEXT=kind-launchpad</code>
+              </template>
+              <template #envFile>
+                <code class="font-mono text-xs text-[var(--lp-text)]">.env</code>
+              </template>
+              <template #previewUrl>
+                <code class="font-mono text-xs text-[var(--lp-text)]">http://127.0.0.1:&lt;nodePort&gt;</code>
+              </template>
+            </i18n-t>
           </li>
-          <li>Pick a preview app template, name the environment, and launch.</li>
+          <li>{{ t('docs.environmentsSection.step3') }}</li>
           <li>
-            Open the environment to watch live logs, confirm it reaches
-            <strong class="text-[var(--lp-text)]">RUNNING</strong>, and use
-            <strong class="text-[var(--lp-text)]">Open preview</strong>.
+            <i18n-t keypath="docs.environmentsSection.step4" tag="span">
+              <template #running>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.running') }}</strong>
+              </template>
+              <template #openPreview>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.openPreview') }}</strong>
+              </template>
+            </i18n-t>
           </li>
         </ol>
       </section>
 
       <section id="rebuild" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Git push rebuilds</h2>
-        <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          When a GitHub webhook is configured for your repositories, a push to a branch that matches
-          an active environment’s repo and branch automatically triggers a rebuild. The environment
-          detail page shows whether
-          <code class="font-mono text-xs">WEBHOOK_SECRET</code>
-          is set on the API.
-        </p>
+        <h2 class="text-xl font-semibold">{{ t('docs.gitPushRebuilds') }}</h2>
+        <i18n-t keypath="docs.rebuildSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #webhookSecret>
+            <code class="font-mono text-xs">WEBHOOK_SECRET</code>
+          </template>
+        </i18n-t>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
-          <li>Keep the environment running against the branch you are iterating on.</li>
-          <li>Push commits to that branch in GitHub.</li>
-          <li>
-            Launchpad marks the environment as provisioning again, records the latest commit, and
-            redeploys.
-          </li>
-          <li>
-            Watch the environment card or detail page - status, commit SHA, and logs update live.
-          </li>
+          <li>{{ t('docs.rebuildSection.step1') }}</li>
+          <li>{{ t('docs.rebuildSection.step2') }}</li>
+          <li>{{ t('docs.rebuildSection.step3') }}</li>
+          <li>{{ t('docs.rebuildSection.step4') }}</li>
         </ol>
       </section>
 
       <section id="provision" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Provision cloud infrastructure</h2>
+        <h2 class="text-xl font-semibold">{{ t('docs.provisionCloudInfra') }}</h2>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          The Provision wizard builds an IaC bundle for you. Launchpad does not apply cloud changes
-          by itself - you run the plan/apply commands in the sandbox after the bundle is ready.
+          {{ t('docs.provisionSection.intro') }}
         </p>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            Go to
-            <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">Provision</NuxtLink>.
+            <i18n-t keypath="docs.provisionSection.step1" tag="span">
+              <template #provision>
+                <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.provision') }}</NuxtLink>
+              </template>
+            </i18n-t>
           </li>
-          <li>Choose a workspace name, cloud provider, and IaC engine (Terraform or Pulumi).</li>
+          <li>{{ t('docs.provisionSection.step2') }}</li>
           <li>
-            Paste short-lived cloud credentials for that provider (see
-            <a href="#credentials" class="text-[var(--lp-accent)] hover:underline">Cloud credentials</a>).
+            <i18n-t keypath="docs.provisionSection.step3" tag="span">
+              <template #credentialsLink>
+                <a href="#credentials" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.cloudCredentialsLink') }}</a>
+              </template>
+            </i18n-t>
           </li>
-          <li>Select the resources you want in the generated stack (VPC, cluster, storage, etc.).</li>
+          <li>{{ t('docs.provisionSection.step4') }}</li>
           <li>
-            When you enable a cluster (GKE, EKS, AKS, …), pick
-            <strong class="text-[var(--lp-text)]">Raw K8s Manifests</strong>
-            or
-            <strong class="text-[var(--lp-text)]">Helm</strong>,
-            then toggle the Kubernetes objects to scaffold - Deployment, Service, Ingress, Pod,
-            Job, CronJob, StatefulSet, DaemonSet, ConfigMap, Secret, PVC, Role, HPA, and more.
+            <i18n-t keypath="docs.provisionSection.step5" tag="span">
+              <template #rawK8s>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.rawK8sManifests') }}</strong>
+              </template>
+              <template #helm>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.helm') }}</strong>
+              </template>
+            </i18n-t>
+          </li>
+          <li>{{ t('docs.provisionSection.step6') }}</li>
+          <li>
+            <i18n-t keypath="docs.provisionSection.step7" tag="span">
+              <template #generateWorkspace>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.generateWorkspace') }}</strong>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            Optionally connect GitHub and bootstrap a repository with a CI workflow and cloud secrets.
-          </li>
-          <li>
-            Finish with
-            <strong class="text-[var(--lp-text)]">Generate workspace</strong>.
-            Launchpad scaffolds the IaC files and opens a sandbox terminal.
-          </li>
-          <li>
-            In the terminal, apply infrastructure first:
-            <code class="text-[var(--lp-accent)]">terraform plan</code>
-            /
-            <code class="text-[var(--lp-accent)]">terraform apply</code>,
-            or
-            <code class="text-[var(--lp-accent)]">pulumi up</code>.
-            Manifest apply (
-            <code class="text-[var(--lp-accent)]">kubectl apply</code>
-            /
-            <code class="text-[var(--lp-accent)]">helm upgrade</code>
-            ) runs as a separate step afterward.
+            <i18n-t keypath="docs.provisionSection.step8" tag="span">
+              <template #tfPlan>
+                <code class="text-[var(--lp-accent)]">terraform plan</code>
+              </template>
+              <template #tfApply>
+                <code class="text-[var(--lp-accent)]">terraform apply</code>
+              </template>
+              <template #pulumiUp>
+                <code class="text-[var(--lp-accent)]">pulumi up</code>
+              </template>
+              <template #kubectlApply>
+                <code class="text-[var(--lp-accent)]">kubectl apply</code>
+              </template>
+              <template #helmUpgrade>
+                <code class="text-[var(--lp-accent)]">helm upgrade</code>
+              </template>
+            </i18n-t>
           </li>
         </ol>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          Credentials are encrypted at rest, injected into the sandbox for that session, and never
-          shown in logs in plaintext.
+          {{ t('docs.provisionSection.credentialsNote') }}
         </p>
       </section>
 
       <section id="manifest" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Apply Kubernetes manifests</h2>
-        <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          Manifest deploy is separate from cloud infra provision. Workspaces with
-          <strong class="text-[var(--lp-text)]">Raw K8s Manifests</strong>
-          include files under
-          <code class="font-mono text-xs">infra/k8s/manifests/</code>.
-          You can apply them manually from the sandbox terminal, or let Launchpad apply them when
-          you launch an environment linked to that workspace.
-        </p>
+        <h2 class="text-xl font-semibold">{{ t('docs.applyManifests') }}</h2>
+        <i18n-t keypath="docs.manifestSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #rawK8s>
+            <strong class="text-[var(--lp-text)]">{{ t('docs.rawK8sManifests') }}</strong>
+          </template>
+          <template #path>
+            <code class="font-mono text-xs">infra/k8s/manifests/</code>
+          </template>
+        </i18n-t>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
-          <li>Complete the Provision wizard and enable Raw K8s Manifests packaging.</li>
+          <li>{{ t('docs.manifestSection.step1') }}</li>
           <li>
-            Open the workspace terminal with
-            <strong class="text-[var(--lp-text)]">Run kubectl apply in sandbox on open</strong>
-            to apply manifests to your cluster, or apply infra first then manifests manually.
+            <i18n-t keypath="docs.manifestSection.step2" tag="span">
+              <template #runKubectlOnOpen>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.runKubectlOnOpen') }}</strong>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            To run a governed preview from those manifests, go to
-            <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">Launch</NuxtLink>
-            and select the workspace - Launchpad uses
-            <strong class="text-[var(--lp-text)]">manifest deploy</strong>
-            automatically.
+            <i18n-t keypath="docs.manifestSection.step3" tag="span">
+              <template #launch>
+                <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.launch') }}</NuxtLink>
+              </template>
+              <template #manifestDeploy>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.manifestDeploy') }}</strong>
+              </template>
+            </i18n-t>
           </li>
         </ol>
       </section>
 
       <section id="network" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Network topology</h2>
+        <h2 class="text-xl font-semibold">{{ t('docs.networkTopology') }}</h2>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          When VPC/VNet and Subnets are enabled, choose a topology in Provision:
+          {{ t('docs.networkSection.intro') }}
         </p>
         <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            <strong class="text-[var(--lp-text)]">Simple</strong> - one subnet (plus an internet
-            gateway on AWS). Best for demos and ephemeral stacks. CIDRs are auto-generated per
-            environment so parallel stacks do not collide.
+            <strong class="text-[var(--lp-text)]">{{ t('docs.simple') }}</strong>
+            - {{ t('docs.networkSection.simpleBody') }}
           </li>
           <li>
-            <strong class="text-[var(--lp-text)]">Standard</strong> - public + private subnets with
-            managed NAT egress (Cloud NAT on GCP, NAT Gateway on AWS/Azure). Clusters attach to the
-            private subnet. Prefer this for production-ish golden paths.
+            <strong class="text-[var(--lp-text)]">{{ t('docs.standard') }}</strong>
+            - {{ t('docs.networkSection.standardBody') }}
           </li>
         </ul>
       </section>
 
       <section id="credentials" class="scroll-mt-28 space-y-6">
         <div class="space-y-3">
-          <h2 class="text-xl font-semibold">Cloud credentials</h2>
+          <h2 class="text-xl font-semibold">{{ t('docs.cloudCredentials') }}</h2>
           <p class="text-sm leading-7 text-[var(--lp-muted)]">
-            You can store credentials in two places:
+            {{ t('docs.credentialsSection.intro') }}
           </p>
           <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>
-              <strong class="text-[var(--lp-text)]">Account Settings</strong>
+              <strong class="text-[var(--lp-text)]">{{ t('docs.accountSettings') }}</strong>
               (
               <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">/settings</NuxtLink>
-              ) - encrypted vault for GCP (SA JSON or WIF), AWS (keys or role ARN), Azure SP, and
-              Cloudflare. Used as a fallback when workspace fields are blank.
+              ) - {{ t('docs.credentialsSection.accountSettingsBody') }}
             </li>
             <li>
-              <strong class="text-[var(--lp-text)]">Per workspace</strong>
-              in the Provision wizard - overrides or fills that workspace only.
+              <strong class="text-[var(--lp-text)]">{{ t('docs.perWorkspace') }}</strong>
+              {{ t('docs.credentialsSection.perWorkspaceBody') }}
             </li>
           </ul>
           <p class="text-sm leading-7 text-[var(--lp-muted)]">
-            Prefer short-lived credentials or keyless OIDC. Use least privilege for the resources
-            you selected.
+            {{ t('docs.credentialsSection.preferShortLived') }}
           </p>
         </div>
 
         <div id="gcp" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">GCP - service account JSON</h3>
+          <h3 class="text-lg font-semibold">{{ t('docs.gcpCredentials.title') }}</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>
-              Open
-              <a
-                class="text-[var(--lp-accent)] hover:underline"
-                href="https://console.cloud.google.com/iam-admin/serviceaccounts"
-                target="_blank"
-                rel="noreferrer"
-              >IAM → Service Accounts</a>
-              in Google Cloud Console.
+              <i18n-t keypath="docs.gcpCredentials.step1" tag="span">
+                <template #iamLink>
+                  <a
+                    class="text-[var(--lp-accent)] hover:underline"
+                    href="https://console.cloud.google.com/iam-admin/serviceaccounts"
+                    target="_blank"
+                    rel="noreferrer"
+                  >{{ t('docs.gcpCredentials.iamLinkLabel') }}</a>
+                </template>
+              </i18n-t>
             </li>
-            <li>Select or create a service account in the target project.</li>
+            <li>{{ t('docs.gcpCredentials.step2') }}</li>
+            <li>{{ t('docs.gcpCredentials.step3') }}</li>
+            <li>{{ t('docs.gcpCredentials.step4') }}</li>
             <li>
-              Grant roles for the resources you will provision (for example Compute Admin, Kubernetes
-              Engine Admin, Secret Manager Admin).
-            </li>
-            <li>Keys → Add key → Create new key → JSON - download the file.</li>
-            <li>
-              In Provision, paste the full JSON into
-              <strong class="text-[var(--lp-text)]">GCP SA key JSON</strong>
-              and set the Project ID.
+              <i18n-t keypath="docs.gcpCredentials.step5" tag="span">
+                <template #gcpSaKeyJson>
+                  <strong class="text-[var(--lp-text)]">{{ t('docs.gcpSaKeyJson') }}</strong>
+                </template>
+              </i18n-t>
             </li>
           </ol>
         </div>
 
         <div id="aws" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">AWS - access keys</h3>
+          <h3 class="text-lg font-semibold">{{ t('docs.awsCredentials.title') }}</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>
-              Sign in to the
-              <a
-                class="text-[var(--lp-accent)] hover:underline"
-                href="https://console.aws.amazon.com/iam/"
-                target="_blank"
-                rel="noreferrer"
-              >AWS IAM console</a>.
+              <i18n-t keypath="docs.awsCredentials.step1" tag="span">
+                <template #iamConsole>
+                  <a
+                    class="text-[var(--lp-accent)] hover:underline"
+                    href="https://console.aws.amazon.com/iam/"
+                    target="_blank"
+                    rel="noreferrer"
+                  >{{ t('docs.awsCredentials.iamConsoleLabel') }}</a>
+                </template>
+              </i18n-t>
             </li>
-            <li>
-              Create or select a user with least-privilege policies for the resources you need
-              (VPC, EKS, S3, and so on).
-            </li>
-            <li>Security credentials → Create access key → Command Line Interface (CLI).</li>
-            <li>
-              Paste the Access key ID and Secret access key into Provision. Add a session token if
-              you are using temporary STS credentials.
-            </li>
+            <li>{{ t('docs.awsCredentials.step2') }}</li>
+            <li>{{ t('docs.awsCredentials.step3') }}</li>
+            <li>{{ t('docs.awsCredentials.step4') }}</li>
           </ol>
         </div>
 
         <div id="azure" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">Azure - service principal</h3>
+          <h3 class="text-lg font-semibold">{{ t('docs.azureCredentials.title') }}</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
-            <li>Azure Portal → Microsoft Entra ID → App registrations → New registration.</li>
-            <li>Certificates &amp; secrets → New client secret - copy the value immediately.</li>
-            <li>
-              Note the Application (client) ID, Directory (tenant) ID, and your Subscription ID.
-            </li>
-            <li>
-              Assign the app a role on the subscription or resource group (for example Contributor).
-            </li>
-            <li>
-              Paste Client ID, Client secret, Tenant ID, Subscription ID, and Resource group into
-              Provision.
-            </li>
+            <li>{{ t('docs.azureCredentials.step1') }}</li>
+            <li>{{ t('docs.azureCredentials.step2') }}</li>
+            <li>{{ t('docs.azureCredentials.step3') }}</li>
+            <li>{{ t('docs.azureCredentials.step4') }}</li>
+            <li>{{ t('docs.azureCredentials.step5') }}</li>
           </ol>
         </div>
 
         <div id="cloudflare" class="scroll-mt-28 space-y-3">
-          <h3 class="text-lg font-semibold">Cloudflare - API token</h3>
+          <h3 class="text-lg font-semibold">{{ t('docs.cloudflareCredentials.title') }}</h3>
           <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
             <li>
-              Open
-              <a
-                class="text-[var(--lp-accent)] hover:underline"
-                href="https://dash.cloudflare.com/profile/api-tokens"
-                target="_blank"
-                rel="noreferrer"
-              >My Profile → API Tokens</a>.
+              <i18n-t keypath="docs.cloudflareCredentials.step1" tag="span">
+                <template #apiTokensLink>
+                  <a
+                    class="text-[var(--lp-accent)] hover:underline"
+                    href="https://dash.cloudflare.com/profile/api-tokens"
+                    target="_blank"
+                    rel="noreferrer"
+                  >{{ t('docs.cloudflareCredentials.apiTokensLinkLabel') }}</a>
+                </template>
+              </i18n-t>
             </li>
-            <li>Create a token with permissions for Workers, R2, and/or DNS as needed.</li>
-            <li>Paste the token and Account ID into Provision.</li>
+            <li>{{ t('docs.cloudflareCredentials.step2') }}</li>
+            <li>{{ t('docs.cloudflareCredentials.step3') }}</li>
           </ol>
         </div>
       </section>
 
       <section id="github" class="scroll-mt-28 space-y-4">
-        <h2 class="text-xl font-semibold">GitHub Connect</h2>
-        <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          Launchpad uses a
-          <strong class="text-[var(--lp-text)]">GitHub App</strong>
-          so you never paste a personal access token in the browser. Connecting installs or
-          authorizes the App on your user or organization account; Launchpad then creates repos and
-          sets CI secrets on your behalf during Provision.
-        </p>
+        <h2 class="text-xl font-semibold">{{ t('docs.githubConnect') }}</h2>
+        <i18n-t keypath="docs.githubSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #githubApp>
+            <strong class="text-[var(--lp-text)]">{{ t('docs.githubApp') }}</strong>
+          </template>
+        </i18n-t>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            Open
-            <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">Integrations → GitHub</NuxtLink>.
+            <i18n-t keypath="docs.githubSection.step1" tag="span">
+              <template #integrationsGithub>
+                <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.integrationsGithub') }}</NuxtLink>
+              </template>
+            </i18n-t>
           </li>
-          <li>Click <strong class="text-[var(--lp-text)]">Connect GitHub</strong>.</li>
           <li>
-            On GitHub, choose the account or organization and the repositories the App may access,
-            then Authorize / Install.
+            <i18n-t keypath="docs.githubSection.step2" tag="span">
+              <template #connectGithub>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.connectGithub') }}</strong>
+              </template>
+            </i18n-t>
           </li>
-          <li>You are redirected back to Launchpad when installation finishes.</li>
-          <li>
-            Confirm installations appear on the GitHub page - select one when bootstrapping a repo
-            from the Provision wizard.
-          </li>
+          <li>{{ t('docs.githubSection.step3') }}</li>
+          <li>{{ t('docs.githubSection.step4') }}</li>
+          <li>{{ t('docs.githubSection.step5') }}</li>
         </ol>
         <div class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/50 p-4 text-sm text-[var(--lp-muted)]">
-          <p class="lp-label mb-2">What the App needs</p>
+          <p class="lp-label mb-2">{{ t('docs.githubSection.appNeedsTitle') }}</p>
           <ul class="mb-3 list-disc space-y-1 pl-5 text-xs leading-6">
             <li>
-              <strong class="text-[var(--lp-text)]">Administration</strong>
-              - create repositories
+              <strong class="text-[var(--lp-text)]">{{ t('docs.administration') }}</strong>
+              - {{ t('docs.githubSection.permAdministration') }}
             </li>
             <li>
-              <strong class="text-[var(--lp-text)]">Contents</strong>
-              - push workflow and infrastructure files
+              <strong class="text-[var(--lp-text)]">{{ t('docs.contents') }}</strong>
+              - {{ t('docs.githubSection.permContents') }}
             </li>
             <li>
-              <strong class="text-[var(--lp-text)]">Secrets</strong>
-              - set CI cloud secrets
+              <strong class="text-[var(--lp-text)]">{{ t('docs.secrets') }}</strong>
+              - {{ t('docs.githubSection.permSecrets') }}
             </li>
             <li>
-              <strong class="text-[var(--lp-text)]">Metadata</strong>
-              - read-only
+              <strong class="text-[var(--lp-text)]">{{ t('docs.metadata') }}</strong>
+              - {{ t('docs.githubSection.permMetadata') }}
             </li>
           </ul>
-          <p class="text-xs leading-6">
-            After permission changes, open the installation on GitHub and
-            <strong class="text-[var(--lp-text)]">Accept</strong>
-            the new request. Apps installed on a
-            <strong class="text-[var(--lp-text)]">personal account</strong>
-            cannot create new repos via API - create an empty repo first, or install on an
-            <strong class="text-[var(--lp-text)]">Organization</strong>.
-          </p>
+          <i18n-t keypath="docs.githubSection.afterPermissions" tag="p" class="text-xs leading-6">
+            <template #accept>
+              <strong class="text-[var(--lp-text)]">{{ t('docs.accept') }}</strong>
+            </template>
+            <template #personalAccount>
+              <strong class="text-[var(--lp-text)]">{{ t('docs.personalAccount') }}</strong>
+            </template>
+            <template #organization>
+              <strong class="text-[var(--lp-text)]">{{ t('docs.organization') }}</strong>
+            </template>
+          </i18n-t>
         </div>
         <GithubConnectCard compact />
       </section>
 
       <section id="workspaces" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Workspaces &amp; sandbox terminal</h2>
+        <h2 class="text-xl font-semibold">{{ t('docs.workspacesTerminal') }}</h2>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          Every finished Provision run becomes a workspace: generated Terraform or Pulumi files plus
-          a sandbox where your cloud credentials are already available. The workspace page includes
-          an IDE-style file explorer so you can edit manifests, add Kubernetes/Terraform templates,
-          save, format, push to GitHub, and run kubectl / terraform commands in the terminal.
+          {{ t('docs.workspacesSection.intro') }}
         </p>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            Open
-            <NuxtLink to="/workspaces" class="text-[var(--lp-accent)] hover:underline">Workspaces</NuxtLink>
-            and select a workspace.
+            <i18n-t keypath="docs.workspacesSection.step1" tag="span">
+              <template #workspaces>
+                <NuxtLink to="/workspaces" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.workspaces') }}</NuxtLink>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            Use the explorer to create, rename, delete, edit, format, and save files
-            (<kbd class="font-mono text-[var(--lp-accent)]">⌘/Ctrl+S</kbd>).
+            <i18n-t keypath="docs.workspacesSection.step2" tag="span">
+              <template #saveShortcut>
+                <kbd class="font-mono text-[var(--lp-accent)]">⌘/Ctrl+S</kbd>
+              </template>
+            </i18n-t>
+          </li>
+          <li>{{ t('docs.workspacesSection.step3') }}</li>
+          <li>
+            <i18n-t keypath="docs.workspacesSection.step4" tag="span">
+              <template #pushToGithub>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.pushToGithub') }}</strong>
+              </template>
+            </i18n-t>
           </li>
           <li>
-            Add Kubernetes YAML (Deployment, Service, Ingress, Pod, Job, …) or Terraform stubs from
-            the template menus.
-          </li>
-          <li>
-            Click
-            <strong class="text-[var(--lp-text)]">Push to GitHub</strong>
-            to commit the current bundle into a connected repository.
-          </li>
-          <li>
-            Use
-            <strong class="text-[var(--lp-text)]">kubectl apply / delete</strong>
-            or Terraform
-            <strong class="text-[var(--lp-text)]">plan / apply / destroy</strong>
-            - commands are sent to the sandbox terminal.
+            <i18n-t keypath="docs.workspacesSection.step5" tag="span">
+              <template #kubectlApplyDelete>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.kubectlApplyDelete') }}</strong>
+              </template>
+              <template #planApplyDestroy>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.planApplyDestroy') }}</strong>
+              </template>
+            </i18n-t>
           </li>
         </ol>
       </section>
 
       <section id="teardown" class="scroll-mt-28 space-y-3">
-        <h2 class="text-xl font-semibold">Teardown &amp; TTL</h2>
+        <h2 class="text-xl font-semibold">{{ t('docs.teardownTtl') }}</h2>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
-          Environments are meant to be temporary. Launchpad tracks remaining lifetime on each
-          environment and cleans up expired ones automatically.
+          {{ t('docs.teardownSection.intro') }}
         </p>
         <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
           <li>
-            To tear down early, open the environment and click
-            <strong class="text-[var(--lp-text)]">Destroy</strong>
-            (or destroy from the dashboard).
+            <i18n-t keypath="docs.teardownSection.step1" tag="span">
+              <template #destroy>
+                <strong class="text-[var(--lp-text)]">{{ t('common.destroy') }}</strong>
+              </template>
+            </i18n-t>
           </li>
-          <li>Status moves through teardown while resources are removed; watch the live logs.</li>
-          <li>
-            If you do nothing, the environment expires when its TTL is reached and Launchpad
-            reaps it on a schedule.
-          </li>
+          <li>{{ t('docs.teardownSection.step2') }}</li>
+          <li>{{ t('docs.teardownSection.step3') }}</li>
         </ol>
       </section>
     </article>

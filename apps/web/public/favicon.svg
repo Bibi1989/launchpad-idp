@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Launchpad">
+  <defs>
+    <linearGradient id="lp-glow" x1="12" y1="8" x2="52" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5EEAD4"/>
+      <stop offset="55%" stop-color="#2DD4BF"/>
+      <stop offset="100%" stop-color="#0F766E"/>
+    </linearGradient>
+    <linearGradient id="lp-pad" x1="10" y1="48" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2DD4BF" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#0F766E" stop-opacity="0.85"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded tile -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0C1219"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="13.25" fill="none" stroke="#273447" stroke-width="1.5"/>
+  <!-- Launch pad base -->
+  <path d="M14 50.5h36c1.2 0 1.8-1.5.9-2.3L44 41H20l-6.9 7.2c-.9.8-.3 2.3.9 2.3Z" fill="url(#lp-pad)"/>
+  <rect x="22" y="46" width="20" height="2.5" rx="1.25" fill="#0C1219" opacity="0.35"/>
+  <!-- Rocket body -->
+  <path d="M32 12c7.2 6.2 9.8 16.4 8.2 26.2H23.8C22.2 28.4 24.8 18.2 32 12Z" fill="url(#lp-glow)"/>
+  <!-- Window -->
+  <circle cx="32" cy="26" r="4.2" fill="#0C1219"/>
+  <circle cx="32" cy="26" r="2.4" fill="#E8EEF5" opacity="0.9"/>
+  <!-- Fins -->
+  <path d="M23.8 34.5 17 41.2c-.7.7.1 1.9 1.1 1.5l7.2-2.8c.6-.2.8-1 .3-1.5l-1.8-1.9Z" fill="#5EEAD4"/>
+  <path d="M40.2 34.5 47 41.2c.7.7-.1 1.9-1.1 1.5l-7.2-2.8c-.6-.2-.8-1-.3-1.5l1.8-1.9Z" fill="#5EEAD4"/>
+  <!-- Flame -->
+  <path d="M28.5 39.5c1.1 3.8 2.3 6.8 3.5 9.2 1.2-2.4 2.4-5.4 3.5-9.2H28.5Z" fill="#F59E0B"/>
+  <path d="M30.2 39.5c.7 2.6 1.4 4.6 1.8 6.2.4-1.6 1.1-3.6 1.8-6.2h-3.6Z" fill="#FDE68A"/>
+</svg>

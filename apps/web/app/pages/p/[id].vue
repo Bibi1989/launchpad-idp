@@ -2,6 +2,7 @@
 import type { Environment } from '~/types/environment'
 
 const route = useRoute()
+const { t } = useI18n()
 const id = computed(() => String(route.params.id))
 const { getById } = useEnvironments()
 const { reconcileEnvironment } = useNotifications()
@@ -23,12 +24,12 @@ async function copyShareLink() {
   try {
     await navigator.clipboard.writeText(url)
     copied.value = true
-    toast.success('Link copied', 'Shareable status link is on your clipboard.')
+    toast.success(t('preview.linkCopied'), t('preview.linkCopiedBody'))
     setTimeout(() => {
       copied.value = false
     }, 2000)
   } catch {
-    toast.error('Copy failed', 'Could not copy the link - copy it from the address bar.')
+    toast.error(t('preview.copyFailed'), t('preview.copyFailedBody'))
   }
 }
 
@@ -52,7 +53,7 @@ async function load() {
     environment.value = await getById(id.value)
     reconcileEnvironment(environment.value)
   } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Preview not found'
+    loadError.value = err instanceof Error ? err.message : t('preview.notFound')
   }
 }
 
@@ -70,107 +71,105 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-[#0b1219] text-[#e8eef5]">
+  <div class="min-h-screen bg-[var(--lp-ink)] text-[var(--lp-text)]">
     <div class="mx-auto flex min-h-screen max-w-4xl flex-col px-6 py-10">
       <header class="mb-10 flex items-center justify-between gap-4">
-        <NuxtLink to="/" class="font-semibold tracking-tight text-[var(--lp-accent,#2dd4bf)]">
+        <NuxtLink to="/" class="font-semibold tracking-tight text-[var(--lp-accent)]">
           Launchpad
         </NuxtLink>
         <div v-if="environment" class="flex items-center gap-3">
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 rounded-lg border border-[#273447] px-3 py-1.5 text-sm text-[#8fa3b8] transition hover:border-[#2dd4bf]/50 hover:text-white"
+            class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--lp-line)] px-3 py-1.5 text-sm text-[var(--lp-muted)] transition hover:border-[var(--lp-accent)]/50 hover:text-[var(--lp-text)]"
             @click="copyShareLink"
           >
             <span class="material-symbols-outlined text-base">{{ copied ? 'check' : 'link' }}</span>
-            {{ copied ? 'Copied' : 'Copy link' }}
+            {{ copied ? t('common.copied') : t('preview.copyLink') }}
           </button>
           <NuxtLink
             :to="`/environments/${environment.id}`"
-            class="text-sm text-[#8fa3b8] hover:text-white"
+            class="text-sm text-[var(--lp-muted)] hover:text-[var(--lp-text)]"
           >
-            Environment details →
+            {{ t('preview.envDetails') }}
           </NuxtLink>
         </div>
       </header>
 
-      <p v-if="loadError" class="text-[#f87171]">{{ loadError }}</p>
+      <p v-if="loadError" class="text-[var(--lp-danger)]">{{ loadError }}</p>
 
       <template v-else-if="environment">
         <div class="mb-8 space-y-3">
           <div class="flex items-center gap-3">
-            <p class="font-mono text-xs uppercase tracking-[0.2em] text-[#2dd4bf]">Live preview</p>
+            <p class="font-mono text-xs uppercase tracking-[0.2em] text-[var(--lp-accent)]">{{ t('preview.live') }}</p>
             <EnvironmentHealthDot :environment="environment" />
           </div>
           <h1 class="text-4xl font-semibold tracking-tight">{{ environment.name }}</h1>
-          <p class="text-[#8fa3b8]">
+          <p class="text-[var(--lp-muted)]">
             {{ environment.template_id || 'custom' }} · {{ environment.git_branch }}
           </p>
         </div>
 
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div class="rounded-xl border border-[#273447] bg-[#121a24] p-4">
-            <p class="text-xs uppercase tracking-wide text-[#8fa3b8]">Status</p>
+          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+            <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.status') }}</p>
             <p class="mt-2 text-lg font-semibold">{{ environment.status }}</p>
           </div>
-          <div class="rounded-xl border border-[#273447] bg-[#121a24] p-4">
-            <p class="text-xs uppercase tracking-wide text-[#8fa3b8]">Time left</p>
+          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+            <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.timeLeft') }}</p>
             <p class="mt-2 font-mono text-lg">{{ remainingLabel }}</p>
           </div>
-          <div class="rounded-xl border border-[#273447] bg-[#121a24] p-4">
-            <p class="text-xs uppercase tracking-wide text-[#8fa3b8]">Cost to date</p>
-            <p class="mt-2 font-mono text-lg text-[#2dd4bf]">${{ environment.cost_accrued }}</p>
+          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+            <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.costToDate') }}</p>
+            <p class="mt-2 font-mono text-lg text-[var(--lp-accent)]">${{ environment.cost_accrued }}</p>
           </div>
-          <div class="rounded-xl border border-[#273447] bg-[#121a24] p-4">
-            <p class="text-xs uppercase tracking-wide text-[#8fa3b8]">Rate</p>
+          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+            <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.rate') }}</p>
             <p class="mt-2 font-mono text-lg">${{ environment.cost_estimate_hourly }}/hr</p>
           </div>
         </div>
 
         <div
-          class="mt-8 flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-[#273447] bg-[#121a24]/80 px-6 py-16 text-center"
+          class="mt-8 flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--lp-line)] bg-[var(--lp-panel)]/80 px-6 py-16 text-center"
         >
           <template v-if="isLive">
-            <span class="material-symbols-outlined mb-4 text-5xl text-[#2dd4bf]">rocket_launch</span>
-            <h2 class="text-2xl font-semibold">Your preview is live</h2>
-            <p class="mt-2 max-w-md text-sm text-[#8fa3b8]">
-              This is the shareable status page. Use
-              <strong class="font-medium text-[#e8eef5]">Open app</strong>
-              for the running workload URL.
+            <span class="material-symbols-outlined mb-4 text-5xl text-[var(--lp-accent)]">rocket_launch</span>
+            <h2 class="text-2xl font-semibold">{{ t('preview.yourPreviewLive') }}</h2>
+            <p class="mt-2 max-w-md text-sm text-[var(--lp-muted)]">
+              {{ t('preview.shareableBlurb') }}
             </p>
             <div class="mt-6 flex flex-wrap justify-center gap-3">
               <a
                 v-if="environment.app_ready && environment.preview_url"
                 :href="environment.preview_url"
-                class="inline-flex items-center gap-2 rounded-lg bg-[#2dd4bf] px-4 py-2 text-sm font-semibold text-[#0b1219]"
+                class="inline-flex items-center gap-2 rounded-lg bg-[var(--lp-accent)] px-4 py-2 text-sm font-semibold text-[var(--lp-on-accent)]"
               >
-                Open app
+                {{ t('preview.openApp') }}
               </a>
               <NuxtLink
                 :to="`/environments/${environment.id}`"
-                class="inline-flex items-center gap-2 rounded-lg border border-[#273447] px-4 py-2 text-sm"
+                class="inline-flex items-center gap-2 rounded-lg border border-[var(--lp-line)] px-4 py-2 text-sm"
               >
-                View logs
+                {{ t('preview.viewLogs') }}
               </NuxtLink>
             </div>
           </template>
           <template v-else-if="environment.status === 'PROVISIONING'">
-            <span class="material-symbols-outlined mb-4 animate-pulse text-5xl text-[#f59e0b]">hourglass_top</span>
-            <h2 class="text-2xl font-semibold">Provisioning…</h2>
-            <p class="mt-2 text-sm text-[#8fa3b8]">Hang tight - this page refreshes automatically.</p>
+            <span class="material-symbols-outlined mb-4 animate-pulse text-5xl text-[var(--lp-warn)]">hourglass_top</span>
+            <h2 class="text-2xl font-semibold">{{ t('preview.provisioning') }}</h2>
+            <p class="mt-2 text-sm text-[var(--lp-muted)]">{{ t('preview.hangTight') }}</p>
           </template>
           <template v-else>
-            <span class="material-symbols-outlined mb-4 text-5xl text-[#8fa3b8]">cloud_off</span>
-            <h2 class="text-2xl font-semibold">Preview unavailable</h2>
-            <p class="mt-2 text-sm text-[#8fa3b8]">
-              Status is {{ environment.status }}.
+            <span class="material-symbols-outlined mb-4 text-5xl text-[var(--lp-muted)]">cloud_off</span>
+            <h2 class="text-2xl font-semibold">{{ t('preview.unavailable') }}</h2>
+            <p class="mt-2 text-sm text-[var(--lp-muted)]">
+              {{ t('preview.statusIs', { status: environment.status }) }}
               <span v-if="environment.error_message">{{ environment.error_message }}</span>
             </p>
           </template>
         </div>
       </template>
 
-      <p v-else class="text-[#8fa3b8]">Loading preview…</p>
+      <p v-else class="text-[var(--lp-muted)]">{{ t('preview.loading') }}</p>
     </div>
   </div>
 </template>

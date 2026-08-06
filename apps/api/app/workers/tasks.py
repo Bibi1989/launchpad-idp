@@ -1242,18 +1242,36 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         await asyncio.to_thread(stop_preview_tunnel, str(env_uuid))
                     except Exception:
                         logger.exception("preview_tunnel_stop_failed", environment_id=str(env_uuid))
-                    # Reclaim the locally-built app image from kind + host so
-                    # deleted previews do not leak disk (leave shared base images).
-                    if environment.provider == "local" and environment.workload_image:
-                        try:
-                            local_cluster = (
-                                settings.kubernetes_context or "launchpad"
-                            ).removeprefix("kind-").removeprefix("k3d-")
-                            _remove_kind_docker_images(local_cluster, [environment.workload_image])
-                        except Exception:
-                            logger.exception(
-                                "teardown_image_cleanup_failed", environment_id=environment_id
+                    # Reclaim locally-built app images from kind/k3d + host Docker
+                    # so deleted previews do not leak disk (leave shared base images).
+                    try:
+                        from app.services.image_cleanup import (
+                            collect_preview_environment_images,
+                            remove_local_docker_images,
+                            resolve_local_cluster_short_name,
+                        )
+
+                        preview_images = collect_preview_environment_images(
+                            settings=settings,
+                            environment_id=str(env_uuid),
+                            workload_image=environment.workload_image,
+                            commit_sha=environment.latest_commit_sha,
+                        )
+                        if preview_images:
+                            is_local = environment.provider == "local" or (
+                                (settings.resolved_kubernetes_context or settings.kubernetes_context or "")
+                                .startswith(("kind-", "k3d-"))
                             )
+                            remove_local_docker_images(
+                                preview_images,
+                                cluster_name=resolve_local_cluster_short_name(settings),
+                                settings=settings,
+                                remove_from_cluster=is_local,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "teardown_image_cleanup_failed", environment_id=environment_id
+                        )
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     await env_repo.update_status(environment, EnvironmentStatus.DESTROYED)
                     await _emit_log(
@@ -1841,66 +1859,8 @@ def _build_and_load_kind_docker_images(workspace_root: Path, cluster_name: str =
     return build_and_load_kind_images(workspace_root, cluster_name=cluster_name)
 
 
-# Official/shared images that must never be removed on teardown (they are reused
-# across previews and would just be re-pulled). Only locally-built app images go.
-_KIND_IMAGE_REMOVE_DENYLIST = (
-    "nginx",
-    "postgres",
-    "mysql",
-    "mariadb",
-    "mongo",
-    "redis",
-    "busybox",
-    "alpine",
-    "http-echo",
-)
-
-
 def _remove_kind_docker_images(cluster_name: str, images: "list[str] | None") -> list[str]:
-    """Best-effort removal of locally-built app images from kind + the host.
+    """Compatibility wrapper around ``image_cleanup.remove_local_docker_images``."""
+    from app.services.image_cleanup import remove_local_docker_images
 
-    Removes each image from the kind node's containerd (``crictl rmi`` inside the
-    control-plane container) and from the host Docker daemon (``docker rmi``).
-    Official/shared base images (postgres, redis, nginx, …) are skipped. All
-    failures are swallowed - teardown must never fail because an image is gone.
-    """
-    import shutil
-    import subprocess
-
-    if not images or not shutil.which("docker"):
-        return []
-    settings = get_settings()
-    default_image = settings.default_workload_image
-    # Node container hosting containerd differs per engine: kind uses
-    # "<cluster>-control-plane"; k3d uses "k3d-<cluster>-server-0".
-    if settings.local_k8s_engine == "k3s":
-        node = f"k3d-{cluster_name}-server-0"
-    else:
-        node = f"{cluster_name}-control-plane"
-    removed: list[str] = []
-    seen: set[str] = set()
-    for image in images:
-        if not image or image in seen:
-            continue
-        seen.add(image)
-        repo = image.rsplit(":", 1)[0].rsplit("/", 1)[-1].lower()
-        if image == default_image or repo in _KIND_IMAGE_REMOVE_DENYLIST:
-            continue
-        try:
-            subprocess.run(
-                ["docker", "exec", node, "crictl", "rmi", image],
-                capture_output=True, text=True, timeout=60, check=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.info("kind_node_image_remove_failed", image=image, error=str(exc))
-        try:
-            subprocess.run(
-                ["docker", "rmi", "-f", image],
-                capture_output=True, text=True, timeout=60, check=False,
-            )
-            removed.append(image)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("host_image_remove_failed", image=image, error=str(exc))
-    if removed:
-        logger.info("kind_images_removed", cluster=cluster_name, images=removed)
-    return removed
+    return remove_local_docker_images(images, cluster_name=cluster_name)

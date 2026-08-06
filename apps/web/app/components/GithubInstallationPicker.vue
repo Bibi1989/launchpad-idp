@@ -2,6 +2,8 @@
 import type { GitHubInstallationItem } from '~/types/provisioning'
 import { githubAccountTypeLabel } from '~/utils/githubAccount'
 
+const { t } = useI18n()
+
 const props = withDefaults(
   defineProps<{
     installations: GitHubInstallationItem[]
@@ -12,7 +14,6 @@ const props = withDefaults(
   }>(),
   {
     disabled: false,
-    label: 'GitHub account',
     manageLink: false,
   },
 )
@@ -25,6 +26,8 @@ const selected = computed(
   () => props.installations.find((item) => item.id === props.modelValue) ?? null,
 )
 
+const resolvedLabel = computed(() => props.label ?? t('integrations.githubAccount'))
+
 function select(id: number) {
   if (props.disabled || props.modelValue === id) return
   emit('update:modelValue', id)
@@ -33,7 +36,7 @@ function select(id: number) {
 
 <template>
   <div v-if="installations.length" class="space-y-2">
-    <p class="lp-label">{{ label }}</p>
+    <p class="lp-label">{{ resolvedLabel }}</p>
     <div class="flex flex-wrap gap-2">
       <button
         v-for="item in installations"
@@ -58,10 +61,10 @@ function select(id: number) {
       </button>
     </div>
     <p v-if="selected && manageLink" class="text-xs text-[var(--lp-muted)]">
-      Using
+      {{ t('integrations.using') }}
       <span class="text-[var(--lp-text)]">{{ selected.account_login }}</span>
       ({{ githubAccountTypeLabel(selected) }}).
-      <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">Manage installs</NuxtLink>
+      <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.manageInstalls') }}</NuxtLink>
     </p>
   </div>
 </template>

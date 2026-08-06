@@ -10,6 +10,8 @@ const props = defineProps<{
   workspaceId: string
 }>()
 
+const { t } = useI18n()
+
 const { getClusterContext, getResources, deleteResource, describeResource } =
   useKubernetesSuite()
 
@@ -165,7 +167,7 @@ function onOpenExec(res: K8sResource) {
     consoleLogs.value.push(
       `[error] Exec requires a Pod. "${res.kind}/${res.name}" is not a Pod - open a Pod row instead.`,
     )
-    errorMessage.value = `Exec is only available for Pods. Pick a Pod under ${res.name}, not the ${res.kind}.`
+    errorMessage.value = t('k8s.suite.execPodOnly', { name: res.name, kind: res.kind })
     return
   }
   selectedResourceForExec.value = res
@@ -247,7 +249,7 @@ onMounted(() => {
       <div class="flex items-start gap-2.5 min-w-0">
         <span class="material-symbols-outlined text-lg text-rose-400 shrink-0">warning</span>
         <div class="min-w-0">
-          <h4 class="font-bold text-rose-200 uppercase tracking-wider">Cluster Connection Warning</h4>
+          <h4 class="font-bold text-rose-200 uppercase tracking-wider">{{ t('k8s.suite.clusterWarning') }}</h4>
           <p class="mt-0.5 text-rose-300/90 break-words">{{ errorMessage }}</p>
         </div>
       </div>
@@ -258,7 +260,7 @@ onMounted(() => {
           @click="openAiDrawerWithError(errorMessage)"
         >
           <span class="material-symbols-outlined text-sm text-amber-400">auto_awesome</span>
-          <span>AI Analyze &amp; Fix</span>
+          <span>{{ t('k8s.suite.aiAnalyzeFix') }}</span>
         </button>
         <button
           type="button"
@@ -328,20 +330,20 @@ onMounted(() => {
 
     <ConfirmDialog
       v-model:open="confirmNukeOpen"
-      title="Nuke this workspace?"
-      message="This permanently destroys the workspace record and on-disk IaC/manifests. Cluster objects already applied are not automatically deleted."
-      confirm-label="Yes, nuke workspace"
+      :title="t('k8s.suite.nukeTitle')"
+      :message="t('k8s.suite.nukeMessage')"
+      :confirm-label="t('k8s.suite.nukeConfirm')"
       :busy="nuking"
       @confirm="confirmNukeWorkspace"
     />
 
     <ConfirmDialog
       :open="pendingDelete !== null"
-      :title="pendingDelete ? `Delete ${pendingDelete.kind}/${pendingDelete.name}?` : 'Delete resource?'"
+      :title="pendingDelete ? `Delete ${pendingDelete.kind}/${pendingDelete.name}?` : t('k8s.suite.deleteResource')"
       :message="pendingDelete
-        ? `This runs kubectl delete against namespace ${pendingDelete.namespace}. This cannot be undone.`
+        ? t('k8s.suite.deleteResourceMessage', { namespace: pendingDelete.namespace })
         : ''"
-      confirm-label="Yes, delete"
+      :confirm-label="t('common.confirmDelete')"
       :busy="deletingResource"
       @update:open="(value) => { if (!value) pendingDelete = null }"
       @confirm="confirmDeleteResource"

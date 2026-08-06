@@ -1,9 +1,5 @@
 <script setup lang="ts">
 import type { ProvisionEngine } from '~/types/provisioning'
-import {
-  iacEngineLabel,
-  iacToolbarActions,
-} from '~/utils/workspaceInfraScaffold'
 
 const props = defineProps<{
   engine: ProvisionEngine
@@ -13,14 +9,23 @@ const props = defineProps<{
   terminalReady?: boolean
 }>()
 
+const { t } = useI18n()
+
 const emit = defineEmits<{
   openProvision: []
   openDestroy: []
   openTerminal: []
 }>()
 
-const actions = computed(() => iacToolbarActions(props.engine))
-const engineLabel = computed(() => iacEngineLabel(props.engine))
+const engineLabel = computed(() => t(`workspaceIde.engines.${props.engine}`))
+const provisionLabel = computed(() => t('workspaceIde.toolbar.provisionStack'))
+const destroyLabel = computed(() => t('common.destroy'))
+const provisionDescription = computed(() =>
+  t('workspaceIde.toolbar.provisionDescription', { engine: engineLabel.value }),
+)
+const destroyDescription = computed(() =>
+  t('workspaceIde.toolbar.destroyDescription', { engine: engineLabel.value }),
+)
 
 function onProvision() {
   if (props.busy) return
@@ -42,7 +47,7 @@ function onDestroy() {
     <div class="min-w-0 space-y-0.5">
       <div class="flex flex-wrap items-center gap-2">
         <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
-          IaC · {{ engineLabel }}
+          {{ t('workspaceIde.toolbar.iacLabel') }} · {{ engineLabel }}
         </p>
         <span
           v-if="status"
@@ -60,8 +65,8 @@ function onDestroy() {
         </span>
       </div>
       <p class="text-xs text-[var(--lp-muted)]">
-        Provision runs a guided init → validate → plan → apply. Destroy asks for confirmation first.
-        <span v-if="!terminalReady" class="text-[var(--lp-warn)]">(opens sandbox when needed)</span>
+        {{ t('workspaceIde.toolbar.blurb') }}
+        <span v-if="!terminalReady" class="text-[var(--lp-warn)]">{{ t('workspaceIde.toolbar.opensSandbox') }}</span>
       </p>
     </div>
     <div class="flex flex-wrap items-center gap-1.5">
@@ -69,21 +74,21 @@ function onDestroy() {
         type="button"
         class="inline-flex items-center gap-1 rounded-lg border border-[var(--lp-accent)]/50 bg-[var(--lp-accent)]/10 px-2.5 py-1.5 font-mono text-[11px] uppercase tracking-wide text-[var(--lp-accent)] transition hover:bg-[var(--lp-accent)]/20 disabled:opacity-50"
         :disabled="busy"
-        :title="actions.provision.description"
+        :title="provisionDescription"
         @click="onProvision"
       >
         <span class="material-symbols-outlined text-sm text-[var(--lp-accent)]">rocket_launch</span>
-        {{ actions.provision.label }}
+        {{ provisionLabel }}
       </button>
       <button
         type="button"
         class="inline-flex items-center gap-1 rounded-lg border border-[var(--lp-danger)]/40 px-2.5 py-1.5 font-mono text-[11px] uppercase tracking-wide text-[var(--lp-danger)] transition hover:bg-[var(--lp-danger)]/10 disabled:opacity-50"
         :disabled="busy"
-        :title="actions.destroy.description"
+        :title="destroyDescription"
         @click="onDestroy"
       >
         <span class="material-symbols-outlined text-sm text-[var(--lp-danger)]">dangerous</span>
-        {{ actions.destroy.label }}
+        {{ destroyLabel }}
       </button>
     </div>
   </div>

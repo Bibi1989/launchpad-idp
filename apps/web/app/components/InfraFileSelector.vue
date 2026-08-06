@@ -14,6 +14,7 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
 
+const { t } = useI18n()
 const { listWorkspaceFiles, restoreWorkspaceFiles } = useProvisioning()
 const loading = ref(false)
 const restoring = ref(false)
@@ -27,6 +28,12 @@ const filePaths = computed(() =>
 )
 
 const fileCount = computed(() => filePaths.value.length)
+
+const fileCountLabel = computed(() =>
+  fileCount.value === 1
+    ? t('manifest.explorer.fileCountOne', { count: 1 })
+    : t('manifest.explorer.fileCountMany', { count: fileCount.value }),
+)
 
 function pickDefaultFile(files: string[]): string | undefined {
   const mapped = files.find((path) => inferInfraManifestKind(path) !== 'unknown')
@@ -96,14 +103,14 @@ watch(
   <aside class="flex w-full lg:w-[280px] shrink-0 flex-col border-b lg:border-b-0 lg:border-r border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50 lg:sticky lg:top-4 lg:max-h-[calc(100vh-6rem)] h-[400px] lg:h-[calc(100vh-6rem)]">
     <div class="flex items-center justify-between border-b border-[var(--lp-line)] px-4 py-3 shrink-0">
       <div class="min-w-0">
-        <h2 class="lp-label">Explorer</h2>
+        <h2 class="lp-label">{{ t('manifest.explorer.title') }}</h2>
         <p class="mt-0.5 font-mono text-[10px] text-[var(--lp-muted)]">
-          {{ loading ? '…' : `${fileCount} file${fileCount === 1 ? '' : 's'}` }}
+          {{ loading ? '…' : fileCountLabel }}
         </p>
       </div>
       <button
         type="button"
-        title="Refresh"
+        :title="t('manifest.explorer.refreshTitle')"
         class="rounded-md p-1.5 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel)] hover:text-[var(--lp-text)]"
         @click="loadFiles"
       >
@@ -112,7 +119,7 @@ watch(
     </div>
 
     <div class="flex-1 overflow-y-auto px-2 py-2">
-      <p v-if="loading" class="px-2 py-2 font-mono text-xs text-[var(--lp-muted)]">Loading…</p>
+      <p v-if="loading" class="px-2 py-2 font-mono text-xs text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
       <div v-else-if="loadError" class="space-y-2 px-2 py-2">
         <p class="font-mono text-xs text-[var(--lp-danger)]">{{ loadError }}</p>
         <button
@@ -122,11 +129,11 @@ watch(
           :disabled="restoring"
           @click="restoreFiles"
         >
-          {{ restoring ? 'Restoring…' : 'Restore files' }}
+          {{ restoring ? t('manifest.explorer.restoring') : t('manifest.explorer.restoreFiles') }}
         </button>
       </div>
       <p v-else-if="!tree.length" class="px-2 py-2 font-mono text-xs text-[var(--lp-muted)]">
-        No files found in workspace.
+        {{ t('manifest.explorer.noFiles') }}
       </p>
       <ul v-else class="space-y-0.5">
         <WorkspaceTreeNode
@@ -143,7 +150,7 @@ watch(
 
     <div class="border-t border-[var(--lp-line)] bg-[var(--lp-panel)]/50 px-4 py-3 shrink-0">
       <p class="font-mono text-[10px] leading-relaxed text-[var(--lp-muted)]">
-        Select a mapped file to edit structured fields.
+        {{ t('manifest.explorer.hint') }}
       </p>
     </div>
   </aside>

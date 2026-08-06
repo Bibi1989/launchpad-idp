@@ -2,6 +2,7 @@
 import type { Environment } from '~/types/environment'
 
 const route = useRoute()
+const { t } = useI18n()
 const { refresh, environments } = useEnvironments()
 
 const prNumber = computed(() => {
@@ -30,7 +31,7 @@ onMounted(async () => {
       await navigateTo(`/environments/${env.id}`)
     }
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to resolve PR preview'
+    errorMessage.value = err instanceof Error ? err.message : t('preview.resolveFailed')
   } finally {
     loading.value = false
   }
@@ -40,21 +41,21 @@ onMounted(async () => {
 <template>
   <div class="mx-auto max-w-2xl animate-fade-up space-y-6 pb-12">
     <header>
-      <p class="lp-label mb-1">PR preview</p>
+      <p class="lp-label mb-1">{{ t('preview.prPreview') }}</p>
       <h1 class="text-2xl font-semibold">
-        Stable URL for PR #{{ prNumber ?? '-' }}
+        {{ t('preview.prTitle', { number: prNumber ?? '-' }) }}
       </h1>
       <p class="mt-2 text-sm text-[var(--lp-muted)]">
-        This path is the Launchpad stable PR preview link. Closing the PR tears the environment down automatically.
+        {{ t('preview.prBlurb') }}
       </p>
     </header>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Resolving preview…</p>
+    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('preview.resolving') }}</p>
     <p v-else-if="errorMessage" class="text-sm text-[var(--lp-danger)]">{{ errorMessage }}</p>
     <p v-else-if="!matches.length" class="rounded-xl border border-dashed border-[var(--lp-line)] p-6 text-sm text-[var(--lp-muted)]">
-      No active preview linked to this PR. Launch one from
+      {{ t('preview.noPreview') }}
       <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">/launch</NuxtLink>
-      with the PR number set.
+      {{ t('preview.noPreviewSuffix') }}
     </p>
     <ul v-else class="space-y-3">
       <li
@@ -66,7 +67,7 @@ onMounted(async () => {
         <p class="mt-1 font-mono text-xs text-[var(--lp-muted)]">{{ env.status }}</p>
         <div class="mt-3 flex flex-wrap gap-2">
           <NuxtLink :to="`/environments/${env.id}`" class="lp-btn-primary py-1.5 text-xs uppercase tracking-wide">
-            Open in Launchpad
+            {{ t('preview.openInLaunchpad') }}
           </NuxtLink>
           <a
             v-if="env.preview_url"
@@ -75,7 +76,7 @@ onMounted(async () => {
             target="_blank"
             rel="noreferrer"
           >
-            Open app
+            {{ t('preview.openApp') }}
           </a>
         </div>
       </li>

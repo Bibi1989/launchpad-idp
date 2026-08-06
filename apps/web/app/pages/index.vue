@@ -3,30 +3,34 @@ definePageMeta({
   layout: false,
 })
 
+const { t } = useI18n()
 const { token, ready } = useAuth()
 
 const signedIn = computed(() => Boolean(ready.value && token.value))
 
 const primaryCta = computed(() =>
   signedIn.value
-    ? { to: '/launch', label: 'Get started' }
-    : { to: '/login?next=/launch', label: 'Get started' },
+    ? { to: '/launch', label: t('landing.getStarted') }
+    : { to: '/login?next=/launch', label: t('landing.getStarted') },
 )
 
-const features = [
+const features = computed(() => [
   {
-    title: 'Ephemeral previews',
-    blurb: 'Spin up governed app environments from a repo or catalog template, then tear them down on TTL.',
+    key: 'previews',
+    title: t('landing.features.previews.title'),
+    blurb: t('landing.features.previews.blurb'),
   },
   {
-    title: 'Multi-cloud IaC',
-    blurb: 'Generate Terraform or Pulumi for GCP, AWS, Azure, Cloudflare, or local Sandbox, then apply from a sandbox.',
+    key: 'iac',
+    title: t('landing.features.iac.title'),
+    blurb: t('landing.features.iac.blurb'),
   },
   {
-    title: 'Kubernetes workloads',
-    blurb: 'Edit hardened manifests, apply to your cluster, and operate pods with describe, logs, and exec.',
+    key: 'k8s',
+    title: t('landing.features.k8s.title'),
+    blurb: t('landing.features.k8s.blurb'),
   },
-] as const
+])
 </script>
 
 <template>
@@ -41,46 +45,50 @@ const features = [
       "
     />
 
-    <header class="relative z-10 mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
-      <div class="flex items-baseline gap-2">
-        <span class="text-xl font-semibold tracking-tight text-[var(--lp-accent)]">Launchpad</span>
-        <span class="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--lp-muted)]">IDP</span>
+    <header class="relative z-10 mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-6">
+      <NuxtLink to="/" class="block">
+        <BrandLogo size="sm" />
+      </NuxtLink>
+      <div class="flex items-center gap-3 sm:gap-4">
+        <PreferenceControls compact />
+        <nav class="flex items-center gap-4 text-sm">
+          <NuxtLink
+            to="/docs"
+            class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
+          >
+            {{ t('landing.docs') }}
+          </NuxtLink>
+          <NuxtLink
+            v-if="signedIn"
+            to="/home"
+            class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
+          >
+            {{ t('landing.openHub') }}
+          </NuxtLink>
+          <NuxtLink
+            v-else
+            to="/login"
+            class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
+          >
+            {{ t('landing.signIn') }}
+          </NuxtLink>
+        </nav>
       </div>
-      <nav class="flex items-center gap-4 text-sm">
-        <NuxtLink
-          to="/docs"
-          class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
-        >
-          Docs
-        </NuxtLink>
-        <NuxtLink
-          v-if="signedIn"
-          to="/home"
-          class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
-        >
-          Open hub
-        </NuxtLink>
-        <NuxtLink
-          v-else
-          to="/login"
-          class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
-        >
-          Sign in
-        </NuxtLink>
-      </nav>
     </header>
 
     <main class="relative z-10 mx-auto flex max-w-6xl flex-col px-6 pb-24 pt-16 md:pt-24">
       <section class="max-w-3xl animate-fade-up space-y-8">
         <p class="font-mono text-xs uppercase tracking-[0.28em] text-[var(--lp-accent)]">
-          Internal developer portal
+          {{ t('landing.eyebrow') }}
         </p>
-        <h1 class="text-5xl font-semibold tracking-tight text-[var(--lp-text)] md:text-6xl md:leading-[1.05]">
-          Launchpad
-        </h1>
+        <div class="flex items-center gap-4">
+          <BrandLogo size="lg" :show-wordmark="false" />
+          <h1 class="text-5xl font-semibold tracking-tight text-[var(--lp-text)] md:text-6xl md:leading-[1.05]">
+            {{ t('landing.heroTitle') }}
+          </h1>
+        </div>
         <p class="max-w-xl text-lg leading-relaxed text-[var(--lp-muted)] md:text-xl">
-          Governed ephemeral environments and multi-cloud infrastructure from one portal -
-          provision, ship manifests, and launch previews without leaving the control plane.
+          {{ t('landing.heroBlurb') }}
         </p>
         <div class="flex flex-wrap items-center gap-4 pt-2">
           <NuxtLink
@@ -94,7 +102,7 @@ const features = [
             to="/docs"
             class="lp-btn-ghost inline-flex items-center gap-2 px-5 py-3 text-sm"
           >
-            Read the docs
+            {{ t('landing.readDocs') }}
           </NuxtLink>
         </div>
       </section>
@@ -102,7 +110,7 @@ const features = [
       <section class="mt-24 grid gap-10 border-t border-[var(--lp-line)] pt-16 md:grid-cols-3 md:gap-12">
         <div
           v-for="(feature, index) in features"
-          :key="feature.title"
+          :key="feature.key"
           class="animate-fade-up space-y-3"
           :style="{ animationDelay: `${(index + 1) * 80}ms` }"
         >
@@ -114,16 +122,16 @@ const features = [
 
     <footer class="relative z-10 mx-auto max-w-6xl border-t border-[var(--lp-line)] px-6 py-8">
       <div class="flex flex-wrap items-center justify-between gap-4 text-sm text-[var(--lp-muted)]">
-        <p class="font-mono text-xs">Launchpad IDP</p>
+        <p class="font-mono text-xs">{{ t('brand.product') }}</p>
         <div class="flex gap-6">
-          <NuxtLink to="/docs#getting-started" class="hover:text-[var(--lp-text)]">Getting started</NuxtLink>
+          <NuxtLink to="/docs#getting-started" class="hover:text-[var(--lp-text)]">
+            {{ t('landing.gettingStarted') }}
+          </NuxtLink>
           <a
-            href="http://localhost:8000/docs"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="/docs"
             class="hover:text-[var(--lp-text)]"
           >
-            API reference
+            {{ t('landing.apiReference') }}
           </a>
         </div>
       </div>

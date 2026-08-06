@@ -13,6 +13,7 @@ const {
 } = useProvisioning()
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 
 const status = ref<GitlabStatus | null>(null)
 const loading = ref(true)
@@ -95,7 +96,7 @@ onMounted(async () => {
 
 <template>
   <section class="overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/80 p-6">
-    <div v-if="loading" class="text-sm text-[var(--lp-muted)]">Checking GitLab connection…</div>
+    <div v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('integrations.checkingGitlab') }}</div>
 
     <div v-else-if="!status?.connected" class="space-y-5">
       <div class="flex items-start gap-4">
@@ -105,9 +106,9 @@ onMounted(async () => {
           <span class="material-symbols-outlined text-2xl">code</span>
         </div>
         <div class="min-w-0 flex-1 space-y-1">
-          <h2 class="text-lg font-semibold">Connect GitLab</h2>
+          <h2 class="text-lg font-semibold">{{ t('integrations.connectGitlab') }}</h2>
           <p class="text-sm text-[var(--lp-muted)]">
-            Authorize Launchpad to create projects and push the same files that live in your workspace.
+            {{ t('integrations.gitlabConnectBlurb') }}
           </p>
         </div>
       </div>
@@ -123,24 +124,24 @@ onMounted(async () => {
           :disabled="saving"
           @click="connectOAuth"
         >
-          Connect with GitLab OAuth
+          {{ t('integrations.connectOAuth') }}
         </button>
         <button
           type="button"
           class="lp-btn-ghost text-xs uppercase tracking-wide"
           @click="showPatForm = !showPatForm"
         >
-          {{ showPatForm ? 'Hide token form' : 'Use personal access token' }}
+          {{ showPatForm ? t('integrations.hidePatForm') : t('integrations.usePat') }}
         </button>
       </div>
 
       <div v-if="showPatForm" class="space-y-3 rounded-xl border border-[var(--lp-line)] p-4">
         <label class="block space-y-2">
-          <span class="lp-label">GitLab base URL</span>
+          <span class="lp-label">{{ t('integrations.gitlabBaseUrl') }}</span>
           <input v-model="baseUrl" class="lp-input" placeholder="https://gitlab.com">
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Personal access token</span>
+          <span class="lp-label">{{ t('integrations.patToken') }}</span>
           <input
             v-model="patToken"
             class="lp-input"
@@ -149,8 +150,7 @@ onMounted(async () => {
             placeholder="glpat-…"
           >
           <span class="block text-xs text-[var(--lp-muted)]">
-            Needs <code class="font-mono">api</code> and
-            <code class="font-mono">write_repository</code> scopes.
+            {{ t('integrations.patScopes') }}
           </span>
         </label>
         <button
@@ -159,7 +159,7 @@ onMounted(async () => {
           :disabled="saving || patToken.trim().length < 8"
           @click="connectPat"
         >
-          {{ saving ? 'Connecting…' : 'Save token' }}
+          {{ saving ? t('integrations.connecting') : t('integrations.saveToken') }}
         </button>
       </div>
     </div>
@@ -174,8 +174,8 @@ onMounted(async () => {
           </div>
           <div>
             <p class="text-sm font-semibold">
-              Connected to GitLab
-              <span class="ml-2 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-ok)]">Live</span>
+              {{ t('common.connected') }} GitLab
+              <span class="ml-2 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-ok)]">{{ t('integrations.live') }}</span>
             </p>
             <p class="text-xs text-[var(--lp-muted)]">
               {{ status.username }} · {{ status.base_url }} · {{ status.token_type }}
@@ -184,7 +184,7 @@ onMounted(async () => {
         </div>
         <div class="flex gap-2">
           <button type="button" class="lp-btn-ghost py-1.5 text-xs" :disabled="loading" @click="refresh">
-            Refresh
+            {{ t('common.refresh') }}
           </button>
           <button
             type="button"
@@ -192,7 +192,7 @@ onMounted(async () => {
             :disabled="saving"
             @click="disconnect"
           >
-            Disconnect
+            {{ t('integrations.disconnectGitlab') }}
           </button>
         </div>
       </div>

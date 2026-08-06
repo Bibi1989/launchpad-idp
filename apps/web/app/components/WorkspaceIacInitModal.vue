@@ -6,7 +6,6 @@ import {
 } from '~/utils/cloudServiceOptions'
 import {
   iacDestroyWizardSteps,
-  iacEngineLabel,
   iacInitWizardSteps,
 } from '~/utils/workspaceInfraScaffold'
 
@@ -29,6 +28,8 @@ const emit = defineEmits<{
   saved: []
   error: [message: string]
 }>()
+
+const { t } = useI18n()
 
 const { getWizardConfig, updateWorkspace, listWorkspaceFiles, readWorkspaceFile, writeWorkspaceFile, enableCloudApis } =
   useProvisioning()
@@ -87,15 +88,15 @@ const steps = computed(() =>
       }),
 )
 const currentStep = computed(() => steps.value[stepIndex.value] ?? null)
-const engineLabel = computed(() => iacEngineLabel(props.engine))
+const engineLabel = computed(() => t(`workspaceIde.engines.${props.engine}`))
 const needsCredentials = computed(() => provider.value !== 'local')
 const modalTitle = computed(() =>
-  isDestroy.value ? `Destroy with ${engineLabel.value}` : `Provision with ${engineLabel.value}`,
+  isDestroy.value
+    ? t('workspaceIde.initModal.destroyTitle', { engine: engineLabel.value })
+    : t('workspaceIde.initModal.provisionTitle', { engine: engineLabel.value }),
 )
 const modalBlurb = computed(() =>
-  isDestroy.value
-    ? 'Confirm the cloud key, then destroy managed resources (auto-approved after you confirm).'
-    : 'Review services, select a cloud key, then run init → validate → plan → apply (auto-approved).',
+  isDestroy.value ? t('workspaceIde.initModal.destroyBlurb') : t('workspaceIde.initModal.provisionBlurb'),
 )
 const credentialKindLabel = computed(() => {
   switch (provider.value) {
@@ -425,7 +426,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
   <Teleport to="body">
     <div
       v-if="open"
-      class="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 p-4"
+      class="fixed inset-0 z-[90] flex items-center justify-center bg-[var(--lp-ink)]/55 p-4"
       @click.self="close"
     >
       <div class="w-full max-w-lg space-y-5 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-5 shadow-2xl">
@@ -436,7 +437,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
               <p class="mt-1 text-sm text-[var(--lp-muted)]">{{ modalBlurb }}</p>
             </div>
             <button type="button" class="lp-btn-ghost px-2 py-1 text-xs" @click="close">
-              Close
+              {{ t('common.close') }}
             </button>
           </div>
           <div class="h-1.5 overflow-hidden rounded-full bg-[var(--lp-line)]">
@@ -447,7 +448,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
           </div>
         </header>
 
-        <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Loading workspace config…</p>
+        <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('workspaceIde.initModal.loadingConfig') }}</p>
         <p v-else-if="sandboxNote" class="text-xs text-[var(--lp-muted)]">
           <span class="material-symbols-outlined align-middle text-sm">terminal</span>
           {{ sandboxNote }}
@@ -487,14 +488,14 @@ async function applyAiFix(payload: { path: string; content: string }) {
             </div>
             <div class="flex justify-end gap-2">
               <button type="button" class="lp-btn-ghost text-xs uppercase tracking-wide" @click="close">
-                Cancel
+                {{ t('common.cancel') }}
               </button>
               <button
                 type="button"
                 class="lp-btn-primary text-xs uppercase tracking-wide"
                 @click="goNextFromReview"
               >
-                Continue
+                {{ t('common.continue') }}
               </button>
             </div>
           </div>
@@ -562,7 +563,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
                 class="lp-btn-ghost text-xs uppercase tracking-wide"
                 @click="isDestroy ? close() : (phase = 'review')"
               >
-                {{ isDestroy ? 'Cancel' : 'Back' }}
+                {{ isDestroy ? t('common.cancel') : t('common.back') }}
               </button>
               <button
                 type="button"
@@ -572,10 +573,10 @@ async function applyAiFix(payload: { path: string; content: string }) {
               >
                 {{
                   savingCreds
-                    ? 'Saving…'
+                    ? t('common.saving')
                     : isDestroy
-                      ? 'Continue to destroy'
-                      : 'Continue to provision'
+                      ? t('workspaceIde.initModal.continueToDestroy')
+                      : t('workspaceIde.initModal.continueToProvision')
                 }}
               </button>
             </div>
@@ -678,7 +679,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
                 :disabled="running"
                 @click="goBackFromRun"
               >
-                Back
+                {{ t('common.back') }}
               </button>
               <div class="flex flex-wrap gap-2">
                 <button
@@ -737,7 +738,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
               class="rounded-xl border p-4 text-sm"
               :class="
                 isDestroy
-                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                  ? 'border-[var(--lp-warn)]/30 bg-[var(--lp-warn)]/10 text-[var(--lp-warn)]'
                   : 'border-[var(--lp-ok)]/30 bg-[var(--lp-ok)]/10 text-[var(--lp-ok)]'
               "
             >
@@ -786,7 +787,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
             </div>
             <div class="flex justify-end">
               <button type="button" class="lp-btn-primary text-xs uppercase tracking-wide" @click="close">
-                Done
+                {{ t('workspaceIde.initModal.done') }}
               </button>
             </div>
           </div>

@@ -4,6 +4,8 @@ import type { IngressClassName, KubernetesPackaging, KubernetesWorkloadOptions }
 const packaging = defineModel<KubernetesPackaging>('packaging', { required: true })
 const options = defineModel<KubernetesWorkloadOptions>('options', { required: true })
 
+const { t } = useI18n()
+
 const props = withDefaults(
   defineProps<{
     /** When false, hide the "None" packaging option (e.g. Dev kind always needs manifests). */
@@ -14,10 +16,10 @@ const props = withDefaults(
 
 const packagingChoices = computed(() => {
   const all = [
-    { value: 'none' as const, title: 'None', desc: 'Skip workload manifests' },
-    { value: 'raw_manifests' as const, title: 'Raw K8s Manifests', desc: 'infra/k8s/manifests/' },
-    { value: 'helm' as const, title: 'Helm Chart', desc: 'infra/helm/app-chart/' },
-    { value: 'kustomize' as const, title: 'Kustomize', desc: 'infra/kustomize/' },
+    { value: 'none' as const, title: t('k8s.packaging.none'), desc: t('k8s.packaging.noneDesc') },
+    { value: 'raw_manifests' as const, title: t('k8s.packaging.rawManifests'), desc: t('k8s.packaging.rawManifestsDesc') },
+    { value: 'helm' as const, title: t('k8s.packaging.helm'), desc: t('k8s.packaging.helmDesc') },
+    { value: 'kustomize' as const, title: t('k8s.packaging.kustomize'), desc: t('k8s.packaging.kustomizeDesc') },
   ]
   return props.allowNone ? all : all.filter((item) => item.value !== 'none')
 })
@@ -51,11 +53,11 @@ const workloadToggles: Array<{
   { key: 'limit_range', title: 'LimitRange', hint: 'Default container limits', group: 'policy' },
 ]
 
-const groups = [
-  { id: 'workloads' as const, title: 'Workloads & networking' },
-  { id: 'config' as const, title: 'Config, identity & storage' },
-  { id: 'policy' as const, title: 'Autoscaling & policy' },
-]
+const groups = computed(() => [
+  { id: 'workloads' as const, title: t('k8s.packaging.groups.workloads') },
+  { id: 'config' as const, title: t('k8s.packaging.groups.config') },
+  { id: 'policy' as const, title: t('k8s.packaging.groups.policy') },
+])
 
 const ingressClasses: Array<{ value: IngressClassName; label: string }> = [
   { value: 'nginx', label: 'nginx' },
@@ -89,10 +91,9 @@ watch(
 <template>
   <div class="space-y-4 rounded-xl border border-[var(--lp-line)] p-4">
     <div>
-      <p class="text-sm font-medium">Kubernetes packaging</p>
+      <p class="text-sm font-medium">{{ t('k8s.packaging.title') }}</p>
       <p class="mt-1 text-xs text-[var(--lp-muted)]">
-        Choose how to scaffold workloads, then select the YAML kinds to include.
-        Namespace is always written when packaging is enabled.
+        {{ t('k8s.packaging.blurb') }}
       </p>
     </div>
 
@@ -123,9 +124,9 @@ watch(
 
     <div v-if="packaging !== 'none'" class="space-y-5 border-t border-[var(--lp-line)] pt-4">
       <div>
-        <p class="text-sm font-medium">Kubernetes objects to add</p>
+        <p class="text-sm font-medium">{{ t('k8s.packaging.objectsTitle') }}</p>
         <p class="mt-1 text-xs text-[var(--lp-muted)]">
-          Toggle the resource kinds you want generated as YAML (or Helm templates).
+          {{ t('k8s.packaging.objectsBlurb') }}
         </p>
       </div>
 
@@ -155,7 +156,7 @@ watch(
       </div>
 
       <label v-if="options.ingress" class="block space-y-2">
-        <span class="lp-label">Ingress class</span>
+        <span class="lp-label">{{ t('k8s.packaging.ingressClass') }}</span>
         <select v-model="options.ingress_class" class="lp-input">
           <option v-for="cls in ingressClasses" :key="cls.value" :value="cls.value">
             {{ cls.label }}

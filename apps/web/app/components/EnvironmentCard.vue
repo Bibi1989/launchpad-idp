@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { Environment, EnvironmentStatus } from '~/types/environment'
 
+const { t } = useI18n()
+
 const props = defineProps<{
   environment: Environment
   retrying?: boolean
@@ -176,7 +178,9 @@ const repoShort = computed(() => {
             <p class="truncate font-mono text-sm">{{ environment.namespace_name }}</p>
           </div>
           <div class="space-y-1 text-right">
-            <p class="lp-label">{{ isLocal ? 'Cost (shadow)' : 'Cost to date' }}</p>
+            <p class="lp-label">
+              {{ isLocal ? t('environments.detail.localShadow') : t('environments.detail.costToDate') }}
+            </p>
             <p class="font-mono text-sm">${{ costToDate }}</p>
             <p class="font-mono text-[10px] text-[var(--lp-muted)]">
               ${{ environment.cost_estimate_hourly }}/hr
@@ -215,11 +219,10 @@ const repoShort = computed(() => {
             @click="logsOpen = !logsOpen"
           >
             <span class="material-symbols-outlined text-sm">terminal</span>
-            {{ logsOpen ? 'Hide logs' : 'Logs' }}
+            {{ logsOpen ? t('common.close') : t('environments.card.logs') }}
             <span
               class="h-1.5 w-1.5 rounded-full"
               :class="connected ? 'bg-[var(--lp-ok)]' : 'bg-[var(--lp-muted)]'"
-              :title="connected ? 'Live stream connected' : 'Stream disconnected'"
             />
           </button>
         </div>
@@ -254,9 +257,11 @@ const repoShort = computed(() => {
           <span class="material-symbols-outlined absolute text-xl text-[var(--lp-accent)]">timer</span>
         </div>
         <p class="font-mono text-[11px] text-[var(--lp-text)]">
-          {{ remaining.expired ? 'Expired' : remaining.label }}
+          {{ remaining.expired ? t('environments.actions.expired') : remaining.label }}
         </p>
-        <p class="text-[9px] font-bold uppercase tracking-wide text-[var(--lp-muted)]">Remaining</p>
+        <p class="text-[9px] font-bold uppercase tracking-wide text-[var(--lp-muted)]">
+          {{ t('environments.card.remaining') }}
+        </p>
       </div>
     </div>
 
@@ -264,10 +269,10 @@ const repoShort = computed(() => {
       v-if="logsOpen"
       class="border-t border-[var(--lp-line)] bg-[var(--lp-ink)]/70 px-4 py-3"
     >
-      <p class="lp-label mb-2">Live rebuild stream</p>
+      <p class="lp-label mb-2">{{ t('environments.card.liveRebuild') }}</p>
       <pre
         class="max-h-40 overflow-y-auto font-mono text-[11px] leading-relaxed text-[var(--lp-muted)]"
-      >{{ logLines.length ? logLines.join('\n') : 'Waiting for events…' }}</pre>
+      >{{ logLines.length ? logLines.join('\n') : t('common.loadingEllipsis') }}</pre>
     </div>
 
     <div class="flex gap-2 border-t border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 px-4 py-3">
@@ -278,20 +283,19 @@ const repoShort = computed(() => {
         rel="noopener noreferrer"
         class="lp-btn-primary flex-1 py-1.5 text-center text-xs uppercase tracking-wide"
       >
-        Open app
+        {{ t('environments.card.openApp') }}
       </a>
       <span
         v-else-if="isProvisioning"
         class="lp-btn-primary flex-1 cursor-default py-1.5 text-center text-xs uppercase tracking-wide opacity-60"
-        title="App URL ready when Running"
       >
-        Provisioning…
+        {{ t('environments.detail.provisioning') }}
       </span>
       <NuxtLink
         :to="`/environments/${environment.id}`"
         class="lp-btn-ghost flex-1 py-1.5 text-xs uppercase tracking-wide"
       >
-        Details
+        {{ t('environments.card.details') }}
       </NuxtLink>
       <button
         v-if="liveStatus === 'RUNNING'"
@@ -300,7 +304,7 @@ const repoShort = computed(() => {
         @click="emit('pause', environment.id)"
       >
         <span class="material-symbols-outlined text-sm">pause</span>
-        Pause
+        {{ t('environments.card.pause') }}
       </button>
       <button
         v-if="canResume"
@@ -309,15 +313,14 @@ const repoShort = computed(() => {
         @click="emit('resume', environment.id)"
       >
         <span class="material-symbols-outlined text-sm">play_arrow</span>
-        Resume
+        {{ t('environments.card.resume') }}
       </button>
       <span
         v-else-if="displayStatus === 'EXPIRED'"
         class="inline-flex items-center gap-1 px-3 py-1.5 text-xs uppercase tracking-wide text-[var(--lp-muted)]"
-        title="TTL expired - resume is disabled"
       >
         <span class="material-symbols-outlined text-sm">timer_off</span>
-        Expired
+        {{ t('environments.actions.expired') }}
       </span>
       <button
         v-if="canRetry"
@@ -327,16 +330,15 @@ const repoShort = computed(() => {
         @click="onRetry"
       >
         <span class="material-symbols-outlined text-sm">replay</span>
-        {{ retrying ? 'Retrying…' : 'Retry' }}
+        {{ retrying ? t('environments.actions.retrying') : t('common.retry') }}
       </button>
       <a
         :href="portalHref"
         target="_blank"
         rel="noopener noreferrer"
         class="lp-btn-ghost px-3 py-1.5 text-xs uppercase tracking-wide"
-        title="Shareable status page"
       >
-        Status
+        {{ t('common.status') }}
       </a>
       <button
         v-if="canDestroy"
@@ -344,7 +346,7 @@ const repoShort = computed(() => {
         class="lp-btn-danger px-4 py-1.5 text-xs uppercase tracking-wide"
         @click="emit('destroy', environment.id)"
       >
-        Destroy
+        {{ t('environments.card.destroy') }}
       </button>
     </div>
   </article>

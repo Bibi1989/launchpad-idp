@@ -7,6 +7,8 @@ const props = defineProps<{
   applying: boolean
 }>()
 
+const { t } = useI18n()
+
 const emit = defineEmits<{
   (e: 'apply'): void
   (e: 'refresh'): void
@@ -15,18 +17,24 @@ const emit = defineEmits<{
 
 const providerBadgeClass = computed(() => {
   const p = props.context?.provider?.toLowerCase() || 'local'
-  if (p === 'gcp' || p.includes('gke')) return 'bg-blue-500/10 text-blue-400 border-blue-500/30'
-  if (p === 'aws' || p.includes('eks')) return 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-  if (p === 'azure' || p.includes('aks')) return 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30'
-  return 'bg-purple-500/10 text-purple-400 border-purple-500/30'
+  if (p === 'gcp' || p.includes('gke')) {
+    return 'border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/10 text-[var(--lp-accent)]'
+  }
+  if (p === 'aws' || p.includes('eks')) {
+    return 'border-[var(--lp-warn)]/30 bg-[var(--lp-warn)]/10 text-[var(--lp-warn)]'
+  }
+  if (p === 'azure' || p.includes('aks')) {
+    return 'border-[var(--lp-accent-dim)]/30 bg-[var(--lp-accent-dim)]/10 text-[var(--lp-accent-dim)]'
+  }
+  return 'border-[var(--lp-line)] bg-[var(--lp-panel-2)] text-[var(--lp-muted)]'
 })
 
 const providerLabel = computed(() => {
   const p = props.context?.provider?.toUpperCase() || 'LOCAL'
-  if (p === 'GCP') return 'GCP (GKE)'
-  if (p === 'AWS') return 'AWS (EKS)'
-  if (p === 'AZURE') return 'Azure (AKS)'
-  return 'Local (Sandbox)'
+  if (p === 'GCP') return t('k8s.banner.providers.gcp')
+  if (p === 'AWS') return t('k8s.banner.providers.aws')
+  if (p === 'AZURE') return t('k8s.banner.providers.azure')
+  return t('k8s.banner.providers.local')
 })
 </script>
 
@@ -42,31 +50,31 @@ const providerLabel = computed(() => {
 
         <div class="flex items-center gap-2 rounded-full border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/60 px-3.5 py-1 font-mono text-xs text-[var(--lp-text)]">
           <span class="relative flex h-2.5 w-2.5">
-            <span v-if="context?.status === 'connected'" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+            <span v-if="context?.status === 'connected'" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--lp-ok)] opacity-75" />
             <span
               class="relative inline-flex h-2.5 w-2.5 rounded-full"
-              :class="context?.status === 'connected' ? 'bg-emerald-500' : 'bg-amber-500'"
+              :class="context?.status === 'connected' ? 'bg-[var(--lp-ok)]' : 'bg-[var(--lp-warn)]'"
             />
           </span>
-          <span class="font-semibold text-emerald-400">Connected:</span>
-          <span class="text-[var(--lp-accent)] font-semibold">{{ context?.cluster_name || 'gke-lp-primary' }}</span>
+          <span class="font-semibold text-[var(--lp-ok)]">{{ t('k8s.banner.connected') }}</span>
+          <span class="font-semibold text-[var(--lp-accent)]">{{ context?.cluster_name || 'gke-lp-primary' }}</span>
           <span class="text-[var(--lp-muted)]">|</span>
-          <span class="text-[var(--lp-muted)]">Context: {{ context?.region || 'us-central1-a' }}</span>
+          <span class="text-[var(--lp-muted)]">{{ t('k8s.banner.context') }} {{ context?.region || 'us-central1-a' }}</span>
           <template v-if="context?.target_namespace">
             <span class="text-[var(--lp-muted)]">|</span>
-            <span class="text-[var(--lp-muted)]">ns: {{ context.target_namespace }}</span>
+            <span class="text-[var(--lp-muted)]">{{ t('k8s.banner.namespace') }} {{ context.target_namespace }}</span>
           </template>
         </div>
 
         <div class="hidden items-center gap-3 font-mono text-xs text-[var(--lp-muted)] md:flex">
           <span class="flex items-center gap-1">
             <span class="material-symbols-outlined text-sm">view_in_ar</span>
-            {{ context?.node_count || 3 }} nodes
+            {{ t('k8s.banner.nodes', { count: context?.node_count || 3 }) }}
           </span>
           <span>·</span>
-          <span class="flex items-center gap-1 text-emerald-400">
+          <span class="flex items-center gap-1 text-[var(--lp-ok)]">
             <span class="material-symbols-outlined text-sm">health_metrics</span>
-            {{ context?.control_plane_health || 'Healthy (100%)' }}
+            {{ context?.control_plane_health || t('k8s.banner.healthyDefault') }}
           </span>
         </div>
       </div>
@@ -85,7 +93,7 @@ const providerLabel = computed(() => {
           >
             {{ applying ? 'sync' : 'rocket_launch' }}
           </span>
-          {{ applying ? 'Applying Pipeline…' : 'Apply Manifests' }}
+          {{ applying ? t('k8s.banner.applyingPipeline') : t('k8s.banner.applyManifests') }}
         </button>
 
         <button
@@ -95,7 +103,7 @@ const providerLabel = computed(() => {
           @click="emit('refresh')"
         >
           <span class="material-symbols-outlined text-base" :class="loading ? 'animate-spin' : ''">refresh</span>
-          Refresh State
+          {{ t('k8s.banner.refreshState') }}
         </button>
 
         <button
@@ -104,7 +112,7 @@ const providerLabel = computed(() => {
           @click="emit('deleteWorkspace')"
         >
           <span class="material-symbols-outlined text-base">delete_forever</span>
-          Nuke Workspace
+          {{ t('k8s.banner.nukeWorkspace') }}
         </button>
       </div>
     </div>

@@ -40,6 +40,7 @@ const {
   pollBuildJob,
   clearReport,
 } = useDockerfiles()
+const { t } = useI18n()
 
 const installations = ref<GitHubInstallationItem[]>([])
 const repositories = ref<GitHubRepositoryItem[]>([])
@@ -443,27 +444,26 @@ async function onBuild() {
   <div class="mx-auto max-w-6xl space-y-8 animate-fade-up pb-16">
     <header class="space-y-2">
       <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">
-        Repository scaffold
+        {{ t('dockerfiles.title') }}
       </p>
-      <h1 class="text-3xl font-semibold tracking-tight">Repo scaffolding</h1>
+      <h1 class="text-3xl font-semibold tracking-tight">{{ t('dockerfiles.pageTitle') }}</h1>
       <p class="max-w-3xl text-sm text-[var(--lp-muted)]">
-        Scan an imported GitHub repository, scaffold Dockerfiles, CI/CD, IaC (Terraform/Pulumi),
-        and Kubernetes (manifests, Helm, or Kustomize), then push everything in one commit.
+        {{ t('dockerfiles.blurb') }}
       </p>
     </header>
 
     <section class="lp-panel space-y-4 p-5">
-      <h2 class="text-base font-semibold">Repository</h2>
+      <h2 class="text-base font-semibold">{{ t('dockerfiles.repository') }}</h2>
       <div class="grid gap-4 md:grid-cols-2">
         <label class="block space-y-1.5">
-          <span class="lp-label">GitHub installation</span>
+          <span class="lp-label">{{ t('dockerfiles.githubInstallation') }}</span>
           <select
             v-model.number="installationId"
             class="lp-input"
             :disabled="loadingInstalls"
           >
             <option :value="null" disabled>
-              {{ loadingInstalls ? 'Loading…' : 'Select installation' }}
+              {{ loadingInstalls ? t('common.loading') : t('dockerfiles.selectInstallation') }}
             </option>
             <option
               v-for="item in installations"
@@ -475,14 +475,14 @@ async function onBuild() {
           </select>
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Repository</span>
+          <span class="lp-label">{{ t('dockerfiles.repository') }}</span>
           <select
             v-model="fullName"
             class="lp-input"
             :disabled="!installationId || loadingRepos"
           >
             <option value="" disabled>
-              {{ loadingRepos ? 'Loading…' : 'Select repository' }}
+              {{ loadingRepos ? t('common.loading') : t('dockerfiles.selectRepository') }}
             </option>
             <option
               v-for="repo in repositories"
@@ -494,20 +494,20 @@ async function onBuild() {
           </select>
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Branch / ref</span>
+          <span class="lp-label">{{ t('dockerfiles.branchRef') }}</span>
           <input v-model="branch" type="text" class="lp-input" placeholder="main">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Detected / scaffold stack</span>
+          <span class="lp-label">{{ t('dockerfiles.detectedStack') }}</span>
           <select v-model="selectedStack" class="lp-input">
-            <option :value="null" disabled>Auto</option>
+            <option :value="null" disabled>{{ t('dockerfiles.auto') }}</option>
             <option v-for="s in stacks" :key="s.id" :value="s.id">
               {{ s.label }}
             </option>
           </select>
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">App name</span>
+          <span class="lp-label">{{ t('dockerfiles.appName') }}</span>
           <input v-model="containerScaffold.app_name" type="text" class="lp-input" placeholder="my-service">
         </label>
       </div>
@@ -518,7 +518,7 @@ async function onBuild() {
           :disabled="!canActOnRepo || busyAction === 'scan'"
           @click="onScan"
         >
-          {{ busyAction === 'scan' ? 'Scanning…' : 'Scan repository' }}
+          {{ busyAction === 'scan' ? t('dockerfiles.scanning') : t('dockerfiles.scan') }}
         </button>
         <button
           type="button"
@@ -526,7 +526,7 @@ async function onBuild() {
           :disabled="!canActOnRepo || busyAction === 'scaffold' || !hasScaffoldSelection"
           @click="onScaffoldSelected"
         >
-          {{ busyAction === 'scaffold' ? 'Scaffolding…' : 'Scaffold selected' }}
+          {{ busyAction === 'scaffold' ? t('dockerfiles.scaffolding') : t('dockerfiles.scaffoldSelected') }}
         </button>
         <button
           type="button"
@@ -534,21 +534,21 @@ async function onBuild() {
           :disabled="busyAction === 'scaffold-docker'"
           @click="onScaffoldDockerfile()"
         >
-          {{ busyAction === 'scaffold-docker' ? 'Scaffolding…' : 'Dockerfile only' }}
+          {{ busyAction === 'scaffold-docker' ? t('dockerfiles.scaffolding') : t('dockerfiles.dockerfileOnly') }}
         </button>
       </div>
       <p v-if="scanResult" class="text-sm text-[var(--lp-muted)]">
-        Stack: <span class="text-[var(--lp-text)]">{{ scanResult.detected_stack }}</span>
-        · Ref: <span class="font-mono text-xs">{{ scanResult.ref }}</span>
-        · Markers:
-        <span class="font-mono text-xs">{{ scanResult.root_markers.join(', ') || 'none' }}</span>
+        {{ t('dockerfiles.stackLabel') }}: <span class="text-[var(--lp-text)]">{{ scanResult.detected_stack }}</span>
+        · {{ t('dockerfiles.refLabel') }}: <span class="font-mono text-xs">{{ scanResult.ref }}</span>
+        · {{ t('dockerfiles.markersLabel') }}:
+        <span class="font-mono text-xs">{{ scanResult.root_markers.join(', ') || t('dockerfiles.none') }}</span>
       </p>
     </section>
 
     <section class="lp-panel space-y-4 p-5">
-      <h2 class="text-base font-semibold">Scaffold artifacts</h2>
+      <h2 class="text-base font-semibold">{{ t('dockerfiles.scaffoldArtifacts') }}</h2>
       <p class="text-sm text-[var(--lp-muted)]">
-        Choose what to generate from the scanned repo stack
+        {{ t('dockerfiles.scaffoldArtifactsBlurb') }}
         <span v-if="detectedFramework" class="font-mono text-xs text-[var(--lp-accent)]">
           ({{ detectedFramework }})
         </span>.
@@ -563,11 +563,11 @@ async function onBuild() {
     <div class="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
       <aside class="lp-panel space-y-2 p-4">
         <div class="flex items-center justify-between gap-2">
-          <h3 class="lp-label">Scaffold files</h3>
+          <h3 class="lp-label">{{ t('dockerfiles.scaffoldFiles') }}</h3>
           <span class="font-mono text-[10px] text-[var(--lp-muted)]">{{ filePaths.length }}</span>
         </div>
         <p v-if="!filePaths.length" class="text-xs text-[var(--lp-muted)]">
-          Scan a repo or scaffold selected artifacts.
+          {{ t('dockerfiles.scanOrScaffold') }}
         </p>
         <div
           v-for="path in filePaths"
@@ -587,7 +587,7 @@ async function onBuild() {
           <button
             type="button"
             class="rounded p-1 text-[var(--lp-muted)] opacity-0 transition hover:text-[var(--lp-danger)] group-hover:opacity-100"
-            title="Remove from session"
+            :title="t('dockerfiles.removeFromSession')"
             @click="requestDeleteFile(path)"
           >
             <span class="material-symbols-outlined text-sm">delete</span>
@@ -598,7 +598,7 @@ async function onBuild() {
       <section class="lp-panel space-y-3 p-4">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <h2 class="text-base font-semibold">
-            Editor
+            {{ t('dockerfiles.editor') }}
             <span v-if="selectedPath" class="ml-2 font-mono text-xs font-normal text-[var(--lp-muted)]">
               {{ selectedPath }}
             </span>
@@ -610,7 +610,7 @@ async function onBuild() {
               :disabled="!editorContent.trim()"
               @click="copyActiveFile"
             >
-              Copy
+              {{ t('common.copy') }}
             </button>
             <button
               type="button"
@@ -618,7 +618,7 @@ async function onBuild() {
               :disabled="!editorContent.trim() || !selectedPath"
               @click="downloadActiveFile"
             >
-              Download
+              {{ t('dockerfiles.download') }}
             </button>
             <button
               type="button"
@@ -626,7 +626,7 @@ async function onBuild() {
               :disabled="!editorContent.trim() || busyAction === 'review' || !selectedPath?.startsWith('dockers/')"
               @click="onReview"
             >
-              {{ busyAction === 'review' ? 'Reviewing…' : 'AI security review' }}
+              {{ busyAction === 'review' ? t('dockerfiles.reviewing') : t('dockerfiles.aiReview') }}
             </button>
             <button
               type="button"
@@ -634,7 +634,7 @@ async function onBuild() {
               :disabled="!report?.improvedDockerfile"
               @click="onApplyImproved"
             >
-              Apply improved
+              {{ t('dockerfiles.applyImproved') }}
             </button>
           </div>
         </div>
@@ -645,7 +645,7 @@ async function onBuild() {
             class="min-h-[420px] rounded-lg border border-[var(--lp-line)]"
           />
           <template #fallback>
-            <p class="text-sm text-[var(--lp-muted)]">Loading editor…</p>
+            <p class="text-sm text-[var(--lp-muted)]">{{ t('dockerfiles.loadingEditor') }}</p>
           </template>
         </ClientOnly>
       </section>
@@ -654,7 +654,7 @@ async function onBuild() {
     <section v-if="report" class="lp-panel space-y-4 p-5">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 class="text-base font-semibold">Security review</h2>
+          <h2 class="text-base font-semibold">{{ t('dockerfiles.securityReview') }}</h2>
           <p class="mt-1 text-sm text-[var(--lp-muted)]">{{ report.summary }}</p>
         </div>
         <span class="rounded border border-[var(--lp-line)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
@@ -672,13 +672,13 @@ async function onBuild() {
           <div class="flex flex-wrap items-center gap-2">
             <span class="font-mono text-[10px] uppercase tracking-wide">{{ issue.severity }}</span>
             <span class="font-mono text-xs">{{ issue.ruleId }}</span>
-            <span v-if="issue.lineNumber" class="text-xs opacity-80">line {{ issue.lineNumber }}</span>
+            <span v-if="issue.lineNumber" class="text-xs opacity-80">{{ t('dockerfiles.line') }} {{ issue.lineNumber }}</span>
           </div>
           <p class="mt-1 opacity-90">{{ issue.description }}</p>
         </li>
       </ul>
       <div v-if="report.explanationOfChanges.length" class="space-y-1">
-        <h3 class="lp-label">Changes in improved Dockerfile</h3>
+        <h3 class="lp-label">{{ t('dockerfiles.changesImproved') }}</h3>
         <ul class="list-disc space-y-1 pl-5 text-sm text-[var(--lp-muted)]">
           <li v-for="(change, idx) in report.explanationOfChanges" :key="idx">
             {{ change }}
@@ -688,19 +688,17 @@ async function onBuild() {
     </section>
 
     <section class="lp-panel space-y-4 p-5">
-      <h2 class="text-base font-semibold">Push to GitHub</h2>
+      <h2 class="text-base font-semibold">{{ t('dockerfiles.pushToGithub') }}</h2>
       <p class="text-sm text-[var(--lp-muted)]">
-        Commits scaffold files under <code class="font-mono text-xs">dockers/</code>,
-        <code class="font-mono text-xs">ci/</code>, and <code class="font-mono text-xs">infra/</code>
-        via the GitHub App.
+        {{ t('dockerfiles.pushBlurb') }}
       </p>
       <div class="grid gap-4 md:grid-cols-2">
         <label class="block space-y-1.5">
-          <span class="lp-label">Active file path</span>
+          <span class="lp-label">{{ t('dockerfiles.activeFilePath') }}</span>
           <input v-model="pushPath" type="text" class="lp-input" placeholder="dockers/Dockerfile.app">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Commit message</span>
+          <span class="lp-label">{{ t('dockerfiles.commitMessage') }}</span>
           <input v-model="commitMessage" type="text" class="lp-input">
         </label>
       </div>
@@ -711,7 +709,7 @@ async function onBuild() {
           :disabled="!canActOnRepo || !filePaths.length || busyAction === 'push'"
           @click="onPushAll"
         >
-          {{ busyAction === 'push' ? 'Pushing…' : `Push all (${filePaths.length})` }}
+          {{ busyAction === 'push' ? t('dockerfiles.pushing') : t('dockerfiles.pushAll', { count: filePaths.length }) }}
         </button>
         <button
           type="button"
@@ -719,16 +717,15 @@ async function onBuild() {
           :disabled="!canActOnRepo || !editorContent.trim() || busyAction === 'push-one'"
           @click="onPush"
         >
-          {{ busyAction === 'push-one' ? 'Pushing…' : 'Push active file' }}
+          {{ busyAction === 'push-one' ? t('dockerfiles.pushing') : t('dockerfiles.pushActiveFile') }}
         </button>
       </div>
     </section>
 
     <section class="lp-panel space-y-4 p-5">
-      <h2 class="text-base font-semibold">Build &amp; push image</h2>
+      <h2 class="text-base font-semibold">{{ t('dockerfiles.buildPushImage') }}</h2>
       <p class="text-sm text-[var(--lp-muted)]">
-        Clones the repo, builds with Docker, and pushes to the selected registry. Requires a running worker
-        (<code class="font-mono text-xs">make worker</code> and Docker daemon.
+        {{ t('dockerfiles.buildBlurb') }}
       </p>
       <div class="flex flex-wrap gap-2">
         <button
@@ -751,64 +748,64 @@ async function onBuild() {
 
       <div class="grid gap-4 md:grid-cols-2">
         <label class="block space-y-1.5">
-          <span class="lp-label">Dockerfile path</span>
+          <span class="lp-label">{{ t('dockerfiles.dockerfilePath') }}</span>
           <input v-model="dockerfilePath" type="text" class="lp-input">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Build context</span>
+          <span class="lp-label">{{ t('dockerfiles.buildContext') }}</span>
           <input v-model="contextPath" type="text" class="lp-input" placeholder=".">
         </label>
         <label class="block space-y-1.5 md:col-span-2">
-          <span class="lp-label">Tags (comma or space separated)</span>
+          <span class="lp-label">{{ t('dockerfiles.tagsLabel') }}</span>
           <input v-model="tagsInput" type="text" class="lp-input" placeholder="latest, v1.0.0, sha-abc1234">
         </label>
       </div>
 
       <div v-if="registryProvider === 'docker_hub'" class="grid gap-4 md:grid-cols-2">
         <label class="block space-y-1.5">
-          <span class="lp-label">Username</span>
+          <span class="lp-label">{{ t('dockerfiles.username') }}</span>
           <input v-model="dockerHub.username" type="text" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Password / access token</span>
+          <span class="lp-label">{{ t('dockerfiles.passwordToken') }}</span>
           <input v-model="dockerHub.password_or_token" type="password" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-1.5 md:col-span-2">
-          <span class="lp-label">Repository (user/name)</span>
+          <span class="lp-label">{{ t('dockerfiles.repoUserName') }}</span>
           <input v-model="dockerHub.repository" type="text" class="lp-input" placeholder="myorg/myapp">
         </label>
       </div>
 
       <div v-else-if="registryProvider === 'aws_ecr'" class="grid gap-4 md:grid-cols-2">
         <label class="block space-y-1.5">
-          <span class="lp-label">Access key ID</span>
+          <span class="lp-label">{{ t('dockerfiles.accessKeyId') }}</span>
           <input v-model="awsEcr.access_key_id" type="text" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Secret access key</span>
+          <span class="lp-label">{{ t('dockerfiles.secretAccessKey') }}</span>
           <input v-model="awsEcr.secret_access_key" type="password" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Session token (optional)</span>
+          <span class="lp-label">{{ t('dockerfiles.sessionTokenOptional') }}</span>
           <input v-model="awsEcr.session_token" type="password" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Region</span>
+          <span class="lp-label">{{ t('provision.fields.region') }}</span>
           <input v-model="awsEcr.region" type="text" class="lp-input">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Account ID</span>
+          <span class="lp-label">{{ t('dockerfiles.accountId') }}</span>
           <input v-model="awsEcr.account_id" type="text" class="lp-input" placeholder="123456789012">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">ECR repository</span>
+          <span class="lp-label">{{ t('dockerfiles.ecrRepository') }}</span>
           <input v-model="awsEcr.repository" type="text" class="lp-input" placeholder="launchpad/app">
         </label>
       </div>
 
       <div v-else class="grid gap-4 md:grid-cols-2">
         <label class="block space-y-1.5 md:col-span-2">
-          <span class="lp-label">Service account JSON</span>
+          <span class="lp-label">{{ t('dockerfiles.serviceAccountJson') }}</span>
           <textarea
             v-model="gcpGar.service_account_json"
             class="lp-input min-h-[100px] font-mono text-xs"
@@ -817,19 +814,19 @@ async function onBuild() {
           />
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Project ID</span>
+          <span class="lp-label">{{ t('provision.fields.projectId') }}</span>
           <input v-model="gcpGar.project_id" type="text" class="lp-input">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Location</span>
+          <span class="lp-label">{{ t('dockerfiles.location') }}</span>
           <input v-model="gcpGar.location" type="text" class="lp-input" placeholder="us-central1">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">AR repository</span>
+          <span class="lp-label">{{ t('dockerfiles.arRepository') }}</span>
           <input v-model="gcpGar.repository" type="text" class="lp-input">
         </label>
         <label class="block space-y-1.5">
-          <span class="lp-label">Image name</span>
+          <span class="lp-label">{{ t('dockerfiles.imageName') }}</span>
           <input v-model="gcpGar.image_name" type="text" class="lp-input">
         </label>
       </div>
@@ -840,7 +837,7 @@ async function onBuild() {
         :disabled="!canActOnRepo || tags.length === 0 || busyAction === 'build'"
         @click="onBuild"
       >
-        {{ busyAction === 'build' ? 'Building…' : 'Build & push' }}
+        {{ busyAction === 'build' ? t('dockerfiles.building') : t('dockerfiles.buildPush') }}
       </button>
 
       <div v-if="buildJob" class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 p-3">
@@ -853,23 +850,23 @@ async function onBuild() {
         </p>
         <pre
           v-if="buildJob.logs.length"
-          class="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-[var(--lp-muted)]"
+          class="lp-console max-h-48 overflow-auto whitespace-pre-wrap p-3 font-mono text-[11px] lp-console-line"
         >{{ buildJob.logs.slice(-40).join('\n') }}</pre>
       </div>
     </section>
 
     <p v-if="successMessage" class="text-sm text-[var(--lp-accent)]">{{ successMessage }}</p>
     <p v-if="error" class="text-sm text-red-300">{{ error }}</p>
-    <p v-if="loading && !busyAction" class="text-sm text-[var(--lp-muted)]">Working…</p>
+    <p v-if="loading && !busyAction" class="text-sm text-[var(--lp-muted)]">{{ t('common.working') }}</p>
 
     <ConfirmDialog
       :open="pendingDeletePath !== null"
-      title="Remove file?"
+      :title="t('dockerfiles.removeFileTitle')"
       :message="pendingDeletePath
-        ? `Remove “${pendingDeletePath}” from this scaffold session?`
+        ? t('dockerfiles.removeFileConfirm', { path: pendingDeletePath })
         : ''"
-      confirm-label="Yes, remove"
-      cancel-label="Cancel"
+      :confirm-label="t('common.confirmRemove')"
+      :cancel-label="t('common.cancel')"
       @update:open="(value) => { if (!value) pendingDeletePath = null }"
       @confirm="confirmDeleteFile"
     />

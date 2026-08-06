@@ -6,6 +6,8 @@ const props = defineProps<{
   services: DetectedService[]
 }>()
 
+const { t } = useI18n()
+
 const emit = defineEmits<{
   'update:services': [services: DetectedService[]]
 }>()
@@ -46,7 +48,7 @@ function roleBadge(role: string) {
 <template>
   <div class="space-y-4">
     <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/30 p-4">
-      <p class="text-sm font-medium text-[var(--lp-text)]">Detected architecture</p>
+      <p class="text-sm font-medium text-[var(--lp-text)]">{{ t('scaffold.detected.architecture') }}</p>
       <p class="mt-1 text-xs text-[var(--lp-muted)]">{{ detection.summary }}</p>
       <div class="mt-3 flex flex-wrap gap-2">
         <span
@@ -97,15 +99,15 @@ function roleBadge(role: string) {
                 v-if="svc.is_preview_target"
                 class="rounded border border-[var(--lp-accent)]/40 bg-[var(--lp-accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--lp-accent)]"
               >
-                preview target
+                {{ t('scaffold.detected.previewTarget') }}
               </span>
             </div>
             <p class="font-mono text-[11px] text-[var(--lp-muted)]">path: {{ svc.path }}</p>
             <p v-if="svc.has_dockerfile" class="text-[11px] text-[var(--lp-muted)]">
-              Dockerfile: {{ svc.dockerfile_path || 'present' }}
+              {{ t('scaffold.detected.dockerfilePresent', { path: svc.dockerfile_path || 'present' }) }}
             </p>
             <p v-else class="text-[11px] text-amber-200/80">
-              No Dockerfile - Launchpad will scaffold one on save
+              {{ t('scaffold.detected.noDockerfile') }}
             </p>
           </div>
           <label class="inline-flex items-center gap-2 text-xs text-[var(--lp-muted)]">
@@ -115,13 +117,13 @@ function roleBadge(role: string) {
               :checked="svc.enabled"
               @change="toggleEnabled(svc.id)"
             >
-            Include
+            {{ t('scaffold.detected.include') }}
           </label>
         </div>
 
         <div class="mt-3 flex flex-wrap items-end gap-3">
           <label class="block space-y-1">
-            <span class="lp-label">Port</span>
+            <span class="lp-label">{{ t('scaffold.detected.port') }}</span>
             <input
               type="number"
               min="1"
@@ -138,7 +140,7 @@ function roleBadge(role: string) {
             :disabled="!svc.enabled || svc.is_preview_target"
             @click="setPreviewTarget(svc.id)"
           >
-            {{ svc.is_preview_target ? 'Primary preview' : 'Set as preview target' }}
+            {{ svc.is_preview_target ? t('scaffold.detected.primaryPreview') : t('scaffold.detected.setPreviewTarget') }}
           </button>
         </div>
       </li>

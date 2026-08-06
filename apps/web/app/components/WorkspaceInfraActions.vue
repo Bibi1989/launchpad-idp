@@ -24,6 +24,8 @@ import {
 import { copyTextToClipboard, downloadTextFile } from '~/utils/clipboardFile'
 import { dockerfileContentForStack } from '~/utils/workspaceInfraScaffold'
 
+const { t } = useI18n()
+
 const props = withDefaults(
   defineProps<{
     mode?: 'selection' | 'execution'
@@ -373,8 +375,8 @@ function downloadWorkflowYaml() {
             <div class="flex items-center gap-2.5">
               <span class="material-symbols-outlined text-xl text-[var(--lp-accent)]">cloud</span>
               <div>
-                <p class="lp-label">Provision</p>
-                <h3 class="text-base font-semibold text-[var(--lp-text)]">Create Provision</h3>
+                <p class="lp-label">{{ t('scaffold.infra.provision.label') }}</p>
+                <h3 class="text-base font-semibold text-[var(--lp-text)]">{{ t('scaffold.infra.provision.title') }}</h3>
               </div>
             </div>
             <label
@@ -388,14 +390,14 @@ function downloadWorkflowYaml() {
                 :disabled="disabled || provisionDisabled"
                 @change="toggleProvision(($event.target as HTMLInputElement).checked)"
               >
-              Enable
+              {{ t('scaffold.infra.enable') }}
             </label>
           </div>
           <p class="text-xs leading-relaxed text-[var(--lp-muted)]">
-            Scaffold Terraform or Pulumi files under <code class="font-mono text-xs text-[var(--lp-accent)]">infra/</code>.
+            {{ t('scaffold.infra.provision.blurb') }}
           </p>
           <p v-if="provisionDisabled" class="text-xs text-[var(--lp-muted)] italic">
-            Dev (k3s) workspaces use Kubernetes manifests only.
+            {{ t('scaffold.infra.provision.localHint') }}
           </p>
         </div>
 
@@ -406,9 +408,9 @@ function downloadWorkflowYaml() {
             :disabled="disabled || (mode === 'selection' && !config.provision.enabled)"
             @change="setProvisionEngine(($event.target as HTMLSelectElement).value as ProvisionEngine)"
           >
-            <option value="terraform">Terraform</option>
-            <option value="opentofu">OpenTofu</option>
-            <option value="pulumi">Pulumi</option>
+            <option value="terraform">{{ t('workspaceIde.engines.terraform') }}</option>
+            <option value="opentofu">{{ t('workspaceIde.engines.opentofu') }}</option>
+            <option value="pulumi">{{ t('workspaceIde.engines.pulumi') }}</option>
           </select>
 
           <div v-if="mode === 'execution'" class="flex items-center gap-2">
@@ -418,7 +420,7 @@ function downloadWorkflowYaml() {
               :disabled="busy || disabled"
               @click="emit('createProvision')"
             >
-              Create files
+              {{ t('scaffold.infra.createFiles') }}
             </button>
             <button
               v-if="showRunActions"
@@ -427,7 +429,7 @@ function downloadWorkflowYaml() {
               :disabled="busy || disabled"
               @click="emit('runProvision')"
             >
-              Run
+              {{ t('scaffold.infra.run') }}
             </button>
           </div>
         </div>
@@ -447,8 +449,8 @@ function downloadWorkflowYaml() {
             <div class="flex items-center gap-2.5">
               <span class="material-symbols-outlined text-xl text-[var(--lp-accent)]">view_in_ar</span>
               <div>
-                <p class="lp-label">Kubernetes</p>
-                <h3 class="text-base font-semibold text-[var(--lp-text)]">Create Kubernetes</h3>
+                <p class="lp-label">{{ t('scaffold.infra.kubernetes.label') }}</p>
+                <h3 class="text-base font-semibold text-[var(--lp-text)]">{{ t('scaffold.infra.kubernetes.title') }}</h3>
               </div>
             </div>
             <label
@@ -462,14 +464,14 @@ function downloadWorkflowYaml() {
                 :disabled="disabled || kubernetesDisabled"
                 @change="toggleKubernetes(($event.target as HTMLInputElement).checked)"
               >
-              Enable
+              {{ t('scaffold.infra.enable') }}
             </label>
           </div>
           <p class="text-xs leading-relaxed text-[var(--lp-muted)]">
-            Scaffold raw manifests, Helm chart, or Kustomize layout under <code class="font-mono text-xs text-[var(--lp-accent)]">infra/</code>.
+            {{ t('scaffold.infra.kubernetes.blurb') }}
           </p>
           <p v-if="kubernetesDisabled" class="text-xs text-[var(--lp-muted)] italic">
-            Enable a Kubernetes runtime (GKE, EKS, AKS, Cloud Run, or Container Apps) first.
+            {{ t('scaffold.infra.kubernetes.runtimeHint') }}
           </p>
         </div>
 
@@ -480,9 +482,9 @@ function downloadWorkflowYaml() {
             :disabled="disabled || kubernetesDisabled || (mode === 'selection' && !config.kubernetes.enabled)"
             @change="setK8sMode(($event.target as HTMLSelectElement).value as K8sScaffoldMode)"
           >
-            <option value="k8s">K8s manifests</option>
-            <option value="helm">Helm chart</option>
-            <option value="kustomize">Kustomize</option>
+            <option value="k8s">{{ t('scaffold.infra.kubernetes.modeK8s') }}</option>
+            <option value="helm">{{ t('scaffold.infra.kubernetes.modeHelm') }}</option>
+            <option value="kustomize">{{ t('scaffold.infra.kubernetes.modeKustomize') }}</option>
           </select>
 
           <div v-if="mode === 'execution'" class="flex items-center gap-2">
@@ -492,7 +494,7 @@ function downloadWorkflowYaml() {
               :disabled="busy || disabled"
               @click="emit('createKubernetes')"
             >
-              Create files
+              {{ t('scaffold.infra.createFiles') }}
             </button>
             <button
               v-if="showRunActions"
@@ -501,7 +503,7 @@ function downloadWorkflowYaml() {
               :disabled="busy || disabled"
               @click="emit('runKubernetes')"
             >
-              Run
+              {{ t('scaffold.infra.run') }}
             </button>
           </div>
         </div>
@@ -521,8 +523,8 @@ function downloadWorkflowYaml() {
             <div class="flex items-center gap-2.5">
               <span class="material-symbols-outlined text-xl text-[var(--lp-accent)]">sync_alt</span>
               <div>
-                <p class="lp-label">CI/CD</p>
-                <h3 class="text-base font-semibold text-[var(--lp-text)]">Create CI/CD</h3>
+                <p class="lp-label">{{ t('scaffold.infra.cicd.label') }}</p>
+                <h3 class="text-base font-semibold text-[var(--lp-text)]">{{ t('scaffold.infra.cicd.title') }}</h3>
               </div>
             </div>
             <label
@@ -536,44 +538,44 @@ function downloadWorkflowYaml() {
                 :disabled="disabled"
                 @change="toggleCiCd(($event.target as HTMLInputElement).checked)"
               >
-              Enable
+              {{ t('scaffold.infra.enable') }}
             </label>
           </div>
           <p class="text-xs leading-relaxed text-[var(--lp-muted)]">
-            Scaffold a multi-job GitHub or GitLab pipeline with optional security stages.
+            {{ t('scaffold.infra.cicd.blurb') }}
           </p>
         </div>
 
         <div class="mt-4 space-y-3 pt-3 border-t border-[var(--lp-line)]/50">
           <div class="grid gap-2">
-            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">Target Frameworks / Stacks</label>
+            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">{{ t('scaffold.infra.cicd.frameworks') }}</label>
             <FrameworkMultiSelectDropdown
               v-model="selectedCicdFrameworks"
               :disabled="disabled || (mode === 'selection' && !cicd.enabled)"
-              placeholder="Check Target Frameworks"
+              :placeholder="t('scaffold.infra.cicd.frameworksPlaceholder')"
             />
           </div>
 
           <div class="grid gap-2">
-            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">CI/CD provider</label>
+            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">{{ t('scaffold.infra.cicd.provider') }}</label>
             <select
               :value="cicd.platform"
               class="lp-input w-full text-xs"
               :disabled="disabled || (mode === 'selection' && !cicd.enabled)"
               @change="setCiCdPlatform(($event.target as HTMLSelectElement).value as CicdPlatform)"
             >
-              <option value="github">GitHub Actions only</option>
-              <option value="gitlab">GitLab CI only</option>
+              <option value="github">{{ t('scaffold.infra.cicd.githubOnly') }}</option>
+              <option value="gitlab">{{ t('scaffold.infra.cicd.gitlabOnly') }}</option>
             </select>
           </div>
 
           <div class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5 text-[11px] text-emerald-400 flex items-center justify-between">
             <span class="flex items-center gap-1 font-medium">
               <span class="material-symbols-outlined text-sm">shield</span>
-              SAST &amp; Security Scans Active
+              {{ t('scaffold.infra.cicd.securityActive') }}
             </span>
             <span class="rounded bg-emerald-500/20 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300">
-              Verified
+              {{ t('scaffold.infra.cicd.verified') }}
             </span>
           </div>
 
@@ -585,7 +587,7 @@ function downloadWorkflowYaml() {
               :disabled="busy || disabled"
               @click="emit('createCiCd')"
             >
-              Create files
+              {{ t('scaffold.infra.createFiles') }}
             </button>
             <button
               type="button"
@@ -593,7 +595,7 @@ function downloadWorkflowYaml() {
               :disabled="disabled || (mode === 'selection' && !cicd.enabled)"
               @click="copyWorkflowYaml"
             >
-              {{ copiedWorkflow ? 'Copied' : 'Copy YAML' }}
+              {{ copiedWorkflow ? t('common.copied') : t('scaffold.infra.copyYaml') }}
             </button>
             <button
               type="button"
@@ -601,7 +603,7 @@ function downloadWorkflowYaml() {
               :disabled="disabled || (mode === 'selection' && !cicd.enabled)"
               @click="downloadWorkflowYaml"
             >
-              Download
+              {{ t('common.download') }}
             </button>
           </div>
         </div>
@@ -621,8 +623,8 @@ function downloadWorkflowYaml() {
             <div class="flex items-center gap-2.5">
               <span class="material-symbols-outlined text-xl text-[var(--lp-accent)]">deployed_code</span>
               <div>
-                <p class="lp-label">Docker</p>
-                <h3 class="text-base font-semibold text-[var(--lp-text)]">Create Docker</h3>
+                <p class="lp-label">{{ t('scaffold.infra.docker.label') }}</p>
+                <h3 class="text-base font-semibold text-[var(--lp-text)]">{{ t('scaffold.infra.docker.title') }}</h3>
               </div>
             </div>
             <label
@@ -636,31 +638,31 @@ function downloadWorkflowYaml() {
                 :disabled="disabled"
                 @change="toggleDocker(($event.target as HTMLInputElement).checked)"
               >
-              Enable
+              {{ t('scaffold.infra.enable') }}
             </label>
           </div>
           <p class="text-xs leading-relaxed text-[var(--lp-muted)]">
-            Scaffold multi-stage Dockerfile &amp; docker-compose under <code class="font-mono text-xs text-[var(--lp-accent)]">dockers/</code>.
+            {{ t('scaffold.infra.docker.blurb') }}
           </p>
         </div>
 
         <div class="mt-4 space-y-3 pt-3 border-t border-[var(--lp-line)]/50">
           <div class="grid gap-2">
-            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">Select Frameworks / Stacks</label>
+            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">{{ t('scaffold.infra.docker.frameworks') }}</label>
             <FrameworkMultiSelectDropdown
               v-model="selectedDockerFrameworks"
               :disabled="disabled || (mode === 'selection' && !containerScaffold.enabled)"
-              placeholder="Check FastAPI, Express, React..."
+              :placeholder="t('scaffold.infra.docker.frameworksPlaceholder')"
             />
           </div>
 
           <div class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5 text-[11px] text-emerald-400 flex items-center justify-between">
             <span class="flex items-center gap-1 font-medium">
               <span class="material-symbols-outlined text-sm">verified_user</span>
-              USER 10001 &amp; Multi-stage Hardened
+              {{ t('scaffold.infra.docker.hardened') }}
             </span>
             <span class="rounded bg-emerald-500/20 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300">
-              0 Risks
+              {{ t('scaffold.infra.docker.zeroRisks') }}
             </span>
           </div>
 
@@ -672,7 +674,7 @@ function downloadWorkflowYaml() {
               :disabled="busy || disabled"
               @click="emit('createDocker')"
             >
-              Create files
+              {{ t('scaffold.infra.createFiles') }}
             </button>
             <button
               type="button"
@@ -680,7 +682,7 @@ function downloadWorkflowYaml() {
               :disabled="disabled || (mode === 'selection' && !containerScaffold.enabled)"
               @click="copyDockerfileContent"
             >
-              {{ copiedDockerfile ? 'Copied' : 'Copy Dockerfile' }}
+              {{ copiedDockerfile ? t('common.copied') : t('scaffold.infra.copyDockerfile') }}
             </button>
             <button
               type="button"
@@ -688,7 +690,7 @@ function downloadWorkflowYaml() {
               :disabled="disabled || (mode === 'selection' && !containerScaffold.enabled)"
               @click="downloadDockerfileFile"
             >
-              Download
+              {{ t('common.download') }}
             </button>
           </div>
         </div>
@@ -702,11 +704,10 @@ function downloadWorkflowYaml() {
     >
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p class="lp-label">Pipeline security</p>
-          <h3 class="mt-1 text-base font-semibold">Solutions A &amp; B</h3>
+          <p class="lp-label">{{ t('scaffold.infra.pipelineSecurity.label') }}</p>
+          <h3 class="mt-1 text-base font-semibold">{{ t('scaffold.infra.pipelineSecurity.title') }}</h3>
           <p class="mt-1 text-sm text-[var(--lp-muted)]">
-            Toggle independently - A only, B only, both, or neither. Actions are pinned to commit
-            SHAs.
+            {{ t('scaffold.infra.pipelineSecurity.blurb') }}
           </p>
         </div>
         <p class="font-mono text-[10px] uppercase tracking-wider text-[var(--lp-accent)]">
@@ -726,10 +727,10 @@ function downloadWorkflowYaml() {
             >
             <span>
               <span class="block text-sm font-medium text-[var(--lp-text)]">
-                Container image security scanning (Solution A)
+                {{ t('scaffold.infra.pipelineSecurity.solutionA') }}
               </span>
               <span class="mt-0.5 block text-xs text-[var(--lp-muted)]">
-                Trivy CVE scan after build, before deploy. Uploads SARIF to the security dashboard.
+                {{ t('scaffold.infra.pipelineSecurity.solutionABlurb') }}
               </span>
             </span>
           </label>
@@ -738,7 +739,7 @@ function downloadWorkflowYaml() {
             class="space-y-3 border-t border-[var(--lp-line)] pt-3"
           >
             <label class="block space-y-1.5">
-              <span class="lp-label">Security scanner</span>
+              <span class="lp-label">{{ t('scaffold.infra.pipelineSecurity.scanner') }}</span>
               <select
                 :value="security.containerScan.tool"
                 class="lp-input font-mono text-xs"
@@ -758,27 +759,27 @@ function downloadWorkflowYaml() {
               </span>
             </label>
             <label class="block space-y-1.5">
-              <span class="lp-label">Severity threshold</span>
+              <span class="lp-label">{{ t('scaffold.infra.pipelineSecurity.severity') }}</span>
               <select
                 :value="security.containerScan.severityThreshold"
                 class="lp-input"
                 :disabled="disabled"
                 @change="setSeverityThreshold(($event.target as HTMLSelectElement).value as ScanSeverityThreshold)"
               >
-                <option value="critical">CRITICAL only</option>
-                <option value="critical_high">CRITICAL + HIGH (default)</option>
+                <option value="critical">{{ t('scaffold.infra.pipelineSecurity.criticalOnly') }}</option>
+                <option value="critical_high">{{ t('scaffold.infra.pipelineSecurity.criticalHigh') }}</option>
               </select>
             </label>
             <label class="block space-y-1.5">
-              <span class="lp-label">Action on finding</span>
+              <span class="lp-label">{{ t('scaffold.infra.pipelineSecurity.onFinding') }}</span>
               <select
                 :value="security.containerScan.onFinding"
                 class="lp-input"
                 :disabled="disabled"
                 @change="setFindingAction(($event.target as HTMLSelectElement).value as ScanFindingAction)"
               >
-                <option value="block">Block deployment / fail job</option>
-                <option value="warn">Warn &amp; upload report</option>
+                <option value="block">{{ t('scaffold.infra.pipelineSecurity.blockDeploy') }}</option>
+                <option value="warn">{{ t('scaffold.infra.pipelineSecurity.warnUpload') }}</option>
               </select>
             </label>
           </div>
@@ -795,10 +796,10 @@ function downloadWorkflowYaml() {
             >
             <span>
               <span class="block text-sm font-medium text-[var(--lp-text)]">
-                SAST &amp; production protection (Solution B)
+                {{ t('scaffold.infra.pipelineSecurity.solutionB') }}
               </span>
               <span class="mt-0.5 block text-xs text-[var(--lp-muted)]">
-                Pre-build static analysis plus deploy health verification with auto-rollback.
+                {{ t('scaffold.infra.pipelineSecurity.solutionBBlurb') }}
               </span>
             </span>
           </label>
@@ -814,13 +815,13 @@ function downloadWorkflowYaml() {
                 :disabled="disabled"
                 @change="toggleEnableSast(($event.target as HTMLInputElement).checked)"
               >
-              Enable SAST code analysis (CodeQL / Semgrep)
+              {{ t('scaffold.infra.pipelineSecurity.enableSast') }}
             </label>
             <label
               v-if="security.sastGuardrails.enableSast"
               class="block space-y-1.5"
             >
-              <span class="lp-label">SAST scanner</span>
+              <span class="lp-label">{{ t('scaffold.infra.pipelineSecurity.sastScanner') }}</span>
               <select
                 :value="security.sastGuardrails.sastTool"
                 class="lp-input font-mono text-xs"
@@ -843,7 +844,7 @@ function downloadWorkflowYaml() {
               v-if="security.sastGuardrails.enableSast && security.sastGuardrails.sastTool === 'codeql-v3.28.10'"
               class="block space-y-1.5"
             >
-              <span class="lp-label">CodeQL language pack</span>
+              <span class="lp-label">{{ t('scaffold.infra.pipelineSecurity.codeqlLang') }}</span>
               <select
                 :value="security.sastGuardrails.sastLanguages[0] ?? 'javascript-typescript'"
                 class="lp-input"
@@ -867,7 +868,7 @@ function downloadWorkflowYaml() {
                 :disabled="disabled"
                 @change="toggleHealthRollback(($event.target as HTMLInputElement).checked)"
               >
-              Automated health check &amp; instant rollback
+              {{ t('scaffold.infra.pipelineSecurity.healthRollback') }}
             </label>
           </div>
         </div>
@@ -876,13 +877,10 @@ function downloadWorkflowYaml() {
 
     <div class="rounded-xl border border-dashed border-[var(--lp-line)] px-6 py-5 text-sm text-[var(--lp-muted)]">
       <template v-if="mode === 'selection'">
-        Select any combination of Provision, Kubernetes, and CI/CD. Security solutions A/B only
-        apply when CI/CD is enabled and write into the generated pipeline under
-        <code class="font-mono text-xs">ci/</code>.
+        {{ t('scaffold.infra.footerSelection') }}
       </template>
       <template v-else>
-        Actions are independent. Regenerating CI/CD rewrites the workflow with the current security
-        toggles (SHA-pinned actions).
+        {{ t('scaffold.infra.footerExecution') }}
       </template>
     </div>
   </div>

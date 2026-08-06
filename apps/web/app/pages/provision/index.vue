@@ -59,6 +59,7 @@ const {
   deleteWorkspacePath,
   analyzeWorkspaceFile,
 } = useProvisioning()
+const { t } = useI18n()
 const { scanRepo } = useDockerfiles()
 const terminalOpen = useState('lp-terminal-open', () => false)
 const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
@@ -194,18 +195,18 @@ const githubStatus = ref<string | null>(null)
 const submitting = ref(false)
 const creationStep = ref(1)
 const creationStepLabel = computed(() => {
-  if (creationStep.value === 1) return 'Validating cloud configuration & dependencies…'
-  if (creationStep.value === 2) return 'Generating IaC & container scaffolds…'
-  if (creationStep.value === 3) return 'Scaffolding Kubernetes workload manifests…'
-  if (creationStep.value === 4) return isLocalProvider.value ? 'Starting local cluster & terminal sandbox…' : 'Opening terminal sandbox…'
-  return 'Workspace ready!'
+  if (creationStep.value === 1) return t('provision.steps.validate')
+  if (creationStep.value === 2) return t('provision.steps.generate')
+  if (creationStep.value === 3) return t('provision.steps.sandbox')
+  if (creationStep.value === 4) return isLocalProvider.value ? t('provision.cta.startLocal') : t('provision.cta.generateLaunch')
+  return t('provision.generate')
 })
 const creationProgressPercent = computed(() => Math.min(creationStep.value * 25, 100))
 const creationSteps = computed(() => [
-  { key: 1, label: 'Validate cloud configuration' },
-  { key: 2, label: 'Generate IaC & container scaffolds' },
-  { key: 3, label: 'Scaffold Kubernetes workload manifests' },
-  { key: 4, label: isLocalProvider.value ? 'Start local cluster & sandbox' : 'Initialize terminal sandbox' },
+  { key: 1, label: t('provision.steps.validate') },
+  { key: 2, label: t('provision.steps.generate') },
+  { key: 3, label: t('provision.steps.sandbox') },
+  { key: 4, label: isLocalProvider.value ? t('provision.cta.startLocal') : t('provision.cta.generateLaunch') },
 ])
 const bundle = ref<IaCBundleSummary | null>(null)
 const wsPath = ref<string | null>(null)
@@ -322,7 +323,7 @@ onMounted(async () => {
   } catch {
     githubApp.value = {
       configured: false,
-      message: 'Unable to load GitHub App status',
+      message: t('provision.github.loadStatusFailed'),
       installations: [],
     }
   }
@@ -342,64 +343,134 @@ function onGithubAppUpdated(status: GitHubAppStatus) {
   applyGithubDefaults(status)
 }
 
-const providers: Array<{
-  id: CloudProvider
-  label: string
-  badge: string
-  icon: string
-  blurb: string
-}> = [
+const providers = computed(() => [
   {
-    id: 'local',
-    label: 'Dev (k3s)',
+    id: 'local' as CloudProvider,
+    label: t('provision.providers.local'),
     badge: 'LOCAL',
     icon: 'developer_board',
-    blurb: 'Verify Launchpad on your machine with k3s - no cloud credentials.',
+    blurb: t('provision.sandbox.blurb'),
   },
   {
-    id: 'aws',
-    label: 'Amazon Web Services',
+    id: 'aws' as CloudProvider,
+    label: t('provision.providers.aws'),
     badge: 'AWS',
     icon: 'cloud',
-    blurb: 'Enterprise scalability with EKS, EC2, and Secrets Manager.',
+    blurb: t('provision.providerBlurbs.aws'),
   },
   {
-    id: 'gcp',
-    label: 'Google Cloud',
+    id: 'gcp' as CloudProvider,
+    label: t('provision.providers.gcp'),
     badge: 'GCP',
     icon: 'deployed_code',
-    blurb: 'Best-in-class GKE, Artifact Registry, and Cloud Run.',
+    blurb: t('provision.providerBlurbs.gcp'),
   },
   {
-    id: 'azure',
-    label: 'Microsoft Azure',
+    id: 'azure' as CloudProvider,
+    label: t('provision.providers.azure'),
     badge: 'AZURE',
     icon: 'grid_view',
-    blurb: 'AKS, Key Vault, and Container Apps for MS stacks.',
+    blurb: t('provision.providerBlurbs.azure'),
   },
   {
-    id: 'cloudflare',
-    label: 'Cloudflare',
+    id: 'cloudflare' as CloudProvider,
+    label: t('provision.providers.cloudflare'),
     badge: 'EDGE',
     icon: 'bolt',
-    blurb: 'Low-latency Workers, R2, and edge DNS.',
+    blurb: t('provision.providerBlurbs.cloudflare'),
   },
-]
+])
 
 const progressPct = computed(() => (currentStep.value / TOTAL_STEPS) * 100)
 
 const stepTitle = computed(() => {
   switch (currentStep.value) {
     case 1:
-      return 'Select workspace & cloud'
+      return t('provision.stepTitles.step1')
     case 2:
-      return `${form.provider.toUpperCase()} resources & credentials`
+      return t('provision.stepTitles.step2', { provider: form.provider.toUpperCase() })
     case 3:
-      return 'Connect GitHub'
+      return t('integrations.github')
     default:
-      return isNewWorkspace.value ? 'Generate & launch sandbox' : 'Save changes & open sandbox'
+      return isNewWorkspace.value ? t('provision.stepTitles.step3New') : t('provision.stepTitles.step3Existing')
   }
 })
+
+const gcpResourceOptions = computed(() =>
+  ([
+    'vpc',
+    'subnets',
+    'gke',
+    'artifact_registry',
+    'cloud_run',
+    'cloud_functions',
+    'cloud_sql',
+    'cloud_storage',
+    'pubsub',
+    'memorystore',
+    'bigquery',
+  ] as const).map((key) => ({
+    key,
+    title: t(`provision.resources.gcp.${key}.title`),
+    desc: t(`provision.resources.gcp.${key}.desc`),
+  })),
+)
+
+const awsResourceOptions = computed(() =>
+  ([
+    'vpc',
+    'subnets',
+    'ec2',
+    's3',
+    'eks',
+    'secrets_manager',
+    'rds',
+    'ecr',
+    'elasticache',
+    'lambda_fn',
+    'dynamodb',
+    'sqs',
+    'alb',
+  ] as const).map((key) => ({
+    key,
+    title: t(`provision.resources.aws.${key}.title`),
+  })),
+)
+
+const azureResourceOptions = computed(() =>
+  ([
+    'vnet',
+    'subnets',
+    'aks',
+    'key_vault',
+    'container_apps',
+    'acr',
+    'storage_account',
+    'cosmos_db',
+    'redis_cache',
+    'app_service',
+    'log_analytics',
+  ] as const).map((key) => ({
+    key,
+    title: t(`provision.resources.azure.${key}.title`),
+  })),
+)
+
+const cloudflareResourceOptions = computed(() =>
+  ([
+    'workers',
+    'r2',
+    'dns_records',
+    'pages',
+    'kv',
+    'd1',
+    'tunnels',
+    'queues',
+  ] as const).map((key) => ({
+    key,
+    title: t(`provision.resources.cloudflare.${key}.title`),
+  })),
+)
 
 function clearCredentials() {
   form.credentials.gcp_sa_key_json = ''
@@ -560,7 +631,7 @@ watch(selectedWorkspaceId, async (id) => {
         form.iac_engine = ws.engine
       }
     }
-    fieldError.value = err instanceof Error ? err.message : 'Failed to load workspace config'
+    fieldError.value = err instanceof Error ? err.message : t('provision.errors.loadFailed')
   } finally {
     loadingConfig.value = false
   }
@@ -630,46 +701,46 @@ function validateStep(): boolean {
   if (currentStep.value === 1) {
     if (!isNewWorkspace.value) {
       if (!selectedExisting.value) {
-        fieldError.value = 'Select a workspace.'
+        fieldError.value = t('provision.errors.selectWorkspace')
         return false
       }
       return true
     }
     if (!form.name.trim() || form.name.trim().length < 3) {
-      fieldError.value = 'Workspace name must be at least 3 characters (lowercase, hyphens).'
+      fieldError.value = t('provision.errors.workspaceNameMin')
       return false
     }
     if (!/^[a-z][a-z0-9-]*$/.test(form.name.trim().toLowerCase())) {
-      fieldError.value = 'Name must start with a letter and use only a-z, 0-9, hyphens.'
+      fieldError.value = t('provision.errors.workspaceNameFormat')
       return false
     }
   }
   if (currentStep.value === 2) {
     if (form.provider === 'local') {
       if (!form.local.cluster_name.trim() || !form.local.context.trim()) {
-        fieldError.value = 'Local cluster name and kubectl context are required.'
+        fieldError.value = t('provision.errors.localClusterRequired')
         return false
       }
       if (!infraGeneration.value.kubernetes.enabled) {
-        fieldError.value = 'Enable Kubernetes generation for Dev (k3s) workspaces.'
+        fieldError.value = t('provision.errors.enableK8sGeneration')
         return false
       }
       return true
     }
     if (!infraGeneration.value.provision.enabled && !infraGeneration.value.kubernetes.enabled) {
-      fieldError.value = 'Enable at least Provision or Kubernetes generation.'
+      fieldError.value = t('provision.errors.enableProvisionOrK8s')
       return false
     }
     if (form.provider === 'gcp' && form.gcp.project_id.trim().length < 3) {
-      fieldError.value = 'GCP Project ID is required.'
+      fieldError.value = t('provision.errors.gcpProjectRequired')
       return false
     }
     if (form.provider === 'azure' && form.azure.resource_group.trim().length < 3) {
-      fieldError.value = 'Azure resource group is required.'
+      fieldError.value = t('provision.errors.azureResourceGroupRequired')
       return false
     }
     if (form.provider === 'cloudflare' && form.cloudflare.account_id.trim().length < 8) {
-      fieldError.value = 'Cloudflare account ID is required.'
+      fieldError.value = t('provision.errors.cloudflareAccountRequired')
       return false
     }
   }
@@ -778,7 +849,7 @@ async function onGenerate() {
     if (!parsed.success) {
       const issue = parsed.error.issues[0]
       const path = issue?.path?.length ? `${issue.path.join('.')}: ` : ''
-      fieldError.value = `${path}${issue?.message ?? 'Invalid form'}`
+      fieldError.value = `${path}${issue?.message ?? t('provision.errors.invalidForm')}`
       return
     }
 
@@ -840,20 +911,18 @@ async function onGenerate() {
       }, 1200)
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Provisioning failed'
+    const message = err instanceof Error ? err.message : t('provision.errors.failed')
     const timedOut = message.toLowerCase().includes('timed out')
     if (timedOut && isNewWorkspace.value && !sessionCreatedWorkspaceId.value && form.name.trim()) {
       const recoveredId = await recoverCreatedWorkspaceByName(form.name.trim())
       if (recoveredId) {
         selectedWorkspaceId.value = recoveredId
-        fieldError.value =
-          'Workspace was created, but a later step timed out. Click Generate again to finish - a duplicate will not be created.'
+        fieldError.value = t('provision.errors.timeoutCreated')
         return
       }
     }
     if (timedOut && sessionCreatedWorkspaceId.value) {
-      fieldError.value =
-        'A step timed out after the workspace was created. Click Generate again to continue - a duplicate will not be created.'
+      fieldError.value = t('provision.errors.timeoutContinue')
       return
     }
     fieldError.value = message
@@ -900,24 +969,24 @@ async function pushGithubBootstrap(workspaceId: string) {
   if (!parsed.success) {
     const issue = parsed.error.issues[0]
     const path = issue?.path?.length ? `${issue.path.join('.')}: ` : ''
-    githubError.value = `${path}${issue?.message ?? 'Invalid GitHub form'}`
+    githubError.value = `${path}${issue?.message ?? t('provision.errors.invalidGithubForm')}`
     fieldError.value = githubError.value
     return
   }
 
   githubStatus.value = form.github.include_workflow
-    ? 'Saving infra and workflow to GitHub…'
-    : 'Saving infra to GitHub…'
+    ? t('provision.github.savingInfraWorkflow')
+    : t('provision.github.savingInfra')
   try {
     githubResult.value = await createGithubRepo(parsed.data, form.credentials)
     const workflowNote = githubResult.value.workflow_path
       ? ` · ${githubResult.value.workflow_path}`
-      : ' · workflow skipped'
+      : ` · ${t('provision.github.workflowSkipped')}`
     githubStatus.value = githubResult.value.created
-      ? `Repository created and infra pushed${workflowNote}`
-      : `Infra pushed to ${githubResult.value.full_name}${workflowNote}`
+      ? `${t('provision.github.repoCreated')}${workflowNote}`
+      : `${t('provision.github.infraPushed', { repo: githubResult.value.full_name })}${workflowNote}`
   } catch (err) {
-    githubError.value = err instanceof Error ? err.message : 'GitHub provisioning failed'
+    githubError.value = err instanceof Error ? err.message : t('provision.github.provisioningFailed')
     githubStatus.value = null
     fieldError.value = githubError.value
   }
@@ -936,18 +1005,17 @@ async function onPrimaryAction() {
   <div class="mx-auto max-w-4xl animate-fade-up space-y-6 pb-10">
     <header class="flex flex-wrap items-end justify-between gap-4">
       <div>
-        <p class="lp-label mb-1">Infrastructure</p>
+        <p class="lp-label mb-1">{{ t('provision.eyebrow') }}</p>
         <h1 class="text-2xl font-semibold tracking-tight text-[var(--lp-text)] sm:text-3xl">
-          Provision cloud environment
+          {{ t('provision.title') }}
         </h1>
         <p class="mt-2 max-w-2xl text-sm text-[var(--lp-muted)]">
-          Configure multi-cloud infrastructure, connect GitHub, and launch a sandboxed terminal.
-          Existing workspaces keep their prior selections so you can review or edit before regenerating.
+          {{ t('provision.blurb') }}
         </p>
       </div>
       <NuxtLink to="/workspaces" class="lp-btn-ghost">
         <span class="material-symbols-outlined text-base">arrow_back</span>
-        Workspaces
+        {{ t('nav.workspaces') }}
       </NuxtLink>
     </header>
 
@@ -961,7 +1029,7 @@ async function onPrimaryAction() {
           />
         </div>
         <span class="shrink-0 font-mono text-xs text-[var(--lp-accent)]">
-          STEP {{ currentStep }}/{{ TOTAL_STEPS }}
+          {{ t('provision.stepProgress', { current: currentStep, total: TOTAL_STEPS }) }}
         </span>
       </div>
 
@@ -976,9 +1044,9 @@ async function onPrimaryAction() {
         <div v-show="currentStep === 1" class="space-y-6">
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2 sm:col-span-2">
-              <span class="lp-label">Workspace</span>
+              <span class="lp-label">{{ t('provision.workspace') }}</span>
               <select v-model="selectedWorkspaceId" class="lp-input">
-                <option :value="NEW_WORKSPACE">+ Create new workspace</option>
+                <option :value="NEW_WORKSPACE">{{ t('provision.createNew') }}</option>
                 <option
                   v-for="ws in existingWorkspaces"
                   :key="ws.id"
@@ -988,12 +1056,12 @@ async function onPrimaryAction() {
                 </option>
               </select>
               <p class="text-xs text-[var(--lp-muted)]">
-                Create a new stack, or reopen an existing one with its previous settings filled in.
+                {{ t('provision.workspaceSelectBlurb') }}
               </p>
             </label>
 
             <label class="block space-y-2">
-              <span class="lp-label">Workspace name</span>
+              <span class="lp-label">{{ t('provision.workspaceName') }}</span>
               <input
                 v-model="form.name"
                 class="lp-input"
@@ -1003,7 +1071,7 @@ async function onPrimaryAction() {
               >
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">IaC engine</span>
+              <span class="lp-label">{{ t('provision.iacEngine') }}</span>
               <select
                 v-model="form.iac_engine"
                 class="lp-input"
@@ -1014,8 +1082,7 @@ async function onPrimaryAction() {
                 <option value="pulumi">Pulumi</option>
               </select>
               <p v-if="isLocalProvider" class="text-xs text-[var(--lp-muted)]">
-                Dev (k3s) scaffolds Kubernetes manifests only - switch to a cloud provider for
-                Terraform, OpenTofu, or Pulumi.
+                {{ t('provision.iacEngineLocalHint') }}
               </p>
             </label>
           </div>
@@ -1024,10 +1091,9 @@ async function onPrimaryAction() {
             v-if="!isNewWorkspace && selectedExisting"
             class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
           >
-            Editing
+            {{ t('provision.editingExisting') }}
             <strong class="text-[var(--lp-text)]">{{ selectedExisting.name }}</strong>
-            - prior resource selections are loaded on the next step. Leave credentials blank to keep
-            the ones already stored.
+            - {{ t('provision.editingExistingSuffix') }}
           </div>
 
           <div class="grid gap-4 sm:grid-cols-2">
@@ -1074,17 +1140,16 @@ async function onPrimaryAction() {
             v-if="hasStoredCredentials && !isLocalProvider"
             class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50 p-4 text-sm text-[var(--lp-muted)]"
           >
-            Credentials are already stored for this workspace. Paste new values only if you want to
-            replace them; otherwise leave the fields blank.
+            {{ t('provision.credentialsStored') }}
           </div>
 
           <template v-if="form.provider === 'gcp'">
             <label class="block space-y-2">
-              <span class="lp-label">Project ID</span>
+              <span class="lp-label">{{ t('provision.fields.projectId') }}</span>
               <input v-model="form.gcp.project_id" class="lp-input" placeholder="my-gcp-project">
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">Region</span>
+              <span class="lp-label">{{ t('provision.fields.region') }}</span>
               <select v-model="form.gcp.region" class="lp-input">
                 <option v-for="region in GCP_REGIONS" :key="region.value" :value="region.value">
                   {{ region.label }}
@@ -1092,7 +1157,7 @@ async function onPrimaryAction() {
               </select>
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">Instance / machine type</span>
+              <span class="lp-label">{{ t('provision.fields.instanceMachineType') }}</span>
               <select v-model="form.gcp.machine_type" class="lp-input font-mono text-xs">
                 <option v-for="opt in GCP_MACHINE_TYPES" :key="opt.value" :value="opt.value">
                   {{ opt.label }}
@@ -1100,27 +1165,15 @@ async function onPrimaryAction() {
               </select>
             </label>
             <label v-if="form.gcp.vpc && form.gcp.subnets" class="block space-y-2">
-              <span class="lp-label">Network topology</span>
+              <span class="lp-label">{{ t('provision.fields.networkTopology') }}</span>
               <select v-model="form.gcp.network_topology" class="lp-input">
-                <option value="simple">Simple - one subnet (demos / previews)</option>
-                <option value="standard">Standard - public + private with Cloud NAT</option>
+                <option value="simple">{{ t('provision.topology.simple') }}</option>
+                <option value="standard">{{ t('provision.topology.standard') }}</option>
               </select>
             </label>
             <div class="space-y-2">
               <label
-                v-for="opt in [
-                  { key: 'vpc', title: 'VPC', desc: 'Isolated network with custom routing' },
-                  { key: 'subnets', title: 'Subnets', desc: 'Regional subnet layout' },
-                  { key: 'gke', title: 'GKE', desc: 'Managed Kubernetes cluster' },
-                  { key: 'artifact_registry', title: 'Artifact Registry', desc: 'Container image storage' },
-                  { key: 'cloud_run', title: 'Cloud Run', desc: 'Serverless containers' },
-                  { key: 'cloud_functions', title: 'Cloud Functions', desc: 'Event-driven functions' },
-                  { key: 'cloud_sql', title: 'Cloud SQL', desc: 'Managed PostgreSQL / MySQL' },
-                  { key: 'cloud_storage', title: 'Cloud Storage', desc: 'Object storage buckets' },
-                  { key: 'pubsub', title: 'Pub/Sub', desc: 'Messaging topics & subscriptions' },
-                  { key: 'memorystore', title: 'Memorystore', desc: 'Managed Redis' },
-                  { key: 'bigquery', title: 'BigQuery', desc: 'Analytics warehouse dataset' },
-                ] as const"
+                v-for="opt in gcpResourceOptions"
                 :key="opt.key"
                 class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-4 transition hover:bg-[var(--lp-panel-2)]"
               >
@@ -1138,7 +1191,7 @@ async function onPrimaryAction() {
 
           <template v-else-if="form.provider === 'aws'">
             <label class="block space-y-2">
-              <span class="lp-label">Region</span>
+              <span class="lp-label">{{ t('provision.fields.region') }}</span>
               <select v-model="form.aws.region" class="lp-input">
                 <option v-for="region in AWS_REGIONS" :key="region.value" :value="region.value">
                   {{ region.label }}
@@ -1146,7 +1199,7 @@ async function onPrimaryAction() {
               </select>
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">Instance type</span>
+              <span class="lp-label">{{ t('provision.fields.instanceType') }}</span>
               <select v-model="form.aws.instance_type" class="lp-input font-mono text-xs">
                 <option v-for="opt in AWS_INSTANCE_TYPES" :key="opt.value" :value="opt.value">
                   {{ opt.label }}
@@ -1154,29 +1207,15 @@ async function onPrimaryAction() {
               </select>
             </label>
             <label v-if="form.aws.vpc && form.aws.subnets" class="block space-y-2">
-              <span class="lp-label">Network topology</span>
+              <span class="lp-label">{{ t('provision.fields.networkTopology') }}</span>
               <select v-model="form.aws.network_topology" class="lp-input">
-                <option value="simple">Simple - one public subnet + IGW</option>
-                <option value="standard">Standard - public + private with NAT Gateway</option>
+                <option value="simple">{{ t('provision.topology.simple') }}</option>
+                <option value="standard">{{ t('provision.topology.standard') }}</option>
               </select>
             </label>
             <div class="grid gap-2 sm:grid-cols-2">
               <label
-                v-for="opt in [
-                  { key: 'vpc', title: 'VPC' },
-                  { key: 'subnets', title: 'Subnets' },
-                  { key: 'ec2', title: 'EC2' },
-                  { key: 's3', title: 'S3' },
-                  { key: 'eks', title: 'EKS' },
-                  { key: 'secrets_manager', title: 'Secrets Manager' },
-                  { key: 'rds', title: 'RDS' },
-                  { key: 'ecr', title: 'ECR' },
-                  { key: 'elasticache', title: 'ElastiCache' },
-                  { key: 'lambda_fn', title: 'Lambda' },
-                  { key: 'dynamodb', title: 'DynamoDB' },
-                  { key: 'sqs', title: 'SQS' },
-                  { key: 'alb', title: 'ALB' },
-                ] as const"
+                v-for="opt in awsResourceOptions"
                 :key="opt.key"
                 class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
               >
@@ -1188,11 +1227,11 @@ async function onPrimaryAction() {
 
           <template v-else-if="form.provider === 'azure'">
             <label class="block space-y-2">
-              <span class="lp-label">Resource group</span>
+              <span class="lp-label">{{ t('provision.fields.resourceGroup') }}</span>
               <input v-model="form.azure.resource_group" class="lp-input">
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">Location</span>
+              <span class="lp-label">{{ t('provision.fields.location') }}</span>
               <select v-model="form.azure.location" class="lp-input">
                 <option v-for="loc in AZURE_LOCATIONS" :key="loc.value" :value="loc.value">
                   {{ loc.label }}
@@ -1200,7 +1239,7 @@ async function onPrimaryAction() {
               </select>
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">VM size</span>
+              <span class="lp-label">{{ t('provision.fields.vmSize') }}</span>
               <select v-model="form.azure.vm_size" class="lp-input font-mono text-xs">
                 <option v-for="opt in AZURE_VM_SIZES" :key="opt.value" :value="opt.value">
                   {{ opt.label }}
@@ -1208,27 +1247,15 @@ async function onPrimaryAction() {
               </select>
             </label>
             <label v-if="form.azure.vnet && form.azure.subnets" class="block space-y-2">
-              <span class="lp-label">Network topology</span>
+              <span class="lp-label">{{ t('provision.fields.networkTopology') }}</span>
               <select v-model="form.azure.network_topology" class="lp-input">
-                <option value="simple">Simple - one subnet</option>
-                <option value="standard">Standard - public + private with NAT Gateway</option>
+                <option value="simple">{{ t('provision.topology.simple') }}</option>
+                <option value="standard">{{ t('provision.topology.standard') }}</option>
               </select>
             </label>
             <div class="grid gap-2 sm:grid-cols-2">
               <label
-                v-for="opt in [
-                  { key: 'vnet', title: 'VNet' },
-                  { key: 'subnets', title: 'Subnets' },
-                  { key: 'aks', title: 'AKS' },
-                  { key: 'key_vault', title: 'Key Vault' },
-                  { key: 'container_apps', title: 'Container Apps' },
-                  { key: 'acr', title: 'ACR' },
-                  { key: 'storage_account', title: 'Storage Account' },
-                  { key: 'cosmos_db', title: 'Cosmos DB' },
-                  { key: 'redis_cache', title: 'Redis Cache' },
-                  { key: 'app_service', title: 'App Service' },
-                  { key: 'log_analytics', title: 'Log Analytics' },
-                ] as const"
+                v-for="opt in azureResourceOptions"
                 :key="opt.key"
                 class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
               >
@@ -1240,25 +1267,16 @@ async function onPrimaryAction() {
 
           <template v-else-if="form.provider === 'cloudflare'">
             <label class="block space-y-2">
-              <span class="lp-label">Account ID</span>
+              <span class="lp-label">{{ t('provision.fields.accountId') }}</span>
               <input v-model="form.cloudflare.account_id" class="lp-input">
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">Zone name (optional)</span>
+              <span class="lp-label">{{ t('provision.fields.zoneNameOptional') }}</span>
               <input v-model="form.cloudflare.zone_name" class="lp-input" placeholder="example.com">
             </label>
             <div class="grid gap-2 sm:grid-cols-3">
               <label
-                v-for="opt in [
-                  { key: 'workers', title: 'Workers' },
-                  { key: 'r2', title: 'R2' },
-                  { key: 'dns_records', title: 'DNS' },
-                  { key: 'pages', title: 'Pages' },
-                  { key: 'kv', title: 'KV' },
-                  { key: 'd1', title: 'D1' },
-                  { key: 'tunnels', title: 'Tunnel' },
-                  { key: 'queues', title: 'Queues' },
-                ] as const"
+                v-for="opt in cloudflareResourceOptions"
                 :key="opt.key"
                 class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
               >
@@ -1269,7 +1287,7 @@ async function onPrimaryAction() {
           </template>
 
           <div v-if="!isLocalProvider" class="rounded-xl border border-[var(--lp-line)] p-4">
-            <p class="lp-label mb-3">Infrastructure generation</p>
+            <p class="lp-label mb-3">{{ t('provision.infraGeneration') }}</p>
             <WorkspaceInfraActions
               v-model:config="infraGeneration"
               v-model:container-scaffold="form.container_scaffold"
@@ -1290,38 +1308,23 @@ async function onPrimaryAction() {
             <div
               class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
             >
-              <p class="font-medium text-[var(--lp-text)]">Verify your local Sandbox setup</p>
+              <p class="font-medium text-[var(--lp-text)]">{{ t('provision.sandbox.title') }}</p>
               <ol class="mt-2 list-decimal space-y-1 pl-5">
+                <li>{{ t('provision.sandboxSteps.kindUp') }}</li>
                 <li>
-                  Launchpad runs
-                  <code class="font-mono text-xs text-[var(--lp-accent)]">make kind-up</code>
-                  automatically when you provision (requires Docker, kind, and kubectl).
+                  {{ t('provision.sandboxSteps.envVars', { context: form.local.context }) }}
                 </li>
-                <li>
-                  Keep
-                  <code class="font-mono text-xs">KUBERNETES_ENABLED=true</code>
-                  and
-                  <code class="font-mono text-xs">KUBERNETES_CONTEXT={{ form.local.context }}</code>
-                  in
-                  <code class="font-mono text-xs">apps/api/.env</code>, then restart API + worker once.
-                </li>
-                <li>
-                  Open the sandbox - kubectl apply runs against kind. Destroying the last Dev
-                  workspace runs
-                  <code class="font-mono text-xs text-[var(--lp-accent)]">make kind-down</code>.
-                </li>
-                <li>
-                  When it looks good, switch the provider to GCP/AWS/Azure/Cloudflare and save.
-                </li>
+                <li>{{ t('provision.sandboxSteps.applyDestroy') }}</li>
+                <li>{{ t('provision.sandboxSteps.switchProvider') }}</li>
               </ol>
             </div>
             <div class="grid gap-4 sm:grid-cols-2">
               <label class="block space-y-2">
-                <span class="lp-label">Cluster name</span>
+                <span class="lp-label">{{ t('provision.fields.clusterName') }}</span>
                 <input v-model="form.local.cluster_name" class="lp-input" placeholder="launchpad">
               </label>
               <label class="block space-y-2">
-                <span class="lp-label">kubectl context</span>
+                <span class="lp-label">{{ t('provision.fields.kubectlContext') }}</span>
                 <input v-model="form.local.context" class="lp-input" placeholder="kind-launchpad">
               </label>
             </div>
@@ -1381,16 +1384,16 @@ async function onPrimaryAction() {
               />
             </div>
             <label class="block space-y-2">
-              <span class="lp-label">Secret backend</span>
+              <span class="lp-label">{{ t('provision.secrets.backend') }}</span>
               <select v-model="form.gcp.secret_backend" class="lp-input">
-                <option value="secret_manager">Secret Manager</option>
-                <option value="native_k8s">Native K8s Secret</option>
+                <option value="secret_manager">{{ t('provision.secrets.manager') }}</option>
+                <option value="native_k8s">{{ t('provision.secrets.k8s') }}</option>
               </select>
             </label>
             <CloudCredentialsFields
               v-model:credentials="form.credentials"
               provider="gcp"
-              :sa-placeholder="hasStoredCredentials ? 'Leave blank to keep stored credentials' : 'Paste service account JSON (encrypted at rest)'"
+              :sa-placeholder="hasStoredCredentials ? t('provision.credentialsHints.leaveBlank') : t('provision.credentialsHints.pasteSaJson')"
             />
           </template>
 
@@ -1462,7 +1465,7 @@ async function onPrimaryAction() {
           <div class="flex flex-wrap gap-4">
             <label class="flex items-center gap-2 text-sm">
               <input v-model="form.github.private" type="checkbox" class="accent-[var(--lp-accent)]">
-              Private repository
+              {{ t('provision.github.privateRepo') }}
             </label>
             <label class="flex items-center gap-2 text-sm">
               <input
@@ -1471,22 +1474,21 @@ async function onPrimaryAction() {
                 class="accent-[var(--lp-accent)]"
                 :disabled="isLocalProvider"
               >
-              Set cloud CI secrets
+              {{ t('provision.github.setCloudSecrets') }}
             </label>
             <label class="flex items-center gap-2 text-sm">
               <input v-model="form.github.include_workflow" type="checkbox" class="accent-[var(--lp-accent)]">
-              Add deploy workflow
+              {{ t('provision.github.addWorkflow') }}
             </label>
             <label class="flex items-center gap-2 text-sm">
               <input v-model="form.github.include_dockerfiles" type="checkbox" class="accent-[var(--lp-accent)]">
-              Add Docker files
+              {{ t('provision.github.addDockerfiles') }}
             </label>
           </div>
           <div class="flex items-start gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
             <span class="material-symbols-outlined text-[var(--lp-ok)]">verified_user</span>
             <p class="text-sm text-[var(--lp-muted)]">
-              Pick or create a repository now. At the final step Launchpad pushes generated infra
-              and, if selected, adds a new workflow file without overwriting existing workflows.
+              {{ t('provision.github.repoBlurb') }}
             </p>
           </div>
           <p v-if="githubError" class="text-sm text-[var(--lp-danger)]">{{ githubError }}</p>
@@ -1505,49 +1507,49 @@ async function onPrimaryAction() {
         <!-- Step 4: Generate -->
         <div v-show="currentStep === 4" class="space-y-8">
           <div class="rounded-2xl border border-[var(--lp-accent)]/20 bg-[var(--lp-panel-2)]/60 p-6">
-            <h3 class="text-lg font-semibold">Review</h3>
+            <h3 class="text-lg font-semibold">{{ t('provision.review.title') }}</h3>
             <dl class="mt-4 grid gap-3 text-sm sm:grid-cols-2">
               <div>
-                <dt class="lp-label">Workspace</dt>
+                <dt class="lp-label">{{ t('provision.workspace') }}</dt>
                 <dd class="font-mono">
                   {{ isNewWorkspace ? (form.name || '-') : selectedExisting?.name || '-' }}
-                  <span v-if="!isNewWorkspace" class="text-[var(--lp-muted)]"> (existing)</span>
+                  <span v-if="!isNewWorkspace" class="text-[var(--lp-muted)]"> {{ t('provision.review.existing') }}</span>
                 </dd>
               </div>
               <div>
-                <dt class="lp-label">Provider</dt>
+                <dt class="lp-label">{{ t('provision.review.provider') }}</dt>
                 <dd class="font-mono uppercase">{{ form.provider }}</dd>
               </div>
               <div>
-                <dt class="lp-label">Engine</dt>
+                <dt class="lp-label">{{ t('provision.review.engine') }}</dt>
                 <dd class="font-mono">{{ form.iac_engine }}</dd>
               </div>
               <div>
-                <dt class="lp-label">Artifacts</dt>
+                <dt class="lp-label">{{ t('provision.review.artifacts') }}</dt>
                 <dd class="font-mono">{{ form.artifact_mode }}</dd>
               </div>
               <div>
-                <dt class="lp-label">Provision</dt>
+                <dt class="lp-label">{{ t('provision.review.provision') }}</dt>
                 <dd class="font-mono">
                   {{
                     infraGeneration.provision.enabled
                       ? infraGeneration.provision.engine
-                      : 'skipped'
+                      : t('provision.review.skipped')
                   }}
                 </dd>
               </div>
               <div>
-                <dt class="lp-label">Kubernetes</dt>
+                <dt class="lp-label">{{ t('provision.review.kubernetes') }}</dt>
                 <dd class="font-mono">
                   {{
                     infraGeneration.kubernetes.enabled
                       ? infraGeneration.kubernetes.mode
-                      : 'skipped'
+                      : t('provision.review.skipped')
                   }}
                 </dd>
               </div>
               <div>
-                <dt class="lp-label">CI/CD</dt>
+                <dt class="lp-label">{{ t('provision.review.cicd') }}</dt>
                 <dd class="font-mono">
                   {{
                     infraGeneration.cicd.enabled
@@ -1558,32 +1560,32 @@ async function onPrimaryAction() {
                         ]
                           .filter(Boolean)
                           .join(' · ')
-                      : 'skipped'
+                      : t('provision.review.skipped')
                   }}
                 </dd>
               </div>
               <div>
-                <dt class="lp-label">GitHub repo</dt>
+                <dt class="lp-label">{{ t('provision.review.githubRepo') }}</dt>
                 <dd class="font-mono">
                   <template v-if="form.github.repo_mode === 'existing' && form.github.existing_full_name">
-                    {{ form.github.existing_full_name }} (import)
+                    {{ form.github.existing_full_name }} {{ t('provision.review.import') }}
                   </template>
                   <template v-else-if="form.github.name">
-                    {{ form.github.name }} (create)
+                    {{ form.github.name }} {{ t('provision.review.create') }}
                   </template>
-                  <template v-else>(skip)</template>
+                  <template v-else>{{ t('provision.review.skip') }}</template>
                 </dd>
               </div>
               <div>
-                <dt class="lp-label">Deploy workflow</dt>
+                <dt class="lp-label">{{ t('provision.review.deployWorkflow') }}</dt>
                 <dd class="font-mono">
-                  {{ form.github.include_workflow && (form.github.name || form.github.existing_full_name) ? 'yes' : 'no' }}
+                  {{ form.github.include_workflow && (form.github.name || form.github.existing_full_name) ? t('common.yes') : t('common.no') }}
                 </dd>
               </div>
               <div>
-                <dt class="lp-label">Docker files</dt>
+                <dt class="lp-label">{{ t('provision.review.dockerFiles') }}</dt>
                 <dd class="font-mono">
-                  {{ form.github.include_dockerfiles && (form.github.name || form.github.existing_full_name) ? 'yes' : 'no' }}
+                  {{ form.github.include_dockerfiles && (form.github.name || form.github.existing_full_name) ? t('common.yes') : t('common.no') }}
                 </dd>
               </div>
             </dl>
@@ -1593,14 +1595,14 @@ async function onPrimaryAction() {
             <input v-model="form.run_init" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
             <div>
               <p class="text-sm font-medium">
-                {{ isLocalProvider ? 'Run kubectl apply in sandbox on open' : 'Run IaC init in sandbox on open' }}
+                {{ isLocalProvider ? t('provision.runInit.localTitle') : t('provision.runInit.cloudTitle') }}
               </p>
               <p class="text-xs text-[var(--lp-muted)]">
                 <template v-if="isLocalProvider">
-                  Applies Kubernetes manifests (and Helm chart if selected) against your kind context.
+                  {{ t('provision.runInit.localBlurb') }}
                 </template>
                 <template v-else>
-                  Executes terraform/pulumi init inside the sandboxed terminal session.
+                  {{ t('provision.runInit.cloudBlurb') }}
                 </template>
               </p>
             </div>
@@ -1627,10 +1629,10 @@ async function onPrimaryAction() {
                 </div>
                 <div>
                   <h3 class="text-sm font-semibold text-[var(--lp-text)]">
-                    {{ submitting ? creationStepLabel : 'Workspace ready' }}
+                    {{ submitting ? creationStepLabel : t('provision.progress.workspaceReady') }}
                   </h3>
                   <p class="text-xs text-[var(--lp-muted)]">
-                    {{ submitting ? 'Configuring files, container scaffolds, and sandbox' : `Opening workspace details (${bundle?.workspace_id})…` }}
+                    {{ submitting ? t('provision.progress.configuring') : t('provision.progress.openingWorkspace', { id: bundle?.workspace_id }) }}
                   </p>
                 </div>
               </div>
@@ -1638,7 +1640,7 @@ async function onPrimaryAction() {
                 {{ creationProgressPercent }}%
               </span>
               <span v-else class="rounded-full border border-[var(--lp-ok)]/30 bg-[var(--lp-ok)]/10 px-3 py-1 font-mono text-xs text-[var(--lp-ok)]">
-                Ready 🚀
+                {{ t('provision.progress.ready') }}
               </span>
             </div>
 
@@ -1671,14 +1673,14 @@ async function onPrimaryAction() {
           </div>
 
           <div v-if="bundle" class="space-y-3 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4 font-mono text-xs text-[var(--lp-muted)]">
-            <p class="text-[var(--lp-ok)]">Workspace ready</p>
-            <p>workspace {{ bundle.workspace_id }}</p>
-            <p>{{ bundle.engine }} / {{ bundle.provider }} · {{ bundle.files.length }} files</p>
+            <p class="text-[var(--lp-ok)]">{{ t('provision.progress.workspaceReady') }}</p>
+            <p>{{ t('provision.progress.workspaceId', { id: bundle.workspace_id }) }}</p>
+            <p>{{ t('provision.progress.filesSummary', { engine: bundle.engine, provider: bundle.provider, count: bundle.files.length }) }}</p>
             <NuxtLink
               :to="`/workspaces/${bundle.workspace_id}`"
               class="inline-block rounded border border-[var(--lp-accent)]/50 px-3 py-1.5 text-[var(--lp-accent)] transition hover:bg-[var(--lp-accent)]/10"
             >
-              Open workspace details
+              {{ t('provision.progress.openWorkspace') }}
             </NuxtLink>
           </div>
 
@@ -1699,7 +1701,7 @@ async function onPrimaryAction() {
           @click="prevStep"
         >
           <span class="material-symbols-outlined text-base">arrow_back</span>
-          Back
+          {{ t('common.back') }}
         </button>
         <button
           type="button"
@@ -1709,18 +1711,16 @@ async function onPrimaryAction() {
           @click="onPrimaryAction"
         >
           <template v-if="currentStep < TOTAL_STEPS">
-            <span>Continue</span>
+            <span>{{ t('provision.continue') }}</span>
             <span class="material-symbols-outlined text-base">arrow_forward</span>
           </template>
           <template v-else>
             <span>{{
               submitting
-                ? isLocalProvider
-                  ? 'Starting cluster…'
-                  : 'Saving…'
+                ? t('provision.cta.busy')
                 : isNewWorkspace
-                  ? 'Generate workspace'
-                  : 'Save & open terminal'
+                  ? t('provision.generate')
+                  : t('provision.saveOpenTerminal')
             }}</span>
             <span class="material-symbols-outlined text-base">rocket_launch</span>
           </template>

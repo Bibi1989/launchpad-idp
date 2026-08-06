@@ -19,6 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const { searchGithubRepositories } = useProvisioning()
+const { t } = useI18n()
 
 const searchQuery = ref('')
 const isOpen = ref(false)
@@ -175,7 +176,7 @@ onUnmounted(() => {
           {{ modelValue }}
         </span>
         <span v-else class="text-[var(--lp-muted)]">
-          {{ loading ? 'Loading repositories…' : 'Search & select repository…' }}
+          {{ loading ? t('integrations.loadingReposPicker') : t('integrations.searchSelectRepo') }}
         </span>
       </div>
       <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">
@@ -202,7 +203,7 @@ onUnmounted(() => {
                 :value="searchQuery"
                 type="text"
                 class="lp-input w-full pl-8 pr-8 text-xs"
-                placeholder="Search personal & org repos by name..."
+                :placeholder="t('integrations.searchRepos')"
                 @input="onSearchInput(($event.target as HTMLInputElement).value)"
               >
               <button
@@ -219,7 +220,7 @@ onUnmounted(() => {
           <!-- Repo List -->
           <div class="max-h-56 overflow-y-auto p-1">
             <div v-if="loading && repos.length === 0" class="p-4 text-center text-xs text-[var(--lp-muted)]">
-              Fetching repositories…
+              {{ t('integrations.fetchingRepos') }}
             </div>
 
             <div v-else-if="searchError" class="p-3 text-xs text-[var(--lp-danger)]">
@@ -227,7 +228,7 @@ onUnmounted(() => {
             </div>
 
             <div v-else-if="filteredRepos.length === 0" class="p-4 text-center text-xs text-[var(--lp-muted)]">
-              No repositories found matching "{{ searchQuery }}"
+              {{ t('integrations.noReposMatching', { query: searchQuery }) }}
             </div>
 
             <button
@@ -263,7 +264,7 @@ onUnmounted(() => {
                 class="ml-2 shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide"
                 :class="repo.isPrivate ? 'bg-[var(--lp-accent)]/20 text-[var(--lp-accent)]' : 'bg-[var(--lp-panel-2)] text-[var(--lp-muted)]'"
               >
-                {{ repo.isPrivate ? 'Private' : 'Public' }}
+                {{ repo.isPrivate ? t('common.private') : t('common.public') }}
               </span>
             </button>
           </div>

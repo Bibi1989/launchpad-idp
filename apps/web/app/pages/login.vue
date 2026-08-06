@@ -5,6 +5,7 @@ definePageMeta({
   layout: false,
 })
 
+const { t } = useI18n()
 const { login, register, devLogin, startOidcLogin, authConfig, token } = useAuth()
 const route = useRoute()
 const mode = ref<'login' | 'register'>('login')
@@ -42,7 +43,7 @@ async function onLogin() {
   error.value = null
   const parsed = loginSchema.safeParse(loginForm)
   if (!parsed.success) {
-    error.value = parsed.error.issues[0]?.message ?? 'Invalid form'
+    error.value = parsed.error.issues[0]?.message ?? t('auth.invalidForm')
     return
   }
   submitting.value = true
@@ -50,7 +51,7 @@ async function onLogin() {
     await login(parsed.data)
     await navigateTo(postAuthPath())
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Login failed'
+    error.value = err instanceof Error ? err.message : t('auth.loginFailed')
   } finally {
     submitting.value = false
   }
@@ -60,7 +61,7 @@ async function onRegister() {
   error.value = null
   const parsed = registerSchema.safeParse(registerForm)
   if (!parsed.success) {
-    error.value = parsed.error.issues[0]?.message ?? 'Invalid form'
+    error.value = parsed.error.issues[0]?.message ?? t('auth.invalidForm')
     return
   }
   submitting.value = true
@@ -68,7 +69,7 @@ async function onRegister() {
     await register(parsed.data)
     await navigateTo(postAuthPath())
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Registration failed'
+    error.value = err instanceof Error ? err.message : t('auth.registerFailed')
   } finally {
     submitting.value = false
   }
@@ -81,7 +82,7 @@ async function onDevLogin() {
     await devLogin()
     await navigateTo(postAuthPath())
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Dev login failed'
+    error.value = err instanceof Error ? err.message : t('auth.devLoginFailed')
   } finally {
     submitting.value = false
   }
@@ -93,7 +94,7 @@ async function onOidcLogin() {
   try {
     await startOidcLogin()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'SSO login failed'
+    error.value = err instanceof Error ? err.message : t('auth.ssoFailed')
     submitting.value = false
   }
 }
@@ -101,11 +102,15 @@ async function onOidcLogin() {
 
 <template>
   <div class="relative flex min-h-screen items-center justify-center px-6">
+    <div class="absolute right-6 top-6 z-10">
+      <PreferenceControls compact />
+    </div>
     <div class="w-full max-w-md space-y-8 animate-fade-up">
-      <div class="space-y-2 text-center">
-        <p class="text-3xl font-semibold tracking-tight text-[var(--lp-accent)]">Launchpad</p>
-        <p class="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--lp-muted)]">IDP</p>
-        <p class="text-sm text-[var(--lp-muted)]">Sign in to provision governed environments</p>
+      <div class="space-y-3 text-center">
+        <div class="flex justify-center">
+          <BrandLogo size="lg" />
+        </div>
+        <p class="text-sm text-[var(--lp-muted)]">{{ t('auth.subtitle') }}</p>
       </div>
 
       <div class="lp-glass space-y-5 rounded-2xl p-6">
@@ -116,7 +121,7 @@ async function onOidcLogin() {
             :class="mode === 'login' ? 'text-[var(--lp-text)]' : 'text-[var(--lp-muted)]'"
             @click="mode = 'login'"
           >
-            Login
+            {{ t('auth.login') }}
           </button>
           <button
             type="button"
@@ -124,83 +129,93 @@ async function onOidcLogin() {
             :class="mode === 'register' ? 'text-[var(--lp-text)]' : 'text-[var(--lp-muted)]'"
             @click="mode = 'register'"
           >
-            Register
+            {{ t('auth.register') }}
           </button>
         </div>
 
         <form v-if="mode === 'login'" class="space-y-4" @submit.prevent="onLogin">
           <label class="block space-y-2">
-            <span class="lp-label">Email</span>
+            <span class="lp-label">{{ t('auth.email') }}</span>
             <input
               v-model="loginForm.email"
               type="email"
               autocomplete="username"
               class="lp-input"
+              required
             >
           </label>
           <label class="block space-y-2">
-            <span class="lp-label">Password</span>
+            <span class="lp-label">{{ t('auth.password') }}</span>
             <input
               v-model="loginForm.password"
               type="password"
               autocomplete="current-password"
               class="lp-input"
+              required
             >
           </label>
+          <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
           <button type="submit" class="lp-btn-primary w-full" :disabled="submitting">
-            {{ submitting ? 'Signing in…' : 'Sign in' }}
+            {{ t('auth.submitLogin') }}
           </button>
         </form>
 
         <form v-else class="space-y-4" @submit.prevent="onRegister">
           <label class="block space-y-2">
-            <span class="lp-label">Display name</span>
-            <input v-model="registerForm.display_name" autocomplete="name" class="lp-input">
+            <span class="lp-label">{{ t('auth.displayName') }}</span>
+            <input
+              v-model="registerForm.display_name"
+              type="text"
+              autocomplete="name"
+              class="lp-input"
+            >
           </label>
           <label class="block space-y-2">
-            <span class="lp-label">Email</span>
+            <span class="lp-label">{{ t('auth.email') }}</span>
             <input
               v-model="registerForm.email"
               type="email"
               autocomplete="username"
               class="lp-input"
+              required
             >
           </label>
           <label class="block space-y-2">
-            <span class="lp-label">Password</span>
+            <span class="lp-label">{{ t('auth.password') }}</span>
             <input
               v-model="registerForm.password"
               type="password"
               autocomplete="new-password"
               class="lp-input"
+              required
             >
           </label>
+          <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
           <button type="submit" class="lp-btn-primary w-full" :disabled="submitting">
-            {{ submitting ? 'Creating…' : 'Create account' }}
+            {{ t('auth.submitRegister') }}
           </button>
         </form>
 
-        <button
-          v-if="authConfig?.oidc_enabled"
-          type="button"
-          class="lp-btn-ghost w-full"
-          :disabled="submitting"
-          @click="onOidcLogin"
-        >
-          Continue with {{ authConfig.oidc_provider_name || 'SSO' }}
-        </button>
-
-        <button
-          v-if="authConfig?.dev_login_enabled"
-          type="button"
-          class="lp-btn-ghost w-full"
-          :disabled="submitting"
-          @click="onDevLogin"
-        >
-          Dev login
-        </button>
-
-        <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
+        <div class="space-y-2 border-t border-[var(--lp-line)] pt-4">
+          <button
+            v-if="authConfig?.oidc_enabled"
+            type="button"
+            class="lp-btn-ghost w-full"
+            :disabled="submitting"
+            @click="onOidcLogin"
+          >
+            {{ t('auth.ssoLogin') }}{{ authConfig?.oidc_provider_name ? ` (${authConfig.oidc_provider_name})` : '' }}
+          </button>
+          <button
+            v-if="authConfig?.dev_login_enabled"
+            type="button"
+            class="lp-btn-ghost w-full"
+            :disabled="submitting"
+            @click="onDevLogin"
+          >
+            {{ t('auth.devLogin') }}
+          </button>
+        </div>
       </div>
     </div>
   </div>

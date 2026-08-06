@@ -11,6 +11,8 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+const { t } = useI18n()
+
 const activeTab = ref<'yaml' | 'events'>('yaml')
 
 function copyYaml() {
@@ -39,7 +41,7 @@ function copyYaml() {
                 {{ metadata?.kind }} / {{ metadata?.name }}
               </h3>
               <p class="font-mono text-xs text-[var(--lp-muted)]">
-                Namespace: {{ metadata?.namespace || 'default' }}
+                {{ t('k8s.describe.namespace', { namespace: metadata?.namespace || 'default' }) }}
               </p>
             </div>
           </div>
@@ -61,7 +63,7 @@ function copyYaml() {
               :class="activeTab === 'yaml' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)]' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
               @click="activeTab = 'yaml'"
             >
-              YAML Definition
+              {{ t('k8s.describe.yamlTab') }}
             </button>
             <button
               type="button"
@@ -69,7 +71,7 @@ function copyYaml() {
               :class="activeTab === 'events' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)]' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
               @click="activeTab = 'events'"
             >
-              Events History ({{ metadata?.events.length || 0 }})
+              {{ t('k8s.describe.eventsTab', { count: metadata?.events.length || 0 }) }}
             </button>
           </div>
           <button
@@ -79,7 +81,7 @@ function copyYaml() {
             @click="copyYaml"
           >
             <span class="material-symbols-outlined text-sm">content_copy</span>
-            Copy YAML
+            {{ t('k8s.describe.copyYaml') }}
           </button>
         </div>
 
@@ -87,26 +89,26 @@ function copyYaml() {
         <div class="flex-1 overflow-y-auto p-6 font-mono text-xs">
           <div v-if="loading" class="flex h-40 items-center justify-center text-[var(--lp-muted)]">
             <span class="material-symbols-outlined animate-spin text-2xl mr-2">sync</span>
-            Fetching kubectl describe metadata…
+            {{ t('k8s.describe.loading') }}
           </div>
 
           <!-- YAML View -->
-          <div v-else-if="activeTab === 'yaml'" class="rounded-xl border border-[var(--lp-line)] bg-black/80 p-4 text-emerald-300 font-mono overflow-x-auto shadow-inner leading-relaxed">
-            <pre>{{ metadata?.manifest_yaml || '# No YAML definition found' }}</pre>
+          <div v-else-if="activeTab === 'yaml'" class="lp-console rounded-xl border border-[var(--lp-line)] p-4 font-mono overflow-x-auto shadow-inner leading-relaxed">
+            <pre class="lp-console-line-ok">{{ metadata?.manifest_yaml || t('k8s.describe.noYaml') }}</pre>
           </div>
 
           <!-- Events Table -->
           <div v-else-if="activeTab === 'events'" class="space-y-3">
             <div v-if="!metadata?.events.length" class="text-center text-[var(--lp-muted)] py-8">
-              No recent Kubernetes control plane events recorded.
+              {{ t('k8s.describe.noEvents') }}
             </div>
             <table v-else class="w-full text-left border-collapse font-mono text-xs">
               <thead>
                 <tr class="border-b border-[var(--lp-line)] text-[var(--lp-muted)]">
-                  <th class="py-2">Type</th>
-                  <th class="py-2">Reason</th>
-                  <th class="py-2">Message</th>
-                  <th class="py-2 text-right">Age</th>
+                  <th class="py-2">{{ t('k8s.describe.colType') }}</th>
+                  <th class="py-2">{{ t('k8s.describe.colReason') }}</th>
+                  <th class="py-2">{{ t('k8s.describe.colMessage') }}</th>
+                  <th class="py-2 text-right">{{ t('k8s.describe.colAge') }}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-[var(--lp-line)]/50">

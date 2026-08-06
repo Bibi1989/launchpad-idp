@@ -35,6 +35,7 @@ const emit = defineEmits<{
 }>()
 
 const { readWorkspaceFile, writeWorkspaceFile, deleteWorkspacePath, inspectImage } = useProvisioning()
+const { t } = useI18n()
 
 const loading = ref(false)
 const saving = ref(false)
@@ -584,19 +585,19 @@ onBeforeUnmount(() => {
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <h1 class="truncate text-lg font-semibold text-[var(--lp-text)]">
-            {{ selectedPath?.split('/').pop() || 'Structured infra editor' }}
+            {{ selectedPath?.split('/').pop() || t('manifest.configurator.defaultTitle') }}
           </h1>
           <span
             v-if="supported"
             class="rounded border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-accent)]"
           >
-            Mapped
+            {{ t('manifest.configurator.mapped') }}
           </span>
           <span
             v-else-if="isRawEditor"
             class="rounded border border-[var(--lp-line)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]"
           >
-            IDE
+            {{ t('manifest.configurator.ide') }}
           </span>
         </div>
       </div>
@@ -608,7 +609,7 @@ onBeforeUnmount(() => {
           @click="showAiAnalysis = true"
         >
           <span class="material-symbols-outlined text-sm">auto_awesome</span>
-          AI analyze
+          {{ t('manifest.configurator.aiAnalyze') }}
         </button>
         <button
           type="button"
@@ -617,7 +618,7 @@ onBeforeUnmount(() => {
           @click="saveChanges"
         >
           <span class="material-symbols-outlined text-sm">save</span>
-          {{ saving ? 'Saving…' : 'Save changes' }}
+          {{ saving ? t('common.saving') : t('manifest.configurator.saveChanges') }}
         </button>
         <div class="relative" @click.stop>
           <button
@@ -625,7 +626,7 @@ onBeforeUnmount(() => {
             class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/25 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
             :aria-expanded="actionsMenuOpen"
             aria-haspopup="menu"
-            aria-label="More file actions"
+            :aria-label="t('manifest.configurator.moreActions')"
             @click="toggleActionsMenu"
           >
             <span class="material-symbols-outlined text-xl">more_vert</span>
@@ -645,7 +646,7 @@ onBeforeUnmount(() => {
               <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">
                 {{ copiedFile ? 'check' : 'content_copy' }}
               </span>
-              {{ copiedFile ? 'Copied' : 'Copy' }}
+              {{ copiedFile ? t('common.copied') : t('common.copy') }}
             </button>
             <button
               type="button"
@@ -655,7 +656,7 @@ onBeforeUnmount(() => {
               @click="downloadActiveFile(); closeActionsMenu()"
             >
               <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">download</span>
-              Download
+              {{ t('common.download') }}
             </button>
             <button
               type="button"
@@ -665,7 +666,7 @@ onBeforeUnmount(() => {
               @click="discardChanges(); closeActionsMenu()"
             >
               <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">undo</span>
-              Discard
+              {{ t('manifest.configurator.discard') }}
             </button>
             <div class="my-1 border-t border-[var(--lp-line)]" role="separator" />
             <button
@@ -676,7 +677,7 @@ onBeforeUnmount(() => {
               @click="requestDeleteSelectedFile(); closeActionsMenu()"
             >
               <span class="material-symbols-outlined text-base">delete</span>
-              {{ deleting ? 'Deleting…' : 'Delete file' }}
+              {{ deleting ? t('manifest.configurator.deleting') : t('manifest.configurator.deleteFile') }}
             </button>
           </div>
         </div>
@@ -685,10 +686,10 @@ onBeforeUnmount(() => {
 
     <div class="flex-1 overflow-y-auto px-5 py-6">
       <div v-if="!selectedPath" class="rounded-xl border border-dashed border-[var(--lp-line)] px-6 py-10 text-center text-sm text-[var(--lp-muted)]">
-        Select an infra file from the sidebar to configure.
+        {{ t('manifest.configurator.selectSidebar') }}
       </div>
       <div v-else-if="loading" class="text-sm text-[var(--lp-muted)]">
-        Loading file…
+        {{ t('manifest.configurator.loadingFile') }}
       </div>
       <div
         v-else-if="isRawEditor"
@@ -701,7 +702,7 @@ onBeforeUnmount(() => {
             class="min-h-0 flex-1"
           />
           <template #fallback>
-            <p class="p-6 text-sm text-[var(--lp-muted)]">Loading editor…</p>
+            <p class="p-6 text-sm text-[var(--lp-muted)]">{{ t('manifest.configurator.loadingEditor') }}</p>
           </template>
         </ClientOnly>
       </div>
@@ -711,7 +712,7 @@ onBeforeUnmount(() => {
         <section v-if="isNamespace" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">folder</span>
-            <h3 class="lp-label">Namespace</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.namespace') }}</h3>
           </div>
           <label class="block max-w-md space-y-2">
             <span class="lp-label">Namespace name</span>
@@ -723,7 +724,7 @@ onBeforeUnmount(() => {
         <section v-if="isHpa" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">speed</span>
-            <h3 class="lp-label">Horizontal Pod Autoscaler</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.hpa') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -749,7 +750,7 @@ onBeforeUnmount(() => {
         <section v-if="isVpa" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">height</span>
-            <h3 class="lp-label">Vertical Pod Autoscaler</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.vpa') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -772,7 +773,7 @@ onBeforeUnmount(() => {
         <section v-if="isPdb" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">shield</span>
-            <h3 class="lp-label">Pod Disruption Budget</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.pdb') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -794,7 +795,7 @@ onBeforeUnmount(() => {
         <section v-if="isIngress" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">public</span>
-            <h3 class="lp-label">Ingress</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.ingress') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -841,7 +842,7 @@ onBeforeUnmount(() => {
         <section v-if="isDataMap" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">{{ isSecret ? 'key' : 'data_object' }}</span>
-            <h3 class="lp-label">{{ isSecret ? 'Secret data' : 'ConfigMap data' }}</h3>
+            <h3 class="lp-label">{{ isSecret ? t('manifest.configurator.sections.secret') : t('manifest.configurator.sections.configMap') }}</h3>
           </div>
           <label class="block max-w-md space-y-2">
             <span class="lp-label">Resource name</span>
@@ -869,7 +870,7 @@ onBeforeUnmount(() => {
         <section v-if="isServiceAccount" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">badge</span>
-            <h3 class="lp-label">ServiceAccount</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.serviceAccount') }}</h3>
           </div>
           <label class="block max-w-md space-y-2">
             <span class="lp-label">Name</span>
@@ -881,7 +882,7 @@ onBeforeUnmount(() => {
         <section v-if="isNetworkPolicy" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">firewall</span>
-            <h3 class="lp-label">NetworkPolicy</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.networkPolicy') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -899,7 +900,7 @@ onBeforeUnmount(() => {
         <section v-if="isResourceQuota" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">pie_chart</span>
-            <h3 class="lp-label">ResourceQuota</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.resourceQuota') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -925,7 +926,7 @@ onBeforeUnmount(() => {
         <section v-if="isLimitRange" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">straighten</span>
-            <h3 class="lp-label">LimitRange</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.limitRange') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -947,7 +948,7 @@ onBeforeUnmount(() => {
         <section v-if="isDeployment || isService || isHelm" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">sell</span>
-            <h3 class="lp-label">{{ isService ? 'Service ↔ Deployment link' : 'Workload identity' }}</h3>
+            <h3 class="lp-label">{{ isService ? t('manifest.configurator.sections.serviceLink') : t('manifest.configurator.sections.workloadIdentity') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label v-if="!isHelm" class="block space-y-2">
@@ -1035,7 +1036,7 @@ onBeforeUnmount(() => {
         <section v-if="isDeployment || isHelm" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">view_in_ar</span>
-            <h3 class="lp-label">{{ isDeployment ? 'App container' : 'Container configuration' }}</h3>
+            <h3 class="lp-label">{{ isDeployment ? t('manifest.configurator.sections.appContainer') : t('manifest.configurator.sections.containerConfig') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -1146,7 +1147,7 @@ onBeforeUnmount(() => {
         <section v-if="isService || isHelm" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">hub</span>
-            <h3 class="lp-label">Networking</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.networking') }}</h3>
           </div>
           <div class="space-y-4">
             <div class="space-y-2">
@@ -1236,7 +1237,7 @@ onBeforeUnmount(() => {
         <section v-if="isDeployment" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">lan</span>
-            <h3 class="lp-label">Container port</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.containerPort') }}</h3>
           </div>
           <label class="block max-w-xs space-y-2">
             <span class="lp-label">containerPort</span>
@@ -1261,7 +1262,7 @@ onBeforeUnmount(() => {
           <div class="flex items-center justify-between gap-3 border-b border-[var(--lp-line)] pb-2">
             <div class="flex items-center gap-2">
               <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">key</span>
-              <h3 class="lp-label">Environment variables</h3>
+              <h3 class="lp-label">{{ t('manifest.configurator.sections.envVars') }}</h3>
             </div>
             <button type="button" class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide" @click="addEnvVar">
               <span class="material-symbols-outlined text-sm">add</span>
@@ -1293,7 +1294,7 @@ onBeforeUnmount(() => {
         <section v-if="isProvision" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">settings_ethernet</span>
-            <h3 class="lp-label">Infrastructure provisioning</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.provision') }}</h3>
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
@@ -1328,7 +1329,7 @@ onBeforeUnmount(() => {
         <section v-if="isCi" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
             <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">integration_instructions</span>
-            <h3 class="lp-label">CI/CD pipeline</h3>
+            <h3 class="lp-label">{{ t('manifest.configurator.sections.cicd') }}</h3>
           </div>
           <div class="space-y-4">
             <div class="grid gap-4 sm:grid-cols-2">
@@ -1501,7 +1502,7 @@ onBeforeUnmount(() => {
     <footer class="flex shrink-0 items-center border-t border-[var(--lp-line)] bg-[var(--lp-panel-2)]/70 px-5 py-3">
       <p class="font-mono text-xs text-[var(--lp-muted)]">
         <span v-if="statusMessage" class="text-[var(--lp-ok)]">{{ statusMessage }}</span>
-        <span v-else>{{ hasChanges ? 'Unsaved changes' : 'No pending changes' }}</span>
+        <span v-else>{{ hasChanges ? t('manifest.configurator.unsavedChanges') : t('manifest.configurator.noPendingChanges') }}</span>
       </p>
     </footer>
 
@@ -1517,10 +1518,10 @@ onBeforeUnmount(() => {
 
     <ConfirmDialog
       v-model:open="confirmDeleteOpen"
-      title="Delete file?"
-      :message="selectedPath ? `Delete “${selectedPath}” from this workspace? This cannot be undone.` : ''"
-      confirm-label="Yes, delete"
-      cancel-label="No"
+      :title="t('manifest.configurator.deleteTitle')"
+      :message="selectedPath ? t('workspaceIde.dialogs.deletePathMessage', { path: selectedPath }) : ''"
+      :confirm-label="t('common.confirmDelete')"
+      :cancel-label="t('common.no')"
       :busy="deleting"
       @confirm="deleteSelectedFile"
     />

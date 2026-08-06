@@ -5,6 +5,7 @@ definePageMeta({
   layout: false,
 })
 
+const { t } = useI18n()
 const route = useRoute()
 const config = useRuntimeConfig()
 const { token } = useAuth()
@@ -16,12 +17,12 @@ onMounted(async () => {
   const state = typeof route.query.state === 'string' ? route.query.state : null
   const expected = import.meta.client ? sessionStorage.getItem('launchpad_oidc_state') : null
   if (!code || !state) {
-    error.value = 'Missing OIDC code or state'
+    error.value = t('auth.missingOidc')
     completing.value = false
     return
   }
   if (expected && expected !== state) {
-    error.value = 'OIDC state mismatch - restart login'
+    error.value = t('auth.oidcStateMismatch')
     completing.value = false
     return
   }
@@ -36,7 +37,7 @@ onMounted(async () => {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => null)
-      throw new Error(body?.error?.message ?? 'OIDC callback failed')
+      throw new Error(body?.error?.message ?? t('auth.callbackFailed'))
     }
     const payload = (await response.json()) as TokenResponse
     if (import.meta.client) {
@@ -48,7 +49,7 @@ onMounted(async () => {
     applyFromTokenResponse(payload)
     await navigateTo('/home')
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'OIDC callback failed'
+    error.value = err instanceof Error ? err.message : t('auth.callbackFailed')
   } finally {
     completing.value = false
   }
@@ -58,11 +59,11 @@ onMounted(async () => {
 <template>
   <div class="flex min-h-screen items-center justify-center px-6">
     <div class="lp-glass max-w-md space-y-3 rounded-2xl p-6 text-center">
-      <p class="text-lg font-semibold">Completing sign-in…</p>
-      <p v-if="completing" class="text-sm text-[var(--lp-muted)]">Exchanging OIDC authorization code</p>
+      <p class="text-lg font-semibold">{{ t('auth.callbackTitle') }}</p>
+      <p v-if="completing" class="text-sm text-[var(--lp-muted)]">{{ t('auth.callbackBlurb') }}</p>
       <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
       <NuxtLink v-if="error" to="/login" class="text-sm text-[var(--lp-accent)] hover:underline">
-        Back to login
+        {{ t('auth.backToLogin') }}
       </NuxtLink>
     </div>
   </div>

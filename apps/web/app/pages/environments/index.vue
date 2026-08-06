@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { OrgCostSummary } from '~/types/auth'
 
+const { t } = useI18n()
 const { environments, loading, error, refresh, destroy, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
 const { activeOrgId, fetchOrgCosts } = useOrgs()
 const toast = useToast()
@@ -16,16 +17,29 @@ function envName(id: string) {
   return environments.value.find((env) => env.id === id)?.name ?? 'environment'
 }
 
+function consoleLineClass(line: string): string {
+  const upper = line.toUpperCase()
+  if (upper.includes('FAILED') || upper.includes('ERROR')) return 'lp-console-line-danger'
+  if (upper.includes('WARN')) return 'lp-console-line-warn'
+  if (upper.includes('RUNNING') || upper.includes('SUCCESS') || upper.includes(' OK')) {
+    return 'lp-console-line-ok'
+  }
+  if (upper.includes('PROVISIONING') || upper.includes('SYNC') || upper.includes('INFO')) {
+    return 'lp-console-line-info'
+  }
+  return 'lp-console-line'
+}
+
 const { define } = useAsyncAction()
 
 const pauseAction = define((id: string) => pauseEnvironment(id), {
-  success: (env) => ({ title: 'Environment paused', message: `${env.name} was paused.` }),
-  error: (err) => ({ title: 'Pause failed', message: toastError(err, 'Could not pause the environment.') }),
+  success: (env) => ({ title: t('environments.toasts.paused'), message: `${env.name} was paused.` }),
+  error: (err) => ({ title: t('environments.toasts.pauseFailed'), message: toastError(err, t('common.failed')) }),
 })
 
 const resumeAction = define((id: string) => resumeEnvironment(id), {
-  success: (env) => ({ title: 'Environment resumed', message: `${env.name} is resuming.` }),
-  error: (err) => ({ title: 'Resume failed', message: toastError(err, 'Could not resume the environment.') }),
+  success: (env) => ({ title: t('environments.toasts.resumed'), message: `${env.name} is resuming.` }),
+  error: (err) => ({ title: t('environments.toasts.resumeFailed'), message: toastError(err, t('common.failed')) }),
 })
 
 const pendingDestroyName = computed(() => {
@@ -144,9 +158,9 @@ async function onDestroy() {
     await destroy(id)
     await refresh()
     await loadOrgCosts()
-    toast.success('Teardown queued', `${name} is being destroyed.`)
+    toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)
   } catch (err) {
-    toast.error('Destroy failed', toastError(err, `Could not destroy ${name}.`))
+    toast.error(t('environments.toasts.destroyFailed'), toastError(err, t('common.failed')))
   } finally {
     destroyingId.value = null
   }
@@ -159,9 +173,9 @@ async function onRetry(id: string) {
     const updated = await retryProvision(id)
     onCardUpdate({ id: updated.id, status: updated.status })
     await refresh()
-    toast.info('Retrying provision', `${envName(id)} is provisioning again.`)
+    toast.info(t('environments.actions.retrying'), `${envName(id)} is provisioning again.`)
   } catch (err) {
-    toast.error('Retry failed', toastError(err, 'Could not retry provisioning.'))
+    toast.error(t('common.failed'), toastError(err, t('common.failed')))
   } finally {
     retryingId.value = null
   }
@@ -185,17 +199,17 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
     <!-- Metrics banner -->
     <section class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5 animate-fade-up">
       <div class="lp-glass rounded-xl p-4">
-        <p class="lp-label">Active Environments</p>
+        <p class="lp-label">{{ t('environments.index.title') }}</p>
         <div class="mt-2 flex items-baseline gap-2">
           <span class="text-3xl font-bold tracking-tight">{{ activeEnvs.length }}</span>
           <span class="font-mono text-xs text-[var(--lp-ok)]">
-            ● {{ environments.length }} total
+            ● {{ t('environments.index.totalCount', { count: environments.length }) }}
           </span>
         </div>
       </div>
 
       <div class="lp-glass rounded-xl border-l-2 border-l-[var(--lp-accent)] p-4">
-        <p class="lp-label">Est. Hourly Spend</p>
+        <p class="lp-label">{{ t('environments.index.estHourlySpend') }}</p>
         <div class="mt-2 flex items-baseline gap-1">
           <span class="text-3xl font-bold tracking-tight text-[var(--lp-accent)]">${{ hourlySpend }}</span>
           <span class="text-sm text-[var(--lp-muted)]">/hr</span>
@@ -206,7 +220,7 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
         class="lp-glass rounded-xl p-4"
         :class="softCapExceeded ? 'border-l-2 border-l-[var(--lp-danger)]' : ''"
       >
-        <p class="lp-label">Org Cloud Accrued</p>
+        <p class="lp-label">{{ t('environments.index.orgCloudAccrued') }}</p>
         <div class="mt-2 flex items-baseline gap-1">
           <span
             class="text-3xl font-bold tracking-tight"
@@ -219,7 +233,7 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
       </div>
 
       <div class="lp-glass rounded-xl p-4">
-        <p class="lp-label">Attention</p>
+        <p class="lp-label">{{ t('environments.index.attention') }}</p>
         <div class="mt-2 flex items-baseline gap-2">
           <span
             class="text-3xl font-bold tracking-tight"
@@ -227,19 +241,19 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
           >
             {{ failedEnvs.length }}
           </span>
-          <span class="text-sm text-[var(--lp-muted)]">failed</span>
+          <span class="text-sm text-[var(--lp-muted)]">{{ t('environments.index.failedLabel') }}</span>
         </div>
       </div>
 
       <div class="lp-glass rounded-xl p-4">
-        <p class="lp-label">Control Plane</p>
+        <p class="lp-label">{{ t('environments.index.controlPlane') }}</p>
         <div class="mt-2 flex items-center gap-3">
           <div class="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--lp-line)] bg-[var(--lp-panel-2)]">
             <span class="material-symbols-outlined text-[var(--lp-accent)] text-base">cloud</span>
           </div>
           <div>
-            <p class="text-sm font-medium">{{ providers }} namespace group{{ providers === 1 ? '' : 's' }}</p>
-            <p class="text-xs text-[var(--lp-muted)]">Ephemeral K8s targets</p>
+            <p class="text-sm font-medium">{{ providers }} {{ providers === 1 ? t('environments.index.namespaceGroup') : t('environments.index.namespaceGroups') }}</p>
+            <p class="text-xs text-[var(--lp-muted)]">{{ t('environments.index.ephemeralTargets') }}</p>
           </div>
         </div>
       </div>
@@ -248,32 +262,32 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
     <!-- Live environments -->
     <section class="space-y-4 animate-fade-up [animation-delay:80ms]">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <h2 class="text-xl font-semibold">Live Environments</h2>
+        <h2 class="text-xl font-semibold">{{ t('environments.index.live') }}</h2>
         <div class="flex items-center gap-2">
           <button type="button" class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide" @click="refresh()">
             <span class="material-symbols-outlined text-sm">refresh</span>
-            Refresh
+            {{ t('common.refresh') }}
           </button>
           <button type="button" class="lp-btn-primary py-1.5 text-xs uppercase tracking-wide" @click="navigateTo('/launch')">
             <span class="material-symbols-outlined text-sm">rocket_launch</span>
-            Launch preview
+            {{ t('environments.index.launchPreview') }}
           </button>
         </div>
       </div>
 
       <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
-      <p v-else-if="loading" class="text-sm text-[var(--lp-muted)]">Loading environments…</p>
+      <p v-else-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('environments.index.loading') }}</p>
       <div
         v-else-if="liveEnvironments.length === 0"
         class="rounded-xl border border-dashed border-[var(--lp-line)] px-6 py-12 text-center"
       >
         <span class="material-symbols-outlined mb-3 text-4xl text-[var(--lp-muted)]">deployed_code</span>
-        <p class="text-sm text-[var(--lp-muted)]">No active environments yet.</p>
+        <p class="text-sm text-[var(--lp-muted)]">{{ t('environments.index.empty') }}</p>
         <NuxtLink to="/launch" class="lp-btn-primary mt-4 inline-flex">
-          Launch your first preview
+          {{ t('environments.index.firstPreview') }}
         </NuxtLink>
         <button type="button" class="mt-3 block w-full text-xs text-[var(--lp-muted)] hover:underline" @click="createEnvOpen = true">
-          Or use advanced git form
+          {{ t('environments.index.advancedForm') }}
         </button>
       </div>
 
@@ -294,10 +308,10 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
 
     <ConfirmDialog
       :open="confirmDestroyId !== null"
-      title="Destroy environment?"
-      :message="`Destroy preview “${pendingDestroyName}”? Kubernetes resources for this environment will be torn down. This cannot be undone.`"
-      confirm-label="Yes, destroy"
-      cancel-label="No"
+      :title="t('environments.destroy.title')"
+      :message="t('environments.destroy.message', { name: pendingDestroyName })"
+      :confirm-label="t('environments.destroy.confirm')"
+      :cancel-label="t('environments.destroy.cancel')"
       :busy="destroyingId !== null"
       @update:open="(value) => { if (!value) confirmDestroyId = null }"
       @confirm="onDestroy"
@@ -307,7 +321,7 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
     <section class="lp-glass overflow-hidden rounded-xl animate-fade-up [animation-delay:140ms]">
       <div class="flex items-center justify-between bg-[var(--lp-panel-2)] px-4 py-2">
         <div class="flex items-center gap-4">
-          <span class="lp-label text-white/60">System Logs</span>
+          <span class="lp-label text-[var(--lp-muted)]">{{ t('environments.index.systemLogs') }}</span>
           <div class="flex gap-1.5">
             <span class="h-2 w-2 rounded-full bg-[var(--lp-danger)]" />
             <span class="h-2 w-2 rounded-full bg-[var(--lp-warn)]" />
@@ -316,20 +330,15 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
         </div>
         <span class="font-mono text-[10px] text-[var(--lp-muted)]">control-plane</span>
       </div>
-      <div class="h-44 overflow-y-auto bg-black/70 p-4 font-mono text-xs leading-6">
+      <div class="lp-console h-44 overflow-y-auto p-4 font-mono text-xs leading-6">
         <p
           v-for="(line, idx) in recentLogLines"
           :key="idx"
-          :class="{
-            'text-[var(--lp-ok)]': line.includes('RUNNING') || line.includes('SUCCESS'),
-            'text-[var(--lp-danger)]': line.includes('FAILED') || line.includes('WARN'),
-            'text-[var(--lp-accent)]': line.includes('PROVISIONING') || line.includes('SYNC'),
-            'text-[var(--lp-muted)]': !line.includes('RUNNING') && !line.includes('FAILED') && !line.includes('PROVISIONING'),
-          }"
+          :class="consoleLineClass(line)"
         >
           {{ line }}
         </p>
-        <p class="animate-pulse text-[var(--lp-muted)]">_</p>
+        <p class="animate-pulse lp-console-line">_</p>
       </div>
     </section>
   </div>

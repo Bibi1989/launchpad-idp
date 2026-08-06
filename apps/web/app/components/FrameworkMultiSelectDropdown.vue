@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { FRAMEWORK_OPTIONS, type FrameworkOption } from '~/types/provisioning'
 
+const { t } = useI18n()
+
 const props = withDefaults(
   defineProps<{
     modelValue?: FrameworkOption[]
@@ -11,7 +13,6 @@ const props = withDefaults(
   {
     modelValue: () => [],
     disabled: false,
-    placeholder: 'Select Frameworks / Stacks',
   },
 )
 
@@ -115,16 +116,19 @@ function selectAll() {
   emit('update:modelValue', FRAMEWORK_OPTIONS.map((f) => f.id))
 }
 
-const categories = [
-  { id: 'frontend', title: '⚡ Frontend & Meta-Frameworks' },
-  { id: 'python', title: '🐍 Python Backends' },
-  { id: 'node', title: '🟢 Node.js Backends' },
-  { id: 'backend', title: '☕ JVM, Systems & Generic' },
-]
+const defaultPlaceholder = computed(() => t('scaffold.frameworkDropdown.placeholder'))
+const resolvedPlaceholder = computed(() => props.placeholder ?? defaultPlaceholder.value)
+
+const categories = computed(() => [
+  { id: 'frontend', title: t('scaffold.frameworkDropdown.categories.frontend') },
+  { id: 'python', title: t('scaffold.frameworkDropdown.categories.python') },
+  { id: 'node', title: t('scaffold.frameworkDropdown.categories.node') },
+  { id: 'backend', title: t('scaffold.frameworkDropdown.categories.backend') },
+])
 
 const filteredGroups = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
-  return categories
+  return categories.value
     .map((cat) => {
       const items = FRAMEWORK_OPTIONS.filter(
         (item) =>
@@ -138,13 +142,13 @@ const filteredGroups = computed(() => {
 
 const selectedSummaryText = computed(() => {
   const list = props.modelValue || []
-  if (list.length === 0) return props.placeholder
+  if (list.length === 0) return resolvedPlaceholder.value
   if (list.length === 1) {
     const found = FRAMEWORK_OPTIONS.find((f) => f.id === list[0])
     return found ? found.label : list[0]
   }
   const first = FRAMEWORK_OPTIONS.find((f) => f.id === list[0])
-  return `${first ? first.label : list[0]} (+${list.length - 1} more)`
+  return `${first ? first.label : list[0]} (${t('scaffold.frameworkDropdown.more', { count: list.length - 1 })})`
 })
 </script>
 
@@ -188,7 +192,7 @@ const selectedSummaryText = computed(() => {
           <input
             v-model="searchQuery"
             type="text"
-            placeholder="Search FastAPI, React, Spring..."
+            :placeholder="t('scaffold.frameworkDropdown.searchPlaceholder')"
             class="lp-input text-xs py-1 px-2.5 w-full bg-[var(--lp-panel-2)]/60"
             @click.stop
           >
@@ -198,7 +202,7 @@ const selectedSummaryText = computed(() => {
               class="text-[var(--lp-accent)] hover:underline"
               @click="selectAll"
             >
-              All
+              {{ t('scaffold.frameworkDropdown.all') }}
             </button>
             <span class="text-[var(--lp-muted)]">•</span>
             <button
@@ -206,13 +210,13 @@ const selectedSummaryText = computed(() => {
               class="text-[var(--lp-muted)] hover:text-[var(--lp-text)]"
               @click="clearAll"
             >
-              Clear
+              {{ t('common.clear') }}
             </button>
           </div>
         </div>
 
         <div v-if="filteredGroups.length === 0" class="py-4 text-center text-xs text-[var(--lp-muted)]">
-          No matching frameworks found.
+          {{ t('scaffold.frameworkDropdown.noMatch') }}
         </div>
 
         <div v-for="group in filteredGroups" :key="group.id" class="space-y-1">

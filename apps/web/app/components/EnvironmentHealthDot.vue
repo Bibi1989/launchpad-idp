@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { Environment, EnvironmentStatus } from '~/types/environment'
 
+const { t } = useI18n()
+
 const props = withDefaults(
   defineProps<{
     /** Pass the whole environment, or the individual signals. */
@@ -43,40 +45,59 @@ const health = computed<Health>(() => {
   }
 })
 
-const META: Record<Health, { label: string; dot: string; text: string; pulse: boolean }> = {
-  healthy: { label: 'Healthy', dot: 'bg-[var(--lp-ok)]', text: 'text-[var(--lp-ok)]', pulse: false },
-  waking: { label: 'Waking up', dot: 'bg-[var(--lp-warn)]', text: 'text-[var(--lp-warn)]', pulse: true },
-  starting: { label: 'Starting', dot: 'bg-[var(--lp-warn)]', text: 'text-[var(--lp-warn)]', pulse: true },
-  paused: { label: 'Paused', dot: 'bg-amber-400', text: 'text-amber-400', pulse: false },
-  unhealthy: { label: 'Unhealthy', dot: 'bg-[var(--lp-danger)]', text: 'text-[var(--lp-danger)]', pulse: false },
-  stopped: { label: 'Stopped', dot: 'bg-[var(--lp-muted)]', text: 'text-[var(--lp-muted)]', pulse: false },
+const STYLE: Record<Health, { dot: string; text: string; pulse: boolean }> = {
+  healthy: { dot: 'bg-[var(--lp-ok)]', text: 'text-[var(--lp-ok)]', pulse: false },
+  waking: { dot: 'bg-[var(--lp-warn)]', text: 'text-[var(--lp-warn)]', pulse: true },
+  starting: { dot: 'bg-[var(--lp-warn)]', text: 'text-[var(--lp-warn)]', pulse: true },
+  paused: { dot: 'bg-amber-400', text: 'text-amber-400', pulse: false },
+  unhealthy: { dot: 'bg-[var(--lp-danger)]', text: 'text-[var(--lp-danger)]', pulse: false },
+  stopped: { dot: 'bg-[var(--lp-muted)]', text: 'text-[var(--lp-muted)]', pulse: false },
 }
 
-const meta = computed(() => META[health.value])
+const style = computed(() => STYLE[health.value])
+
+const label = computed(() => {
+  switch (health.value) {
+    case 'healthy':
+      return t('environments.health.healthy')
+    case 'waking':
+      return t('environments.health.waking')
+    case 'starting':
+      return t('environments.health.starting')
+    case 'paused':
+      return t('environments.health.paused')
+    case 'unhealthy':
+      return t('environments.health.unhealthy')
+    case 'stopped':
+      return t('environments.health.stopped')
+    default:
+      return t('environments.health.stopped')
+  }
+})
 </script>
 
 <template>
   <span
     class="inline-flex items-center gap-1.5"
-    :title="`Health: ${meta.label}`"
+    :title="label"
   >
     <span class="relative flex h-2 w-2">
       <span
-        v-if="meta.pulse"
+        v-if="style.pulse"
         class="absolute inline-flex h-full w-full animate-ping rounded-full opacity-70"
-        :class="meta.dot"
+        :class="style.dot"
       />
       <span
         class="relative inline-flex h-2 w-2 rounded-full"
-        :class="[meta.dot, health === 'healthy' ? 'shadow-[0_0_8px_currentColor]' : '']"
+        :class="[style.dot, health === 'healthy' ? 'shadow-[0_0_8px_currentColor]' : '']"
       />
     </span>
     <span
       v-if="showLabel"
       class="text-[11px] font-medium uppercase tracking-wide"
-      :class="meta.text"
+      :class="style.text"
     >
-      {{ meta.label }}
+      {{ label }}
     </span>
   </span>
 </template>

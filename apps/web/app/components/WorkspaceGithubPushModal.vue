@@ -16,6 +16,8 @@ const emit = defineEmits<{
   converted: [message: string]
 }>()
 
+const { t } = useI18n()
+
 const {
   getGithubAppStatus,
   getGitlabStatus,
@@ -258,9 +260,13 @@ const canPush = computed(() => {
 
 const publishLabel = computed(() => {
   if (provider.value === 'github') {
-    return githubRepoMode.value === 'create' ? 'Create & push to GitHub' : 'Push to GitHub'
+    return githubRepoMode.value === 'create'
+      ? t('workspaceIde.push.createPushGithub')
+      : t('workspaceIde.push.pushGithub')
   }
-  return gitlabRepoMode.value === 'create' ? 'Create & push to GitLab' : 'Push to GitLab'
+  return gitlabRepoMode.value === 'create'
+    ? t('workspaceIde.push.createPushGitlab')
+    : t('workspaceIde.push.pushGitlab')
 })
 
 const showCommitMessage = computed(() => {
@@ -278,10 +284,9 @@ const showCommitMessage = computed(() => {
     >
       <div class="w-full max-w-lg space-y-5 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-5 shadow-2xl">
         <header class="space-y-1">
-          <h2 class="text-lg font-semibold">Publish workspace</h2>
+          <h2 class="text-lg font-semibold">{{ t('workspaceIde.push.title') }}</h2>
           <p class="text-sm text-[var(--lp-muted)]">
-            Create a new repository or push to an existing one. If CI doesn’t match the target, it
-            is converted first (GitHub ↔ GitLab).
+            {{ t('workspaceIde.push.blurb') }}
           </p>
         </header>
 
@@ -304,19 +309,19 @@ const showCommitMessage = computed(() => {
           </button>
         </div>
 
-        <p v-if="loadingStatus" class="text-sm text-[var(--lp-muted)]">Loading…</p>
+        <p v-if="loadingStatus" class="text-sm text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
         <p v-if="convertNote" class="text-sm text-[var(--lp-ok)]">{{ convertNote }}</p>
 
         <template v-if="!loadingStatus && provider === 'github'">
           <p v-if="!githubApp?.installations.length" class="text-sm text-[var(--lp-warn)]">
-            Connect GitHub first -
-            <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">Integrations</NuxtLink>
+            {{ t('workspaceIde.push.connectGithub') }}
+            <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">{{ t('workspaceIde.push.integrations') }}</NuxtLink>
           </p>
           <template v-else>
             <GithubInstallationPicker
               v-model="pushInstallationId"
               :installations="githubApp.installations"
-              label="Installation"
+              :label="t('workspaceIde.push.installation')"
             />
 
             <div class="flex flex-wrap gap-2">
@@ -326,7 +331,7 @@ const showCommitMessage = computed(() => {
                 :class="githubRepoMode === 'create' ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]' : 'text-[var(--lp-muted)]'"
                 @click="githubRepoMode = 'create'; newRepoName = defaultRepoName()"
               >
-                Create new repository
+                {{ t('workspaceIde.push.createRepo') }}
               </button>
               <button
                 type="button"
@@ -334,7 +339,7 @@ const showCommitMessage = computed(() => {
                 :class="githubRepoMode === 'existing' ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]' : 'text-[var(--lp-muted)]'"
                 @click="githubRepoMode = 'existing'"
               >
-                Existing repository
+                {{ t('workspaceIde.push.existingRepo') }}
               </button>
             </div>
 
@@ -343,12 +348,10 @@ const showCommitMessage = computed(() => {
                 v-if="isPersonalGithubAccount"
                 class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/60 px-3 py-2 text-xs leading-5 text-[var(--lp-muted)]"
               >
-                Personal GitHub accounts can’t create new repos via App installation tokens.
-                Prefer <strong class="text-[var(--lp-text)]">Existing repository</strong>, or create
-                an empty repo on GitHub first. Organization installs can create repos directly.
+                {{ t('workspaceIde.push.personalGithubWarning') }}
               </p>
               <label class="block space-y-2">
-                <span class="lp-label">New repository name</span>
+                <span class="lp-label">{{ t('workspaceIde.push.newRepoName') }}</span>
                 <div class="flex gap-2">
                   <input
                     v-model="newRepoName"
@@ -361,11 +364,11 @@ const showCommitMessage = computed(() => {
                     class="lp-btn-ghost shrink-0 text-xs uppercase tracking-wide"
                     @click="useWorkspaceName"
                   >
-                    Use workspace name
+                    {{ t('workspaceIde.push.useWorkspaceName') }}
                   </button>
                 </div>
                 <p class="text-[11px] text-[var(--lp-muted)]">
-                  Creates under
+                  {{ t('workspaceIde.push.createsUnder') }}
                   <span class="font-mono text-[var(--lp-text)]">
                     {{ selectedInstallation?.account_login || '…' }}/{{ sanitizeRepoName(newRepoName) || '…' }}
                   </span>
@@ -373,12 +376,12 @@ const showCommitMessage = computed(() => {
               </label>
               <label class="flex items-center gap-2 text-sm text-[var(--lp-muted)]">
                 <input v-model="newRepoPrivate" type="checkbox" class="accent-[var(--lp-accent)]">
-                Private repository
+                {{ t('workspaceIde.push.privateRepo') }}
               </label>
             </template>
 
             <label v-else class="block space-y-2">
-              <span class="lp-label">Repository</span>
+              <span class="lp-label">{{ t('workspaceIde.push.repository') }}</span>
               <GithubRepoPicker
                 v-model="pushRepo"
                 :installation-id="pushInstallationId"
@@ -389,8 +392,8 @@ const showCommitMessage = computed(() => {
 
         <template v-else-if="!loadingStatus">
           <p v-if="!gitlabStatus?.connected" class="text-sm text-[var(--lp-warn)]">
-            Connect GitLab first -
-            <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">Integrations</NuxtLink>
+            {{ t('workspaceIde.push.connectGitlab') }}
+            <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">{{ t('workspaceIde.push.integrations') }}</NuxtLink>
           </p>
           <template v-else>
             <div class="flex flex-wrap gap-2">
@@ -400,7 +403,7 @@ const showCommitMessage = computed(() => {
                 :class="gitlabRepoMode === 'create' ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]' : 'text-[var(--lp-muted)]'"
                 @click="gitlabRepoMode = 'create'; newRepoName = defaultRepoName()"
               >
-                Create new project
+                {{ t('workspaceIde.push.createProject') }}
               </button>
               <button
                 type="button"
@@ -408,13 +411,13 @@ const showCommitMessage = computed(() => {
                 :class="gitlabRepoMode === 'existing' ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]' : 'text-[var(--lp-muted)]'"
                 @click="gitlabRepoMode = 'existing'"
               >
-                Existing project
+                {{ t('workspaceIde.push.existingProject') }}
               </button>
             </div>
 
             <template v-if="gitlabRepoMode === 'create'">
               <label class="block space-y-2">
-                <span class="lp-label">New project name</span>
+                <span class="lp-label">{{ t('workspaceIde.push.newProjectName') }}</span>
                 <div class="flex gap-2">
                   <input
                     v-model="newRepoName"
@@ -427,21 +430,21 @@ const showCommitMessage = computed(() => {
                     class="lp-btn-ghost shrink-0 text-xs uppercase tracking-wide"
                     @click="useWorkspaceName"
                   >
-                    Use workspace name
+                    {{ t('workspaceIde.push.useWorkspaceName') }}
                   </button>
                 </div>
               </label>
               <label class="flex items-center gap-2 text-sm text-[var(--lp-muted)]">
                 <input v-model="newRepoPrivate" type="checkbox" class="accent-[var(--lp-accent)]">
-                Private project
+                {{ t('workspaceIde.push.privateProject') }}
               </label>
             </template>
 
             <template v-else>
               <label class="block space-y-2">
-                <span class="lp-label">Project</span>
+                <span class="lp-label">{{ t('workspaceIde.push.project') }}</span>
                 <select v-model="gitlabProject" class="lp-input font-mono text-xs">
-                  <option value="" disabled>Select project</option>
+                  <option value="" disabled>{{ t('workspaceIde.push.selectProject') }}</option>
                   <option
                     v-for="item in gitlabProjects"
                     :key="item.id"
@@ -452,7 +455,7 @@ const showCommitMessage = computed(() => {
                 </select>
               </label>
               <label class="block space-y-2">
-                <span class="lp-label">Or path with namespace</span>
+                <span class="lp-label">{{ t('workspaceIde.push.orPath') }}</span>
                 <input
                   v-model="gitlabProject"
                   class="lp-input font-mono text-xs"
@@ -464,13 +467,13 @@ const showCommitMessage = computed(() => {
         </template>
 
         <label v-if="showCommitMessage" class="block space-y-2">
-          <span class="lp-label">Commit message</span>
+          <span class="lp-label">{{ t('workspaceIde.push.commitMessage') }}</span>
           <input v-model="pushMessage" class="lp-input">
         </label>
 
         <div class="flex justify-end gap-2">
           <button type="button" class="lp-btn-ghost text-xs uppercase tracking-wide" @click="close">
-            Cancel
+            {{ t('common.cancel') }}
           </button>
           <button
             type="button"
@@ -478,7 +481,7 @@ const showCommitMessage = computed(() => {
             :disabled="pushing || !canPush"
             @click="doPush"
           >
-            {{ pushing ? 'Publishing…' : publishLabel }}
+            {{ pushing ? t('workspaceIde.push.publishing') : publishLabel }}
           </button>
         </div>
       </div>

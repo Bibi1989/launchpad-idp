@@ -3,6 +3,7 @@ import type { AuditLogEntry, Environment, PreviewLaunchPayload } from '~/types/e
 
 type CloudProvider = Exclude<PreviewLaunchPayload['provider'], 'local'>
 
+const { t } = useI18n()
 const route = useRoute()
 const id = computed(() => String(route.params.id))
 const environmentId = computed(() => id.value || null)
@@ -22,15 +23,15 @@ const confirmDestroyOpen = ref(false)
 const { define } = useAsyncAction()
 
 const pauseAction = define(() => pauseEnvironment(environment.value!.id), {
-  success: (env) => ({ title: 'Environment paused', message: `${env.name} was paused.` }),
-  error: (err) => ({ title: 'Pause failed', message: toastError(err, 'Could not pause the environment.') }),
+  success: (env) => ({ title: t('environments.toasts.paused'), message: `${env.name} was paused.` }),
+  error: (err) => ({ title: t('environments.toasts.pauseFailed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; loadError.value = null },
   onError: (msg) => { loadError.value = msg },
 })
 
 const resumeAction = define(() => resumeEnvironment(environment.value!.id), {
-  success: (env) => ({ title: 'Environment resumed', message: `${env.name} is resuming.` }),
-  error: (err) => ({ title: 'Resume failed', message: toastError(err, 'Could not resume the environment.') }),
+  success: (env) => ({ title: t('environments.toasts.resumed'), message: `${env.name} is resuming.` }),
+  error: (err) => ({ title: t('environments.toasts.resumeFailed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; loadError.value = null },
   onError: (msg) => { loadError.value = msg },
 })
@@ -114,10 +115,10 @@ const canOpenApp = computed(() => {
 
 const openAppTitle = computed(() => {
   const env = environment.value
-  if (!env) return 'Open preview'
+  if (!env) return t('environments.detail.openPreview')
   const image = env.workload_image || 'workload'
   const port = env.node_port != null ? `NodePort ${env.node_port}` : env.preview_url
-  return `Open ${image} (${port})`
+  return t('environments.detail.openPreviewTitle', { image, port: port ?? '-' })
 })
 
 const isProvisioning = computed(() => environment.value?.status === 'PROVISIONING')
@@ -158,8 +159,8 @@ async function onAnalyze() {
 }
 
 const retryAction = define(() => retryProvision(environment.value!.id), {
-  success: (env) => ({ type: 'info', title: 'Retrying provision', message: `${env.name} is provisioning again.` }),
-  error: (err) => ({ title: 'Retry failed', message: toastError(err, 'Could not retry provisioning.') }),
+  success: (env) => ({ type: 'info', title: t('environments.actions.retrying'), message: `${env.name} is provisioning again.` }),
+  error: (err) => ({ title: t('common.failed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; loadError.value = null; connect(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
@@ -179,7 +180,7 @@ async function load(opts: { softAudits?: boolean } = {}) {
       auditsLoading.value = false
     }
   } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Failed to load environment'
+    loadError.value = err instanceof Error ? err.message : t('common.failed')
   }
 }
 
@@ -192,9 +193,8 @@ function toggleActionsMenu() {
 }
 
 const destroyAction = define(() => destroy(environment.value!.id), {
-  // Read the name before the result comes back mangled with a "--destroyed-" suffix.
-  success: () => ({ title: 'Teardown queued', message: `${environment.value?.name ?? 'Environment'} is being destroyed.` }),
-  error: (err) => ({ title: 'Destroy failed', message: toastError(err, 'Could not destroy the environment.') }),
+  success: () => ({ title: t('environments.toasts.destroyed'), message: `${environment.value?.name ?? 'Environment'} is being destroyed.` }),
+  error: (err) => ({ title: t('environments.toasts.destroyFailed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; connect(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
@@ -210,8 +210,8 @@ async function onDestroy() {
 }
 
 const extendAction = define(() => extendTtl(environment.value!.id, {}), {
-  success: (env) => ({ title: 'TTL extended', message: `${env.name} will live longer.` }),
-  error: (err) => ({ title: 'Extend failed', message: toastError(err, 'Could not extend the TTL.') }),
+  success: (env) => ({ title: t('environments.toasts.extended'), message: `${env.name} will live longer.` }),
+  error: (err) => ({ title: t('environments.toasts.extendFailed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; loadError.value = null },
   onError: (msg) => { loadError.value = msg },
 })
@@ -232,9 +232,9 @@ const scanDriftAction = define(
   },
   {
     success: (env) => env.drift_detected
-      ? { type: 'warning', title: 'Drift detected', message: 'Live cluster state differs from Launchpad.' }
-      : { title: 'No drift', message: 'Live state matches Launchpad.' },
-    error: (err) => ({ title: 'Drift scan failed', message: toastError(err, 'Could not scan for drift.') }),
+      ? { type: 'warning', title: t('environments.detail.driftWarning'), message: t('environments.detail.driftWarning') }
+      : { title: t('environments.toasts.driftOk'), message: t('environments.toasts.driftOk') },
+    error: (err) => ({ title: t('environments.toasts.driftFailed'), message: toastError(err, t('common.failed')) }),
     onSuccess: (env) => { environment.value = env; loadError.value = null },
     onError: (msg) => { loadError.value = msg },
   },
@@ -246,8 +246,8 @@ const promoteAction = define(
     credentials: { ...promoteCredentials },
   }),
   {
-    success: () => ({ title: 'Cloud preview launching', message: `Deploying to ${promoteForm.provider.toUpperCase()}.` }),
-    error: (err) => ({ title: 'Deploy failed', message: toastError(err, 'Could not launch the cloud preview.') }),
+    success: () => ({ title: t('environments.detail.launchCloudPreview'), message: t('environments.detail.deployingToCloud', { provider: promoteForm.provider.toUpperCase() }) }),
+    error: (err) => ({ title: t('environments.toasts.cloudFailed'), message: toastError(err, t('common.failed')) }),
     onSuccess: async (created) => {
       showPromote.value = false
       loadError.value = null
@@ -263,13 +263,13 @@ async function copyAppUrl() {
     await navigator.clipboard.writeText(appHref.value)
     copied.value = true
     closeActionsMenu()
-    toast.success('URL copied', 'App URL is on your clipboard.')
+    toast.success(t('environments.actions.copied'), t('environments.actions.copied'))
     setTimeout(() => {
       copied.value = false
     }, 2000)
   } catch {
-    loadError.value = 'Could not copy URL'
-    toast.error('Copy failed', 'Could not copy the app URL.')
+    loadError.value = t('common.failed')
+    toast.error(t('common.failed'), t('common.failed'))
   }
 }
 
@@ -331,7 +331,7 @@ onMounted(() => {
       class="inline-flex items-center gap-2 font-mono text-xs uppercase tracking-wide text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
     >
       <span class="material-symbols-outlined text-sm">arrow_back</span>
-      Environments
+      {{ t('environments.detail.crumb') }}
     </NuxtLink>
 
     <p v-if="loadError" class="text-sm text-[var(--lp-danger)]">{{ loadError }}</p>
@@ -341,20 +341,20 @@ onMounted(() => {
         v-if="environment.ttl_warning"
         class="rounded-lg border border-[var(--lp-warn)]/40 bg-[var(--lp-warn)]/10 px-4 py-3 text-sm text-[var(--lp-warn)]"
       >
-        TTL under 2 hours - extend now or this preview will be reaped.
+        {{ t('environments.detail.ttlWarning') }}
       </p>
       <p
         v-if="environment.soft_cost_cap_exceeded"
         class="rounded-lg border border-[var(--lp-danger)]/40 bg-[var(--lp-danger)]/10 px-4 py-3 text-sm text-[var(--lp-danger)]"
       >
-        Soft cost cap reached for this environment. Destroy it or raise
+        {{ t('environments.detail.softCostCapWarning') }}
         <code class="font-mono text-xs">PREVIEW_SOFT_COST_CAP</code>.
       </p>
       <p
         v-if="environment.drift_detected"
         class="rounded-lg border border-[var(--lp-warn)]/40 bg-[var(--lp-warn)]/10 px-4 py-3 text-sm text-[var(--lp-warn)]"
       >
-        Configuration drift detected - live cluster state differs from Launchpad.
+        {{ t('environments.detail.driftWarning') }}
         <span v-if="environment.drift_summary" class="mt-1 block font-mono text-xs">
           {{ environment.drift_summary }}
         </span>
@@ -387,7 +387,7 @@ onMounted(() => {
                 @click="onOpenAppClick"
               >
                 <span class="material-symbols-outlined text-base">open_in_new</span>
-                Open app
+                {{ t('environments.detail.openApp') }}
                 <span v-if="environment.node_port" class="font-mono text-xs opacity-80">
                   :{{ environment.node_port }}
                 </span>
@@ -397,10 +397,10 @@ onMounted(() => {
                 type="button"
                 class="lp-btn-primary whitespace-nowrap opacity-60"
                 disabled
-                title="App URL is available when status is Running"
+                :title="t('environments.detail.openAppWhenRunning')"
               >
                 <span class="material-symbols-outlined text-base">hourglass_top</span>
-                App provisioning…
+                {{ t('environments.detail.provisioning') }}
               </button>
               <button
                 v-if="environment.status === 'RUNNING'"
@@ -410,7 +410,7 @@ onMounted(() => {
                 @click="pauseAction.run()"
               >
                 <span class="material-symbols-outlined text-base">pause</span>
-                {{ pauseAction.pending ? 'Pausing…' : 'Pause' }}
+                {{ pauseAction.pending ? t('environments.actions.pausing') : t('environments.actions.pause') }}
               </button>
               <button
                 v-if="canResume"
@@ -420,15 +420,15 @@ onMounted(() => {
                 @click="resumeAction.run()"
               >
                 <span class="material-symbols-outlined text-base">play_arrow</span>
-                {{ resumeAction.pending ? 'Resuming…' : 'Resume' }}
+                {{ resumeAction.pending ? t('environments.actions.resuming') : t('environments.actions.resume') }}
               </button>
               <span
                 v-else-if="displayStatus === 'EXPIRED'"
                 class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[var(--lp-line)] px-3 py-2 text-sm text-[var(--lp-muted)]"
-                title="TTL expired - resume is disabled"
+                :title="t('environments.detail.ttlExpiredResumeDisabled')"
               >
                 <span class="material-symbols-outlined text-base">timer_off</span>
-                Expired
+                {{ t('environments.actions.expired') }}
               </span>
               <button
                 v-if="canRetry"
@@ -438,7 +438,7 @@ onMounted(() => {
                 @click="retryAction.run()"
               >
                 <span class="material-symbols-outlined text-base">replay</span>
-                {{ retryAction.pending ? 'Retrying…' : 'Retry provision' }}
+                {{ retryAction.pending ? t('environments.actions.retrying') : t('environments.actions.retry') }}
               </button>
               <button
                 v-if="environment.status !== 'DESTROYED' && environment.status !== 'TEARDOWN_PENDING' && environment.status !== 'PROVISIONING'"
@@ -448,7 +448,7 @@ onMounted(() => {
                 @click="requestDestroy"
               >
                 <span class="material-symbols-outlined text-base">delete</span>
-                {{ destroyAction.pending ? 'Queuing teardown…' : 'Destroy' }}
+                {{ destroyAction.pending ? t('environments.actions.queuingTeardown') : t('environments.actions.destroy') }}
               </button>
             </div>
 
@@ -459,7 +459,7 @@ onMounted(() => {
                 class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/25 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
                 :aria-expanded="actionsMenuOpen"
                 aria-haspopup="menu"
-                aria-label="More actions"
+                :aria-label="t('common.actions')"
                 @click="toggleActionsMenu"
               >
                 <span class="material-symbols-outlined text-xl">more_vert</span>
@@ -477,7 +477,7 @@ onMounted(() => {
                   @click="copyAppUrl"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">content_copy</span>
-                  {{ copied ? 'Copied' : 'Copy URL' }}
+                  {{ copied ? t('environments.actions.copied') : t('environments.actions.copyUrl') }}
                 </button>
                 <button
                   v-if="canExtend"
@@ -488,7 +488,7 @@ onMounted(() => {
                   @click="extendAction.run(); closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">more_time</span>
-                  {{ extendAction.pending ? 'Extending…' : 'Extend TTL' }}
+                  {{ extendAction.pending ? t('environments.actions.extending') : t('environments.actions.extendTtl') }}
                 </button>
                 <button
                   v-if="canScanDrift"
@@ -499,7 +499,7 @@ onMounted(() => {
                   @click="scanDriftAction.run(); closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">difference</span>
-                  {{ scanDriftAction.pending ? 'Scanning…' : 'Scan drift' }}
+                  {{ scanDriftAction.pending ? t('environments.actions.scanning') : t('environments.actions.scanDrift') }}
                 </button>
                 <button
                   v-if="canAnalyze"
@@ -510,7 +510,7 @@ onMounted(() => {
                   @click="onAnalyze(); closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">psychology</span>
-                  {{ analyzing ? 'Analyzing…' : 'Analyze' }}
+                  {{ analyzing ? t('environments.actions.analyzing') : t('environments.actions.analyze') }}
                 </button>
                 <button
                   v-if="canPromote"
@@ -520,7 +520,7 @@ onMounted(() => {
                   @click="showPromote = !showPromote; closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">cloud_upload</span>
-                  Deploy to cloud
+                  {{ t('environments.detail.deployToCloud') }}
                 </button>
                 <a
                   :href="portalHref"
@@ -531,7 +531,7 @@ onMounted(() => {
                   @click="closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">monitoring</span>
-                  Status page
+                  {{ t('common.status') }}
                 </a>
               </div>
             </div>
@@ -543,8 +543,7 @@ onMounted(() => {
           class="space-y-4 border-b border-[var(--lp-line)] bg-[var(--lp-ink)]/30 px-5 py-4"
         >
           <p class="text-sm text-[var(--lp-muted)]">
-            Creates a <strong class="text-[var(--lp-text)]">new</strong> cloud preview from the same
-            template/repo. Your local environment keeps running until you destroy it.
+            {{ t('environments.detail.promoteBlurb') }}
           </p>
           <div class="flex flex-wrap gap-2">
             <button
@@ -572,13 +571,13 @@ onMounted(() => {
             :disabled="promoteAction.pending"
             @click="promoteAction.run()"
           >
-            {{ promoteAction.pending ? 'Launching cloud preview…' : 'Launch cloud preview' }}
+            {{ promoteAction.pending ? t('environments.detail.launchingCloud') : t('environments.detail.launchCloudPreview') }}
           </button>
         </div>
 
         <div class="grid gap-6 p-5 sm:grid-cols-2 lg:grid-cols-3">
           <div>
-            <p class="lp-label">App URL</p>
+            <p class="lp-label">{{ t('environments.detail.appUrl') }}</p>
             <a
               v-if="canOpenApp && appHref"
               :href="appHref"
@@ -589,12 +588,12 @@ onMounted(() => {
               {{ appHref }}
             </a>
             <p v-else-if="isProvisioning" class="mt-1 text-sm text-[var(--lp-muted)]">
-              Available when Running - watch logs below
+              {{ t('environments.detail.appUrlWhenRunning') }}
             </p>
-            <p v-else class="mt-1 text-sm text-[var(--lp-muted)]">Not available</p>
+            <p v-else class="mt-1 text-sm text-[var(--lp-muted)]">{{ t('common.notSet') }}</p>
           </div>
           <div>
-            <p class="lp-label">TTL remaining</p>
+            <p class="lp-label">{{ t('environments.detail.ttlRemaining') }}</p>
             <p
               class="mt-1 font-mono text-sm"
               :class="environment.ttl_warning ? 'text-[var(--lp-warn)]' : ''"
@@ -602,11 +601,11 @@ onMounted(() => {
               {{ remainingLabel }}
             </p>
             <p class="mt-0.5 text-xs text-[var(--lp-muted)]">
-              Expires {{ new Date(environment.ttl_expires_at).toLocaleString() }}
+              {{ t('environments.detail.expires') }} {{ new Date(environment.ttl_expires_at).toLocaleString() }}
             </p>
           </div>
           <div v-if="!isLocal">
-            <p class="lp-label">Cost to date</p>
+            <p class="lp-label">{{ t('environments.detail.costToDate') }}</p>
             <p class="mt-1 text-lg font-semibold text-[var(--lp-accent)]">
               ${{ environment.cost_accrued ?? '0.00' }}
             </p>
@@ -618,9 +617,9 @@ onMounted(() => {
             </p>
           </div>
           <div v-else>
-            <p class="lp-label">Cost</p>
+            <p class="lp-label">{{ t('environments.detail.costToDate') }}</p>
             <p class="mt-1 text-sm text-[var(--lp-muted)]">
-              Local shadow
+              {{ t('environments.detail.localShadow') }}
               <span class="font-mono"> ${{ environment.cost_accrued ?? '0.00' }}</span>
               <span v-if="environment.cost_source" class="opacity-80">
                 · {{ formatCostSource(environment.cost_source) }}
@@ -628,37 +627,37 @@ onMounted(() => {
             </p>
           </div>
           <div>
-            <p class="lp-label">Git repository</p>
+            <p class="lp-label">{{ t('environments.detail.gitRepo') }}</p>
             <p class="mt-1 break-all font-mono text-xs">{{ environment.git_repo_url }}</p>
           </div>
           <div>
-            <p class="lp-label">Git branch</p>
+            <p class="lp-label">{{ t('environments.detail.gitBranch') }}</p>
             <p class="mt-1 font-mono text-sm">{{ environment.git_branch }}</p>
           </div>
           <div v-if="environment.enable_postgres || environment.enable_redis">
-            <p class="lp-label">Ephemeral datastores</p>
+            <p class="lp-label">{{ t('environments.detail.datastores') }}</p>
             <div class="mt-1 flex flex-wrap gap-2">
               <span
                 v-if="environment.enable_postgres"
                 class="inline-flex items-center gap-1 rounded border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-300"
               >
                 <span class="material-symbols-outlined text-sm">database</span>
-                Postgres
+                {{ t('environments.detail.postgres') }}
               </span>
               <span
                 v-if="environment.enable_redis"
                 class="inline-flex items-center gap-1 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-300"
               >
                 <span class="material-symbols-outlined text-sm">memory</span>
-                Redis
+                {{ t('environments.detail.redis') }}
               </span>
             </div>
             <p class="mt-1 text-[10px] text-[var(--lp-muted)]">
-              Injected via <span class="font-mono">app-secrets</span> (DATABASE_URL / REDIS_URL)
+              {{ t('environments.detail.datastoresInjected') }}
             </p>
           </div>
           <div v-if="environment.stable_pr_url">
-            <p class="lp-label">Stable PR URL</p>
+            <p class="lp-label">{{ t('environments.detail.stablePrUrl') }}</p>
             <a
               :href="environment.stable_pr_url"
               class="mt-1 block break-all font-mono text-sm text-[var(--lp-accent)] hover:underline"
@@ -669,7 +668,7 @@ onMounted(() => {
             </a>
           </div>
           <div v-if="environment.github_pr_number">
-            <p class="lp-label">Linked PR</p>
+            <p class="lp-label">{{ t('environments.detail.linkedPr') }}</p>
             <a
               v-if="environment.github_pr_url"
               :href="environment.github_pr_url"
@@ -682,68 +681,62 @@ onMounted(() => {
             <p v-else class="mt-1 font-mono text-sm">#{{ environment.github_pr_number }}</p>
           </div>
           <div v-if="environment.template_id">
-            <p class="lp-label">Template</p>
+            <p class="lp-label">{{ t('environments.detail.template') }}</p>
             <p class="mt-1 font-mono text-sm">{{ environment.template_id }}</p>
           </div>
           <div v-if="environment.workload_image">
-            <p class="lp-label">Workload image</p>
+            <p class="lp-label">{{ t('environments.detail.workloadImage') }}</p>
             <p class="mt-1 break-all font-mono text-xs">{{ environment.workload_image }}</p>
           </div>
           <div v-if="environment.workspace_id">
-            <p class="lp-label">Linked workspace</p>
+            <p class="lp-label">{{ t('environments.detail.linkedWorkspace') }}</p>
             <NuxtLink
               :to="`/workspaces/${environment.workspace_id}`"
               class="mt-1 inline-block font-mono text-xs text-[var(--lp-accent)] hover:underline"
             >
-              Open workspace
+              {{ t('workspaces.index.open') }}
             </NuxtLink>
           </div>
           <div>
-            <p class="lp-label">Environment ID</p>
+            <p class="lp-label">{{ t('environments.detail.environmentId') }}</p>
             <p class="mt-1 break-all font-mono text-xs">{{ environment.id }}</p>
           </div>
         </div>
 
         <div class="border-t border-[var(--lp-line)] px-5 py-4">
-          <p class="lp-label mb-2">Git push rebuilds</p>
+          <p class="lp-label mb-2">{{ t('environments.detail.gitPushRebuilds') }}</p>
           <p class="text-sm text-[var(--lp-muted)]">
-            Push to
-            <span class="font-mono text-[var(--lp-text)]">{{ environment.git_branch }}</span>
-            on this repo to rebuild while the environment is active.
+            {{ t('environments.detail.gitPushRebuildActive', { branch: environment.git_branch }) }}
             <template v-if="environment.gitops_rebuild_enabled">
-              Webhook is configured -
-              <NuxtLink to="/docs#rebuild" class="text-[var(--lp-accent)] hover:underline">docs</NuxtLink>.
+              {{ t('environments.detail.webhookConfigured') }}
+              <NuxtLink to="/docs#rebuild" class="text-[var(--lp-accent)] hover:underline">{{ t('common.docs') }}</NuxtLink>.
             </template>
             <template v-else>
-              Set
-              <code class="font-mono text-xs text-[var(--lp-accent)]">WEBHOOK_SECRET</code>
-              and point GitHub at
-              <code class="font-mono text-xs">/api/v1/webhooks/github</code>
-              -
-              <NuxtLink to="/docs#rebuild" class="text-[var(--lp-accent)] hover:underline">docs</NuxtLink>.
+              {{ t('environments.detail.webhookSetup') }}
+              <NuxtLink to="/docs#rebuild" class="text-[var(--lp-accent)] hover:underline">{{ t('common.docs') }}</NuxtLink>.
             </template>
           </p>
           <p
             v-if="environment.latest_commit_sha"
             class="mt-2 font-mono text-xs text-[var(--lp-muted)]"
           >
-            Latest commit: {{ environment.latest_commit_sha }}
+            {{ t('environments.detail.latestCommit', { sha: environment.latest_commit_sha }) }}
           </p>
           <p
             v-if="environment.max_concurrent_environments != null"
             class="mt-2 text-xs text-[var(--lp-muted)]"
           >
-            Concurrent previews:
-            {{ environment.concurrent_active_count ?? '-' }}
-            /
-            {{ environment.max_concurrent_environments }}
+            {{ t('environments.detail.concurrentPreviews', {
+              active: environment.concurrent_active_count ?? '-',
+              max: environment.max_concurrent_environments,
+            }) }}
           </p>
         </div>
 
         <div class="border-t border-[var(--lp-line)] px-5 py-3 text-sm text-[var(--lp-muted)]">
-          Need custom manifests or Terraform?
-          <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">Open Provision</NuxtLink>
-          for an IaC workspace - this page is for the live preview only.
+          {{ t('environments.detail.needCustomManifests') }}
+          <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">{{ t('environments.detail.openProvision') }}</NuxtLink>
+          {{ t('environments.detail.livePreviewOnly') }}
         </div>
 
         <p v-if="environment.error_message" class="border-t border-[var(--lp-line)] px-5 py-3 text-sm text-[var(--lp-danger)]">
@@ -752,10 +745,10 @@ onMounted(() => {
       </section>
 
       <AuditTimeline
-        title="Execution pipeline"
+        :title="t('audit.title')"
         :entries="audits"
         :loading="auditsLoading"
-        empty-label="No control-plane audit events for this preview yet."
+        :empty-label="t('environments.detail.auditEmpty')"
       />
 
       <JobLogStream
@@ -775,10 +768,10 @@ onMounted(() => {
 
       <ConfirmDialog
         v-model:open="confirmDestroyOpen"
-        title="Destroy environment?"
-        :message="`Destroy preview “${environment.name}”? Kubernetes resources for this environment will be torn down. This cannot be undone.`"
-        confirm-label="Yes, destroy"
-        cancel-label="No"
+        :title="t('environments.destroy.title')"
+        :message="t('environments.destroy.message', { name: environment.name })"
+        :confirm-label="t('environments.destroy.confirm')"
+        :cancel-label="t('environments.destroy.cancel')"
         :busy="destroyAction.pending"
         @confirm="onDestroy"
       />

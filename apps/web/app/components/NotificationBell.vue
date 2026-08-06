@@ -2,6 +2,7 @@
 import { notificationIcon, type NotificationKind } from '~/composables/useNotifications'
 
 const { items, unreadCount, hydrate, markAllRead, markRead, remove, clear } = useNotifications()
+const { t } = useI18n()
 
 const open = ref(false)
 const rootRef = ref<HTMLElement | null>(null)
@@ -45,7 +46,7 @@ async function goToEnv(id: string | undefined, notificationId: string) {
       class="relative flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)] text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
       :aria-expanded="open"
       aria-haspopup="menu"
-      aria-label="Notifications"
+      :aria-label="t('notifications.title')"
       @click="toggle"
     >
       <span class="material-symbols-outlined text-lg">notifications</span>
@@ -63,14 +64,14 @@ async function goToEnv(id: string | undefined, notificationId: string) {
       class="absolute right-0 top-full z-50 mt-2 w-[min(92vw,22rem)] overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] shadow-2xl"
     >
       <div class="flex items-center justify-between border-b border-[var(--lp-line)] px-4 py-2.5">
-        <p class="text-sm font-semibold text-[var(--lp-text)]">Notifications</p>
+        <p class="text-sm font-semibold text-[var(--lp-text)]">{{ t('notifications.title') }}</p>
         <button
           v-if="items.length"
           type="button"
           class="text-xs text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
           @click="clear"
         >
-          Clear all
+          {{ t('notifications.clearAll') }}
         </button>
       </div>
 
@@ -79,7 +80,7 @@ async function goToEnv(id: string | undefined, notificationId: string) {
           v-if="!items.length"
           class="px-4 py-8 text-center text-sm text-[var(--lp-muted)]"
         >
-          You’re all caught up.
+          {{ t('notifications.empty') }}
         </p>
         <ul v-else class="divide-y divide-[var(--lp-line)]">
           <li
@@ -107,7 +108,7 @@ async function goToEnv(id: string | undefined, notificationId: string) {
             <button
               type="button"
               class="rounded-md p-1 text-[var(--lp-muted)] opacity-0 transition hover:bg-[var(--lp-panel)] hover:text-[var(--lp-text)] group-hover:opacity-100"
-              aria-label="Dismiss"
+              :aria-label="t('notifications.dismissAria')"
               @click.stop="remove(n.id)"
             >
               <span class="material-symbols-outlined text-sm">close</span>

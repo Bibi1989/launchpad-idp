@@ -9,6 +9,8 @@ import type {
 
 const dependencies = defineModel<WorkloadDependenciesConfig>('dependencies', { required: true })
 
+const { t } = useI18n()
+
 const props = defineProps<{
   provider: CloudProvider
   gcpCloudSql?: boolean
@@ -98,10 +100,9 @@ function toggleStore(key: DataStoreKind, enabled: boolean) {
 <template>
   <div class="space-y-4 rounded-xl border border-[var(--lp-line)] p-4">
     <div>
-      <p class="text-sm font-medium">Workload dependencies</p>
+      <p class="text-sm font-medium">{{ t('scaffold.dependencies.title') }}</p>
       <p class="mt-1 text-xs text-[var(--lp-muted)]">
-        Add databases and caches as companion services in the cluster, or wire managed cloud
-        resources when enabled above.
+        {{ t('scaffold.dependencies.blurb') }}
       </p>
     </div>
 
@@ -140,7 +141,7 @@ function toggleStore(key: DataStoreKind, enabled: boolean) {
             :disabled="disabled"
             @click="setPlacement(store.key, 'in_cluster')"
           >
-            In-cluster
+            {{ t('scaffold.dependencies.inCluster') }}
           </button>
           <button
             type="button"
@@ -153,25 +154,25 @@ function toggleStore(key: DataStoreKind, enabled: boolean) {
             :disabled="disabled || !managedAvailable(store.key)"
             @click="setPlacement(store.key, 'managed')"
           >
-            Managed cloud
+            {{ t('scaffold.dependencies.managedCloud') }}
           </button>
           <p
             v-if="store.key !== 'redis' && storeRef(store.key).placement === 'managed' && !managedAvailable(store.key)"
             class="text-xs text-amber-400"
           >
-            Enable {{ store.managedLabel }} in cloud resources first.
+            {{ t('scaffold.dependencies.enableManagedFirst', { service: store.managedLabel }) }}
           </p>
           <p
             v-else-if="store.key === 'redis' && storeRef(store.key).placement === 'managed' && !managedAvailable(store.key)"
             class="text-xs text-amber-400"
           >
-            Enable {{ store.managedLabel }} in cloud resources first.
+            {{ t('scaffold.dependencies.enableManagedFirst', { service: store.managedLabel }) }}
           </p>
           <p
             v-else-if="storeRef(store.key).placement === 'managed'"
             class="text-xs text-[var(--lp-muted)]"
           >
-            Connection strings use Terraform outputs - see infra/MANAGED_DATASTORES.md after apply.
+            {{ t('scaffold.dependencies.managedHint') }}
           </p>
         </div>
       </div>

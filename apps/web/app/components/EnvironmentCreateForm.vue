@@ -2,6 +2,8 @@
 import { environmentCreateSchema } from '~/utils/validation'
 import type { WorkspaceListItem } from '~/types/provisioning'
 
+const { t } = useI18n()
+
 const emit = defineEmits<{
   created: [environmentId: string]
 }>()
@@ -74,7 +76,7 @@ async function onSubmit() {
     form.name = ''
     emit('created', result.id)
   } catch (err) {
-    submitError.value = err instanceof Error ? err.message : 'Failed to create environment'
+    submitError.value = err instanceof Error ? err.message : t('common.failed')
   } finally {
     submitting.value = false
   }
@@ -85,7 +87,7 @@ async function onSubmit() {
   <form class="space-y-5" @submit.prevent="onSubmit">
     <div class="grid gap-4 md:grid-cols-2">
       <label class="block space-y-2">
-        <span class="lp-label">Name</span>
+        <span class="lp-label">{{ t('environments.create.name') }}</span>
         <input
           v-model="form.name"
           class="lp-input"
@@ -96,7 +98,7 @@ async function onSubmit() {
       </label>
 
       <label class="block space-y-2">
-        <span class="lp-label">TTL</span>
+        <span class="lp-label">{{ t('environments.create.ttl') }}</span>
         <div class="flex gap-2">
           <input
             v-model.number="form.ttl_value"
@@ -106,8 +108,8 @@ async function onSubmit() {
             class="lp-input flex-1"
           >
           <select v-model="form.ttl_unit" class="lp-input w-28">
-            <option value="hours">Hours</option>
-            <option value="minutes">Minutes</option>
+            <option value="hours">{{ t('environments.create.hours') }}</option>
+            <option value="minutes">{{ t('environments.create.minutes') }}</option>
           </select>
         </div>
         <input
@@ -123,7 +125,7 @@ async function onSubmit() {
       </label>
 
       <label class="block space-y-2 md:col-span-2">
-        <span class="lp-label">Git repository URL</span>
+        <span class="lp-label">{{ t('environments.create.gitUrl') }}</span>
         <div class="flex items-center gap-3 border-b-2 border-[var(--lp-line)] bg-[var(--lp-ink)]/40 px-2 py-3 focus-within:border-[var(--lp-accent)]">
           <span class="material-symbols-outlined text-[var(--lp-muted)]">link</span>
           <input
@@ -138,7 +140,7 @@ async function onSubmit() {
       </label>
 
       <label class="block space-y-2">
-        <span class="lp-label">Git branch</span>
+        <span class="lp-label">{{ t('common.branch') }}</span>
         <div class="flex items-center gap-3 border-b-2 border-[var(--lp-line)] bg-[var(--lp-ink)]/40 px-2 py-3 focus-within:border-[var(--lp-accent)]">
           <span class="material-symbols-outlined text-[var(--lp-muted)]">fork_right</span>
           <input
@@ -153,9 +155,9 @@ async function onSubmit() {
       </label>
 
       <label class="block space-y-2">
-        <span class="lp-label">Linked workspace</span>
+        <span class="lp-label">{{ t('environments.detail.linkedWorkspace') }}</span>
         <select v-model="form.workspace_id" class="lp-input">
-          <option :value="null">None</option>
+          <option :value="null">{{ t('common.none') }}</option>
           <option v-for="ws in workspaces" :key="ws.id" :value="ws.id">
             {{ ws.name }} ({{ ws.provider }}/{{ ws.engine }})
           </option>
@@ -167,7 +169,7 @@ async function onSubmit() {
 
     <button type="submit" class="lp-btn-primary w-full sm:w-auto" :disabled="submitting">
       <span class="material-symbols-outlined text-base">rocket_launch</span>
-      {{ submitting ? 'Queuing…' : 'Launch environment' }}
+      {{ submitting ? t('common.working') : t('environments.create.launch') }}
     </button>
   </form>
 </template>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { CatalogService, ServiceTier } from '~/types/catalog'
 
+const { t } = useI18n()
 const route = useRoute()
 const serviceId = computed(() => String(route.params.id))
 const { getService, updateService, deleteService } = useCatalog()
@@ -41,7 +42,7 @@ async function load() {
     service.value = await getService(serviceId.value)
     hydrateForm(service.value)
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to load service'
+    errorMessage.value = err instanceof Error ? err.message : t('catalog.errors.load')
     service.value = null
   } finally {
     loading.value = false
@@ -76,9 +77,9 @@ async function saveEdit() {
     })
     hydrateForm(service.value)
     editing.value = false
-    statusMessage.value = 'Service updated'
+    statusMessage.value = t('catalog.detail.serviceUpdated')
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to update service'
+    errorMessage.value = err instanceof Error ? err.message : t('catalog.errors.update')
   } finally {
     saving.value = false
   }
@@ -98,7 +99,7 @@ async function onDelete() {
     confirmDeleteOpen.value = false
     await navigateTo('/catalog?tab=services')
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to delete service'
+    errorMessage.value = err instanceof Error ? err.message : t('catalog.errors.delete')
   } finally {
     deleting.value = false
   }
@@ -110,10 +111,10 @@ onMounted(load)
 <template>
   <div class="mx-auto max-w-3xl animate-fade-up space-y-6 pb-12">
     <NuxtLink to="/catalog" class="font-mono text-xs uppercase tracking-wide text-[var(--lp-muted)] hover:text-[var(--lp-text)]">
-      ← Catalog
+      {{ t('catalog.detail.back') }}
     </NuxtLink>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Loading…</p>
+    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
     <p v-else-if="errorMessage && !service" class="text-sm text-[var(--lp-danger)]">{{ errorMessage }}</p>
 
     <template v-else-if="service">
@@ -127,11 +128,11 @@ onMounted(load)
                 ? 'border-[var(--lp-ok)]/40 text-[var(--lp-ok)]'
                 : 'border-amber-500/40 text-amber-400'"
             >
-              Score {{ service.compliance_score }}/100
+              {{ t('catalog.detail.scoreOf', { score: service.compliance_score }) }}
             </span>
           </div>
           <p v-if="!editing" class="text-sm text-[var(--lp-muted)]">
-            {{ service.description || 'No description' }}
+            {{ service.description || t('catalog.detail.noDescription') }}
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
@@ -140,7 +141,7 @@ onMounted(load)
             :to="`/workspaces/${service.workspace_id}`"
             class="lp-btn-ghost text-xs uppercase tracking-wide"
           >
-            Open workspace
+            {{ t('catalog.detail.openWorkspace') }}
           </NuxtLink>
           <button
             v-if="!editing"
@@ -149,7 +150,7 @@ onMounted(load)
             @click="startEdit"
           >
             <span class="material-symbols-outlined text-base">edit</span>
-            Update service
+            {{ t('catalog.detail.updateService') }}
           </button>
           <button
             v-if="!editing"
@@ -159,7 +160,7 @@ onMounted(load)
             @click="requestDelete"
           >
             <span class="material-symbols-outlined text-base">delete</span>
-            {{ deleting ? 'Deleting…' : 'Delete' }}
+            {{ deleting ? t('common.deleting') : t('common.delete') }}
           </button>
         </div>
       </header>
@@ -171,33 +172,33 @@ onMounted(load)
         v-if="editing"
         class="space-y-4 rounded-xl border border-[var(--lp-line)] p-5"
       >
-        <h2 class="text-lg font-semibold">Edit service metadata</h2>
+        <h2 class="text-lg font-semibold">{{ t('catalog.detail.edit') }}</h2>
         <label class="block space-y-2">
-          <span class="lp-label">Description</span>
+          <span class="lp-label">{{ t('catalog.create.description') }}</span>
           <textarea v-model="form.description" rows="3" class="lp-input" maxlength="500" />
         </label>
         <div class="grid gap-4 sm:grid-cols-2">
           <label class="block space-y-2">
-            <span class="lp-label">Owner</span>
+            <span class="lp-label">{{ t('catalog.detail.ownerLabel') }}</span>
             <input v-model="form.owner" class="lp-input" required>
           </label>
           <label class="block space-y-2">
-            <span class="lp-label">On-call</span>
+            <span class="lp-label">{{ t('catalog.create.onCall') }}</span>
             <input v-model="form.on_call" class="lp-input" placeholder="team@example.com">
           </label>
           <label class="block space-y-2">
-            <span class="lp-label">Tier</span>
+            <span class="lp-label">{{ t('catalog.create.tier') }}</span>
             <select v-model="form.tier" class="lp-input">
-              <option v-for="t in tiers" :key="t" :value="t">{{ t }}</option>
+              <option v-for="tier in tiers" :key="tier" :value="tier">{{ tier }}</option>
             </select>
           </label>
           <label class="block space-y-2">
-            <span class="lp-label">SLO target (%)</span>
+            <span class="lp-label">{{ t('catalog.create.sloTarget') }}</span>
             <input v-model="form.slo_target" class="lp-input" placeholder="99.5">
           </label>
         </div>
         <label class="block space-y-2">
-          <span class="lp-label">Runbook URL</span>
+          <span class="lp-label">{{ t('catalog.create.runbookUrl') }}</span>
           <input v-model="form.runbook_url" class="lp-input" type="url" placeholder="https://…">
         </label>
         <div class="flex flex-wrap gap-2">
@@ -207,7 +208,7 @@ onMounted(load)
             :disabled="saving || !form.owner.trim()"
             @click="saveEdit"
           >
-            {{ saving ? 'Saving…' : 'Save changes' }}
+            {{ saving ? t('common.saving') : t('catalog.detail.save') }}
           </button>
           <button
             type="button"
@@ -215,30 +216,30 @@ onMounted(load)
             :disabled="saving"
             @click="cancelEdit"
           >
-            Cancel
+            {{ t('common.cancel') }}
           </button>
         </div>
       </section>
 
       <section v-else class="grid gap-4 rounded-xl border border-[var(--lp-line)] p-5 sm:grid-cols-2">
         <div>
-          <p class="lp-label">Owner</p>
+          <p class="lp-label">{{ t('catalog.detail.ownerLabel') }}</p>
           <p class="mt-1 text-sm">{{ service.owner }}</p>
         </div>
         <div>
-          <p class="lp-label">Tier / SLO</p>
+          <p class="lp-label">{{ t('catalog.detail.tierSlo') }}</p>
           <p class="mt-1 font-mono text-sm">{{ service.tier }} · {{ service.slo_target }}%</p>
         </div>
         <div>
-          <p class="lp-label">Template</p>
+          <p class="lp-label">{{ t('catalog.detail.templateLabel') }}</p>
           <p class="mt-1 font-mono text-sm">{{ service.template_id }}@{{ service.template_version }}</p>
         </div>
         <div>
-          <p class="lp-label">On-call</p>
+          <p class="lp-label">{{ t('catalog.create.onCall') }}</p>
           <p class="mt-1 text-sm">{{ service.on_call || '-' }}</p>
         </div>
         <div v-if="service.runbook_url" class="sm:col-span-2">
-          <p class="lp-label">Runbook</p>
+          <p class="lp-label">{{ t('catalog.detail.runbookLabel') }}</p>
           <a :href="service.runbook_url" class="mt-1 block text-sm text-[var(--lp-accent)] hover:underline" target="_blank" rel="noreferrer">
             {{ service.runbook_url }}
           </a>
@@ -246,9 +247,12 @@ onMounted(load)
       </section>
 
       <section class="space-y-3 rounded-xl border border-[var(--lp-line)] p-5">
-        <h2 class="text-lg font-semibold">Scorecard</h2>
+        <h2 class="text-lg font-semibold">{{ t('catalog.detail.scorecard') }}</h2>
         <p class="text-xs text-[var(--lp-muted)]">
-          Gate {{ service.scorecard.gate }} - {{ service.scorecard.passed ? 'passed' : 'needs work' }}
+          {{ t('catalog.detail.gateLabel', {
+            gate: service.scorecard.gate,
+            status: service.scorecard.passed ? t('catalog.detail.gatePassed') : t('catalog.detail.gateNeedsWork'),
+          }) }}
         </p>
         <div
           v-for="item in service.scorecard.items"
@@ -270,10 +274,10 @@ onMounted(load)
 
       <ConfirmDialog
         v-model:open="confirmDeleteOpen"
-        title="Delete service?"
-        :message="`Delete “${service.name}” from Your services? This removes the catalog entry only. Linked workspace (if any) is kept unless you destroy it separately.`"
-        confirm-label="Yes, delete"
-        cancel-label="Cancel"
+        :title="t('catalog.detail.deleteTitle')"
+        :message="t('catalog.detail.deleteConfirm', { name: service.name })"
+        :confirm-label="t('common.confirmDelete')"
+        :cancel-label="t('common.cancel')"
         :busy="deleting"
         @confirm="onDelete"
       />

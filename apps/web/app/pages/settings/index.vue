@@ -3,6 +3,7 @@ import type { UserCloudCredentialsStatus } from '~/types/userCredentials'
 import { emptyCloudCredentials } from '~/utils/cloudValidation'
 
 const { user } = useAuth()
+const { t } = useI18n()
 const { getStatus, save, clearAll } = useUserCloudCredentials()
 
 const status = ref<UserCloudCredentialsStatus | null>(null)
@@ -20,7 +21,7 @@ async function refresh() {
   try {
     status.value = await getStatus()
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to load credentials'
+    errorMessage.value = err instanceof Error ? err.message : t('settings.errors.load')
   } finally {
     loading.value = false
   }
@@ -37,9 +38,9 @@ async function onSave() {
   try {
     status.value = await save({ ...credentials })
     Object.assign(credentials, emptyCloudCredentials())
-    successMessage.value = 'Credentials saved (encrypted at rest).'
+    successMessage.value = t('settings.credentialsSaved')
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Save failed'
+    errorMessage.value = err instanceof Error ? err.message : t('settings.errors.save')
   } finally {
     saving.value = false
   }
@@ -56,9 +57,9 @@ async function onClearProvider() {
       clear_azure: activeProvider.value === 'azure',
       clear_cloudflare: activeProvider.value === 'cloudflare',
     })
-    successMessage.value = `Cleared ${activeProvider.value.toUpperCase()} credentials.`
+    successMessage.value = t('settings.clearedProvider', { provider: activeProvider.value.toUpperCase() })
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Clear failed'
+    errorMessage.value = err instanceof Error ? err.message : t('settings.errors.clear')
   } finally {
     saving.value = false
   }
@@ -70,47 +71,52 @@ async function onClearAll() {
   successMessage.value = null
   try {
     status.value = await clearAll()
-    successMessage.value = 'All account cloud credentials removed.'
+    successMessage.value = t('settings.clearedAll')
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Clear failed'
+    errorMessage.value = err instanceof Error ? err.message : t('settings.errors.clear')
   } finally {
     clearing.value = false
   }
 }
 
-const providers = [
-  { id: 'gcp' as const, label: 'Google Cloud', has: () => status.value?.has_gcp, hint: () => status.value?.gcp_label },
-  { id: 'aws' as const, label: 'AWS', has: () => status.value?.has_aws, hint: () => status.value?.aws_label },
-  { id: 'azure' as const, label: 'Azure', has: () => status.value?.has_azure, hint: () => status.value?.azure_label },
-  { id: 'cloudflare' as const, label: 'Cloudflare', has: () => status.value?.has_cloudflare, hint: () => status.value?.cloudflare_label },
-]
+const providers = computed(() => [
+  { id: 'gcp' as const, label: t('launch.targets.gcp'), has: () => status.value?.has_gcp, hint: () => status.value?.gcp_label },
+  { id: 'aws' as const, label: t('launch.targets.aws'), has: () => status.value?.has_aws, hint: () => status.value?.aws_label },
+  { id: 'azure' as const, label: t('launch.targets.azure'), has: () => status.value?.has_azure, hint: () => status.value?.azure_label },
+  { id: 'cloudflare' as const, label: t('launch.targets.cloudflare'), has: () => status.value?.has_cloudflare, hint: () => status.value?.cloudflare_label },
+])
 </script>
 
 <template>
   <div class="mx-auto max-w-3xl animate-fade-up space-y-8">
     <header class="space-y-2">
-      <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">Account</p>
-      <h1 class="text-3xl font-semibold tracking-tight">Settings</h1>
+      <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">{{ t('settings.preferences') }}</p>
+      <h1 class="text-3xl font-semibold tracking-tight">{{ t('settings.title') }}</h1>
       <p class="text-sm text-[var(--lp-muted)]">
-        Profile for <strong class="text-[var(--lp-text)]">{{ user?.email }}</strong>.
-        Store cloud keys once - Provision and sandbox sessions can reuse them when workspace fields are blank.
+        {{ t('settings.profileBlurb', { email: user?.email ?? '' }) }}
       </p>
     </header>
 
     <section class="space-y-4 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-6">
+      <h2 class="text-lg font-semibold">{{ t('settings.appearance') }}</h2>
+      <p class="text-sm text-[var(--lp-muted)]">{{ t('settings.appearanceBlurb') }}</p>
+      <PreferenceControls />
+    </section>
+
+    <section class="space-y-4 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-6">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <h2 class="text-lg font-semibold">Cloud credentials</h2>
+        <h2 class="text-lg font-semibold">{{ t('settings.cloudCredentials') }}</h2>
         <button
           type="button"
           class="lp-btn-ghost text-xs uppercase tracking-wide text-[var(--lp-danger)]"
           :disabled="clearing || loading"
           @click="onClearAll"
         >
-          {{ clearing ? 'Clearing…' : 'Clear all' }}
+          {{ clearing ? t('settings.clearing') : t('settings.clearAll') }}
         </button>
       </div>
       <p class="text-sm text-[var(--lp-muted)]">
-        Keys are Fernet-encrypted at rest. Prefer short-lived credentials or keyless WIF / IAM roles when possible.
+        {{ t('settings.credentialsBlurbExtended') }}
       </p>
 
       <div class="flex flex-wrap gap-2">
@@ -135,18 +141,18 @@ const providers = [
       </div>
 
       <p v-if="status && providers.find((p) => p.id === activeProvider)?.has()" class="text-xs text-[var(--lp-muted)]">
-        Stored:
+        {{ t('settings.stored') }}
         <span class="font-mono text-[var(--lp-accent)]">
-          {{ providers.find((p) => p.id === activeProvider)?.hint() || 'configured' }}
+          {{ providers.find((p) => p.id === activeProvider)?.hint() || t('settings.configured') }}
         </span>
-        - paste new values below to replace.
+        - {{ t('settings.replaceHint') }}
       </p>
 
       <CloudCredentialsFields v-model:credentials="credentials" :provider="activeProvider" />
 
       <div class="flex flex-wrap gap-3 pt-2">
         <button type="button" class="lp-btn-primary" :disabled="saving" @click="onSave">
-          {{ saving ? 'Saving…' : `Save ${activeProvider.toUpperCase()}` }}
+          {{ saving ? t('settings.saving') : t('settings.saveProvider', { provider: activeProvider.toUpperCase() }) }}
         </button>
         <button
           type="button"
@@ -154,7 +160,7 @@ const providers = [
           :disabled="saving || !providers.find((p) => p.id === activeProvider)?.has()"
           @click="onClearProvider"
         >
-          Clear {{ activeProvider.toUpperCase() }}
+          {{ t('settings.clearProvider', { provider: activeProvider.toUpperCase() }) }}
         </button>
       </div>
 
@@ -163,15 +169,13 @@ const providers = [
     </section>
 
     <section class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-6 text-sm text-[var(--lp-muted)]">
-      <h2 class="text-lg font-semibold text-[var(--lp-text)]">Also configure</h2>
+      <h2 class="text-lg font-semibold text-[var(--lp-text)]">{{ t('settings.alsoConfigure') }}</h2>
       <ul class="mt-3 list-disc space-y-2 pl-5">
         <li>
-          <NuxtLink to="/org" class="text-[var(--lp-accent)] hover:underline">Organization</NuxtLink>
-          - members, invites, SSO
+          <NuxtLink to="/org" class="text-[var(--lp-accent)] hover:underline">{{ t('settings.alsoOrg') }}</NuxtLink>
         </li>
         <li>
-          <NuxtLink to="/integrations" class="text-[var(--lp-accent)] hover:underline">Integrations</NuxtLink>
-          - GitHub App, GitLab
+          <NuxtLink to="/integrations" class="text-[var(--lp-accent)] hover:underline">{{ t('settings.alsoIntegrations') }}</NuxtLink>
         </li>
       </ul>
     </section>

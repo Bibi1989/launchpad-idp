@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { GitHost } from '~/types/git'
 
+const { t } = useI18n()
+
 const props = withDefaults(defineProps<{
   modelValue: GitHost
   size?: 'sm' | 'md'
@@ -12,15 +14,15 @@ const emit = defineEmits<{
   'update:modelValue': [value: GitHost]
 }>()
 
-const options: Array<{ id: GitHost; label: string; hint: string }> = [
-  { id: 'github', label: 'GitHub', hint: 'github.com' },
-  { id: 'gitlab', label: 'GitLab', hint: 'gitlab.com / self-hosted' },
-]
+const options = computed(() => [
+  { id: 'github' as const, label: t('integrations.github'), hint: 'github.com' },
+  { id: 'gitlab' as const, label: 'GitLab', hint: t('integrations.gitlabHint') },
+])
 </script>
 
 <template>
   <div class="space-y-2">
-    <span class="lp-label">Git provider</span>
+    <span class="lp-label">{{ t('common.gitProvider') }}</span>
     <div class="grid grid-cols-2 gap-2">
       <button
         v-for="opt in options"

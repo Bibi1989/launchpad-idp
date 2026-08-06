@@ -8,6 +8,7 @@ type PreviewTarget = PreviewLaunchPayload['provider']
 
 const { launchPreview, getKindStatus, getPreviewBuildStatus } = useEnvironments()
 const { listWorkspaces } = useProvisioning()
+const { t } = useI18n()
 const route = useRoute()
 
 const step = ref(1)
@@ -59,13 +60,13 @@ const form = reactive({
 
 const PROVIDER_STORAGE_KEY = 'launchpad.lastPreviewProvider'
 
-const providers: Array<{ id: PreviewTarget; label: string; hint: string }> = [
-  { id: 'local', label: 'Local (Sandbox)', hint: 'On your machine - we start the local cluster if needed' },
-  { id: 'gcp', label: 'Google Cloud', hint: 'SA JSON or keyless WIF' },
-  { id: 'aws', label: 'AWS', hint: 'Access keys or role ARN' },
-  { id: 'azure', label: 'Azure', hint: 'Service principal' },
-  { id: 'cloudflare', label: 'Cloudflare', hint: 'API token' },
-]
+const providers = computed(() => [
+  { id: 'local' as PreviewTarget, label: t('launch.targets.local'), hint: t('launch.hints.local') },
+  { id: 'gcp' as PreviewTarget, label: t('launch.targets.gcp'), hint: t('launch.hints.gcp') },
+  { id: 'aws' as PreviewTarget, label: t('launch.targets.aws'), hint: t('launch.hints.aws') },
+  { id: 'azure' as PreviewTarget, label: t('launch.targets.azure'), hint: t('launch.hints.azure') },
+  { id: 'cloudflare' as PreviewTarget, label: t('launch.targets.cloudflare'), hint: t('launch.hints.cloudflare') },
+])
 
 const isLocal = computed(() => form.provider === 'local')
 
@@ -111,21 +112,21 @@ const cloudSteps = computed(() => {
   if (isLocal.value) return []
   if (usesWorkspaceSource.value) {
     return [
-      { n: 1, label: 'Choose target' },
-      { n: 2, label: 'Launch' },
+      { n: 1, label: t('launch.chooseTarget') },
+      { n: 2, label: t('launch.launch') },
     ]
   }
   return [
-    { n: 1, label: 'Choose target' },
-    { n: 2, label: 'Pick source' },
-    { n: 3, label: 'Launch' },
+    { n: 1, label: t('launch.chooseTarget') },
+    { n: 2, label: t('launch.pickSource') },
+    { n: 3, label: t('launch.launch') },
   ]
 })
 
 const confirmStep = computed(() => (showSourceStep.value ? 3 : 2))
 
 const providerLabel = computed(() => {
-  const match = providers.find((p) => p.id === form.provider)
+  const match = providers.value.find((p) => p.id === form.provider)
   return match?.label ?? form.provider
 })
 
@@ -136,24 +137,24 @@ const hourlyDisplay = computed(() => {
 
 const sourceSummary = computed(() => {
   if (usesWorkspaceSource.value && selectedWorkspace.value) {
-    return `Workspace: ${selectedWorkspace.value.name}`
+    return t('launch.summary.workspace', { name: selectedWorkspace.value.name })
   }
   if (form.git_repo_url.trim()) {
     return form.git_repo_url.trim()
   }
   return form.workload_image.trim()
-    ? `Image ${form.workload_image.trim()}`
-    : 'No image (set container image or use a workspace/repo)'
+    ? t('launch.summary.imageRef', { image: form.workload_image.trim() })
+    : t('launch.summary.noImage')
 })
 
 const imageSummary = computed(() => {
   if (buildsFromRepo.value) {
-    return `Built from ${previewBuild.value?.dockerfile || 'Dockerfile'}`
+    return t('launch.summary.builtFrom', { dockerfile: previewBuild.value?.dockerfile || 'Dockerfile' })
   }
   if (workspaceHasManifests.value) {
-    return 'From workspace manifests'
+    return t('launch.summary.fromManifests')
   }
-  return form.workload_image.trim() || 'Required'
+  return form.workload_image.trim() || t('launch.summary.required')
 })
 
 async function refreshKindStatus() {
@@ -164,7 +165,7 @@ async function refreshKindStatus() {
     kindStatus.value = await getKindStatus()
   } catch (err) {
     kindStatus.value = null
-    kindStatusError.value = err instanceof Error ? err.message : 'Failed to check local cluster'
+    kindStatusError.value = err instanceof Error ? err.message : t('launch.errors.kindCheckFailed')
   } finally {
     kindStatusLoading.value = false
   }
@@ -196,7 +197,7 @@ onMounted(async () => {
       applyWorkspaceSelection(linkedFromQuery.value)
     }
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Failed to load launch options'
+    errorMessage.value = err instanceof Error ? err.message : t('launch.errors.loadFailed')
   } finally {
     loadingWorkspaces.value = false
   }
@@ -287,7 +288,7 @@ const gitUrlPlaceholder = computed(() =>
 )
 
 const prFieldLabel = computed(() =>
-  gitHost.value === 'github' ? 'GitHub PR number (optional)' : 'GitLab MR number (optional)',
+  gitHost.value === 'github' ? t('launch.prNumber') : t('launch.mrNumber'),
 )
 
 function urlMatchesGitHost(url: string, host: GitHost): boolean {
@@ -319,16 +320,22 @@ function sourceValid(): boolean {
   return urlMatchesGitHost(repo, gitHost.value)
 }
 
+function urlMismatchError(): string {
+  return gitHost.value === 'github'
+    ? t('launch.errors.urlMustMatchGithub')
+    : t('launch.errors.urlMustMatchGitlab')
+}
+
 function goNext() {
   errorMessage.value = null
   if (step.value === 1 && !canContinueStep1()) {
-    errorMessage.value = 'Paste cloud credentials to continue'
+    errorMessage.value = t('launch.errors.pasteCredentials')
     return
   }
   if (step.value === 2 && showSourceStep.value && !sourceValid()) {
     errorMessage.value = form.git_repo_url.trim() && !urlMatchesGitHost(form.git_repo_url, gitHost.value)
-      ? `URL must match the selected ${gitHost.value === 'github' ? 'GitHub' : 'GitLab'} provider`
-      : 'Enter a valid git repo URL and branch'
+      ? urlMismatchError()
+      : t('launch.errors.invalidRepo')
     return
   }
   if (step.value === 1 && !showSourceStep.value) {
@@ -346,28 +353,28 @@ async function launch() {
   errorMessage.value = null
   const name = form.name.trim().toLowerCase()
   if (!/^[a-z][a-z0-9-]{2,63}$/.test(name)) {
-    errorMessage.value = 'Name must be lowercase, start with a letter, 3-64 chars'
+    errorMessage.value = t('launch.errors.invalidName')
     return
   }
   if (!sourceValid()) {
     errorMessage.value = usesWorkspaceSource.value
-      ? 'Workspace source is invalid'
+      ? t('launch.errors.invalidWorkspaceSource')
       : isLocal.value && !form.git_repo_url.trim()
-        ? 'Set a container image (or a git repo URL and branch)'
+        ? t('launch.errors.setContainerImage')
         : form.git_repo_url.trim() && !urlMatchesGitHost(form.git_repo_url, gitHost.value)
-          ? `URL must match the selected ${gitHost.value === 'github' ? 'GitHub' : 'GitLab'} provider`
-          : 'Enter a valid git repo URL and branch'
+          ? urlMismatchError()
+          : t('launch.errors.invalidRepo')
     return
   }
   if (!isLocal.value && !canContinueStep1()) {
-    errorMessage.value = 'Paste cloud credentials to continue'
+    errorMessage.value = t('launch.errors.pasteCredentials')
     return
   }
   if (isLocal.value) {
     await refreshKindStatus()
     if (localLaunchBlocked.value) {
       errorMessage.value = kindStatus.value?.message
-        || 'Local Sandbox cluster is not ready. Fix tools/cluster before launching.'
+        || t('launch.errors.localClusterNotReady')
       return
     }
   }
@@ -388,7 +395,7 @@ async function launch() {
     if (!buildsFromRepo.value && !workspaceHasManifests.value) {
       const image = form.workload_image.trim()
       if (!image) {
-        errorMessage.value = 'Container image is required when not launching from a workspace or repo build'
+        errorMessage.value = t('launch.errors.containerImageRequired')
         return
       }
       payload.workload_image = image
@@ -404,7 +411,7 @@ async function launch() {
     } else {
       const image = form.workload_image.trim()
       if (!image) {
-        errorMessage.value = 'Container image is required for image-only launches'
+        errorMessage.value = t('launch.errors.containerImageRequiredLocal')
         return
       }
       payload.workload_image = image
@@ -415,7 +422,7 @@ async function launch() {
     const env = await launchPreview(payload)
     await navigateTo(`/environments/${env.id}`)
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : 'Launch failed'
+    errorMessage.value = err instanceof Error ? err.message : t('launch.errors.launchFailed')
   } finally {
     submitting.value = false
   }
@@ -426,16 +433,14 @@ async function launch() {
   <div class="mx-auto max-w-3xl space-y-8 animate-fade-up">
     <header class="space-y-2">
       <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">
-        One-click preview
+        {{ t('launch.eyebrow') }}
       </p>
-      <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">Launch a preview app</h1>
+      <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">{{ t('launch.title') }}</h1>
       <p class="max-w-2xl text-sm text-[var(--lp-muted)]">
-        Deploy a GitHub or GitLab repo, or a linked workspace. Local Sandbox is the default happy path.
-        Need custom YAML, Helm, or Terraform?
+        {{ t('launch.blurb') }}
         <NuxtLink to="/provision" class="font-medium text-[var(--lp-accent)] hover:underline">
-          Use Provision →
+          {{ t('launch.useProvision') }}
         </NuxtLink>
-        - Launch stays for ephemeral app URLs; Provision is for IaC workspaces.
       </p>
     </header>
 
@@ -474,17 +479,16 @@ async function launch() {
         @click="aiDrawerOpen = true"
       >
         <span class="material-symbols-outlined text-sm text-amber-400">auto_awesome</span>
-        <span>AI Analyze &amp; Fix</span>
+        <span>{{ t('launch.aiAnalyze') }}</span>
       </button>
     </div>
 
     <!-- Local: single screen -->
     <section v-if="isLocal" class="lp-glass space-y-6 rounded-xl p-6">
       <div>
-        <h2 class="text-lg font-semibold">Local (Sandbox)</h2>
+        <h2 class="text-lg font-semibold">{{ t('launch.localTitle') }}</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          Launchpad starts the local cluster if needed (~1-2 min first time). No cloud credentials.
-          Open app uses the NodePort URL once the pod is Ready.
+          {{ t('launch.localBlurb') }}
         </p>
       </div>
 
@@ -499,10 +503,10 @@ async function launch() {
       >
         <div class="flex flex-wrap items-start justify-between gap-2">
           <p>
-            <template v-if="kindStatusLoading">Checking local cluster…</template>
+            <template v-if="kindStatusLoading">{{ t('launch.kind.checking') }}</template>
             <template v-else-if="kindStatusError">{{ kindStatusError }}</template>
             <template v-else-if="kindStatus">{{ kindStatus.message }}</template>
-            <template v-else>Kind status unavailable.</template>
+            <template v-else>{{ t('launch.kind.unavailable') }}</template>
           </p>
           <button
             type="button"
@@ -510,7 +514,7 @@ async function launch() {
             :disabled="kindStatusLoading"
             @click="refreshKindStatus"
           >
-            Refresh
+            {{ t('common.refresh') }}
           </button>
         </div>
         <p
@@ -543,23 +547,22 @@ async function launch() {
       </div>
 
       <label class="block space-y-2">
-        <span class="lp-label">Workspace</span>
+        <span class="lp-label">{{ t('provision.workspace') }}</span>
         <select v-model="form.workspace_id" class="lp-input" :disabled="loadingWorkspaces">
-          <option :value="null">None</option>
+          <option :value="null">{{ t('common.none') }}</option>
           <option v-for="ws in workspaces" :key="ws.id" :value="ws.id">
             {{ ws.name }} ({{ ws.provider }}/{{ ws.engine }})
           </option>
         </select>
         <p class="text-xs text-[var(--lp-muted)]">
           <template v-if="usesWorkspaceSource && selectedWorkspace">
-            Launching from workspace
+            {{ t('launch.workspace.launchingFrom') }}
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            - if the workspace has raw manifests, Launchpad applies them into a preview namespace
-            (manifest deploy). Otherwise it uses the built-in preview profile.
+            - {{ t('launch.workspace.launchingFromDetail') }}
           </template>
           <template v-else>
-            Link a workspace to deploy its Kubernetes manifests, or enter a git repo URL below.
-            <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">Create one</NuxtLink>
+            {{ t('launch.workspace.linkBlurb') }}
+            <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">{{ t('launch.createOne') }}</NuxtLink>
           </template>
         </p>
       </label>
@@ -568,7 +571,7 @@ async function launch() {
       <GitProviderPicker v-model="gitHost" size="sm" />
       <div class="grid gap-3 sm:grid-cols-3">
         <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">{{ gitHost === 'github' ? 'GitHub' : 'GitLab' }} repository URL <span class="font-normal text-[var(--lp-muted)]">(optional for Local)</span></span>
+          <span class="lp-label">{{ gitHost === 'github' ? t('integrations.github') : t('integrations.gitlab') }} {{ t('launch.repoUrl') }} <span class="font-normal text-[var(--lp-muted)]">{{ t('launch.optionalLocal') }}</span></span>
           <input
             v-model="form.git_repo_url"
             class="lp-input font-mono text-xs"
@@ -577,7 +580,7 @@ async function launch() {
           >
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Branch</span>
+          <span class="lp-label">{{ t('common.branch') }}</span>
           <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
         </label>
         <label class="block space-y-2 sm:col-span-3">
@@ -590,9 +593,7 @@ async function launch() {
             placeholder="42"
           >
           <p class="text-xs text-[var(--lp-muted)]">
-            When Running, Launchpad smokes the preview URL, posts a PR/MR comment + commit status
-            (Open in Launchpad), and exposes a stable <code class="font-mono text-[10px]">/pr/{n}</code> URL.
-            Synchronize rebuilds; closing or merging tears it down automatically.
+            {{ t('launch.prSyncBlurb') }}
           </p>
         </label>
         <p
@@ -606,11 +607,11 @@ async function launch() {
 
       <div class="grid gap-3 sm:grid-cols-2">
         <label class="block space-y-2">
-          <span class="lp-label">Environment name</span>
+          <span class="lp-label">{{ t('common.name') }}</span>
           <input v-model="form.name" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">TTL</span>
+          <span class="lp-label">{{ t('environments.create.ttl') }}</span>
           <div class="flex gap-2">
             <input
               v-model.number="form.ttl_value"
@@ -620,13 +621,13 @@ async function launch() {
               class="lp-input flex-1"
             >
             <select v-model="form.ttl_unit" class="lp-input w-28">
-              <option value="hours">Hours</option>
-              <option value="minutes">Minutes</option>
+              <option value="hours">{{ t('common.hours') }}</option>
+              <option value="minutes">{{ t('common.minutes') }}</option>
             </select>
           </div>
         </label>
         <label v-if="!buildsFromRepo && !workspaceHasManifests" class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">Container image</span>
+          <span class="lp-label">{{ t('launch.containerImage') }}</span>
           <input
             v-model="form.workload_image"
             class="lp-input font-mono text-xs"
@@ -635,15 +636,13 @@ async function launch() {
             required
           >
           <p class="text-xs text-[var(--lp-muted)]">
-            Required unless you launch from a workspace or repo build.
+            {{ t('launch.containerImageRequired') }}
           </p>
         </label>
       </div>
 
       <p v-if="!usesWorkspaceSource" class="text-xs text-[var(--lp-muted)]">
-        After launch: push to
-        <span class="font-mono text-[var(--lp-text)]">{{ form.git_branch || 'your branch' }}</span>
-        rebuilds the preview when a GitHub webhook is configured.
+        {{ t('launch.afterLaunchRebuild', { branch: form.git_branch || t('launch.yourBranch') }) }}
       </p>
 
       <div class="flex justify-end">
@@ -653,7 +652,7 @@ async function launch() {
           :disabled="submitting || kindStatusLoading || localLaunchBlocked"
           @click="launch"
         >
-          {{ submitting ? 'Starting cluster & launching…' : 'Launch preview' }}
+          {{ submitting ? t('common.working') : t('environments.index.launchPreview') }}
         </button>
       </div>
     </section>
@@ -661,31 +660,30 @@ async function launch() {
     <!-- Cloud step 1 -->
     <section v-else-if="step === 1" class="lp-glass space-y-5 rounded-xl p-6">
       <div>
-        <h2 class="text-lg font-semibold">Choose target</h2>
+        <h2 class="text-lg font-semibold">{{ t('launch.chooseTarget') }}</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          Local uses kind on your machine. Cloud options encrypt credentials onto a linked workspace,
-          or reuse an existing Provision workspace.
+          {{ t('launch.cloud.chooseTargetBlurb') }}
         </p>
       </div>
 
       <label class="block space-y-2">
-        <span class="lp-label">Workspace</span>
+        <span class="lp-label">{{ t('provision.workspace') }}</span>
         <select v-model="form.workspace_id" class="lp-input" :disabled="loadingWorkspaces">
-          <option :value="null">None - use git repo</option>
+          <option :value="null">{{ t('common.none') }} - {{ t('launch.workspace.noneUseGitRepo') }}</option>
           <option v-for="ws in workspaces" :key="ws.id" :value="ws.id">
             {{ ws.name }} · {{ ws.provider }}/{{ ws.engine }}
           </option>
         </select>
         <p v-if="selectedWorkspace" class="text-xs text-[var(--lp-muted)]">
           <template v-if="usesWorkspaceSource">
-            Launching from workspace
+            {{ t('launch.workspace.launchingFrom') }}
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            - skip git on the next step.
+            - {{ t('launch.workspace.launchingFromSkipGit') }}
           </template>
           <template v-else>
-            Using stored credentials from
+            {{ t('launch.workspace.usingStoredFrom') }}
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            when available - skip credential fields below.
+            {{ t('launch.workspace.storedCredentials') }}
           </template>
         </p>
       </label>
@@ -717,7 +715,7 @@ async function launch() {
 
       <div class="flex justify-end">
         <button type="button" class="lp-btn-primary" @click="goNext">
-          {{ usesWorkspaceSource ? 'Continue to launch' : 'Continue' }}
+          {{ usesWorkspaceSource ? t('launch.launch') : t('common.continue') }}
         </button>
       </div>
     </section>
@@ -725,15 +723,15 @@ async function launch() {
     <!-- Cloud step 2: source -->
     <section v-else-if="step === 2 && showSourceStep" class="lp-glass space-y-5 rounded-xl p-6">
       <div>
-        <h2 class="text-lg font-semibold">Pick source</h2>
+        <h2 class="text-lg font-semibold">{{ t('launch.pickSource') }}</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          Choose GitHub or GitLab, then point at your repository and branch.
+          {{ t('launch.pickSourceBlurb') }}
         </p>
       </div>
       <GitProviderPicker v-model="gitHost" size="sm" />
       <div class="grid gap-3 sm:grid-cols-3">
         <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">{{ gitHost === 'github' ? 'GitHub' : 'GitLab' }} repository URL</span>
+          <span class="lp-label">{{ gitHost === 'github' ? t('integrations.github') : t('integrations.gitlab') }} {{ t('launch.repoUrl') }}</span>
           <input
             v-model="form.git_repo_url"
             class="lp-input font-mono text-xs"
@@ -741,7 +739,7 @@ async function launch() {
           >
         </label>
         <label class="block space-y-2">
-          <span class="lp-label">Branch</span>
+          <span class="lp-label">{{ t('common.branch') }}</span>
           <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
         </label>
         <label class="block space-y-2 sm:col-span-3">
@@ -754,30 +752,30 @@ async function launch() {
             placeholder="42"
           >
           <p class="text-xs text-[var(--lp-muted)]">
-            Enables stable /pr/{n} URL, smoke + status checks, sync rebuilds, and auto-destroy on close.
+            {{ t('launch.prEnableBlurb') }}
           </p>
         </label>
       </div>
       <div class="flex justify-between">
-        <button type="button" class="lp-btn-ghost" @click="step = 1">Back</button>
-        <button type="button" class="lp-btn-primary" @click="goNext">Continue</button>
+        <button type="button" class="lp-btn-ghost" @click="step = 1">{{ t('common.back') }}</button>
+        <button type="button" class="lp-btn-primary" @click="goNext">{{ t('common.continue') }}</button>
       </div>
     </section>
 
     <!-- Cloud confirm -->
     <section v-else-if="step === confirmStep" class="lp-glass space-y-5 rounded-xl p-6">
       <div>
-        <h2 class="text-lg font-semibold">Confirm &amp; launch</h2>
+        <h2 class="text-lg font-semibold">{{ t('launch.launch') }}</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          You’ll get status logs, TTL, and an Open app link when the workload is Running.
+          {{ t('launch.confirmBlurb') }}
         </p>
       </div>
       <label class="block space-y-2">
-        <span class="lp-label">Environment name</span>
+        <span class="lp-label">{{ t('common.name') }}</span>
         <input v-model="form.name" class="lp-input" autocomplete="off">
       </label>
       <label class="block space-y-2">
-        <span class="lp-label">TTL</span>
+        <span class="lp-label">{{ t('environments.create.ttl') }}</span>
         <div class="flex gap-2">
           <input
             v-model.number="form.ttl_value"
@@ -787,8 +785,8 @@ async function launch() {
             class="lp-input flex-1"
           >
           <select v-model="form.ttl_unit" class="lp-input w-28">
-            <option value="hours">Hours</option>
-            <option value="minutes">Minutes</option>
+            <option value="hours">{{ t('common.hours') }}</option>
+            <option value="minutes">{{ t('common.minutes') }}</option>
           </select>
         </div>
       </label>
@@ -796,7 +794,7 @@ async function launch() {
         v-if="!buildsFromRepo && !workspaceHasManifests"
         class="block space-y-2"
       >
-        <span class="lp-label">Container image</span>
+        <span class="lp-label">{{ t('launch.containerImage') }}</span>
         <input
           v-model="form.workload_image"
           class="lp-input font-mono text-xs"
@@ -806,53 +804,53 @@ async function launch() {
         >
       </label>
       <div class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4">
-        <span class="lp-label">Ephemeral Datastores (opt-in)</span>
+        <span class="lp-label">{{ t('launch.ephemeralDatastores') }}</span>
         <div class="grid gap-2 sm:grid-cols-2 pt-1">
           <label class="flex items-center gap-2 text-xs cursor-pointer">
             <input v-model="form.enable_postgres" type="checkbox" class="accent-[var(--lp-accent)]">
-            <span>Postgres (in-cluster)</span>
+            <span>{{ t('launch.postgresInCluster') }}</span>
           </label>
           <label class="flex items-center gap-2 text-xs cursor-pointer">
             <input v-model="form.enable_redis" type="checkbox" class="accent-[var(--lp-accent)]">
-            <span>Redis (in-cluster)</span>
+            <span>{{ t('launch.redisInCluster') }}</span>
           </label>
         </div>
       </div>
       <dl class="grid gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4 text-sm sm:grid-cols-2">
         <div>
-          <dt class="lp-label">Target</dt>
+          <dt class="lp-label">{{ t('launch.chooseTarget') }}</dt>
           <dd class="mt-1">{{ providerLabel }}</dd>
         </div>
         <div>
-          <dt class="lp-label">Source</dt>
+          <dt class="lp-label">{{ t('launch.pickSource') }}</dt>
           <dd class="mt-1 break-all">{{ sourceSummary }}</dd>
         </div>
         <div v-if="selectedWorkspace && !usesWorkspaceSource">
-          <dt class="lp-label">Workspace</dt>
+          <dt class="lp-label">{{ t('provision.workspace') }}</dt>
           <dd class="mt-1">{{ selectedWorkspace.name }} ({{ selectedWorkspace.provider }})</dd>
         </div>
         <div>
-          <dt class="lp-label">Est. hourly</dt>
+          <dt class="lp-label">{{ t('launch.summary.estHourly') }}</dt>
           <dd class="mt-1 font-mono text-[var(--lp-accent)]">${{ hourlyDisplay }}/hr</dd>
         </div>
         <div>
-          <dt class="lp-label">Image</dt>
+          <dt class="lp-label">{{ t('launch.summary.image') }}</dt>
           <dd class="mt-1 break-all font-mono text-xs">{{ imageSummary }}</dd>
         </div>
         <div>
-          <dt class="lp-label">Rebuilds</dt>
-          <dd class="mt-1 text-[var(--lp-muted)]">Push to branch when webhook is configured</dd>
+          <dt class="lp-label">{{ t('launch.summary.rebuilds') }}</dt>
+          <dd class="mt-1 text-[var(--lp-muted)]">{{ t('launch.summary.rebuildsBlurb') }}</dd>
         </div>
       </dl>
       <div class="flex justify-between">
-        <button type="button" class="lp-btn-ghost" @click="goBackFromConfirm">Back</button>
+        <button type="button" class="lp-btn-ghost" @click="goBackFromConfirm">{{ t('common.back') }}</button>
         <button
           type="button"
           class="lp-btn-primary"
           :disabled="submitting"
           @click="launch"
         >
-          {{ submitting ? 'Launching…' : 'Launch preview' }}
+          {{ submitting ? t('common.working') : t('environments.index.launchPreview') }}
         </button>
       </div>
     </section>

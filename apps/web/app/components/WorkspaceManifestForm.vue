@@ -9,6 +9,7 @@ const emit = defineEmits<{
   error: [message: string]
 }>()
 
+const { t } = useI18n()
 const { readWorkspaceFile, writeWorkspaceFile } = useProvisioning()
 
 const selectedPath = ref<string | null>(null)
@@ -91,11 +92,10 @@ function onEditorUpdate(value: string) {
   <section class="space-y-4 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/60 p-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <p class="lp-label">Interface form</p>
-        <h2 class="text-lg font-semibold">Edit manifest &amp; CI files</h2>
+        <p class="lp-label">{{ t('manifest.form.label') }}</p>
+        <h2 class="text-lg font-semibold">{{ t('manifest.form.title') }}</h2>
         <p class="mt-1 text-sm text-[var(--lp-muted)]">
-          Update files under <code class="font-mono text-xs">infra/</code> and
-          <code class="font-mono text-xs">ci/</code> without opening the Advanced IDE.
+          {{ t('manifest.form.blurb') }}
         </p>
       </div>
       <button
@@ -104,7 +104,7 @@ function onEditorUpdate(value: string) {
         :disabled="!selectedPath || saving || !dirty"
         @click="onSave"
       >
-        {{ saving ? 'Saving…' : 'Save changes' }}
+        {{ saving ? t('common.saving') : t('manifest.form.saveChanges') }}
       </button>
     </div>
 
@@ -112,14 +112,12 @@ function onEditorUpdate(value: string) {
       v-if="!editableFiles.length"
       class="rounded-xl border border-dashed border-[var(--lp-line)] px-6 py-10 text-center text-sm text-[var(--lp-muted)]"
     >
-      No files under <code class="font-mono text-xs">infra/</code> or
-      <code class="font-mono text-xs">ci/</code> yet. Use the actions above to scaffold Provision,
-      Kubernetes, or CI/CD output.
+      {{ t('manifest.form.empty') }}
     </div>
 
     <div v-else class="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
       <div class="space-y-2">
-        <p class="lp-label">Files</p>
+        <p class="lp-label">{{ t('manifest.form.files') }}</p>
         <div class="max-h-[420px] space-y-1 overflow-y-auto rounded-lg border border-[var(--lp-line)] p-2">
           <button
             v-for="path in editableFiles"
@@ -139,7 +137,7 @@ function onEditorUpdate(value: string) {
       </div>
 
       <div class="min-h-[420px] rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/30">
-        <p v-if="loadingFile" class="p-4 text-sm text-[var(--lp-muted)]">Loading file…</p>
+        <p v-if="loadingFile" class="p-4 text-sm text-[var(--lp-muted)]">{{ t('manifest.form.loadingFile') }}</p>
         <ClientOnly v-else-if="selectedPath">
           <WorkspaceMonacoEditor
             :model-value="editorContent"
@@ -148,7 +146,7 @@ function onEditorUpdate(value: string) {
             @save="onSave"
           />
         </ClientOnly>
-        <p v-else class="p-4 text-sm text-[var(--lp-muted)]">Select a file to edit.</p>
+        <p v-else class="p-4 text-sm text-[var(--lp-muted)]">{{ t('manifest.form.selectFile') }}</p>
       </div>
     </div>
 

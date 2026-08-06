@@ -6,6 +6,8 @@ const props = defineProps<{
   loading: boolean
 }>()
 
+const { t } = useI18n()
+
 const emit = defineEmits<{
   (e: 'describe', resource: K8sResource): void
   (e: 'logs', resource: K8sResource): void
@@ -60,7 +62,7 @@ function statusBadgeClass(status: string) {
           :class="activeTab === 'all' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)] font-bold' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
           @click="activeTab = 'all'"
         >
-          All Resources ({{ resources.length }})
+          {{ t('k8s.grid.allResources', { count: resources.length }) }}
         </button>
         <button
           type="button"
@@ -68,7 +70,7 @@ function statusBadgeClass(status: string) {
           :class="activeTab === 'deployments' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)] font-bold' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
           @click="activeTab = 'deployments'"
         >
-          Deployments
+          {{ t('k8s.grid.deployments') }}
         </button>
         <button
           type="button"
@@ -76,7 +78,7 @@ function statusBadgeClass(status: string) {
           :class="activeTab === 'pods' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)] font-bold' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
           @click="activeTab = 'pods'"
         >
-          Pods
+          {{ t('k8s.grid.pods') }}
         </button>
         <button
           type="button"
@@ -84,7 +86,7 @@ function statusBadgeClass(status: string) {
           :class="activeTab === 'services' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)] font-bold' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
           @click="activeTab = 'services'"
         >
-          Services
+          {{ t('k8s.grid.services') }}
         </button>
         <button
           type="button"
@@ -92,7 +94,7 @@ function statusBadgeClass(status: string) {
           :class="activeTab === 'ingress' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)] font-bold' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
           @click="activeTab = 'ingress'"
         >
-          Ingress
+          {{ t('k8s.grid.ingress') }}
         </button>
         <button
           type="button"
@@ -100,7 +102,7 @@ function statusBadgeClass(status: string) {
           :class="activeTab === 'configmaps' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)] font-bold' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
           @click="activeTab = 'configmaps'"
         >
-          ConfigMaps
+          {{ t('k8s.grid.configMaps') }}
         </button>
       </div>
     </div>
@@ -110,7 +112,7 @@ function statusBadgeClass(status: string) {
       v-if="!loading && filteredResources.length === 0"
       class="rounded-xl border border-dashed border-[var(--lp-line)] p-8 text-center font-mono text-xs text-[var(--lp-muted)]"
     >
-      No resources found for the selected category. Click "Apply Manifests" to deploy workloads to the cluster.
+      {{ t('k8s.grid.empty') }}
     </div>
 
     <!-- Loading Skeleton -->
@@ -158,23 +160,23 @@ function statusBadgeClass(status: string) {
           <!-- Metadata List -->
           <div class="mt-3 space-y-1.5 font-mono text-xs text-[var(--lp-muted)]">
             <div class="flex justify-between">
-              <span>Namespace:</span>
+              <span>{{ t('k8s.grid.namespace') }}</span>
               <span class="text-[var(--lp-text)] font-medium">{{ res.namespace }}</span>
             </div>
             <div class="flex justify-between">
-              <span>Ready Replicas:</span>
+              <span>{{ t('k8s.grid.readyReplicas') }}</span>
               <span class="text-[var(--lp-text)] font-medium">{{ res.ready_replicas }}</span>
             </div>
             <div v-if="res.ip" class="flex justify-between">
-              <span>IP Address:</span>
+              <span>{{ t('k8s.grid.ipAddress') }}</span>
               <span class="text-[var(--lp-accent)] font-medium">{{ res.ip }}</span>
             </div>
             <div v-if="res.ports && res.ports.length" class="flex justify-between">
-              <span>Ports:</span>
+              <span>{{ t('k8s.grid.ports') }}</span>
               <span class="text-[var(--lp-text)] truncate max-w-[140px]">{{ res.ports.join(', ') }}</span>
             </div>
             <div v-if="res.endpoints && res.endpoints.length" class="mt-1">
-              <span class="text-[10px] text-[var(--lp-muted)] uppercase">Endpoint:</span>
+              <span class="text-[10px] text-[var(--lp-muted)] uppercase">{{ t('k8s.grid.endpoint') }}</span>
               <p class="truncate text-[11px] text-emerald-400 font-semibold">
                 {{ res.endpoints[0] }}
               </p>
@@ -189,11 +191,11 @@ function statusBadgeClass(status: string) {
             <button
               type="button"
               class="flex items-center gap-1 rounded border border-[var(--lp-line)] bg-[var(--lp-panel-2)] px-2 py-1 text-[11px] text-[var(--lp-text)] transition hover:border-[var(--lp-accent)] hover:text-[var(--lp-accent)]"
-              title="Describe Resource"
+              :title="t('k8s.grid.describeTitle')"
               @click="emit('describe', res)"
             >
               <span class="material-symbols-outlined text-sm">description</span>
-              Describe
+              {{ t('k8s.grid.describe') }}
             </button>
 
             <!-- Logs (for Pods/Deployments) -->
@@ -201,11 +203,11 @@ function statusBadgeClass(status: string) {
               v-if="['pod', 'deployment'].includes(res.kind.toLowerCase())"
               type="button"
               class="flex items-center gap-1 rounded border border-[var(--lp-line)] bg-[var(--lp-panel-2)] px-2 py-1 text-[11px] text-[var(--lp-text)] transition hover:border-[var(--lp-accent)] hover:text-[var(--lp-accent)]"
-              title="View Pod Logs"
+              :title="t('k8s.grid.logsTitle')"
               @click="emit('logs', res)"
             >
               <span class="material-symbols-outlined text-sm">article</span>
-              Logs
+              {{ t('common.logs') }}
             </button>
 
             <!-- Exec Terminal (for Pods) -->
@@ -213,11 +215,11 @@ function statusBadgeClass(status: string) {
               v-if="res.kind.toLowerCase() === 'pod'"
               type="button"
               class="flex items-center gap-1 rounded border border-[var(--lp-line)] bg-[var(--lp-panel-2)] px-2 py-1 text-[11px] text-[var(--lp-accent)] transition hover:border-[var(--lp-accent)] hover:bg-[var(--lp-accent)]/10"
-              title="Open Container Terminal Shell"
+              :title="t('k8s.grid.execTitle')"
               @click="emit('exec', res)"
             >
               <span class="material-symbols-outlined text-sm">terminal</span>
-              Exec
+              {{ t('k8s.grid.exec') }}
             </button>
           </div>
 
@@ -225,7 +227,7 @@ function statusBadgeClass(status: string) {
           <button
             type="button"
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--lp-danger)] transition hover:bg-[var(--lp-danger)]/10"
-            title="Delete Resource"
+            :title="t('k8s.grid.deleteTitle')"
             @click="onDelete(res)"
           >
             <span class="material-symbols-outlined text-sm">delete</span>

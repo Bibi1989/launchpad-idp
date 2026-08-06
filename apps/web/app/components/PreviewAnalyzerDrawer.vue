@@ -26,6 +26,8 @@ const {
   rejectPatch,
 } = usePreviewAnalyzer()
 
+const { t } = useI18n()
+
 const patchCopied = ref(false)
 const applyError = ref<string | null>(null)
 
@@ -70,13 +72,13 @@ watch(visible, (isOpen) => {
 function categoryLabel(category: DiagnosticCategory): string {
   switch (category) {
     case 'CONTAINER_VULNERABILITY':
-      return 'Container vulnerability'
+      return t('analyzer.preview.categories.containerVuln')
     case 'SAST_CODE_SECURITY':
-      return 'SAST / code security'
+      return t('analyzer.preview.categories.sast')
     case 'RUNTIME_CRASH':
-      return 'Runtime crash'
+      return t('analyzer.preview.categories.runtimeCrash')
     case 'CONFIGURATION_ERROR':
-      return 'Configuration error'
+      return t('analyzer.preview.categories.configError')
     default:
       return category
   }
@@ -160,7 +162,7 @@ function onClear() {
       <button
         type="button"
         class="absolute inset-0 bg-black/50"
-        aria-label="Close analyzer"
+        :aria-label="t('analyzer.preview.closeLabel')"
         @click="close"
       />
       <aside
@@ -169,10 +171,10 @@ function onClear() {
         <header class="flex items-start justify-between gap-3 border-b border-[var(--lp-line)] px-5 py-4">
           <div class="space-y-1">
             <p class="font-mono text-[10px] uppercase tracking-wider text-[var(--lp-accent)]">
-              Launch Preview Analyzer
+              {{ t('analyzer.preview.eyebrow') }}
             </p>
             <h2 id="preview-analyzer-title" class="text-lg font-semibold tracking-tight">
-              Diagnostic report
+              {{ t('analyzer.preview.title') }}
             </h2>
             <p v-if="environmentName" class="font-mono text-xs text-[var(--lp-muted)]">
               {{ environmentName }}
@@ -185,7 +187,7 @@ function onClear() {
 
         <div class="flex-1 space-y-5 overflow-y-auto px-5 py-5">
           <p v-if="loading" class="text-sm text-[var(--lp-muted)]">
-            Analyzing CI/CD, Kubernetes, Trivy, and CodeQL telemetry…
+            {{ t('analyzer.preview.loading') }}
           </p>
           <p v-else-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
 
@@ -209,7 +211,7 @@ function onClear() {
             </div>
 
             <section class="space-y-2">
-              <h3 class="lp-label">Summary</h3>
+              <h3 class="lp-label">{{ t('analyzer.preview.summary') }}</h3>
               <p class="text-sm leading-relaxed text-[var(--lp-text)]">{{ report.summary }}</p>
             </section>
 
@@ -217,36 +219,36 @@ function onClear() {
               v-if="report.securityDetails"
               class="space-y-3 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 p-4"
             >
-              <h3 class="lp-label">Security details</h3>
+              <h3 class="lp-label">{{ t('analyzer.preview.securityDetails') }}</h3>
               <dl class="grid gap-3 text-sm">
                 <div>
-                  <dt class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">CVE / rule</dt>
+                  <dt class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('analyzer.preview.cveRule') }}</dt>
                   <dd class="mt-0.5 font-mono text-xs text-[var(--lp-accent)]">
                     {{ report.securityDetails.cveOrRuleId }}
                   </dd>
                 </div>
                 <div>
-                  <dt class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">Affected</dt>
+                  <dt class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('analyzer.preview.affected') }}</dt>
                   <dd class="mt-0.5 break-all font-mono text-xs">
                     {{ report.securityDetails.affectedComponent }}
                   </dd>
                 </div>
                 <div>
-                  <dt class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">Recommended fix</dt>
+                  <dt class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('analyzer.preview.recommendedFix') }}</dt>
                   <dd class="mt-0.5 text-sm">{{ report.securityDetails.recommendedUpgrade }}</dd>
                 </div>
               </dl>
             </section>
 
             <section class="space-y-2">
-              <h3 class="lp-label">Root cause</h3>
+              <h3 class="lp-label">{{ t('analyzer.preview.rootCause') }}</h3>
               <p class="text-sm leading-relaxed text-[var(--lp-muted)]">
                 {{ report.rootCauseAnalysis }}
               </p>
             </section>
 
             <section class="space-y-2">
-              <h3 class="lp-label">Actionable steps</h3>
+              <h3 class="lp-label">{{ t('analyzer.preview.actionableSteps') }}</h3>
               <ol class="list-decimal space-y-2 pl-5 text-sm text-[var(--lp-text)]">
                 <li v-for="(step, idx) in report.actionableSteps" :key="idx">
                   {{ step }}
@@ -256,10 +258,10 @@ function onClear() {
 
             <section v-if="patchDiff" class="space-y-3">
               <div class="flex items-center justify-between gap-2">
-                <h3 class="lp-label mb-0">Proposed fix</h3>
+                <h3 class="lp-label mb-0">{{ t('analyzer.preview.proposedFix') }}</h3>
                 <button type="button" class="lp-btn-ghost py-1 text-xs" @click="copySuggestedPatch">
                   <span class="material-symbols-outlined text-sm">content_copy</span>
-                  {{ patchCopied ? 'Copied' : 'Copy diff' }}
+                  {{ patchCopied ? t('common.copied') : t('analyzer.preview.copyDiff') }}
                 </button>
               </div>
               <p class="font-mono text-xs text-[var(--lp-accent)]">{{ patchDiff.targetFile }}</p>
@@ -273,11 +275,10 @@ function onClear() {
                 class="space-y-3 rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4"
               >
                 <p class="text-sm text-[var(--lp-text)]">
-                  Apply this fix to the linked workspace, or reject it?
+                  {{ t('analyzer.preview.applyPrompt') }}
                 </p>
                 <p v-if="!canApplyToWorkspace" class="text-xs text-[var(--lp-muted)]">
-                  This preview has no linked workspace - open a workspace-backed preview to write
-                  the file, or copy the diff manually.
+                  {{ t('analyzer.preview.noWorkspace') }}
                 </p>
                 <div class="flex flex-wrap gap-2">
                   <button
@@ -287,7 +288,7 @@ function onClear() {
                     @click="onApplyFix"
                   >
                     <span class="material-symbols-outlined text-sm">check</span>
-                    {{ patchBusy ? 'Applying…' : 'Apply fix' }}
+                    {{ patchBusy ? t('common.working') : t('analyzer.preview.applyFix') }}
                   </button>
                   <button
                     type="button"
@@ -296,7 +297,7 @@ function onClear() {
                     @click="onRejectFix"
                   >
                     <span class="material-symbols-outlined text-sm">close</span>
-                    Reject
+                    {{ t('analyzer.preview.reject') }}
                   </button>
                 </div>
               </div>
@@ -305,20 +306,20 @@ function onClear() {
                 v-if="patchDecision === 'applied'"
                 class="rounded-lg border border-[var(--lp-ok)]/40 bg-[var(--lp-ok)]/10 px-3 py-2 text-sm text-[var(--lp-ok)]"
               >
-                {{ patchMessage || 'Fix applied.' }}
+                {{ patchMessage || t('analyzer.preview.fixApplied') }}
                 <NuxtLink
                   v-if="workspaceId"
                   :to="`/workspaces/${workspaceId}`"
                   class="ml-1 underline"
                 >
-                  Open workspace
+                  {{ t('analyzer.preview.openWorkspace') }}
                 </NuxtLink>
               </p>
               <p
                 v-else-if="patchDecision === 'rejected'"
                 class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-3 py-2 text-sm text-[var(--lp-muted)]"
               >
-                {{ patchMessage || 'Fix rejected.' }}
+                {{ patchMessage || t('analyzer.preview.fixRejected') }}
               </p>
               <p v-if="applyError" class="text-sm text-[var(--lp-danger)]">{{ applyError }}</p>
             </section>
@@ -327,7 +328,7 @@ function onClear() {
               v-if="Object.keys(telemetrySummary).length"
               class="space-y-2 border-t border-[var(--lp-line)] pt-4"
             >
-              <h3 class="lp-label">Telemetry ingested</h3>
+              <h3 class="lp-label">{{ t('analyzer.preview.telemetry') }}</h3>
               <p class="font-mono text-[11px] text-[var(--lp-muted)]">
                 sources={{ Array.isArray(telemetrySummary.sourceKinds) ? telemetrySummary.sourceKinds.join(', ') : '-' }}
                 · trivy={{ telemetrySummary.trivyCount ?? 0 }}
@@ -338,16 +339,16 @@ function onClear() {
           </template>
 
           <p v-else class="text-sm text-[var(--lp-muted)]">
-            Run Analyze failure to generate a structured diagnostic from preview logs and security scans.
+            {{ t('analyzer.preview.empty') }}
           </p>
         </div>
 
         <footer class="flex items-center justify-between gap-2 border-t border-[var(--lp-line)] px-5 py-3">
           <button type="button" class="lp-btn-ghost text-xs" :disabled="!report" @click="onClear">
-            Clear
+            {{ t('common.clear') }}
           </button>
           <button type="button" class="lp-btn-primary text-xs" @click="close">
-            Done
+            {{ t('workspaceIde.initModal.done') }}
           </button>
         </footer>
       </aside>

@@ -2,6 +2,7 @@
 import type { WorkspaceListItem } from '~/types/provisioning'
 import { artifactModeLabel, workspaceStackLabel } from '~/utils/workspaceDisplay'
 
+const { t } = useI18n()
 const route = useRoute()
 const { listWorkspaces, destroyWorkspace } = useProvisioning()
 const workspaces = ref<WorkspaceListItem[]>([])
@@ -29,7 +30,7 @@ async function refresh() {
   try {
     workspaces.value = await listWorkspaces()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load workspaces'
+    error.value = err instanceof Error ? err.message : t('workspaces.errors.load')
   } finally {
     loading.value = false
   }
@@ -49,7 +50,7 @@ async function onDestroy() {
     await destroyWorkspace(id)
     await refresh()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to destroy workspace'
+    error.value = err instanceof Error ? err.message : t('workspaces.errors.destroy')
   } finally {
     destroyingId.value = null
   }
@@ -83,37 +84,37 @@ watch(
   <div class="space-y-8 animate-fade-up">
     <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <h1 class="text-3xl font-semibold tracking-tight">Workspaces</h1>
+        <h1 class="text-3xl font-semibold tracking-tight">{{ t('workspaces.index.title') }}</h1>
         <p class="mt-1 max-w-xl text-sm text-[var(--lp-muted)]">
-          Import a GitHub or GitLab repo, or provision a new IaC bundle for sandbox execution.
+          {{ t('workspaces.index.blurb') }}
         </p>
       </div>
       <div class="flex flex-wrap gap-2">
         <button type="button" class="lp-btn-ghost" @click="openImport">
           <span class="material-symbols-outlined text-base">download</span>
-          Import repo
+          {{ t('workspaces.index.import') }}
         </button>
         <NuxtLink to="/provision" class="lp-btn-primary">
           <span class="material-symbols-outlined text-base">add</span>
-          New workspace
+          {{ t('workspaces.index.create') }}
         </NuxtLink>
       </div>
     </header>
 
     <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Loading…</p>
+    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
 
     <div
       v-else-if="workspaces.length === 0"
       class="rounded-xl border border-dashed border-[var(--lp-line)] px-6 py-12 text-center"
     >
       <span class="material-symbols-outlined mb-3 text-4xl text-[var(--lp-muted)]">folder_off</span>
-      <p class="text-sm text-[var(--lp-muted)]">No workspaces yet.</p>
+      <p class="text-sm text-[var(--lp-muted)]">{{ t('workspaces.index.empty') }}</p>
       <div class="mt-4 flex flex-wrap justify-center gap-2">
         <button type="button" class="lp-btn-ghost inline-flex" @click="openImport">
-          Import a repo
+          {{ t('workspaces.index.importCta') }}
         </button>
-        <NuxtLink to="/provision" class="lp-btn-primary inline-flex">Create one</NuxtLink>
+        <NuxtLink to="/provision" class="lp-btn-primary inline-flex">{{ t('workspaces.index.createCta') }}</NuxtLink>
       </div>
     </div>
 
@@ -137,7 +138,7 @@ watch(
           </div>
           <div class="flex shrink-0 gap-2">
             <NuxtLink :to="`/workspaces/${ws.id}`" class="lp-btn-ghost px-3 py-1.5 text-xs">
-              Open
+              {{ t('workspaces.index.open') }}
             </NuxtLink>
             <button
               type="button"
@@ -145,7 +146,7 @@ watch(
               :disabled="destroyingId === ws.id"
               @click="requestDestroy(ws.id)"
             >
-              Destroy
+              {{ t('workspaces.index.destroy') }}
             </button>
           </div>
         </div>
@@ -154,9 +155,9 @@ watch(
 
     <ConfirmDialog
       v-model:open="confirmDestroyOpen"
-      title="Destroy workspace?"
+      :title="t('workspaces.destroy.title')"
       :message="`Destroy workspace “${pendingDestroyName}”? Generated files and the sandbox will be removed. This cannot be undone.`"
-      confirm-label="Destroy"
+      :confirm-label="t('workspaces.index.destroy')"
       :busy="destroyingId !== null"
       @confirm="onDestroy"
     />

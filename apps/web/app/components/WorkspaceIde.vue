@@ -10,6 +10,8 @@ import { buildWorkspaceFileTree } from '~/utils/workspaceFileTree'
 import { iacRunShortcuts } from '~/utils/workspaceInfraScaffold'
 import { ApiError } from '~/composables/useApi'
 
+const { t } = useI18n()
+
 const props = defineProps<{
   workspaceId: string
   engine: IaCEngine
@@ -83,7 +85,7 @@ const dirty = computed(() => editorContent.value !== savedContent.value)
 const hasK8sFiles = computed(() =>
   nodes.value.some((n) => n.path.includes('/k8s/') || n.path.includes('/helm/')),
 )
-const fileName = computed(() => selectedPath.value?.split('/').pop() || 'Untitled')
+const fileName = computed(() => selectedPath.value?.split('/').pop() || t('workspaceIde.untitled'))
 const isDirectorySelected = computed(() => {
   if (!selectedPath.value) return false
   return nodes.value.some((n) => n.path === selectedPath.value && n.type === 'directory')
@@ -593,7 +595,7 @@ onUnmounted(() => {
     <!-- Title / file actions bar -->
     <div class="flex flex-wrap items-center gap-1 border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/80 px-2 py-1.5">
       <p class="mr-auto px-1 text-[11px] font-medium uppercase tracking-wide text-[var(--lp-muted)]">
-        Workspace IDE
+        {{ t('workspaceIde.title') }}
       </p>
       <button
         type="button"
@@ -604,7 +606,7 @@ onUnmounted(() => {
         <span class="material-symbols-outlined !text-[13px] mr-1">
           {{ copiedFileState ? 'check' : 'content_copy' }}
         </span>
-        {{ copiedFileState ? 'Copied' : 'Copy' }}
+        {{ copiedFileState ? t('common.copied') : t('common.copy') }}
       </button>
       <button
         type="button"
@@ -613,7 +615,7 @@ onUnmounted(() => {
         @click="downloadActiveFile"
       >
         <span class="material-symbols-outlined !text-[13px] mr-1">download</span>
-        Download
+        {{ t('workspaceIde.download') }}
       </button>
       <button
         type="button"
@@ -621,7 +623,7 @@ onUnmounted(() => {
         :disabled="!selectedPath"
         @click="formatFile"
       >
-        Format
+        {{ t('workspaceIde.format') }}
       </button>
       <button
         type="button"
@@ -629,24 +631,24 @@ onUnmounted(() => {
         :disabled="!selectedPath || !dirty || saving"
         @click="saveFile"
       >
-        {{ saving ? 'Saving…' : dirty ? 'Save' : 'Saved' }}
+        {{ saving ? t('workspaceIde.saving') : dirty ? t('workspaceIde.save') : t('workspaceIde.saved') }}
       </button>
       <button
         type="button"
         class="lp-btn-ghost px-2 py-1 text-[12px] disabled:opacity-40"
         :disabled="!canAiAnalyze"
-        :title="isDirectorySelected ? 'Analyze all files in folder' : 'Analyze selected file'"
+        :title="isDirectorySelected ? t('workspaceIde.aiAnalyzeFolderTitle') : t('workspaceIde.aiAnalyzeFileTitle')"
         @click="openAiAnalysis"
       >
         <span class="material-symbols-outlined !text-[13px] mr-1">auto_awesome</span>
-        {{ aiAnalysisLoading ? 'Loading…' : isDirectorySelected ? 'AI analyze folder' : 'AI analyze' }}
+        {{ aiAnalysisLoading ? t('common.loading') : isDirectorySelected ? t('workspaceIde.aiAnalyzeFolder') : t('workspaceIde.aiAnalyze') }}
       </button>
       <button
         type="button"
         class="lp-btn-primary px-2.5 py-1 text-[12px]"
         @click="openPush"
       >
-        Publish
+        {{ t('workspaceIde.publish') }}
       </button>
     </div>
 
@@ -659,7 +661,7 @@ onUnmounted(() => {
           :class="openDropdown === 'k8s' ? 'border-[var(--lp-accent)]/50 bg-[var(--lp-panel-2)]' : ''"
           @click="toggleDropdown('k8s')"
         >
-          Kubernetes
+          {{ t('workspaceIde.kubernetes') }}
           <span class="material-symbols-outlined !text-[14px] text-[var(--lp-muted)]">expand_more</span>
         </button>
         <div
@@ -685,7 +687,7 @@ onUnmounted(() => {
           :class="openDropdown === 'terraform' ? 'border-[var(--lp-accent)]/50 bg-[var(--lp-panel-2)]' : ''"
           @click="toggleDropdown('terraform')"
         >
-          Terraform
+          {{ t('workspaceIde.engines.terraform') }}
           <span class="material-symbols-outlined !text-[14px] text-[var(--lp-muted)]">expand_more</span>
         </button>
         <div
@@ -712,7 +714,7 @@ onUnmounted(() => {
           :class="openDropdown === 'pulumi' ? 'border-[var(--lp-accent)]/50 bg-[var(--lp-panel-2)]' : ''"
           @click="toggleDropdown('pulumi')"
         >
-          Pulumi
+          {{ t('workspaceIde.engines.pulumi') }}
           <span class="material-symbols-outlined !text-[14px] text-[var(--lp-muted)]">expand_more</span>
         </button>
         <div
@@ -733,7 +735,7 @@ onUnmounted(() => {
       </div>
 
       <span v-if="engine" class="ml-auto font-mono text-[11px] text-[var(--lp-muted)]">
-        engine: {{ engine }}
+        {{ t('workspaceIde.engineLabel') }} {{ engine }}
       </span>
     </div>
 
@@ -749,7 +751,7 @@ onUnmounted(() => {
         :disabled="restoringFiles"
         @click="restoreFiles"
       >
-        {{ restoringFiles ? 'Restoring…' : 'Restore files' }}
+        {{ restoringFiles ? t('workspaceIde.restoring') : t('workspaceIde.restoreFiles') }}
       </button>
     </p>
     <p
@@ -767,12 +769,12 @@ onUnmounted(() => {
       >
         <div class="flex items-center justify-between px-3 py-2">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-[var(--lp-muted)]">
-            Explorer
+            {{ t('workspaceIde.explorer') }}
           </p>
           <div class="flex items-center gap-0.5">
             <button
               type="button"
-              title="New File"
+              :title="t('workspaceIde.newFileTitle')"
               class="rounded p-0.5 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel)] hover:text-[var(--lp-text)]"
               @click.stop="openNewFileDialog(false)"
             >
@@ -780,7 +782,7 @@ onUnmounted(() => {
             </button>
             <button
               type="button"
-              title="New Folder"
+              :title="t('workspaceIde.newFolderTitle')"
               class="rounded p-0.5 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel)] hover:text-[var(--lp-text)]"
               @click.stop="openNewFolderDialog(false)"
             >
@@ -788,7 +790,7 @@ onUnmounted(() => {
             </button>
             <button
               type="button"
-              title="Refresh"
+              :title="t('workspaceIde.refreshTitle')"
               class="rounded p-0.5 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel)] hover:text-[var(--lp-text)]"
               @click.stop="refreshTree"
             >
@@ -796,7 +798,7 @@ onUnmounted(() => {
             </button>
           </div>
         </div>
-        <p v-if="loadingTree" class="px-3 text-[12px] text-[var(--lp-muted)]">Loading…</p>
+        <p v-if="loadingTree" class="px-3 text-[12px] text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
         <ul class="flex-1 overflow-y-auto pb-3" @click.stop>
           <WorkspaceTreeNode
             v-for="node in tree"
@@ -821,10 +823,10 @@ onUnmounted(() => {
             <span v-if="dirty" class="text-[var(--lp-muted)]">●</span>
           </div>
           <div v-else class="px-3 py-1.5 text-[12px] text-[var(--lp-muted)]">
-            {{ isDirectorySelected ? `Folder: ${selectedPath}` : 'No file open' }}
+            {{ isDirectorySelected ? t('workspaceIde.folderLabel', { path: selectedPath }) : t('workspaceIde.noFileOpen') }}
           </div>
           <span v-if="loadingFile" class="ml-auto px-3 py-1.5 text-[11px] text-[var(--lp-muted)]">
-            Loading…
+            {{ t('common.loading') }}
           </span>
         </div>
         <ClientOnly>
@@ -843,7 +845,7 @@ onUnmounted(() => {
             v-else
             class="flex flex-1 items-center justify-center bg-[var(--lp-panel)] text-[13px] text-[var(--lp-muted)]"
           >
-            Select a file in the explorer to edit
+            {{ t('workspaceIde.selectFileHint') }}
           </div>
         </ClientOnly>
       </div>
@@ -908,7 +910,7 @@ onUnmounted(() => {
       >
         <div class="w-full max-w-md space-y-4 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] p-5 shadow-2xl">
           <h3 class="text-base font-semibold text-[var(--lp-text)]">
-            {{ showRename ? 'Rename' : showNewFolder ? 'New Folder' : 'New File' }}
+            {{ showRename ? t('workspaceIde.dialogs.rename') : showNewFolder ? t('workspaceIde.dialogs.newFolder') : t('workspaceIde.dialogs.newFile') }}
           </h3>
           <input
             v-model="newName"
@@ -923,14 +925,14 @@ onUnmounted(() => {
               class="lp-btn-ghost px-3 py-1.5 text-[12px]"
               @click="showNewFile = showNewFolder = showRename = false"
             >
-              Cancel
+              {{ t('common.cancel') }}
             </button>
             <button
               type="button"
               class="lp-btn-primary px-3 py-1.5 text-[12px]"
               @click="showRename ? renameSelected() : showNewFolder ? createFolder() : createFile()"
             >
-              Confirm
+              {{ t('common.confirm') }}
             </button>
           </div>
         </div>
@@ -945,7 +947,7 @@ onUnmounted(() => {
       >
         <div class="max-h-[80vh] w-full max-w-lg space-y-3 overflow-y-auto rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] p-5 shadow-2xl">
           <h3 class="text-base font-semibold text-[var(--lp-text)]">
-            {{ showTemplates === 'kubernetes' ? 'Add Kubernetes YAML' : 'Add Terraform file' }}
+            {{ showTemplates === 'kubernetes' ? t('workspaceIde.addYaml') : t('workspaceIde.addTerraform') }}
           </h3>
           <button
             v-for="tpl in showTemplates === 'kubernetes' ? k8sTemplates : tfTemplates"
@@ -963,7 +965,7 @@ onUnmounted(() => {
             class="lp-btn-ghost px-3 py-1.5 text-[12px]"
             @click="showTemplates = null"
           >
-            Close
+            {{ t('common.close') }}
           </button>
         </div>
       </div>
@@ -989,20 +991,20 @@ onUnmounted(() => {
 
     <ConfirmDialog
       :open="confirmIacDestroy !== null"
-      :title="confirmIacDestroy?.title ?? 'Destroy resources?'"
+      :title="confirmIacDestroy?.title ?? t('workspaceIde.dialogs.destroyResources')"
       :message="confirmIacDestroy?.message ?? ''"
-      confirm-label="Yes, destroy"
-      cancel-label="No"
+      :confirm-label="t('common.confirmDestroy')"
+      :cancel-label="t('common.no')"
       @update:open="(value) => { if (!value) confirmIacDestroy = null }"
       @confirm="confirmIacDestroyRun"
     />
 
     <ConfirmDialog
       :open="pendingDeletePath !== null"
-      title="Delete path?"
-      :message="pendingDeletePath ? `Delete “${pendingDeletePath}” from this workspace? This cannot be undone.` : ''"
-      confirm-label="Yes, delete"
-      cancel-label="No"
+      :title="t('workspaceIde.dialogs.deletePath')"
+      :message="pendingDeletePath ? t('workspaceIde.dialogs.deletePathMessage', { path: pendingDeletePath }) : ''"
+      :confirm-label="t('common.confirmDelete')"
+      :cancel-label="t('common.no')"
       :busy="deletingPath"
       @update:open="(value) => { if (!value) pendingDeletePath = null }"
       @confirm="confirmDeletePath"
@@ -1010,10 +1012,10 @@ onUnmounted(() => {
 
     <ConfirmDialog
       :open="pendingDiscardPath !== null"
-      title="Discard unsaved changes?"
-      message="You have unsaved edits in the current file. Opening another file will discard them."
-      confirm-label="Discard and open"
-      cancel-label="Keep editing"
+      :title="t('workspaceIde.dialogs.discardUnsaved')"
+      :message="t('workspaceIde.dialogs.discardMessage')"
+      :confirm-label="t('workspaceIde.dialogs.discardConfirm')"
+      :cancel-label="t('workspaceIde.dialogs.keepEditing')"
       danger
       @update:open="(value) => { if (!value) pendingDiscardPath = null }"
       @confirm="confirmDiscardUnsaved"

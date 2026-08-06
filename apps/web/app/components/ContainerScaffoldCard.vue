@@ -15,6 +15,8 @@ const emit = defineEmits<{
   'update:modelValue': [value: ContainerScaffoldConfig]
 }>()
 
+const { t } = useI18n()
+
 const activeTab = ref<'dockerfile' | 'compose'>('dockerfile')
 const copiedState = ref(false)
 
@@ -292,10 +294,10 @@ function downloadFile() {
         </span>
         <div>
           <h3 class="text-base font-semibold text-[var(--lp-text)]">
-            Multi-Service Container Scaffold (Frontend UI &amp; Backend API)
+            {{ t('scaffold.containerCard.title') }}
           </h3>
           <p class="text-xs text-[var(--lp-muted)]">
-            Configure frontend UI &amp; backend API deployments with hardened multi-stage Dockerfiles into workspace
+            {{ t('scaffold.containerCard.blurb') }}
           </p>
         </div>
       </div>
@@ -317,7 +319,7 @@ function downloadFile() {
       <!-- Multi-Service / Deployment Configurations -->
       <div class="space-y-3">
         <div class="flex items-center justify-between">
-          <span class="lp-label">Services / Deployments Scaffolded</span>
+          <span class="lp-label">{{ t('scaffold.containerCard.servicesLabel') }}</span>
           <button
             type="button"
             class="lp-btn-ghost text-xs text-[var(--lp-accent)] py-1 px-2.5 inline-flex items-center gap-1"
@@ -325,7 +327,7 @@ function downloadFile() {
             @click="addService"
           >
             <span class="material-symbols-outlined text-sm">add</span>
-            Add Service
+            {{ t('scaffold.containerCard.addService') }}
           </button>
         </div>
 
@@ -336,20 +338,20 @@ function downloadFile() {
             class="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/30 p-3"
           >
             <div class="w-28">
-              <span class="lp-label text-[10px]">Service Type</span>
+              <span class="lp-label text-[10px]">{{ t('scaffold.containerCard.serviceType') }}</span>
               <select
                 v-model="svc.app_kind"
                 class="lp-input py-1 text-xs font-semibold text-[var(--lp-accent)]"
                 :disabled="disabled"
                 @change="onAppKindChange(svc)"
               >
-                <option value="frontend">Frontend UI</option>
-                <option value="backend">Backend API</option>
+                <option value="frontend">{{ t('scaffold.containerCard.frontendUi') }}</option>
+                <option value="backend">{{ t('scaffold.containerCard.backendApi') }}</option>
               </select>
             </div>
 
             <div class="flex-1 min-w-[120px]">
-              <span class="lp-label text-[10px]">Service Name</span>
+              <span class="lp-label text-[10px]">{{ t('scaffold.containerCard.serviceName') }}</span>
               <input
                 v-model="svc.name"
                 class="lp-input py-1 text-xs"
@@ -360,7 +362,7 @@ function downloadFile() {
             </div>
 
             <div class="w-40">
-              <span class="lp-label text-[10px]">Framework Stack</span>
+              <span class="lp-label text-[10px]">{{ t('scaffold.containerCard.frameworkStack') }}</span>
               <select
                 v-model="svc.stack"
                 class="lp-input py-1 text-xs"
@@ -378,7 +380,7 @@ function downloadFile() {
             </div>
 
             <div class="w-24">
-              <span class="lp-label text-[10px]">Port</span>
+              <span class="lp-label text-[10px]">{{ t('scaffold.containerCard.port') }}</span>
               <input
                 v-model.number="svc.listen_port"
                 type="number"
@@ -410,7 +412,7 @@ function downloadFile() {
             :disabled="disabled"
             @change="updateField('generate_dockerfile', ($event.target as HTMLInputElement).checked)"
           >
-          Generate Multi-Stage Dockerfiles (USER 10001)
+          {{ t('scaffold.containerCard.generateDockerfile') }}
         </label>
         <label class="flex items-center gap-2 text-xs text-[var(--lp-text)]">
           <input
@@ -420,7 +422,7 @@ function downloadFile() {
             :disabled="disabled"
             @change="updateField('generate_docker_compose', ($event.target as HTMLInputElement).checked)"
           >
-          Generate docker-compose.yml
+          {{ t('scaffold.containerCard.generateCompose') }}
         </label>
       </div>
 
@@ -451,7 +453,7 @@ function downloadFile() {
               "
               @click="activeTab = 'compose'"
             >
-              docker-compose.yml
+              {{ t('scaffold.containerCard.dockerCompose') }}
             </button>
           </div>
 
@@ -464,7 +466,7 @@ function downloadFile() {
               <span class="material-symbols-outlined !text-sm">
                 {{ copiedState ? 'check' : 'content_copy' }}
               </span>
-              <span>{{ copiedState ? 'Copied!' : 'Copy' }}</span>
+              <span>{{ copiedState ? t('common.copied') : t('common.copy') }}</span>
             </button>
 
             <button
@@ -473,7 +475,7 @@ function downloadFile() {
               @click="downloadFile"
             >
               <span class="material-symbols-outlined !text-sm">download</span>
-              <span>Download</span>
+              <span>{{ t('common.download') }}</span>
             </button>
           </div>
         </div>

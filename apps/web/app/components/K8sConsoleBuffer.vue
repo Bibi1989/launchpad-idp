@@ -57,15 +57,21 @@ function copyConsoleLogs() {
     </div>
 
     <!-- Buffer Content -->
-    <div v-show="open" class="max-h-52 overflow-y-auto p-3 bg-black/80 font-mono text-[11px] leading-relaxed space-y-1 text-emerald-400">
-      <div v-if="!logs.length" class="text-[var(--lp-muted)] italic text-center py-3">
+    <div v-show="open" class="lp-console max-h-52 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed space-y-1">
+      <div v-if="!logs.length" class="lp-console-line italic text-center py-3">
         Console buffer ready. kubectl execution stdout/stderr logs will stream here.
       </div>
       <div
         v-for="(log, idx) in logs"
         :key="idx"
-        class="whitespace-pre-wrap break-all border-b border-zinc-900/50 pb-0.5"
-        :class="log.toLowerCase().includes('error') || log.toLowerCase().includes('failed') ? 'text-rose-400 font-semibold' : 'text-emerald-300'"
+        class="whitespace-pre-wrap break-all border-b border-white/5 pb-0.5"
+        :class="
+          log.toLowerCase().includes('error') || log.toLowerCase().includes('failed')
+            ? 'lp-console-line-danger font-semibold'
+            : log.toLowerCase().includes('warn')
+              ? 'lp-console-line-warn'
+              : 'lp-console-line-ok'
+        "
       >
         {{ log }}
       </div>

@@ -1,7 +1,9 @@
 <script setup lang="ts">
+const { t } = useI18n()
+
 const open = defineModel<boolean>('open', { default: false })
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     title: string
     message: string
@@ -11,8 +13,6 @@ withDefaults(
     busy?: boolean
   }>(),
   {
-    confirmLabel: 'Yes, destroy',
-    cancelLabel: 'No',
     danger: true,
     busy: false,
   },
@@ -22,6 +22,9 @@ const emit = defineEmits<{
   confirm: []
   cancel: []
 }>()
+
+const resolvedConfirmLabel = computed(() => props.confirmLabel ?? t('common.confirmDestroy'))
+const resolvedCancelLabel = computed(() => props.cancelLabel ?? t('common.no'))
 
 const titleId = useId()
 const messageId = useId()
@@ -81,7 +84,7 @@ onUnmounted(() => {
             :disabled="busy"
             @click="onCancel"
           >
-            {{ cancelLabel }}
+            {{ resolvedCancelLabel }}
           </button>
           <button
             type="button"
@@ -90,7 +93,7 @@ onUnmounted(() => {
             :disabled="busy"
             @click="onConfirm"
           >
-            {{ busy ? 'Working…' : confirmLabel }}
+            {{ busy ? t('common.working') : resolvedConfirmLabel }}
           </button>
         </div>
       </div>

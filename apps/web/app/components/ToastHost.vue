@@ -2,6 +2,7 @@
 import type { ToastType } from '~/composables/useToast'
 
 const { toasts, dismiss } = useToast()
+const { t } = useI18n()
 
 const iconFor: Record<ToastType, string> = {
   success: 'check_circle',
@@ -23,7 +24,7 @@ const toneFor: Record<ToastType, string> = {
     <div
       class="pointer-events-none fixed bottom-4 right-4 z-[200] flex w-[min(92vw,24rem)] flex-col gap-3"
       role="region"
-      aria-label="Notifications"
+      :aria-label="t('notifications.title')"
     >
       <TransitionGroup
         enter-active-class="transition duration-200 ease-out"
@@ -52,7 +53,7 @@ const toneFor: Record<ToastType, string> = {
           <button
             type="button"
             class="absolute right-2 top-2 rounded-md p-1 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
-            aria-label="Dismiss notification"
+            :aria-label="t('notifications.dismissAria')"
             @click="dismiss(toast.id)"
           >
             <span class="material-symbols-outlined text-base">close</span>

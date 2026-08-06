@@ -20,6 +20,7 @@ const {
   listGitlabProjects,
   getGitlabStatus,
 } = useProvisioning()
+const { t } = useI18n()
 
 const step = ref<'url' | 'preview'>('url')
 const gitHost = ref<GitHost>('github')
@@ -144,12 +145,12 @@ async function analyze() {
   error.value = null
   if (!canAnalyze.value) {
     error.value = gitHost.value === 'github'
-      ? 'Enter a valid GitHub repository URL'
-      : 'Enter a valid GitLab repository URL'
+      ? t('import.invalidGithubUrl')
+      : t('import.invalidGitlabUrl')
     return
   }
   if (gitHost.value === 'github' && githubInstallations.value.length > 1 && !selectedInstallationId.value) {
-    error.value = 'Select a GitHub account (personal or organization) before importing'
+    error.value = t('import.selectGithubAccount')
     return
   }
   loading.value = true
@@ -168,7 +169,7 @@ async function analyze() {
     services.value = result.services.map((s) => ({ ...s }))
     step.value = 'preview'
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Import failed'
+    error.value = err instanceof Error ? err.message : t('import.importFailed')
   } finally {
     loading.value = false
   }
@@ -179,7 +180,7 @@ async function save() {
   error.value = null
   const name = workspaceName.value.trim().toLowerCase()
   if (!/^[a-z][a-z0-9-]{2,63}$/.test(name)) {
-    error.value = 'Workspace name must be lowercase, start with a letter, 3-64 chars'
+    error.value = t('import.workspaceNameInvalid')
     return
   }
   saving.value = true
@@ -199,7 +200,7 @@ async function save() {
     emit('saved', result.workspace_id)
     await navigateTo(`/workspaces/${result.workspace_id}`)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to save workspace'
+    error.value = err instanceof Error ? err.message : t('import.saveWorkspaceFailed')
   } finally {
     saving.value = false
   }
@@ -235,12 +236,12 @@ async function close() {
       <div class="lp-glass my-4 w-full max-w-3xl space-y-5 rounded-2xl border border-[var(--lp-line)] p-6 shadow-2xl">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <h2 class="text-xl font-semibold">Import repository</h2>
+            <h2 class="text-xl font-semibold">{{ t('import.modalTitle') }}</h2>
             <p class="mt-1 text-sm text-[var(--lp-muted)]">
-              Choose GitHub or GitLab, analyze the stack, then save as a workspace.
+              {{ t('import.modalBlurbFull') }}
             </p>
           </div>
-          <button type="button" class="lp-btn-ghost px-2" aria-label="Close" @click="close">
+          <button type="button" class="lp-btn-ghost px-2" :aria-label="t('common.close')" @click="close">
             <span class="material-symbols-outlined">close</span>
           </button>
         </div>
@@ -256,7 +257,7 @@ async function close() {
           <GitProviderPicker v-model="gitHost" />
 
           <template v-if="gitHost === 'github'">
-            <p v-if="loadingAccounts" class="text-xs text-[var(--lp-muted)]">Loading GitHub accounts…</p>
+            <p v-if="loadingAccounts" class="text-xs text-[var(--lp-muted)]">{{ t('import.loadingGithubAccounts') }}</p>
             <template v-else-if="githubInstallations.length">
               <GithubInstallationPicker
                 :model-value="selectedInstallationId"
@@ -265,7 +266,7 @@ async function close() {
                 @update:model-value="onInstallationChange"
               />
               <div class="block space-y-2">
-                <span class="lp-label">Search repository</span>
+                <span class="lp-label">{{ t('import.searchRepo') }}</span>
                 <GithubRepoPicker
                   v-model="selectedRepoFullName"
                   :installation-id="selectedInstallationId"
@@ -274,20 +275,20 @@ async function close() {
               </div>
             </template>
             <p v-else class="text-xs text-[var(--lp-muted)]">
-              No GitHub App installations found.
-              <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">Connect GitHub</NuxtLink>
-              (personal and/or organization) or paste a URL.
+              {{ t('import.noGithubInstalls') }}
+              <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.connectGithub') }}</NuxtLink>
+              {{ t('import.connectGithubOrPaste') }}
             </p>
           </template>
 
           <label v-if="gitHost === 'gitlab' && gitlabProjects.length" class="block space-y-2">
-            <span class="lp-label">Connected GitLab project</span>
+            <span class="lp-label">{{ t('import.connectedGitlabProject') }}</span>
             <select
               class="lp-input"
               :disabled="loadingAccounts"
               @change="selectGitlabProject(($event.target as HTMLSelectElement).value)"
             >
-              <option value="">Select a project…</option>
+              <option value="">{{ t('import.selectProject') }}</option>
               <option v-for="p in gitlabProjects" :key="p.path" :value="p.path">
                 {{ p.path }}
               </option>
@@ -295,18 +296,18 @@ async function close() {
           </label>
           <p v-else-if="gitHost === 'gitlab' && !loadingAccounts" class="text-xs text-[var(--lp-muted)]">
             <template v-if="!gitlabConnected">
-              GitLab is not connected.
-              <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">Connect GitLab</NuxtLink>
-              or paste a public URL.
+              {{ t('import.gitlabNotConnected') }}
+              <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.connectGitlab') }}</NuxtLink>
+              {{ t('import.gitlabPasteUrl') }}
             </template>
             <template v-else>
-              No projects returned. Paste a GitLab URL below.
+              {{ t('import.noGitlabProjects') }}
             </template>
           </p>
 
           <div class="grid gap-3 sm:grid-cols-3">
             <label class="block space-y-2 sm:col-span-2">
-              <span class="lp-label">{{ gitHost === 'github' ? 'GitHub' : 'GitLab' }} repository URL</span>
+              <span class="lp-label">{{ gitHost === 'github' ? t('import.repoUrlGithub') : t('import.repoUrlGitlab') }}</span>
               <input
                 v-model="repoUrl"
                 class="lp-input font-mono text-xs"
@@ -315,13 +316,13 @@ async function close() {
               >
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">Branch</span>
+              <span class="lp-label">{{ t('common.branch') }}</span>
               <input v-model="branch" class="lp-input font-mono text-xs" placeholder="main">
             </label>
           </div>
 
           <label class="block space-y-2">
-            <span class="lp-label">Workspace name</span>
+            <span class="lp-label">{{ t('import.workspaceName') }}</span>
             <input
               v-model="workspaceName"
               class="lp-input"
@@ -331,14 +332,14 @@ async function close() {
           </label>
 
           <div class="flex justify-end gap-2">
-            <button type="button" class="lp-btn-ghost" @click="close">Cancel</button>
+            <button type="button" class="lp-btn-ghost" @click="close">{{ t('common.cancel') }}</button>
             <button
               type="button"
               class="lp-btn-primary"
               :disabled="loading || !canAnalyze"
               @click="analyze"
             >
-              {{ loading ? 'Cloning & detecting…' : 'Analyze repository' }}
+              {{ loading ? t('import.cloningDetecting') : t('import.analyzeRepo') }}
             </button>
           </div>
         </template>
@@ -346,17 +347,17 @@ async function close() {
         <template v-else-if="session">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 class="text-base font-semibold">Confirm detected stack</h3>
+              <h3 class="text-base font-semibold">{{ t('import.confirmStack') }}</h3>
               <p class="mt-1 font-mono text-xs text-[var(--lp-muted)]">
                 {{ session.git_repo_url }} @ {{ session.git_branch }}
                 <span v-if="session.commit_sha"> · {{ session.commit_sha.slice(0, 8) }}</span>
               </p>
             </div>
-            <button type="button" class="lp-btn-ghost text-xs" @click="reset">Start over</button>
+            <button type="button" class="lp-btn-ghost text-xs" @click="reset">{{ t('import.startOver') }}</button>
           </div>
 
           <label class="block space-y-2">
-            <span class="lp-label">Workspace name</span>
+            <span class="lp-label">{{ t('import.workspaceName') }}</span>
             <input v-model="workspaceName" class="lp-input" autocomplete="off">
           </label>
 
@@ -367,9 +368,9 @@ async function close() {
           />
 
           <div class="flex flex-wrap justify-between gap-3 pt-2">
-            <button type="button" class="lp-btn-ghost" :disabled="saving" @click="close">Cancel</button>
+            <button type="button" class="lp-btn-ghost" :disabled="saving" @click="close">{{ t('common.cancel') }}</button>
             <button type="button" class="lp-btn-primary" :disabled="saving" @click="save">
-              {{ saving ? 'Saving workspace…' : 'Save as Workspace' }}
+              {{ saving ? t('import.savingWorkspace') : t('import.saveAsWorkspace') }}
             </button>
           </div>
         </template>

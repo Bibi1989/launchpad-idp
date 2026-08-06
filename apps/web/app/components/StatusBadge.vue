@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { EnvironmentStatus } from '~/types/environment'
 
+const { t } = useI18n()
+
 const props = defineProps<{
   status: EnvironmentStatus
   rebuilding?: boolean
@@ -26,15 +28,34 @@ const tone = computed(() => {
   }
 })
 
+const emoji = computed(() => {
+  if (props.status === 'PROVISIONING' || props.status === 'TEARDOWN_PENDING') return '⚡'
+  if (props.status === 'RUNNING') return '🟢'
+  if (props.status === 'PAUSED') return '⏸️'
+  if (props.status === 'EXPIRED') return '⌛'
+  if (props.status === 'FAILED') return '🔴'
+  return null
+})
+
 const label = computed(() => {
-  if (props.status === 'PROVISIONING') {
-    return props.rebuilding ? '⚡ REBUILDING' : '⚡ PROVISIONING'
+  switch (props.status) {
+    case 'PROVISIONING':
+      return t('environments.status.provisioning')
+    case 'TEARDOWN_PENDING':
+      return t('environments.status.teardown')
+    case 'RUNNING':
+      return t('environments.status.running')
+    case 'PAUSED':
+      return t('environments.status.paused')
+    case 'EXPIRED':
+      return t('environments.status.expired')
+    case 'FAILED':
+      return t('environments.status.failed')
+    case 'DESTROYED':
+      return t('environments.status.destroyed')
+    default:
+      return props.status
   }
-  if (props.status === 'RUNNING') return '🟢 RUNNING'
-  if (props.status === 'PAUSED') return '⏸️ PAUSED'
-  if (props.status === 'EXPIRED') return '⌛ EXPIRED'
-  if (props.status === 'FAILED') return '🔴 FAILED'
-  return props.status
 })
 </script>
 
@@ -51,6 +72,7 @@ const label = computed(() => {
       v-else-if="status === 'PROVISIONING' || status === 'TEARDOWN_PENDING'"
       class="h-1.5 w-1.5 rounded-full bg-current animate-pulse-line"
     />
+    <span v-if="emoji" aria-hidden="true">{{ emoji }}</span>
     {{ label }}
   </span>
 </template>

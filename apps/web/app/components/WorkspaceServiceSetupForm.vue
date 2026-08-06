@@ -39,6 +39,8 @@ import {
   GCP_SERVICE_OPTIONS,
 } from '~/utils/cloudServiceOptions'
 
+const { t } = useI18n()
+
 const props = defineProps<{
   workspaceId: string
 }>()
@@ -184,9 +186,9 @@ const showsKubernetesPackaging = computed(() => {
 })
 
 const stepTitle = computed(() => {
-  if (currentStep.value === 1) return 'Choose infrastructure outputs'
-  if (currentStep.value === 2) return 'Edit service resources'
-  return 'Review and save workspace setup'
+  if (currentStep.value === 1) return t('scaffold.setup.step1')
+  if (currentStep.value === 2) return t('scaffold.setup.step2')
+  return t('scaffold.setup.step3')
 })
 
 const selectedCloudServices = computed(() => {
@@ -455,7 +457,7 @@ async function onSave() {
     }
     hasStoredCredentials.value = true
     clearCredentials()
-    statusMessage.value = 'Workspace setup updated.'
+    statusMessage.value = t('scaffold.setup.updated')
     emit('saved')
   } catch (err) {
     emit('error', err instanceof Error ? err.message : 'Failed to update workspace')
@@ -489,13 +491,13 @@ onMounted(async () => {
         />
       </div>
       <span class="shrink-0 font-mono text-xs text-[var(--lp-accent)]">
-        STEP {{ currentStep }}/{{ TOTAL_STEPS }}
+        {{ t('scaffold.setup.step', { current: currentStep, total: TOTAL_STEPS }) }}
       </span>
     </div>
 
     <div class="flex items-center justify-between gap-3">
       <div>
-        <p class="lp-label">Service setup</p>
+        <p class="lp-label">{{ t('scaffold.setup.label') }}</p>
         <h2 class="text-lg font-semibold">{{ stepTitle }}</h2>
       </div>
       <span class="rounded border border-[var(--lp-line)] bg-[var(--lp-panel)] px-2 py-1 font-mono text-[10px] uppercase text-[var(--lp-muted)]">
@@ -503,7 +505,7 @@ onMounted(async () => {
       </span>
     </div>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Loading setup…</p>
+    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('scaffold.setup.loading') }}</p>
 
     <template v-else>
       <div v-show="currentStep === 1" class="space-y-4">
@@ -511,9 +513,9 @@ onMounted(async () => {
           v-if="detectionSummary.length"
           class="rounded-xl border border-[var(--lp-accent)]/25 bg-[var(--lp-accent)]/5 px-3 py-2.5 text-sm text-[var(--lp-text)]"
         >
-          <p class="font-medium text-[var(--lp-accent)]">Detected from workspace</p>
+          <p class="font-medium text-[var(--lp-accent)]">{{ t('scaffold.setup.detectedTitle') }}</p>
           <p class="mt-1 text-xs text-[var(--lp-muted)]">
-            Toggles below were enabled from files already in this workspace.
+            {{ t('scaffold.setup.detectedBlurb') }}
           </p>
           <ul class="mt-2 flex flex-wrap gap-1.5">
             <li
@@ -550,17 +552,17 @@ onMounted(async () => {
           v-if="hasStoredCredentials && !isLocalProvider"
           class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 p-3 text-sm text-[var(--lp-muted)]"
         >
-          Credentials are already stored. Leave fields blank to keep them unchanged.
+          {{ t('scaffold.setup.credentialsStored') }}
         </div>
 
         <template v-if="provider === 'local'">
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2">
-              <span class="lp-label">Cluster name</span>
+              <span class="lp-label">{{ t('scaffold.setup.clusterName') }}</span>
               <input v-model="form.local.cluster_name" class="lp-input">
             </label>
             <label class="block space-y-2">
-              <span class="lp-label">kubectl context</span>
+              <span class="lp-label">{{ t('scaffold.setup.kubectlContext') }}</span>
               <input v-model="form.local.context" class="lp-input">
             </label>
           </div>
@@ -588,7 +590,7 @@ onMounted(async () => {
             </select>
           </label>
           <div class="space-y-2">
-            <p class="lp-label">Services to include in IaC</p>
+            <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
             <label
               v-for="opt in GCP_SERVICE_OPTIONS"
               :key="opt.key"
@@ -626,7 +628,7 @@ onMounted(async () => {
             </select>
           </label>
           <div class="space-y-2">
-            <p class="lp-label">Services to include in IaC</p>
+            <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
             <div class="grid gap-2 sm:grid-cols-2">
               <label
                 v-for="opt in AWS_SERVICE_OPTIONS"
@@ -667,7 +669,7 @@ onMounted(async () => {
             </select>
           </label>
           <div class="space-y-2">
-            <p class="lp-label">Services to include in IaC</p>
+            <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
             <div class="grid gap-2 sm:grid-cols-2">
               <label
                 v-for="opt in AZURE_SERVICE_OPTIONS"
@@ -692,7 +694,7 @@ onMounted(async () => {
             <input v-model="form.cloudflare.account_id" class="lp-input">
           </label>
           <div class="space-y-2">
-            <p class="lp-label">Services to include in IaC</p>
+            <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
             <div class="grid gap-2 sm:grid-cols-2">
               <label
                 v-for="opt in CLOUDFLARE_SERVICE_OPTIONS"
@@ -715,27 +717,27 @@ onMounted(async () => {
       <div v-show="currentStep === 3" class="space-y-4">
         <dl class="grid gap-3 rounded-xl border border-[var(--lp-line)] p-4 text-sm sm:grid-cols-2">
           <div>
-            <dt class="lp-label">Workspace</dt>
+            <dt class="lp-label">{{ t('scaffold.setup.reviewWorkspace') }}</dt>
             <dd class="font-mono">{{ workspaceName }}</dd>
           </div>
           <div>
-            <dt class="lp-label">Provider</dt>
+            <dt class="lp-label">{{ t('scaffold.setup.reviewProvider') }}</dt>
             <dd class="font-mono uppercase">{{ provider }}</dd>
           </div>
           <div>
-            <dt class="lp-label">Provision</dt>
+            <dt class="lp-label">{{ t('scaffold.setup.reviewProvision') }}</dt>
             <dd class="font-mono">
-              {{ infraGeneration.provision.enabled ? infraGeneration.provision.engine : 'skipped' }}
+              {{ infraGeneration.provision.enabled ? infraGeneration.provision.engine : t('scaffold.setup.skipped') }}
             </dd>
           </div>
           <div>
-            <dt class="lp-label">Kubernetes</dt>
+            <dt class="lp-label">{{ t('scaffold.setup.reviewKubernetes') }}</dt>
             <dd class="font-mono">
-              {{ infraGeneration.kubernetes.enabled ? infraGeneration.kubernetes.mode : 'skipped' }}
+              {{ infraGeneration.kubernetes.enabled ? infraGeneration.kubernetes.mode : t('scaffold.setup.skipped') }}
             </dd>
           </div>
           <div>
-            <dt class="lp-label">CI/CD</dt>
+            <dt class="lp-label">{{ t('scaffold.setup.reviewCicd') }}</dt>
             <dd class="font-mono">
               {{
                 infraGeneration.cicd.enabled
@@ -746,22 +748,22 @@ onMounted(async () => {
                     ]
                       .filter(Boolean)
                       .join(' · ')
-                  : 'skipped'
+                  : t('scaffold.setup.skipped')
               }}
             </dd>
           </div>
           <div>
-            <dt class="lp-label">Run init</dt>
-            <dd class="font-mono">{{ form.run_init ? 'yes' : 'no' }}</dd>
+            <dt class="lp-label">{{ t('scaffold.setup.reviewRunInit') }}</dt>
+            <dd class="font-mono">{{ form.run_init ? t('common.yes') : t('common.no') }}</dd>
           </div>
           <div class="sm:col-span-2">
-            <dt class="lp-label">Cloud services in IaC</dt>
+            <dt class="lp-label">{{ t('scaffold.setup.reviewCloudServices') }}</dt>
             <dd class="mt-1">
               <template v-if="provider === 'local'">
-                <span class="font-mono text-xs text-[var(--lp-muted)]">local k8s</span>
+                <span class="font-mono text-xs text-[var(--lp-muted)]">{{ t('scaffold.setup.localK8s') }}</span>
               </template>
               <template v-else-if="!selectedCloudServices.length">
-                <span class="text-xs text-[var(--lp-muted)]">None selected</span>
+                <span class="text-xs text-[var(--lp-muted)]">{{ t('scaffold.setup.noneSelected') }}</span>
               </template>
               <ul v-else class="mt-1 flex flex-wrap gap-1.5">
                 <li
@@ -788,7 +790,7 @@ onMounted(async () => {
             :class="{ invisible: currentStep === 1 }"
             @click="prevStep"
           >
-            Back
+            {{ t('common.back') }}
           </button>
           <button
             type="button"
@@ -796,7 +798,7 @@ onMounted(async () => {
             :disabled="saving"
             @click="emit('cancel')"
           >
-            Cancel
+            {{ t('common.cancel') }}
           </button>
         </div>
         <button
@@ -806,7 +808,7 @@ onMounted(async () => {
           :disabled="saving"
           @click="nextStep"
         >
-          Continue
+          {{ t('common.continue') }}
         </button>
         <button
           v-else
@@ -815,7 +817,7 @@ onMounted(async () => {
           :disabled="saving"
           @click="onSave"
         >
-          {{ saving ? 'Saving…' : 'Save workspace setup' }}
+          {{ saving ? t('common.saving') : t('scaffold.setup.saveSetup') }}
         </button>
       </div>
     </template>

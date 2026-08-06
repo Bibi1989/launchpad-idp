@@ -3,7 +3,6 @@ import type { AuditLogEntry } from '~/types/environment'
 import type { IaCBundleSummary, ProvisionEngine } from '~/types/provisioning'
 import { artifactModeLabel, workspaceStackParts } from '~/utils/workspaceDisplay'
 import {
-  detectCicdPlatformFromPaths,
   detectWorkspaceInfraFromPaths,
 } from '~/utils/workspaceInfraScaffold'
 
@@ -16,6 +15,7 @@ const KubernetesSuite = defineAsyncComponent(
 )
 
 const route = useRoute()
+const { t } = useI18n()
 const workspaceId = computed(() => String(route.params.id))
 const { getWorkspace, openTerminal, destroyWorkspace, listAudits } = useProvisioning()
 const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
@@ -97,7 +97,7 @@ async function load() {
       auditsLoading.value = false
     }
   } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Failed to load workspace'
+    loadError.value = err instanceof Error ? err.message : t('workspaces.errors.load')
     workspace.value = null
   } finally {
     loading.value = false
@@ -116,7 +116,7 @@ async function onOpenTerminal(opts: { runInitOnOpen?: boolean } = {}) {
     activeTerminalWsPath.value = session.ws_path
     sandboxWarm.value = true
   } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Failed to open terminal'
+    loadError.value = err instanceof Error ? err.message : t('workspaces.errors.terminal')
     formErrorMessage.value = loadError.value
   } finally {
     openingTerminal.value = false
@@ -170,7 +170,7 @@ async function onDestroy() {
     activeTerminalWsPath.value = null
     await navigateTo('/workspaces')
   } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Failed to destroy workspace'
+    loadError.value = err instanceof Error ? err.message : t('workspaces.errors.destroy')
   } finally {
     destroying.value = false
   }
@@ -241,13 +241,7 @@ function onPushError(message: string) {
   formErrorMessage.value = message
 }
 
-const publishButtonLabel = computed(() => {
-  const files = workspace.value?.files ?? []
-  const platform = detectCicdPlatformFromPaths(files)
-  if (platform === 'gitlab') return 'Publish to GitLab'
-  if (platform === 'github') return 'Publish to GitHub'
-  return 'Publish'
-})
+const publishButtonLabel = computed(() => t('workspaceIde.publish'))
 
 onMounted(async () => {
   document.addEventListener('click', closeActionsMenu)
@@ -273,10 +267,10 @@ watch(advancedMode, async (enabled) => {
       class="inline-flex items-center gap-2 font-mono text-xs uppercase tracking-wide text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
     >
       <span class="material-symbols-outlined text-sm">arrow_back</span>
-      Workspaces
+      {{ t('nav.workspaces') }}
     </NuxtLink>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">Loading workspace…</p>
+    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('workspaces.detail.loading') }}</p>
     <p v-else-if="loadError" class="text-sm text-[var(--lp-danger)]">{{ loadError }}</p>
 
     <template v-if="workspace">
@@ -326,7 +320,7 @@ watch(advancedMode, async (enabled) => {
                 class="lp-btn-ghost hidden whitespace-nowrap text-xs uppercase tracking-wide sm:inline-flex"
               >
                 <span class="material-symbols-outlined text-base">rocket_launch</span>
-                Launch preview
+                {{ t('environments.index.launchPreview') }}
               </NuxtLink>
               <button
                 v-if="!advancedMode"
@@ -369,7 +363,7 @@ watch(advancedMode, async (enabled) => {
                     @click="closeActionsMenu()"
                   >
                     <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">rocket_launch</span>
-                    Launch preview
+                    {{ t('environments.index.launchPreview') }}
                   </NuxtLink>
                   <button
                     type="button"
@@ -400,7 +394,7 @@ watch(advancedMode, async (enabled) => {
                     @click="requestDestroy(); closeActionsMenu()"
                   >
                     <span class="material-symbols-outlined text-base">delete</span>
-                    {{ destroying ? 'Destroying…' : 'Destroy' }}
+                    {{ destroying ? t('common.deleting') : t('common.destroy') }}
                   </button>
                 </div>
               </div>
@@ -458,7 +452,7 @@ watch(advancedMode, async (enabled) => {
             @cancel="setupOpen = false"
           />
           <template #fallback>
-            <p class="text-sm text-[var(--lp-muted)]">Loading setup form…</p>
+            <p class="text-sm text-[var(--lp-muted)]">{{ t('workspaces.detail.loadingSetup') }}</p>
           </template>
         </ClientOnly>
       </section>
@@ -500,7 +494,7 @@ watch(advancedMode, async (enabled) => {
         <template #fallback>
           <div class="lp-glass flex min-h-[300px] items-center justify-center rounded-xl p-8 text-sm text-[var(--lp-muted)]">
             <span class="material-symbols-outlined animate-spin text-2xl mr-2">sync</span>
-            Initializing Kubernetes Visual Suite…
+            {{ t('workspaces.detail.loadingK8s') }}
           </div>
         </template>
       </ClientOnly>
@@ -590,14 +584,14 @@ watch(advancedMode, async (enabled) => {
         />
         <template #fallback>
           <section class="lp-glass flex min-h-[480px] items-center justify-center rounded-xl">
-            <p class="text-sm text-[var(--lp-muted)]">Loading workspace IDE…</p>
+            <p class="text-sm text-[var(--lp-muted)]">{{ t('workspaces.detail.loadingIde') }}</p>
           </section>
         </template>
       </ClientOnly>
 
       <section v-if="advancedMode" class="space-y-4">
         <div class="flex flex-wrap items-center justify-between gap-3">
-          <h2 class="text-lg font-semibold">Sandbox terminal</h2>
+          <h2 class="text-lg font-semibold">{{ t('terminal.title') }}</h2>
           <div class="flex flex-wrap items-center gap-3">
             <label class="flex items-center gap-2 text-sm text-[var(--lp-muted)]">
               <input v-model="runInit" type="checkbox" class="accent-[var(--lp-accent)]">
@@ -641,10 +635,10 @@ watch(advancedMode, async (enabled) => {
 
       <ConfirmDialog
         v-model:open="confirmDestroyOpen"
-        title="Destroy workspace?"
+        :title="t('workspaces.destroy.title')"
         :message="`Destroy IaC workspace “${workspace.name || workspace.workspace_id}”? Generated files and the sandbox will be removed. This cannot be undone.`"
-        confirm-label="Yes, destroy"
-        cancel-label="No"
+        :confirm-label="t('workspaces.destroy.confirm')"
+        :cancel-label="t('workspaces.destroy.cancel')"
         :busy="destroying"
         @confirm="onDestroy"
       />

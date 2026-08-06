@@ -217,23 +217,15 @@ def _is_image_in_kind(image_tag: str, cluster_name: str | None = None) -> bool:
     return _load_image_to_local_cluster(image_tag, cluster_name=cluster_name)
 
 
-def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = None) -> list[str]:
-    """Build workspace app image(s) and load them into the local cluster so pods pull cleanly.
+def plan_workspace_image_builds(
+    workspace_root: Path,
+) -> tuple[list[tuple[Path, Path, str]], set[str]]:
+    """Discover (context, Dockerfile, tag) builds for a workspace.
 
-    Prefer ``.launchpad/image-builds.json`` (written by repo import) so tags match
-    Deployment image refs like ``launch-web:latest``. Fall back to apps/*/Dockerfile
-    and root Dockerfile heuristics.
+    Prefer ``.launchpad/image-builds.json`` so tags match Deployment image refs
+    like ``launch-web:latest``. Fall back to apps/*/Dockerfile and root heuristics.
+    Returns ``(builds, required_tags)``.
     """
-    import json
-    import shutil
-    import subprocess
-
-    if not shutil.which("docker"):
-        logger.warning("local_image_build_skipped", reason="docker CLI not found")
-        return []
-
-    real_cluster = resolve_local_cluster_name(cluster_name)
-
     builds: list[tuple[Path, Path, str]] = []
     seen_tags: set[str] = set()
     required_tags: set[str] = set()
@@ -320,9 +312,14 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
             if df.name.startswith("Dockerfile."):
                 raw_svc = df.name.removeprefix("Dockerfile.").lower()
                 matching_app = apps_dir / raw_svc if apps_dir.is_dir() else None
-                if matching_app and matching_app.is_dir() and ((matching_app / "package.json").is_file() or (matching_app / "Dockerfile").is_file()):
+                if matching_app and matching_app.is_dir() and (
+                    (matching_app / "package.json").is_file()
+                    or (matching_app / "Dockerfile").is_file()
+                ):
                     ctx = matching_app
-                elif (workspace_root / "package.json").is_file() or (workspace_root / "requirements.txt").is_file():
+                elif (workspace_root / "package.json").is_file() or (
+                    workspace_root / "requirements.txt"
+                ).is_file():
                     ctx = workspace_root
                 else:
                     continue
@@ -360,6 +357,35 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                 svc_name = sub.name.lower()
                 _add(sub, app_df, f"{svc_name}:latest")
                 _add(sub, app_df, f"launch-{svc_name}:latest")
+
+    return builds, required_tags
+
+
+def collect_workspace_image_tags(workspace_root: Path) -> list[str]:
+    """Return Docker image tags that a workspace may have built locally."""
+    root = Path(workspace_root)
+    if not root.is_dir():
+        return []
+    builds, _ = plan_workspace_image_builds(root)
+    return [tag for _, _, tag in builds]
+
+
+def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = None) -> list[str]:
+    """Build workspace app image(s) and load them into the local cluster so pods pull cleanly.
+
+    Prefer ``.launchpad/image-builds.json`` (written by repo import) so tags match
+    Deployment image refs like ``launch-web:latest``. Fall back to apps/*/Dockerfile
+    and root Dockerfile heuristics.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("docker"):
+        logger.warning("local_image_build_skipped", reason="docker CLI not found")
+        return []
+
+    real_cluster = resolve_local_cluster_name(cluster_name)
+    builds, required_tags = plan_workspace_image_builds(workspace_root)
 
     loaded: list[str] = []
     failed_required: list[str] = []

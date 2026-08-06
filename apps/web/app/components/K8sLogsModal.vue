@@ -11,6 +11,8 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+const { t } = useI18n()
+
 const logs = ref<string[]>([])
 const searchFilter = ref('')
 const tailing = ref(true)
@@ -124,10 +126,10 @@ function downloadLogs() {
             <span class="material-symbols-outlined text-xl text-emerald-400">article</span>
             <div>
               <h3 class="font-bold text-sm text-zinc-100">
-                Pod Logs: {{ resource?.name }}
+                {{ t('k8s.logs.title', { name: resource?.name }) }}
               </h3>
               <p class="text-[11px] text-zinc-400">
-                Namespace: {{ resource?.namespace }} | Container: {{ selectedContainer }}
+                {{ t('k8s.logs.meta', { namespace: resource?.namespace, container: selectedContainer }) }}
               </p>
             </div>
           </div>
@@ -139,7 +141,7 @@ function downloadLogs() {
               <input
                 v-model="searchFilter"
                 type="text"
-                placeholder="Filter logs…"
+                :placeholder="t('k8s.logs.filterPlaceholder')"
                 class="rounded-lg border border-zinc-800 bg-zinc-900 pl-8 pr-3 py-1 text-xs text-zinc-200 placeholder-zinc-500 focus:border-[var(--lp-accent)] focus:outline-none"
               >
             </div>
@@ -147,7 +149,7 @@ function downloadLogs() {
             <!-- Auto-scroll tailing toggle -->
             <label class="flex items-center gap-1.5 cursor-pointer text-xs text-zinc-400 hover:text-zinc-200">
               <input v-model="tailing" type="checkbox" class="accent-[var(--lp-accent)]">
-              Auto-scroll
+              {{ t('k8s.logs.autoScroll') }}
             </label>
 
             <!-- Download -->
@@ -157,7 +159,7 @@ function downloadLogs() {
               @click="downloadLogs"
             >
               <span class="material-symbols-outlined text-sm">download</span>
-              Export
+              {{ t('k8s.logs.export') }}
             </button>
 
             <!-- Close -->
@@ -174,7 +176,7 @@ function downloadLogs() {
         <!-- Log Content View -->
         <div ref="logContainerRef" class="flex-1 overflow-y-auto p-4 font-mono text-[12px] leading-relaxed text-zinc-300 space-y-1 selection:bg-[var(--lp-accent)]/30">
           <div v-if="filteredLogs.length === 0" class="flex h-32 items-center justify-center text-zinc-500">
-            {{ loading ? 'Connecting log stream…' : 'No matching log entries found.' }}
+            {{ loading ? t('k8s.logs.connecting') : t('k8s.logs.noMatches') }}
           </div>
           <div
             v-for="(line, idx) in filteredLogs"
@@ -192,10 +194,10 @@ function downloadLogs() {
 
         <!-- Modal Footer -->
         <div class="border-t border-zinc-800 bg-zinc-900/80 px-5 py-2 flex items-center justify-between text-[11px] text-zinc-500">
-          <span>Showing {{ filteredLogs.length }} lines</span>
+          <span>{{ t('k8s.logs.showingLines', { count: filteredLogs.length }) }}</span>
           <span class="flex items-center gap-1">
             <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            Live SSE Stream Connected
+            {{ t('k8s.logs.liveConnected') }}
           </span>
         </div>
       </div>
