@@ -46,6 +46,8 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_USER: launchpad
+          POSTGRES_DB: launchpad
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           SECRETS_ENCRYPTION_KEY: ${{ secrets.SECRETS_ENCRYPTION_KEY }}
           LAUNCHPAD_PUBLIC_ORIGIN: ${{ secrets.LAUNCHPAD_PUBLIC_ORIGIN }}
@@ -414,17 +416,17 @@ jobs:
           # GitHub App credentials for "GitHub Connect". Prefer the GitHub Actions
           # secret; else reuse the persisted value. Private key stored as single-line
           # base64 (a compose .env cannot hold multiline); the API base64-decodes it.
-          GH_APP_ID_V="${GITHUB_APP_ID:-$(env_get GITHUB_APP_ID "$STABLE_ENV")}"
-          GH_APP_SLUG_V="${GITHUB_APP_SLUG:-$(env_get GITHUB_APP_SLUG "$STABLE_ENV")}"
+          GH_APP_ID_V="${GH_APP_ID:-$(env_get GH_APP_ID "$STABLE_ENV")}"
+          GH_APP_SLUG_V="${GH_APP_SLUG:-$(env_get GH_APP_SLUG "$STABLE_ENV")}"
           WEBHOOK_SECRET_V="${WEBHOOK_SECRET:-$(env_get WEBHOOK_SECRET "$STABLE_ENV")}"
-          if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then
-            if printf '%s' "$GITHUB_APP_PRIVATE_KEY" | grep -q "BEGIN"; then
-              GH_APP_KEY_V="$(printf '%b' "$GITHUB_APP_PRIVATE_KEY" | base64 | tr -d '\n')"
+          if [ -n "${GH_APP_PRIVATE_KEY:-}" ]; then
+            if printf '%s' "$GH_APP_PRIVATE_KEY" | grep -q "BEGIN"; then
+              GH_APP_KEY_V="$(printf '%b' "$GH_APP_PRIVATE_KEY" | base64 | tr -d '\n')"
             else
-              GH_APP_KEY_V="$GITHUB_APP_PRIVATE_KEY"
+              GH_APP_KEY_V="$GH_APP_PRIVATE_KEY"
             fi
           else
-            GH_APP_KEY_V="$(env_get GITHUB_APP_PRIVATE_KEY "$STABLE_ENV")"
+            GH_APP_KEY_V="$(env_get GH_APP_PRIVATE_KEY "$STABLE_ENV")"
           fi
 
           umask 077
