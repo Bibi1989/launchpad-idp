@@ -9,6 +9,7 @@ alwaysApply: false
 - Use Composition API with `<script setup lang="ts">`.
 - State: `useState` or typed Pinia stores. Prefer `shallowRef` for large non-reactive objects (terminals, log buffers).
 - Styling: Tailwind utilities only - no inline styles.
+- Encoding: Vue/TS/CSS source must be UTF-8 only. Never latin-1 bytes (e.g. raw `0xB7` middot). Use ASCII `-` or a real UTF-8 `·` (`U+00B7`). Invalid encoding breaks `npm run build` in Docker (`stream did not contain valid UTF-8`).
 - Types: strict TypeScript; define shared types in `~/types/`. Never use `any`.
 - Validation: Zod for forms and API payloads.
 - Real-time: prefer SSE or WebSockets for deployment logs; always remove listeners in `onUnmounted()`.

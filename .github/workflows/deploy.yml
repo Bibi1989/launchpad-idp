@@ -275,67 +275,9 @@ jobs:
             EOF
             sed -i 's/^[[:space:]]*//' deploy/oci/.env
 
-            chmod +x deploy/oci/caddy-entrypoint.sh || true
-
-            # Single source of truth for the compose invocation.
-            dc() { docker compose -f deploy/oci/docker-compose.yml --env-file deploy/oci/.env "$@"; }
-
-            # Dump the full stack state so any failure is diagnosable from the run log.
-            dump_diagnostics() {
-              echo "===== docker compose ps (all) ====="; dc ps -a || true
-              echo "===== migrate service log (alembic upgrade head) ====="; dc logs --no-log-prefix migrate || true
-              echo "===== docker compose logs (all services, tail 150) ====="; dc logs --tail=150 || true
-            }
-            # Use explicit `|| fail`, NOT a `trap ... ERR`: an ERR trap does not fire for a
-            # command that fails inside a shell function (dc) unless `set -o errtrace`, so
-            # diagnostics would be silently skipped and the real error hidden.
-            fail() { echo "DEPLOY FAILED: $1"; dump_diagnostics; exit 1; }
-
-            PGUSER="$(grep -E '^POSTGRES_USER=' deploy/oci/.env | head -1 | cut -d= -f2-)"; PGUSER="${PGUSER:-launchpad}"
-            PGDB="$(grep -E '^POSTGRES_DB=' deploy/oci/.env | head -1 | cut -d= -f2-)"; PGDB="${PGDB:-launchpad}"
-            PGPW="$(grep -E '^POSTGRES_PASSWORD=' deploy/oci/.env | head -1 | cut -d= -f2-)"
-            [ -n "$PGPW" ] || fail "POSTGRES_PASSWORD missing from deploy/oci/.env"
-
-            # 1) Build first: a build failure leaves the running stack untouched.
-            dc build || fail "docker compose build failed"
-
-            # 2) Start Postgres alone and reconcile its role password to the env value.
-            #    Postgres only honours POSTGRES_PASSWORD on the FIRST init of its data
-            #    volume, so a rotated password otherwise fails auth for migrate/api
-            #    (asyncpg InvalidPasswordError). The local socket uses trust, so we can
-            #    reset it without knowing the old password. Idempotent + safe to repeat.
-            dc up -d postgres || fail "postgres failed to start"
-            # Retry the reconcile until Postgres genuinely serves (this doubles as the
-            # readiness wait and rides out the transient restart during first-init).
-            # Pipe via stdin: psql interpolates :'pw' from stdin (NOT from -c) and quotes
-            # any password characters safely; ON_ERROR_STOP makes SQL errors non-zero.
-            reconciled=0
-            for i in $(seq 1 30); do
-              if echo "ALTER USER \"$PGUSER\" WITH PASSWORD :'pw';" \
-                   | dc exec -T postgres psql -v ON_ERROR_STOP=1 -v pw="$PGPW" -U "$PGUSER" -d "$PGDB" >/dev/null 2>&1; then
-                reconciled=1; break
-              fi
-              echo "waiting for postgres before reconciling password ($i/30)..."
-              sleep 2
-            done
-            [ "$reconciled" = 1 ] || fail "could not reconcile the postgres role password"
-
-            # 3) Recreate the full stack (migrate runs alembic, then api/worker/beat/caddy).
-            dc up -d --remove-orphans || fail "docker compose up failed (a service did not start or the migration did not complete)"
-            dc ps
-
-            # 4) Wait for the API to report healthy (cold starts: image pulls, migrations, k3s warmup).
-            for i in $(seq 1 60); do
-              if dc exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)" 2>/dev/null; then
-                echo "API healthy"
-                dc ps
-                exit 0
-              fi
-              echo "waiting for API ($i/60)..."
-              sleep 5
-            done
-
-            fail "API did not become healthy within 300s"
+            chmod +x deploy/oci/caddy-entrypoint.sh deploy/oci/ci-deploy.sh
+            # Build, migrate (with hang timeout), up, health-check + api-first diagnostics.
+            deploy/oci/ci-deploy.sh deploy/oci/.env
 
   # Push to main (and manual target=local-mac): deploy the PRODUCTION stack directly on the
   # server laptop's self-hosted macOS runner - no SSH. Requires the runner to carry both the
@@ -475,61 +417,7 @@ jobs:
         run: |
           set -euo pipefail
           ENV_FILE="${COMPOSE_ENV_FILE:-$HOME/.launchpad/oci.env}"
-          dc() { docker compose -f deploy/oci/docker-compose.yml --env-file "$ENV_FILE" "$@"; }
-
-          dump_diagnostics() {
-            echo "===== docker compose ps (all) ====="; dc ps -a || true
-            echo "===== migrate service log (alembic upgrade head) ====="; dc logs --no-log-prefix migrate || true
-            echo "===== docker compose logs (all services, tail 150) ====="; dc logs --tail=150 || true
-          }
-          # Explicit `|| fail`, NOT a `trap ... ERR`: an ERR trap does not fire for a
-          # command that fails inside a shell function (dc) unless `set -o errtrace`.
-          fail() { echo "DEPLOY FAILED: $1"; dump_diagnostics; exit 1; }
-
-          PGUSER="$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | head -1 | cut -d= -f2-)"; PGUSER="${PGUSER:-launchpad}"
-          PGDB="$(grep -E '^POSTGRES_DB=' "$ENV_FILE" | head -1 | cut -d= -f2-)"; PGDB="${PGDB:-launchpad}"
-          PGPW="$(grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
-          [ -n "$PGPW" ] || fail "POSTGRES_PASSWORD missing from $ENV_FILE"
-
-          chmod +x deploy/oci/caddy-entrypoint.sh || true
-
-          # 1) Build first so a build failure leaves the running stack untouched.
-          dc build || fail "docker compose build failed"
-
-          # 2) Start Postgres alone and reconcile its role password to the env value.
-          #    Postgres only honours POSTGRES_PASSWORD on the FIRST init of its data
-          #    volume, so a rotated password otherwise fails auth for migrate/api
-          #    (asyncpg InvalidPasswordError). Local socket uses trust, so we can reset
-          #    it without the old password. Idempotent + safe to repeat every deploy.
-          dc up -d postgres || fail "postgres failed to start"
-          # Retry the reconcile until Postgres genuinely serves (this doubles as the
-          # readiness wait and rides out the transient restart during first-init).
-          # Pipe via stdin: psql interpolates :'pw' from stdin (NOT from -c) and quotes
-          # any password characters safely; ON_ERROR_STOP makes SQL errors non-zero.
-          reconciled=0
-          for i in $(seq 1 30); do
-            if echo "ALTER USER \"$PGUSER\" WITH PASSWORD :'pw';" \
-                 | dc exec -T postgres psql -v ON_ERROR_STOP=1 -v pw="$PGPW" -U "$PGUSER" -d "$PGDB" >/dev/null 2>&1; then
-              reconciled=1; break
-            fi
-            echo "waiting for postgres before reconciling password ($i/30)..."
-            sleep 2
-          done
-          [ "$reconciled" = 1 ] || fail "could not reconcile the postgres role password"
-
-          # 3) Recreate the full stack (migrate runs alembic, then api/worker/beat/caddy).
-          dc up -d --remove-orphans || fail "docker compose up failed (a service did not start or the migration did not complete)"
-          dc ps
-
-          # 4) Wait for the API to report healthy (cold starts: image pulls, migrations, k3d warmup).
-          for i in $(seq 1 60); do
-            if dc exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)" 2>/dev/null; then
-              echo "API healthy - https://launchpad-idp.online (Caddy on host port 8080)"
-              dc ps
-              exit 0
-            fi
-            echo "waiting for API ($i/60)..."
-            sleep 5
-          done
-
-          fail "API did not become healthy within 300s"
+          chmod +x deploy/oci/caddy-entrypoint.sh deploy/oci/ci-deploy.sh
+          # Build, migrate (with hang timeout), up, health-check + api-first diagnostics.
+          deploy/oci/ci-deploy.sh "$ENV_FILE"
+          echo "API healthy - https://launchpad-idp.online (Caddy on host port 8080)"

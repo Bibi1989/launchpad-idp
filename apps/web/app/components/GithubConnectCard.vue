@@ -242,7 +242,7 @@ onMounted(async () => {
             </p>
             <p class="text-xs text-[var(--lp-muted)]">
               {{ selectedInstallation?.account_login || t('integrations.selectAccount') }}
-              <span v-if="justConnected"> · {{ t('integrations.justAuthorized') }}</span>
+              <span v-if="justConnected"> - {{ t('integrations.justAuthorized') }}</span>
             </p>
           </div>
         </div>
