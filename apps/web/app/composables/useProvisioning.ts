@@ -298,8 +298,13 @@ export function useProvisioning() {
     await apiFetch('/provisioning/gitlab/connection', { method: 'DELETE' })
   }
 
-  async function listGitlabProjects(): Promise<GitlabProjectItem[]> {
-    return apiFetch<GitlabProjectItem[]>('/provisioning/gitlab/projects')
+  async function listGitlabProjects(opts?: { q?: string }): Promise<GitlabProjectItem[]> {
+    const params = new URLSearchParams()
+    if (opts?.q?.trim()) params.set('q', opts.q.trim())
+    const qs = params.toString()
+    return apiFetch<GitlabProjectItem[]>(
+      `/provisioning/gitlab/projects${qs ? `?${qs}` : ''}`,
+    )
   }
 
   async function createGitlabRepo(input: GitlabRepoInput): Promise<GitlabRepoResult> {

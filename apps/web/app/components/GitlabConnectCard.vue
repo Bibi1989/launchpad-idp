@@ -14,6 +14,7 @@ const {
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
+const toast = useToast()
 
 const status = ref<GitlabStatus | null>(null)
 const loading = ref(true)
@@ -31,7 +32,7 @@ async function refresh() {
     if (!baseUrl.value) baseUrl.value = status.value.base_url
     emit('updated', status.value)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load GitLab status'
+    error.value = err instanceof Error ? err.message : t('integrations.gitlabStatusFailed')
     status.value = null
   } finally {
     loading.value = false
@@ -54,9 +55,12 @@ async function connectPat() {
     )
     patToken.value = ''
     showPatForm.value = false
+    toast.success(t('integrations.gitlabConnectedToast'), status.value.username || undefined)
     emit('updated', status.value)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to connect GitLab token'
+    const message = err instanceof Error ? err.message : t('integrations.gitlabPatFailed')
+    error.value = message
+    toast.error(t('integrations.gitlabConnectFailed'), message)
   } finally {
     saving.value = false
   }
@@ -67,9 +71,12 @@ async function disconnect() {
   error.value = null
   try {
     await disconnectGitlab()
+    toast.success(t('integrations.gitlabDisconnectedToast'))
     await refresh()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to disconnect GitLab'
+    const message = err instanceof Error ? err.message : t('integrations.gitlabDisconnectFailed')
+    error.value = message
+    toast.error(t('integrations.gitlabDisconnectFailed'), message)
   } finally {
     saving.value = false
   }
@@ -83,10 +90,13 @@ onMounted(async () => {
     saving.value = true
     try {
       status.value = await completeGitlabOAuth(code, state)
+      toast.success(t('integrations.gitlabConnectedToast'), status.value.username || undefined)
       emit('updated', status.value)
       await router.replace({ path: '/integrations/gitlab', query: {} })
     } catch (err) {
-      error.value = err instanceof Error ? err.message : 'GitLab OAuth failed'
+      const message = err instanceof Error ? err.message : t('integrations.gitlabOauthFailed')
+      error.value = message
+      toast.error(t('integrations.gitlabConnectFailed'), message)
     } finally {
       saving.value = false
     }

@@ -1373,7 +1373,7 @@ class ProvisioningService:
         except Exception as exc:  # noqa: BLE001
             raise GitLabAuthError("Stored GitLab token could not be decrypted") from exc
 
-    async def list_gitlab_projects(self, *, owner: User):
+    async def list_gitlab_projects(self, *, owner: User, search: str | None = None):
         from app.schemas.cloud import GitlabProjectItem
         from app.services.gitlab_service import (
             GitLabAuthError,
@@ -1387,6 +1387,7 @@ class ProvisioningService:
                 GitLabProvisioningService(self._iac).list_projects,
                 base_url=base_url,
                 token=token,
+                search=search,
             )
         except GitLabAuthError as exc:
             raise http_error_from_gitlab(exc) from exc

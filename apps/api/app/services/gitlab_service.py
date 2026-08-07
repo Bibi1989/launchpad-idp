@@ -210,37 +210,61 @@ class GitLabProvisioningService:
     def __init__(self, iac_generator: IaCGenerator | None = None) -> None:
         self._iac = iac_generator or IaCGenerator()
 
-    def list_projects(self, *, base_url: str, token: str) -> list[dict[str, Any]]:
+    def list_projects(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        search: str | None = None,
+        per_page: int = 100,
+        max_pages: int = 3,
+    ) -> list[dict[str, Any]]:
+        """List membership projects, optionally filtered by GitLab ``search``."""
         base = _normalize_base_url(base_url)
+        query = (search or "").strip() or None
+        page_size = max(1, min(int(per_page), 100))
+        pages = max(1, min(int(max_pages), 10))
+        collected: list[dict[str, Any]] = []
         with httpx.Client(timeout=30.0) as client:
-            resp = client.get(
-                f"{base}/api/v4/projects",
-                headers=self._headers(token),
-                params={
+            for page in range(1, pages + 1):
+                params: dict[str, str | int | bool] = {
                     "membership": "true",
                     "simple": "true",
                     "order_by": "last_activity_at",
-                    "per_page": 50,
-                },
-            )
-            if resp.status_code >= 400:
-                raise GitLabAuthError(f"Failed to list GitLab projects ({resp.status_code})")
-            rows = resp.json()
-        if not isinstance(rows, list):
-            return []
-        return [
-            {
-                "id": int(item["id"]),
-                "name": str(item["name"]),
-                "path_with_namespace": str(item["path_with_namespace"]),
-                "http_url_to_repo": str(item.get("http_url_to_repo") or ""),
-                "web_url": str(item.get("web_url") or ""),
-                "visibility": str(item.get("visibility") or "private"),
-                "default_branch": str(item.get("default_branch") or "main"),
-            }
-            for item in rows
-            if isinstance(item, dict) and "id" in item
-        ]
+                    "per_page": page_size,
+                    "page": page,
+                }
+                if query:
+                    params["search"] = query
+                resp = client.get(
+                    f"{base}/api/v4/projects",
+                    headers=self._headers(token),
+                    params=params,
+                )
+                if resp.status_code >= 400:
+                    raise GitLabAuthError(
+                        f"Failed to list GitLab projects ({resp.status_code})"
+                    )
+                rows = resp.json()
+                if not isinstance(rows, list) or not rows:
+                    break
+                for item in rows:
+                    if not isinstance(item, dict) or "id" not in item:
+                        continue
+                    collected.append(
+                        {
+                            "id": int(item["id"]),
+                            "name": str(item["name"]),
+                            "path_with_namespace": str(item["path_with_namespace"]),
+                            "http_url_to_repo": str(item.get("http_url_to_repo") or ""),
+                            "web_url": str(item.get("web_url") or ""),
+                            "visibility": str(item.get("visibility") or "private"),
+                            "default_branch": str(item.get("default_branch") or "main"),
+                        }
+                    )
+                if len(rows) < page_size:
+                    break
+        return collected
 
     def create_or_open_project(
         self,

@@ -5,6 +5,7 @@ import type {
   GitHubInstallationItem,
   GitHubRepositoryItem,
   GitHubRepositorySearchItem,
+  GitlabProjectItem,
 } from '~/types/provisioning'
 import { githubCloneUrl } from '~/utils/githubAccount'
 
@@ -17,7 +18,6 @@ const emit = defineEmits<{
 const { startImport, saveImport, discardImport } = useRepoImport()
 const {
   listGithubInstallations,
-  listGitlabProjects,
   getGitlabStatus,
 } = useProvisioning()
 const { t } = useI18n()
@@ -36,9 +36,10 @@ const error = ref<string | null>(null)
 const githubInstallations = ref<GitHubInstallationItem[]>([])
 const selectedInstallationId = ref<number | null>(null)
 const selectedRepoFullName = ref('')
-const gitlabProjects = ref<Array<{ path: string; clone_url: string; default_branch: string }>>([])
+const selectedGitlabPath = ref('')
 const loadingAccounts = ref(false)
 const gitlabConnected = ref(false)
+const gitlabBaseUrl = ref('https://gitlab.com')
 
 const urlPlaceholder = computed(() =>
   gitHost.value === 'github'
@@ -99,38 +100,32 @@ async function loadConnectedAccounts() {
       githubInstallations.value = []
       selectedInstallationId.value = null
       selectedRepoFullName.value = ''
+      selectedGitlabPath.value = ''
       const status = await getGitlabStatus()
       gitlabConnected.value = Boolean(status.connected)
-      if (!status.connected) {
-        gitlabProjects.value = []
-        return
-      }
-      const projects = await listGitlabProjects()
-      gitlabProjects.value = projects.map((p) => ({
-        path: p.path_with_namespace,
-        clone_url: p.http_url_to_repo || `${status.base_url.replace(/\/$/, '')}/${p.path_with_namespace}.git`,
-        default_branch: p.default_branch || 'main',
-      }))
+      gitlabBaseUrl.value = status.base_url || 'https://gitlab.com'
     }
   } catch {
     githubInstallations.value = []
-    gitlabProjects.value = []
+    gitlabConnected.value = false
   } finally {
     loadingAccounts.value = false
   }
 }
 
-function selectGitlabProject(path: string) {
-  const match = gitlabProjects.value.find((p) => p.path === path)
-  if (!match) return
-  repoUrl.value = match.clone_url
-  branch.value = match.default_branch || 'main'
-  workspaceName.value = deriveName(match.path)
+function onGitlabProjectSelect(project: GitlabProjectItem) {
+  selectedGitlabPath.value = project.path_with_namespace
+  const base = gitlabBaseUrl.value.replace(/\/$/, '')
+  repoUrl.value =
+    project.http_url_to_repo || `${base}/${project.path_with_namespace}.git`
+  branch.value = project.default_branch || 'main'
+  workspaceName.value = deriveName(project.path_with_namespace)
 }
 
 watch(gitHost, () => {
   repoUrl.value = ''
   selectedRepoFullName.value = ''
+  selectedGitlabPath.value = ''
   void loadConnectedAccounts()
 })
 
@@ -281,27 +276,18 @@ async function close() {
             </p>
           </template>
 
-          <label v-if="gitHost === 'gitlab' && gitlabProjects.length" class="block space-y-2">
+          <label v-if="gitHost === 'gitlab' && gitlabConnected" class="block space-y-2">
             <span class="lp-label">{{ t('import.connectedGitlabProject') }}</span>
-            <select
-              class="lp-input"
-              :disabled="loadingAccounts"
-              @change="selectGitlabProject(($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">{{ t('import.selectProject') }}</option>
-              <option v-for="p in gitlabProjects" :key="p.path" :value="p.path">
-                {{ p.path }}
-              </option>
-            </select>
+            <GitlabRepoPicker
+              v-model="selectedGitlabPath"
+              @select-project="onGitlabProjectSelect"
+            />
           </label>
           <p v-else-if="gitHost === 'gitlab' && !loadingAccounts" class="text-xs text-[var(--lp-muted)]">
             <template v-if="!gitlabConnected">
               {{ t('import.gitlabNotConnected') }}
               <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.connectGitlab') }}</NuxtLink>
               {{ t('import.gitlabPasteUrl') }}
-            </template>
-            <template v-else>
-              {{ t('import.noGitlabProjects') }}
             </template>
           </p>
 

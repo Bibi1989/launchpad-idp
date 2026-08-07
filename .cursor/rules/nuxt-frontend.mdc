@@ -15,6 +15,7 @@ alwaysApply: false
 - Real-time: prefer SSE or WebSockets for deployment logs; always remove listeners in `onUnmounted()`.
 - **Reuse first**: before new UI, search `components/`, `composables/`, `utils/`. Prefer composing existing pieces over duplicating markup or fetch logic.
 - **GitHub selection**: always use `GithubInstallationPicker` + `GithubRepoPicker` (and `~/utils/githubAccount`) for account/repo pickers. Do not rebuild `<select>` lists for installs or repos.
+- **GitLab selection**: always use `GitlabRepoPicker` for project pickers. Do not rebuild plain `<select>` lists for projects.
 
 ```typescript
 // ❌ BAD - listener leak + any

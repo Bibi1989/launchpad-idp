@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import type { GitHubAppStatus, GitlabProjectItem, GitlabStatus } from '~/types/provisioning'
+import type { GitHubAppStatus, GitlabStatus } from '~/types/provisioning'
 import { isPersonalGithubInstallation } from '~/utils/githubAccount'
 import { syncWorkspaceCicdToPlatform } from '~/utils/syncWorkspaceCicd'
+import { toastError } from '~/composables/useToast'
 
 const props = defineProps<{
   open: boolean
@@ -17,11 +18,11 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const toast = useToast()
 
 const {
   getGithubAppStatus,
   getGitlabStatus,
-  listGitlabProjects,
   listWorkspaceFiles,
   readWorkspaceFile,
   writeWorkspaceFile,
@@ -37,7 +38,6 @@ const githubRepoMode = ref<'create' | 'existing'>('existing')
 const gitlabRepoMode = ref<'create' | 'existing'>('existing')
 const githubApp = ref<GitHubAppStatus | null>(null)
 const gitlabStatus = ref<GitlabStatus | null>(null)
-const gitlabProjects = ref<GitlabProjectItem[]>([])
 const pushInstallationId = ref<number | null>(null)
 const pushRepo = ref('')
 const newRepoName = ref('')
@@ -74,7 +74,9 @@ async function loadStatus() {
   convertNote.value = null
   try {
     const ghResult = await getGithubAppStatus().catch((err: unknown) => {
-      emit('error', err instanceof Error ? err.message : 'Failed to load GitHub status')
+      const message = toastError(err, t('workspaceIde.push.toastStatusFailed'))
+      toast.error(t('workspaceIde.push.toastError'), message)
+      emit('error', message)
       return null
     })
     if (ghResult) {
@@ -90,15 +92,6 @@ async function loadStatus() {
     })
     if (glResult) {
       gitlabStatus.value = glResult
-      if (glResult.connected) {
-        try {
-          gitlabProjects.value = await listGitlabProjects()
-        } catch {
-          gitlabProjects.value = []
-        }
-      } else {
-        gitlabProjects.value = []
-      }
     } else {
       gitlabStatus.value = {
         connected: false,
@@ -109,7 +102,6 @@ async function loadStatus() {
         token_type: null,
         message: 'GitLab unavailable - connect later from Integrations.',
       }
-      gitlabProjects.value = []
     }
   } finally {
     loadingStatus.value = false
@@ -148,6 +140,12 @@ watch(
   },
 )
 
+function finishSuccess(fullName: string) {
+  toast.success(t('workspaceIde.push.toastSuccess'), fullName)
+  emit('update:open', false)
+  emit('pushed', fullName)
+}
+
 async function doPush() {
   pushing.value = true
   convertNote.value = null
@@ -166,8 +164,8 @@ async function doPush() {
     if (result.converted) {
       const msg =
         provider.value === 'github'
-          ? 'Converted GitLab CI → GitHub Actions before publish'
-          : 'Converted GitHub Actions → GitLab CI before publish'
+          ? t('workspaceIde.push.convertedToGithub')
+          : t('workspaceIde.push.convertedToGitlab')
       convertNote.value = msg
       emit('converted', msg)
     }
@@ -188,8 +186,7 @@ async function doPush() {
           include_workflow: false,
           include_dockerfiles: false,
         })
-        emit('update:open', false)
-        emit('pushed', created.full_name)
+        finishSuccess(created.full_name)
         return
       }
 
@@ -199,8 +196,7 @@ async function doPush() {
         existing_full_name: pushRepo.value.trim(),
         commit_message: pushMessage.value,
       })
-      emit('update:open', false)
-      emit('pushed', push.full_name)
+      finishSuccess(push.full_name)
       return
     }
 
@@ -216,8 +212,7 @@ async function doPush() {
         workspace_id: props.workspaceId,
         include_ci: false,
       })
-      emit('update:open', false)
-      emit('pushed', created.path_with_namespace)
+      finishSuccess(created.path_with_namespace)
       return
     }
 
@@ -226,10 +221,11 @@ async function doPush() {
       project_path: gitlabProject.value.trim(),
       commit_message: pushMessage.value,
     })
-    emit('update:open', false)
-    emit('pushed', push.path_with_namespace)
+    finishSuccess(push.path_with_namespace)
   } catch (err) {
-    emit('error', err instanceof Error ? err.message : 'Push failed')
+    const message = toastError(err, t('workspaceIde.push.toastFailed'))
+    toast.error(t('workspaceIde.push.toastError'), message)
+    emit('error', message)
   } finally {
     pushing.value = false
   }
@@ -443,16 +439,7 @@ const showCommitMessage = computed(() => {
             <template v-else>
               <label class="block space-y-2">
                 <span class="lp-label">{{ t('workspaceIde.push.project') }}</span>
-                <select v-model="gitlabProject" class="lp-input font-mono text-xs">
-                  <option value="" disabled>{{ t('workspaceIde.push.selectProject') }}</option>
-                  <option
-                    v-for="item in gitlabProjects"
-                    :key="item.id"
-                    :value="item.path_with_namespace"
-                  >
-                    {{ item.path_with_namespace }}
-                  </option>
-                </select>
+                <GitlabRepoPicker v-model="gitlabProject" />
               </label>
               <label class="block space-y-2">
                 <span class="lp-label">{{ t('workspaceIde.push.orPath') }}</span>

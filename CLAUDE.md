@@ -13,6 +13,7 @@
 - Frontend GitHub flows must use:
   - `GithubInstallationPicker` for personal vs organization App installs
   - `GithubRepoPicker` for searchable repository selection
+  - `GitlabRepoPicker` for searchable GitLab project selection
   - `GithubConnectCard` for connection/status surfaces
   - `~/utils/githubAccount` for account-type labels and clone URLs
 - Backend: reuse `app/services/` and `pkg/` helpers (tokens, installs, clone, detect). Do not reimplement the same path in a second router or worker.

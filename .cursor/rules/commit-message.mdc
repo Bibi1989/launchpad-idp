@@ -1,29 +1,32 @@
 ---
-description: Always end work with a ready-to-paste git commit message
+description: Always end work with a short, standard ready-to-paste commit message
 alwaysApply: true
 ---
 
 # Commit Message Offer
 
-After completing code changes (unless the user already asked you to commit), end the reply with a ready-to-paste commit message they can use.
+After completing code changes (unless the user already asked you to commit), end with a ready-to-paste commit message.
 
 ## Format
 
-1. Short section titled `Commit message` (or similar).
-2. A single fenced `text` block containing only the message body (no `git commit` wrapper unless they asked to commit).
-3. Follow repo style: concise, focus on **why**, complete sentences, no em/en dashes.
-4. Match recent `git log` tone when known (imperative or descriptive is fine if consistent with the branch).
+1. One line only (no body unless they ask).
+2. Prefer `type: short summary` (`fix`, `feat`, `chore`, `docs`, `refactor`, `test`).
+3. Imperative, lowercase after the type, ~50 characters max (hard cap 72).
+4. No em/en dashes. No period at the end unless needed for clarity.
+5. Fence as `text` with only the message line (no `git commit` wrapper).
 
-## Example
+## Examples
 
 ```text
-Commit message
+fix: utf-8 encoding in GithubConnectCard
+```
 
-fix: replace latin-1 separator in GithubConnectCard so Nuxt Docker builds accept UTF-8.
+```text
+chore: timeout hung alembic in ci deploy
 ```
 
 ## When not to
 
 - Read-only questions with no file changes.
-- User already requested a commit in the same turn (then create the commit instead).
-- No changes remain (already committed / nothing to commit).
+- User already asked to commit (create the commit instead).
+- Nothing left to commit.

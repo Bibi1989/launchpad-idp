@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -488,8 +488,9 @@ async def gitlab_disconnect(
 async def gitlab_list_projects(
     user: CurrentUser,
     service: ProvisioningService = Depends(get_provisioning_service),
+    q: str | None = Query(default=None, max_length=200),
 ) -> list[GitlabProjectItem]:
-    return await service.list_gitlab_projects(owner=user)
+    return await service.list_gitlab_projects(owner=user, search=q)
 
 
 @router.post(
