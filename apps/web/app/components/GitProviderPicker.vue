@@ -16,7 +16,7 @@ const emit = defineEmits<{
 
 const options = computed(() => [
   { id: 'github' as const, label: t('integrations.github'), hint: 'github.com' },
-  { id: 'gitlab' as const, label: 'GitLab', hint: t('integrations.gitlabHint') },
+  { id: 'gitlab' as const, label: t('integrations.gitlab'), hint: t('integrations.gitlabHint') },
 ])
 </script>
 

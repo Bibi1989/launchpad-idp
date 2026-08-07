@@ -122,7 +122,13 @@ watch(
       <article
         v-for="ws in workspaces"
         :key="ws.id"
-        class="lp-glass overflow-hidden rounded-xl transition hover:border-[var(--lp-accent)]/40"
+        class="lp-glass cursor-pointer overflow-hidden rounded-xl transition hover:border-[var(--lp-accent)]/40"
+        role="link"
+        tabindex="0"
+        :aria-label="ws.name"
+        @click="navigateTo(`/workspaces/${ws.id}`)"
+        @keydown.enter.prevent="navigateTo(`/workspaces/${ws.id}`)"
+        @keydown.space.prevent="navigateTo(`/workspaces/${ws.id}`)"
       >
         <div class="flex items-start justify-between gap-3 border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-4 py-4">
           <div class="min-w-0">
@@ -136,7 +142,7 @@ watch(
               </span>
             </p>
           </div>
-          <div class="flex shrink-0 gap-2">
+          <div class="flex shrink-0 gap-2" @click.stop>
             <NuxtLink :to="`/workspaces/${ws.id}`" class="lp-btn-ghost px-3 py-1.5 text-xs">
               {{ t('workspaces.index.open') }}
             </NuxtLink>

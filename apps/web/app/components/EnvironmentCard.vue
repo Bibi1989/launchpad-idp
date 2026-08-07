@@ -135,12 +135,30 @@ const repoShort = computed(() => {
     return url
   }
 })
+
+const detailPath = computed(() => `/environments/${props.environment.id}`)
+
+function openDetail() {
+  void navigateTo(detailPath.value)
+}
+
+function onCardKeydown(event: KeyboardEvent) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    openDetail()
+  }
+}
 </script>
 
 <template>
   <article
-    class="lp-glass group overflow-hidden rounded-xl transition hover:border-[var(--lp-accent)]/50"
+    class="lp-glass group cursor-pointer overflow-hidden rounded-xl transition hover:border-[var(--lp-accent)]/50"
     :class="isRebuilding ? 'ring-1 ring-[var(--lp-warn)]/50' : ''"
+    role="link"
+    tabindex="0"
+    :aria-label="environment.name"
+    @click="openDetail"
+    @keydown="onCardKeydown"
   >
     <div class="flex items-center justify-between gap-3 border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-4 py-4">
       <div class="min-w-0">
@@ -216,7 +234,7 @@ const repoShort = computed(() => {
           <button
             type="button"
             class="inline-flex items-center gap-1.5 rounded border border-[var(--lp-line)] bg-[var(--lp-panel-2)] px-3 py-1.5 text-xs text-[var(--lp-accent)] transition hover:bg-[var(--lp-accent)]/10"
-            @click="logsOpen = !logsOpen"
+            @click.stop="logsOpen = !logsOpen"
           >
             <span class="material-symbols-outlined text-sm">terminal</span>
             {{ logsOpen ? t('common.close') : t('environments.card.logs') }}
@@ -268,6 +286,7 @@ const repoShort = computed(() => {
     <div
       v-if="logsOpen"
       class="border-t border-[var(--lp-line)] bg-[var(--lp-ink)]/70 px-4 py-3"
+      @click.stop
     >
       <p class="lp-label mb-2">{{ t('environments.card.liveRebuild') }}</p>
       <pre
@@ -275,7 +294,7 @@ const repoShort = computed(() => {
       >{{ logLines.length ? logLines.join('\n') : t('common.loadingEllipsis') }}</pre>
     </div>
 
-    <div class="flex gap-2 border-t border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 px-4 py-3">
+    <div class="flex gap-2 border-t border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 px-4 py-3" @click.stop>
       <a
         v-if="canOpenApp && previewHref"
         :href="previewHref"
@@ -292,7 +311,7 @@ const repoShort = computed(() => {
         {{ t('environments.detail.provisioning') }}
       </span>
       <NuxtLink
-        :to="`/environments/${environment.id}`"
+        :to="detailPath"
         class="lp-btn-ghost flex-1 py-1.5 text-xs uppercase tracking-wide"
       >
         {{ t('environments.card.details') }}

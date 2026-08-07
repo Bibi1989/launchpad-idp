@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import type { KindClusterStatus, PreviewBuildStatus, PreviewLaunchPayload } from '~/types/environment'
-import type { WorkspaceListItem } from '~/types/provisioning'
+import type {
+  GitHubInstallationItem,
+  GitHubRepositoryItem,
+  GitHubRepositorySearchItem,
+  GitlabProjectItem,
+  WorkspaceListItem,
+} from '~/types/provisioning'
 import type { GitHost } from '~/types/git'
+import { githubCloneUrl } from '~/utils/githubAccount'
 import { hasAwsAuth, hasGcpAuth } from '~/utils/cloudValidation'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
 
 const { launchPreview, getKindStatus, getPreviewBuildStatus } = useEnvironments()
-const { listWorkspaces } = useProvisioning()
+const { listWorkspaces, listGithubInstallations, getGitlabStatus } = useProvisioning()
 const { t } = useI18n()
 const route = useRoute()
 
@@ -21,6 +28,14 @@ const kindStatusLoading = ref(false)
 const kindStatusError = ref<string | null>(null)
 const previewBuild = ref<PreviewBuildStatus | null>(null)
 const gitHost = ref<GitHost>('github')
+
+const githubInstallations = ref<GitHubInstallationItem[]>([])
+const selectedInstallationId = ref<number | null>(null)
+const selectedRepoFullName = ref('')
+const selectedGitlabPath = ref('')
+const gitlabConnected = ref(false)
+const gitlabBaseUrl = ref('https://gitlab.com')
+const loadingGitAccounts = ref(false)
 
 const linkedFromQuery = computed(() => {
   const raw = route.query.workspace
@@ -196,6 +211,7 @@ onMounted(async () => {
     if (linkedFromQuery.value) {
       applyWorkspaceSelection(linkedFromQuery.value)
     }
+    void loadGitAccounts()
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('launch.errors.loadFailed')
   } finally {
@@ -258,12 +274,69 @@ watch(
   },
 )
 
-watch(gitHost, () => {
-  // Clear mismatched URL when switching provider so the user re-enters intentionally.
-  if (form.git_repo_url.trim() && !urlMatchesGitHost(form.git_repo_url, gitHost.value)) {
+watch(gitHost, (host) => {
+  selectedRepoFullName.value = ''
+  selectedGitlabPath.value = ''
+  if (form.git_repo_url.trim() && !urlMatchesGitHost(form.git_repo_url, host)) {
     form.git_repo_url = ''
   }
+  void loadGitAccounts()
 })
+
+async function loadGitAccounts() {
+  loadingGitAccounts.value = true
+  try {
+    if (gitHost.value === 'github') {
+      gitlabConnected.value = false
+      const installations = await listGithubInstallations()
+      githubInstallations.value = installations
+      if (!installations.length) {
+        selectedInstallationId.value = null
+        selectedRepoFullName.value = ''
+        return
+      }
+      const stillValid = installations.some((item) => item.id === selectedInstallationId.value)
+      selectedInstallationId.value = stillValid
+        ? selectedInstallationId.value
+        : installations[0]!.id
+    } else {
+      githubInstallations.value = []
+      selectedInstallationId.value = null
+      selectedRepoFullName.value = ''
+      const status = await getGitlabStatus()
+      gitlabConnected.value = Boolean(status.connected)
+      gitlabBaseUrl.value = status.base_url || 'https://gitlab.com'
+    }
+  } catch {
+    githubInstallations.value = []
+    selectedInstallationId.value = null
+    gitlabConnected.value = false
+  } finally {
+    loadingGitAccounts.value = false
+  }
+}
+
+function onGithubInstallationChange(installationId: number | null) {
+  selectedInstallationId.value = installationId
+  selectedRepoFullName.value = ''
+  form.git_repo_url = ''
+}
+
+function onGithubRepoSelect(repo: GitHubRepositorySearchItem | GitHubRepositoryItem) {
+  const fullName = 'fullName' in repo ? repo.fullName : repo.full_name
+  const defaultBranch = 'defaultBranch' in repo ? repo.defaultBranch : repo.default_branch
+  selectedRepoFullName.value = fullName
+  form.git_repo_url = githubCloneUrl(fullName)
+  form.git_branch = defaultBranch || 'main'
+}
+
+function onGitlabProjectSelect(project: GitlabProjectItem) {
+  selectedGitlabPath.value = project.path_with_namespace
+  const base = gitlabBaseUrl.value.replace(/\/$/, '')
+  form.git_repo_url =
+    project.http_url_to_repo || `${base}/${project.path_with_namespace}.git`
+  form.git_branch = project.default_branch || 'main'
+}
 
 function canContinueStep1(): boolean {
   if (form.provider === 'local') return true
@@ -570,15 +643,67 @@ async function launch() {
       <template v-if="!usesWorkspaceSource">
       <GitProviderPicker v-model="gitHost" size="sm" />
       <div class="grid gap-3 sm:grid-cols-3">
-        <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">{{ gitHost === 'github' ? t('integrations.github') : t('integrations.gitlab') }} {{ t('launch.repoUrl') }} <span class="font-normal text-[var(--lp-muted)]">{{ t('launch.optionalLocal') }}</span></span>
-          <input
-            v-model="form.git_repo_url"
-            class="lp-input font-mono text-xs"
-            :placeholder="gitUrlPlaceholder"
-            autocomplete="off"
-          >
-        </label>
+        <div class="block space-y-2 sm:col-span-2">
+          <span class="lp-label">
+            <template v-if="gitHost === 'github'">
+              {{ t('integrations.github') }} {{ t('common.repository') }}
+              <span class="font-normal text-[var(--lp-muted)]">{{ t('launch.optionalLocal') }}</span>
+            </template>
+            <template v-else>
+              {{ t('integrations.gitlab') }} {{ t('common.repository') }}
+              <span class="font-normal text-[var(--lp-muted)]">{{ t('launch.optionalLocal') }}</span>
+            </template>
+          </span>
+          <template v-if="gitHost === 'github'">
+            <p v-if="loadingGitAccounts" class="text-xs text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
+            <template v-else-if="githubInstallations.length">
+              <GithubInstallationPicker
+                :model-value="selectedInstallationId"
+                :installations="githubInstallations"
+                manage-link
+                @update:model-value="onGithubInstallationChange"
+              />
+              <GithubRepoPicker
+                v-model="selectedRepoFullName"
+                :installation-id="selectedInstallationId"
+                @select-repo="onGithubRepoSelect"
+              />
+            </template>
+            <template v-else>
+              <p class="text-xs text-[var(--lp-muted)]">
+                <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.connectGithub') }}</NuxtLink>
+                {{ t('import.connectGithubOrPaste') }}
+              </p>
+              <input
+                v-model="form.git_repo_url"
+                class="lp-input font-mono text-xs"
+                :placeholder="gitUrlPlaceholder"
+                autocomplete="off"
+              >
+            </template>
+          </template>
+          <template v-else>
+            <p v-if="loadingGitAccounts" class="text-xs text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
+            <template v-else-if="gitlabConnected">
+              <GitlabRepoPicker
+                v-model="selectedGitlabPath"
+                @select-project="onGitlabProjectSelect"
+              />
+            </template>
+            <template v-else>
+              <p class="text-xs text-[var(--lp-muted)]">
+                <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.connectGitlab') }}</NuxtLink>
+                {{ t('import.gitlabPasteUrl') }}
+              </p>
+              <input
+                v-model="form.git_repo_url"
+                class="lp-input font-mono text-xs"
+                :placeholder="gitUrlPlaceholder"
+                autocomplete="off"
+              >
+            </template>
+          </template>
+        </div>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('common.branch') }}</span>
           <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
@@ -730,14 +855,63 @@ async function launch() {
       </div>
       <GitProviderPicker v-model="gitHost" size="sm" />
       <div class="grid gap-3 sm:grid-cols-3">
-        <label class="block space-y-2 sm:col-span-2">
-          <span class="lp-label">{{ gitHost === 'github' ? t('integrations.github') : t('integrations.gitlab') }} {{ t('launch.repoUrl') }}</span>
-          <input
-            v-model="form.git_repo_url"
-            class="lp-input font-mono text-xs"
-            :placeholder="gitUrlPlaceholder"
-          >
-        </label>
+        <div class="block space-y-2 sm:col-span-2">
+          <span class="lp-label">
+            <template v-if="gitHost === 'github'">
+              {{ t('integrations.github') }} {{ t('common.repository') }}
+            </template>
+            <template v-else>
+              {{ t('integrations.gitlab') }} {{ t('common.repository') }}
+            </template>
+          </span>
+          <template v-if="gitHost === 'github'">
+            <p v-if="loadingGitAccounts" class="text-xs text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
+            <template v-else-if="githubInstallations.length">
+              <GithubInstallationPicker
+                :model-value="selectedInstallationId"
+                :installations="githubInstallations"
+                manage-link
+                @update:model-value="onGithubInstallationChange"
+              />
+              <GithubRepoPicker
+                v-model="selectedRepoFullName"
+                :installation-id="selectedInstallationId"
+                @select-repo="onGithubRepoSelect"
+              />
+            </template>
+            <template v-else>
+              <p class="text-xs text-[var(--lp-muted)]">
+                <NuxtLink to="/integrations/github" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.connectGithub') }}</NuxtLink>
+                {{ t('import.connectGithubOrPaste') }}
+              </p>
+              <input
+                v-model="form.git_repo_url"
+                class="lp-input font-mono text-xs"
+                :placeholder="gitUrlPlaceholder"
+              >
+            </template>
+          </template>
+          <template v-else>
+            <p v-if="loadingGitAccounts" class="text-xs text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
+            <template v-else-if="gitlabConnected">
+              <GitlabRepoPicker
+                v-model="selectedGitlabPath"
+                @select-project="onGitlabProjectSelect"
+              />
+            </template>
+            <template v-else>
+              <p class="text-xs text-[var(--lp-muted)]">
+                <NuxtLink to="/integrations/gitlab" class="text-[var(--lp-accent)] hover:underline">{{ t('integrations.connectGitlab') }}</NuxtLink>
+                {{ t('import.gitlabPasteUrl') }}
+              </p>
+              <input
+                v-model="form.git_repo_url"
+                class="lp-input font-mono text-xs"
+                :placeholder="gitUrlPlaceholder"
+              >
+            </template>
+          </template>
+        </div>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('common.branch') }}</span>
           <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
