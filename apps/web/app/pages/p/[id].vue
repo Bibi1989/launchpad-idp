@@ -97,6 +97,12 @@ onMounted(async () => {
 
       <p v-if="loadError" class="text-[var(--lp-danger)]">{{ loadError }}</p>
 
+      <AppSplash
+        v-else-if="!environment"
+        compact
+        :message="t('preview.loading')"
+      />
+
       <template v-else-if="environment">
         <div class="mb-8 space-y-3">
           <div class="flex items-center gap-3">
@@ -110,21 +116,23 @@ onMounted(async () => {
         </div>
 
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+          <div class="min-w-0 overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
             <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.status') }}</p>
-            <p class="mt-2 text-lg font-semibold">{{ environment.status }}</p>
+            <div class="mt-2">
+              <StatusBadge :status="environment.status" />
+            </div>
           </div>
-          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+          <div class="min-w-0 overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
             <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.timeLeft') }}</p>
-            <p class="mt-2 font-mono text-lg">{{ remainingLabel }}</p>
+            <p class="mt-2 truncate font-mono text-lg">{{ remainingLabel }}</p>
           </div>
-          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+          <div class="min-w-0 overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
             <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.costToDate') }}</p>
-            <p class="mt-2 font-mono text-lg text-[var(--lp-accent)]">${{ environment.cost_accrued }}</p>
+            <p class="mt-2 truncate font-mono text-lg text-[var(--lp-accent)]">${{ environment.cost_accrued }}</p>
           </div>
-          <div class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+          <div class="min-w-0 overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
             <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.rate') }}</p>
-            <p class="mt-2 font-mono text-lg">${{ environment.cost_estimate_hourly }}/hr</p>
+            <p class="mt-2 truncate font-mono text-lg">${{ environment.cost_estimate_hourly }}/hr</p>
           </div>
         </div>
 
@@ -168,8 +176,6 @@ onMounted(async () => {
           </template>
         </div>
       </template>
-
-      <p v-else class="text-[var(--lp-muted)]">{{ t('preview.loading') }}</p>
     </div>
   </div>
 </template>

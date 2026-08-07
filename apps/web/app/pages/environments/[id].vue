@@ -18,6 +18,7 @@ const {
 
 const environment = ref<Environment | null>(null)
 const loadError = ref<string | null>(null)
+const loading = ref(true)
 const confirmDestroyOpen = ref(false)
 
 const { define } = useAsyncAction()
@@ -181,6 +182,8 @@ async function load(opts: { softAudits?: boolean } = {}) {
     }
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : t('common.failed')
+  } finally {
+    loading.value = false
   }
 }
 
@@ -334,7 +337,12 @@ onMounted(() => {
       {{ t('environments.detail.crumb') }}
     </NuxtLink>
 
-    <p v-if="loadError" class="text-sm text-[var(--lp-danger)]">{{ loadError }}</p>
+    <AppSplash
+      v-if="loading && !environment"
+      compact
+      :message="t('environments.index.loading')"
+    />
+    <p v-else-if="loadError" class="text-sm text-[var(--lp-danger)]">{{ loadError }}</p>
 
     <template v-if="environment">
       <p

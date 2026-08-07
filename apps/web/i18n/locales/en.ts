@@ -539,6 +539,13 @@ export default {
     "pickSource": "Pick source",
     "launch": "Launch",
     "createOne": "Create one",
+    "splash": {
+      "preparingWorkspace": "Preparing workspace preview",
+      "fromWorkspace": "Workspace preview",
+      "titleForWorkspace": "Launch {name}",
+      "blurbForWorkspace": "Confirm target and TTL, then launch. Manifests and images come from this workspace.",
+      "workspaceMissing": "That workspace could not be found. Pick another workspace or launch without one."
+    },
     "repoUrl": "Repository URL",
     "optionalLocal": "(optional for Local)",
     "branch": "Branch",

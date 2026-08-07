@@ -118,7 +118,11 @@ watch(
     </header>
 
     <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
+    <AppSplash
+      v-else-if="loading"
+      compact
+      :message="t('common.loading')"
+    />
 
     <div
       v-else-if="workspaces.length === 0"

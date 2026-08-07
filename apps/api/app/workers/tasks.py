@@ -472,6 +472,15 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         if is_local:
                             from app.services.kind_cluster import ensure_kind_cluster
 
+                            await _emit_log(
+                                log_repo,
+                                environment_id=env_uuid,
+                                message="INIT - ensuring local Kubernetes cluster is ready",
+                                status=EnvironmentStatus.PROVISIONING.value,
+                                commit_sha=commit_sha,
+                                stage=ExecutionStage.INIT,
+                            )
+                            await session.commit()
                             await ensure_kind_cluster()
                             provisioner.reload_clients()
                         provisioner.assert_cluster_ready(timeout_seconds=5.0)
@@ -600,11 +609,6 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                         message = str(detail)
                                     raise RuntimeError(message) from exc
                             workspace_root = Path(workspace_row.root_dir)
-
-                    _ctx = settings.resolved_kubernetes_context or settings.kubernetes_context or ""
-                    if settings.kubernetes_enabled and (environment.provider == "local" or _ctx.startswith(("kind-", "k3d-"))) and workspace_root is not None:
-                        local_cluster = (_ctx or "launchpad").removeprefix("kind-").removeprefix("k3d-")
-                        _build_and_load_kind_docker_images(workspace_root, cluster_name=local_cluster)
 
                     if deploy_mode == DeployMode.MANIFEST.value and workspace_root is not None:
                         from app.services.manifest_deploy import workspace_has_helm_chart

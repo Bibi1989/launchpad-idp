@@ -365,13 +365,6 @@ class KubernetesProvisioner:
             resources.preview_url = self.portal_preview_url(environment_id=environment_id)
             return resources
 
-        if self._settings.kubernetes_enabled:
-            from app.services.manifest_deploy import build_and_load_kind_images, _is_image_in_kind
-            ws_root = Path(getattr(self._settings, "workspace_root", "."))
-            build_and_load_kind_images(workspace_root=ws_root, cluster_name=self._settings.kubernetes_context)
-            if workload_image:
-                _is_image_in_kind(workload_image, cluster_name=self._settings.kubernetes_context)
-
         self.apply_governance(namespace=namespace, labels=labels, resources=resources)
 
         # Ephemeral datastores (and their connection Secret) must be applied AFTER

@@ -48,7 +48,18 @@ fi
 
 acquire_lock() {
   local waited=0
+  local holder_pid=""
   while ! mkdir "${LOCK_DIR}" 2>/dev/null; do
+    holder_pid=""
+    if [[ -f "${LOCK_DIR}/pid" ]]; then
+      holder_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+    fi
+    # Reclaim stale locks left by a killed Celery worker / Ctrl-C mid create.
+    if [[ -n "${holder_pid}" ]] && ! kill -0 "${holder_pid}" 2>/dev/null; then
+      echo "Removing stale k3s lock (pid ${holder_pid} no longer running)…" >&2
+      rm -rf "${LOCK_DIR}"
+      continue
+    fi
     if [[ "${waited}" -ge "${LOCK_WAIT_SECONDS}" ]]; then
       echo "Timed out waiting for k3s lock (${LOCK_DIR})." >&2
       echo "If nothing is creating a cluster, remove it: rm -rf '${LOCK_DIR}'" >&2
@@ -57,6 +68,7 @@ acquire_lock() {
     sleep 1
     waited=$((waited + 1))
   done
+  echo "$$" > "${LOCK_DIR}/pid"
   # shellcheck disable=SC2064
   trap 'rm -rf "${LOCK_DIR}"' EXIT
 }
@@ -74,64 +86,99 @@ cluster_ready() {
        | grep -q "True"
 }
 
+print_ready_banner() {
+  cat <<EOF
+
+k3s cluster ready (context: ${CONTEXT}).
+
+Enable real Kubernetes provisioning in apps/api/.env (or deploy/oci/.env):
+
+  KUBERNETES_ENABLED=true
+  KUBERNETES_IN_CLUSTER=false
+  LOCAL_K8S_ENGINE=k3s
+  KUBERNETES_CONTEXT=${CONTEXT}
+  PREVIEW_NODE_HOST=127.0.0.1
+  PREVIEW_NODE_PORT_MIN=${PORT_MIN}
+  PREVIEW_NODE_PORT_MAX=${PORT_MAX}
+  PREVIEW_INGRESS_HTTP_PORT=${INGRESS_HTTP_PORT}
+  USE_CLOUDFLARE_TUNNEL=true
+  PREVIEW_BASE_DOMAIN=launchpad-idp.online
+  PROVISION_STEP_DELAY_SECONDS=0
+
+Cloudflare Tunnel public hostnames (cloudflared in Docker on this host):
+  launchpad-idp.online          → http://caddy:80
+  *.launchpad-idp.online        → http://host.docker.internal:${INGRESS_HTTP_PORT}
+  (spelling: host.docker.internal, not docker.host.internal; not :30080 NodePorts)
+
+
+Then restart the API and Celery worker.
+
+Open Preview / Dev sandboxes use this cluster automatically when managed by the API.
+EOF
+}
+
 if cluster_ready; then
+  # Fast path for Launch Preview: every provision used to re-run ingress rollout
+  # and k3d image import here, which often hung and left audits at INITIATED.
   echo "k3s cluster '${CLUSTER_NAME}' is already ready (context: ${CONTEXT})"
-else
-  if cluster_exists; then
-    echo "k3s cluster '${CLUSTER_NAME}' exists but is unhealthy - recreating…"
-    k3d cluster delete "${CLUSTER_NAME}" || true
-    sleep 2
-  fi
+  print_ready_banner
+  exit 0
+fi
 
-  # Bind the host NodePort range straight to the server node so NodePort Services
-  # on those ports are reachable at 127.0.0.1 - the same contract as kind.
-  # Also publish ingress HTTP (default host 3080 → NodePort 30090) for Cloudflare
-  # Tunnel Host-based previews (ws-*.yourdomain → host.docker.internal:3080).
-  CREATE_ARGS=(
-    cluster create "${CLUSTER_NAME}"
-    --servers 1
-    --port "${PORT_MIN}-${PORT_MAX}:${PORT_MIN}-${PORT_MAX}@server:0"
-    # Cloudflare Tunnel Host-based previews: host :3080 → ingress-nginx NodePort 30090.
-    --port "${INGRESS_HTTP_PORT}:${INGRESS_NODE_PORT}@server:0"
-    # Match the kind engine: no bundled Traefik. Launchpad installs ingress-nginx
-    # via scripts/ensure-ingress-nginx.sh for Host-based preview URLs.
+if cluster_exists; then
+  echo "k3s cluster '${CLUSTER_NAME}' exists but is unhealthy - recreating…"
+  k3d cluster delete "${CLUSTER_NAME}" || true
+  sleep 2
+fi
 
-    --k3s-arg "--disable=traefik@server:0"
-    --wait
-    --timeout 150s
-  )
-  # When k3d runs inside the api/worker container (Docker socket mount), the
-  # kube-apiserver must be reachable via the host gateway name, not 127.0.0.1.
-  #
-  # IMPORTANT: the apiserver PUBLISH/bind address and the CLIENT (kubeconfig)
-  # address are two different things and must not be conflated. host.docker.internal
-  # is a gateway ALIAS (e.g. 192.168.65.254 on Docker Desktop) - reachable *from*
-  # containers, but NOT a real interface address the host can bind a published
-  # port to. Binding it fails with "can't assign requested address".
-  #
-  # So: bind the port on a real, bindable host address (0.0.0.0 works on both
-  # Docker Desktop and Linux), advertise the client-facing name as a TLS SAN, and
-  # rewrite the kubeconfig server to K3D_API_HOST after create (see below).
-  if [[ -n "${K3D_API_HOST:-}" ]]; then
-    API_PORT="${K3D_API_PORT:-6445}"
-    API_BIND_HOST="${K3D_API_BIND_HOST:-0.0.0.0}"
-    CREATE_ARGS+=(--api-port "${API_BIND_HOST}:${API_PORT}")
-    CREATE_ARGS+=(--k3s-arg "--tls-san=${K3D_API_HOST}@server:0")
-  fi
-  if [[ -n "${K3S_IMAGE}" ]]; then
-    CREATE_ARGS+=(--image "${K3S_IMAGE}")
-  fi
+# Bind the host NodePort range straight to the server node so NodePort Services
+# on those ports are reachable at 127.0.0.1 - the same contract as kind.
+# Also publish ingress HTTP (default host 3080 → NodePort 30090) for Cloudflare
+# Tunnel Host-based previews (ws-*.yourdomain → host.docker.internal:3080).
+CREATE_ARGS=(
+  cluster create "${CLUSTER_NAME}"
+  --servers 1
+  --port "${PORT_MIN}-${PORT_MAX}:${PORT_MIN}-${PORT_MAX}@server:0"
+  # Cloudflare Tunnel Host-based previews: host :3080 → ingress-nginx NodePort 30090.
+  --port "${INGRESS_HTTP_PORT}:${INGRESS_NODE_PORT}@server:0"
+  # Match the kind engine: no bundled Traefik. Launchpad installs ingress-nginx
+  # via scripts/ensure-ingress-nginx.sh for Host-based preview URLs.
 
-  echo "Creating k3s cluster '${CLUSTER_NAME}' with NodePort mappings ${PORT_MIN}-${PORT_MAX}…"
-  if ! k3d "${CREATE_ARGS[@]}"; then
-    echo >&2
-    echo "k3d cluster create failed. Common fixes on macOS / Docker Desktop:" >&2
-    echo "  1. make k3s-down && sleep 3 && make k3s-up" >&2
-    echo "  2. Remove stale clusters: k3d cluster list && k3d cluster delete <name>" >&2
-    echo "  3. Give Docker more CPUs/RAM, then retry" >&2
-    echo "  4. Narrow ports: PREVIEW_NODE_PORT_MAX=30089" >&2
-    exit 1
-  fi
+  --k3s-arg "--disable=traefik@server:0"
+  --wait
+  --timeout 150s
+)
+# When k3d runs inside the api/worker container (Docker socket mount), the
+# kube-apiserver must be reachable via the host gateway name, not 127.0.0.1.
+#
+# IMPORTANT: the apiserver PUBLISH/bind address and the CLIENT (kubeconfig)
+# address are two different things and must not be conflated. host.docker.internal
+# is a gateway ALIAS (e.g. 192.168.65.254 on Docker Desktop) - reachable *from*
+# containers, but NOT a real interface address the host can bind a published
+# port to. Binding it fails with "can't assign requested address".
+#
+# So: bind the port on a real, bindable host address (0.0.0.0 works on both
+# Docker Desktop and Linux), advertise the client-facing name as a TLS SAN, and
+# rewrite the kubeconfig server to K3D_API_HOST after create (see below).
+if [[ -n "${K3D_API_HOST:-}" ]]; then
+  API_PORT="${K3D_API_PORT:-6445}"
+  API_BIND_HOST="${K3D_API_BIND_HOST:-0.0.0.0}"
+  CREATE_ARGS+=(--api-port "${API_BIND_HOST}:${API_PORT}")
+  CREATE_ARGS+=(--k3s-arg "--tls-san=${K3D_API_HOST}@server:0")
+fi
+if [[ -n "${K3S_IMAGE}" ]]; then
+  CREATE_ARGS+=(--image "${K3S_IMAGE}")
+fi
+
+echo "Creating k3s cluster '${CLUSTER_NAME}' with NodePort mappings ${PORT_MIN}-${PORT_MAX}…"
+if ! k3d "${CREATE_ARGS[@]}"; then
+  echo >&2
+  echo "k3d cluster create failed. Common fixes on macOS / Docker Desktop:" >&2
+  echo "  1. make k3s-down && sleep 3 && make k3s-up" >&2
+  echo "  2. Remove stale clusters: k3d cluster list && k3d cluster delete <name>" >&2
+  echo "  3. Give Docker more CPUs/RAM, then retry" >&2
+  echo "  4. Narrow ports: PREVIEW_NODE_PORT_MAX=30089" >&2
+  exit 1
 fi
 
 # k3d merges + switches kubeconfig context on create. When we bound the apiserver
@@ -142,6 +189,15 @@ if [[ -n "${K3D_API_HOST:-}" ]]; then
   echo "Pointing kubeconfig cluster '${CONTEXT}' at ${K3D_API_HOST}:${K3D_API_PORT:-6445}…"
   kubectl config set-cluster "${CONTEXT}" \
     --server="https://${K3D_API_HOST}:${K3D_API_PORT:-6445}" >/dev/null
+else
+  # Local desktop: k3d often writes https://0.0.0.0:<port>, which times out for clients.
+  SERVER_URL="$(kubectl config view --raw \
+    -o "jsonpath={.clusters[?(@.name==\"${CONTEXT}\")].cluster.server}" 2>/dev/null || true)"
+  if [[ "${SERVER_URL}" == *"0.0.0.0"* ]]; then
+    FIXED_URL="${SERVER_URL//0.0.0.0/127.0.0.1}"
+    echo "Rewriting kubeconfig server ${SERVER_URL} → ${FIXED_URL}"
+    kubectl config set-cluster "${CONTEXT}" --server="${FIXED_URL}" >/dev/null
+  fi
 fi
 
 # k3d merges + switches kubeconfig context on create; make sure it exists.
@@ -170,12 +226,32 @@ fi
 
 
 # Prefetch workload image (best-effort; multi-arch digests often fail on Apple Silicon).
+# Bound by a short wait so a wedged docker pull cannot stick Launch at INITIATED.
+# (macOS has no GNU `timeout` by default - use a bash watchdog.)
+run_with_deadline() {
+  local secs="$1"
+  shift
+  "$@" &
+  local cmd_pid=$!
+  local waited=0
+  while kill -0 "${cmd_pid}" 2>/dev/null; do
+    if [[ "${waited}" -ge "${secs}" ]]; then
+      kill "${cmd_pid}" 2>/dev/null || true
+      wait "${cmd_pid}" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "${cmd_pid}"
+}
+
 if [[ "${PRELOAD_IMAGE}" != "0" ]]; then
   IMAGE="${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine}"
-  echo "Importing ${IMAGE} into k3s (best-effort)…"
-  if docker pull --platform linux/amd64 "${IMAGE}" >/dev/null 2>&1 \
-    || docker pull "${IMAGE}" >/dev/null 2>&1; then
-    if ! k3d image import "${IMAGE}" -c "${CLUSTER_NAME}"; then
+  echo "Importing ${IMAGE} into k3s (best-effort, 60s cap)…"
+  if run_with_deadline 60 docker pull --platform linux/amd64 "${IMAGE}" >/dev/null 2>&1 \
+    || run_with_deadline 60 docker pull "${IMAGE}" >/dev/null 2>&1; then
+    if ! run_with_deadline 60 k3d image import "${IMAGE}" -c "${CLUSTER_NAME}"; then
       echo "Warning: could not preload ${IMAGE} into k3s (non-fatal)." >&2
     fi
   else
@@ -183,31 +259,4 @@ if [[ "${PRELOAD_IMAGE}" != "0" ]]; then
   fi
 fi
 
-cat <<EOF
-
-k3s cluster ready (context: ${CONTEXT}).
-
-Enable real Kubernetes provisioning in apps/api/.env (or deploy/oci/.env):
-
-  KUBERNETES_ENABLED=true
-  KUBERNETES_IN_CLUSTER=false
-  LOCAL_K8S_ENGINE=k3s
-  KUBERNETES_CONTEXT=${CONTEXT}
-  PREVIEW_NODE_HOST=127.0.0.1
-  PREVIEW_NODE_PORT_MIN=${PORT_MIN}
-  PREVIEW_NODE_PORT_MAX=${PORT_MAX}
-  PREVIEW_INGRESS_HTTP_PORT=${INGRESS_HTTP_PORT}
-  USE_CLOUDFLARE_TUNNEL=true
-  PREVIEW_BASE_DOMAIN=launchpad-idp.online
-  PROVISION_STEP_DELAY_SECONDS=0
-
-Cloudflare Tunnel public hostnames (cloudflared in Docker on this host):
-  launchpad-idp.online          → http://caddy:80
-  *.launchpad-idp.online        → http://host.docker.internal:${INGRESS_HTTP_PORT}
-  (spelling: host.docker.internal, not docker.host.internal; not :30080 NodePorts)
-
-
-Then restart the API and Celery worker.
-
-Open Preview / Dev sandboxes use this cluster automatically when managed by the API.
-EOF
+print_ready_banner

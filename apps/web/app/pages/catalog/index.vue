@@ -87,7 +87,11 @@ onMounted(async () => {
       </NuxtLink>
     </header>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('catalog.index.loading') }}</p>
+    <AppSplash
+      v-if="loading"
+      compact
+      :message="t('catalog.index.loading')"
+    />
     <p v-else-if="errorMessage" class="text-sm text-[var(--lp-danger)]">{{ errorMessage }}</p>
 
     <template v-else>

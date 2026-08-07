@@ -291,7 +291,11 @@ watch(advancedMode, async (enabled) => {
       {{ t('nav.workspaces') }}
     </NuxtLink>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('workspaces.detail.loading') }}</p>
+    <AppSplash
+      v-if="loading"
+      compact
+      :message="t('workspaces.detail.loading')"
+    />
     <p v-else-if="loadError" class="text-sm text-[var(--lp-danger)]">{{ loadError }}</p>
 
     <template v-if="workspace">

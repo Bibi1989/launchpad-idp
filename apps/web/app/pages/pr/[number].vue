@@ -50,7 +50,11 @@ onMounted(async () => {
       </p>
     </header>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('preview.resolving') }}</p>
+    <AppSplash
+      v-if="loading"
+      compact
+      :message="t('preview.resolving')"
+    />
     <p v-else-if="errorMessage" class="text-sm text-[var(--lp-danger)]">{{ errorMessage }}</p>
     <p v-else-if="!matches.length" class="rounded-xl border border-dashed border-[var(--lp-line)] p-6 text-sm text-[var(--lp-muted)]">
       {{ t('preview.noPreview') }}

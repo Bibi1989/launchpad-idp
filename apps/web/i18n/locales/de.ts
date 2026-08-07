@@ -539,6 +539,13 @@ export default {
     "pickSource": "Quelle wählen",
     "launch": "Starten",
     "createOne": "Eine erstellen",
+    "splash": {
+      "preparingWorkspace": "Workspace-Preview wird vorbereitet",
+      "fromWorkspace": "Workspace-Preview",
+      "titleForWorkspace": "{name} starten",
+      "blurbForWorkspace": "Ziel und TTL bestätigen, dann starten. Manifeste und Images kommen aus diesem Workspace.",
+      "workspaceMissing": "Dieser Workspace wurde nicht gefunden. Anderen wählen oder ohne Workspace starten."
+    },
     "repoUrl": "Repository-URL",
     "optionalLocal": "(optional für Lokal)",
     "branch": "Branch",

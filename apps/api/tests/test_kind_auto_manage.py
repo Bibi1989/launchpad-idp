@@ -41,11 +41,74 @@ async def test_ensure_kind_cluster_runs_script(tmp_path: Path, monkeypatch: pyte
         settings.preview_node_port_max = 30084
         settings.default_workload_image = "nginx:1.27-alpine"
 
-        with patch("app.services.kind_cluster.local_cluster_available", return_value=True):
+        with (
+            patch("app.services.kind_cluster.local_cluster_available", return_value=True),
+            patch("app.services.kind_cluster._list_clusters", new_callable=AsyncMock, return_value=set()),
+            patch("app.services.kind_cluster._nodes_ready", new_callable=AsyncMock, return_value=False),
+        ):
             result = await ensure_kind_cluster()
     assert result["status"] == "ready"
     assert result["engine"] == "kind"
     assert "kind-up-ok" in result["output"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_kind_cluster_skips_script_when_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KIND_AUTO_MANAGE", "true")
+    with patch("app.services.kind_cluster.get_settings") as settings_mock:
+        settings = settings_mock.return_value
+        settings.kind_auto_manage = True
+        settings.kind_cluster_name = "launchpad"
+        settings.local_k8s_engine = "k3s"
+        settings.local_cluster_tool = "k3d"
+
+        with (
+            patch("app.services.kind_cluster.local_cluster_available", return_value=True),
+            patch("app.services.kind_cluster._list_clusters", new_callable=AsyncMock, return_value={"launchpad"}),
+            patch("app.services.kind_cluster._nodes_ready", new_callable=AsyncMock, return_value=True),
+            patch(
+                "app.services.kind_cluster._run_lifecycle_script",
+                new_callable=AsyncMock,
+            ) as run_script,
+        ):
+            result = await ensure_kind_cluster()
+
+    run_script.assert_not_awaited()
+    assert result["status"] == "ready"
+    assert result["context"] == "k3d-launchpad"
+    assert "already ready" in result["output"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_kind_cluster_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    up = script_dir / "k3s-up.sh"
+    up.write_text("#!/usr/bin/env bash\nsleep 30\n", encoding="utf-8")
+    up.chmod(0o755)
+
+    monkeypatch.setenv("KIND_AUTO_MANAGE", "true")
+    with (
+        patch("app.services.kind_cluster.get_settings") as settings_mock,
+        patch("app.services.kind_cluster.LOCAL_CLUSTER_UP_TIMEOUT_SECONDS", 0.2),
+    ):
+        settings = settings_mock.return_value
+        settings.kind_auto_manage = True
+        settings.kind_cluster_name = "launchpad"
+        settings.kind_scripts_dir = str(script_dir)
+        settings.local_k8s_engine = "k3s"
+        settings.local_cluster_tool = "k3d"
+        settings.preview_node_port_min = 30080
+        settings.preview_node_port_max = 30084
+        settings.default_workload_image = "nginx:1.27-alpine"
+
+        with (
+            patch("app.services.kind_cluster.local_cluster_available", return_value=True),
+            patch("app.services.kind_cluster._list_clusters", new_callable=AsyncMock, return_value=set()),
+            patch("app.services.kind_cluster._nodes_ready", new_callable=AsyncMock, return_value=False),
+        ):
+            with pytest.raises(RuntimeError, match="timed out"):
+                await ensure_kind_cluster()
 
 
 @pytest.mark.asyncio

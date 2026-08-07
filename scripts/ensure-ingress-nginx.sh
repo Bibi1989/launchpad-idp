@@ -18,43 +18,56 @@ kubectl_ctx() {
   kubectl --context "${CONTEXT}" "$@"
 }
 
+already_ready=0
 if kubectl_ctx get ingressclass nginx >/dev/null 2>&1 \
   && kubectl_ctx -n "${INGRESS_NS}" get svc ingress-nginx-controller >/dev/null 2>&1; then
-  echo "ingress-nginx already present (context: ${CONTEXT})"
-else
-  echo "Installing ingress-nginx into ${CONTEXT}…"
-  if ! kubectl_ctx apply -f "${MANIFEST_URL}"; then
-    echo "Failed to apply ingress-nginx manifest from ${MANIFEST_URL}" >&2
-    echo "Check network access from this host, or apply a local copy." >&2
+  # Skip patch + long rollout wait when the controller is already Available.
+  if kubectl_ctx -n "${INGRESS_NS}" get deploy ingress-nginx-controller \
+       -o jsonpath='{.status.availableReplicas}' 2>/dev/null | grep -Eq '^[1-9]'; then
+    echo "ingress-nginx already ready (context: ${CONTEXT})"
+    already_ready=1
+  else
+    echo "ingress-nginx present but not Available yet (context: ${CONTEXT})"
+  fi
+fi
+
+if [[ "${already_ready}" -eq 0 ]]; then
+  if ! kubectl_ctx get ingressclass nginx >/dev/null 2>&1 \
+    || ! kubectl_ctx -n "${INGRESS_NS}" get svc ingress-nginx-controller >/dev/null 2>&1; then
+    echo "Installing ingress-nginx into ${CONTEXT}…"
+    if ! kubectl_ctx apply -f "${MANIFEST_URL}"; then
+      echo "Failed to apply ingress-nginx manifest from ${MANIFEST_URL}" >&2
+      echo "Check network access from this host, or apply a local copy." >&2
+      exit 1
+    fi
+  fi
+
+  # Wait for the controller Service, then pin HTTP NodePort for Cloudflare Tunnel.
+  for _ in $(seq 1 60); do
+    if kubectl_ctx -n "${INGRESS_NS}" get svc ingress-nginx-controller >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+
+  if ! kubectl_ctx -n "${INGRESS_NS}" get svc ingress-nginx-controller >/dev/null 2>&1; then
+    echo "ingress-nginx-controller Service not found after install" >&2
     exit 1
   fi
+
+  # Force NodePort + fixed http nodePort so host mapping 3080:30090 stays stable.
+  kubectl_ctx -n "${INGRESS_NS}" patch svc ingress-nginx-controller --type merge -p "{
+    \"spec\": {
+      \"type\": \"NodePort\",
+      \"ports\": [
+        {\"name\": \"http\", \"port\": 80, \"targetPort\": \"http\", \"protocol\": \"TCP\", \"nodePort\": ${NODE_PORT}},
+        {\"name\": \"https\", \"port\": 443, \"targetPort\": \"https\", \"protocol\": \"TCP\", \"nodePort\": 30091}
+      ]
+    }
+  }" >/dev/null
+
+  kubectl_ctx -n "${INGRESS_NS}" rollout status deployment/ingress-nginx-controller --timeout=90s || true
 fi
-
-# Wait for the controller Service, then pin HTTP NodePort for Cloudflare Tunnel.
-for _ in $(seq 1 60); do
-  if kubectl_ctx -n "${INGRESS_NS}" get svc ingress-nginx-controller >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
-
-if ! kubectl_ctx -n "${INGRESS_NS}" get svc ingress-nginx-controller >/dev/null 2>&1; then
-  echo "ingress-nginx-controller Service not found after install" >&2
-  exit 1
-fi
-
-# Force NodePort + fixed http nodePort so host mapping 3080:30090 stays stable.
-kubectl_ctx -n "${INGRESS_NS}" patch svc ingress-nginx-controller --type merge -p "{
-  \"spec\": {
-    \"type\": \"NodePort\",
-    \"ports\": [
-      {\"name\": \"http\", \"port\": 80, \"targetPort\": \"http\", \"protocol\": \"TCP\", \"nodePort\": ${NODE_PORT}},
-      {\"name\": \"https\", \"port\": 443, \"targetPort\": \"https\", \"protocol\": \"TCP\", \"nodePort\": 30091}
-    ]
-  }
-}" >/dev/null
-
-kubectl_ctx -n "${INGRESS_NS}" rollout status deployment/ingress-nginx-controller --timeout=180s || true
 
 echo "ingress-nginx ready. HTTP NodePort=${NODE_PORT} (map host PREVIEW_INGRESS_HTTP_PORT → this NodePort)."
 kubectl_ctx -n "${INGRESS_NS}" get svc ingress-nginx-controller

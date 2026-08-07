@@ -225,6 +225,10 @@ def plan_workspace_image_builds(
     Prefer ``.launchpad/image-builds.json`` so tags match Deployment image refs
     like ``launch-web:latest``. Fall back to apps/*/Dockerfile and root heuristics.
     Returns ``(builds, required_tags)``.
+
+    When an explicit plan exists, heuristic alias tags (``nestjs`` /
+    ``launch-nestjs`` / ``launchpad/nestjs``) are skipped so provision does not
+    rebuild and re-import the same Dockerfile three times.
     """
     builds: list[tuple[Path, Path, str]] = []
     seen_tags: set[str] = set()
@@ -239,6 +243,7 @@ def plan_workspace_image_builds(
 
     # 0) Import / generator plan - exact service image names.
     plan_path = workspace_root / ".launchpad" / "image-builds.json"
+    plan_entries = 0
     if plan_path.is_file():
         try:
             raw = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -260,11 +265,17 @@ def plan_workspace_image_builds(
                     alt = context / "Dockerfile"
                     if alt.is_file():
                         dockerfile = alt
+                before = len(builds)
                 _add(context, dockerfile, image, required=True)
+                if len(builds) > before:
+                    plan_entries += 1
+
+    if plan_entries > 0:
+        return builds, required_tags
 
     # Also map detected-stack services when plan is missing but stack metadata exists.
     stack_path = workspace_root / ".launchpad" / "detected-stack.json"
-    if stack_path.is_file() and not plan_path.is_file():
+    if stack_path.is_file():
         try:
             stack = json.loads(stack_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
@@ -376,6 +387,9 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
     Prefer ``.launchpad/image-builds.json`` (written by repo import) so tags match
     Deployment image refs like ``launch-web:latest``. Fall back to apps/*/Dockerfile
     and root Dockerfile heuristics.
+
+    Builds each Dockerfile once, then ``docker tag`` aliases, and imports each tag
+    at most once per call (avoids multi-minute duplicate k3d imports).
     """
     import shutil
     import subprocess
@@ -387,14 +401,37 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
     real_cluster = resolve_local_cluster_name(cluster_name)
     builds, required_tags = plan_workspace_image_builds(workspace_root)
 
+    # Group alias tags that share one Dockerfile so we build once.
+    groups: dict[tuple[Path, Path], list[str]] = {}
+    for context, df, image_tag in builds:
+        key = (context.resolve(), df.resolve())
+        groups.setdefault(key, []).append(image_tag)
+
     loaded: list[str] = []
     failed_required: list[str] = []
-    for context, df, image_tag in builds:
-        rel = df.relative_to(workspace_root)
+    loaded_ids: set[str] = set()
+
+    def _image_id(tag: str) -> str | None:
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if inspect.returncode != 0:
+            return None
+        return (inspect.stdout or "").strip() or None
+
+    for (context, df), tags in groups.items():
         try:
-            logger.info("building_kind_docker_image", image=image_tag, dockerfile=str(rel))
+            rel = df.relative_to(workspace_root)
+        except ValueError:
+            rel = df
+        primary = next((t for t in tags if t in required_tags), tags[0])
+        try:
+            logger.info("building_kind_docker_image", image=primary, dockerfile=str(rel), aliases=len(tags))
             build_res = subprocess.run(
-                ["docker", "build", "-t", image_tag, "-f", str(df), str(context)],
+                ["docker", "build", "-t", primary, "-f", str(df), str(context)],
                 capture_output=True,
                 text=True,
                 timeout=600,
@@ -404,23 +441,61 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                 logger.warning(
                     "kind_image_build_failed",
                     dockerfile=str(rel),
-                    image=image_tag,
+                    image=primary,
                     error=detail,
                 )
-                if image_tag in required_tags:
-                    failed_required.append(f"{image_tag} ({rel}): {detail[:200]}")
+                for image_tag in tags:
+                    if image_tag in required_tags:
+                        failed_required.append(f"{image_tag} ({rel}): {detail[:200]}")
                 continue
-            logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
-            if _load_image_to_local_cluster(image_tag, cluster_name=real_cluster):
-                loaded.append(image_tag)
-            else:
-                logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
-                if image_tag in required_tags:
-                    failed_required.append(f"{image_tag}: built but failed to load into cluster")
+
+            for alias in tags:
+                if alias == primary:
+                    continue
+                tag_res = subprocess.run(
+                    ["docker", "tag", primary, alias],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if tag_res.returncode != 0:
+                    logger.warning(
+                        "kind_image_tag_failed",
+                        source=primary,
+                        alias=alias,
+                        error=(tag_res.stderr or tag_res.stdout or "").strip()[-200:],
+                    )
+
+            image_id = _image_id(primary)
+            # Prefer importing required tags; if none marked required, import all.
+            tags_to_load = [t for t in tags if t in required_tags] if required_tags else list(tags)
+            if not tags_to_load:
+                tags_to_load = [primary]
+
+            for image_tag in tags_to_load:
+                # Same image ID already imported under another tag this call: still
+                # import the alias name so the cluster has the exact ref pods use,
+                # but skip if we already imported this exact tag.
+                if image_tag in loaded:
+                    continue
+                if image_id and image_id in loaded_ids and image_tag not in required_tags:
+                    # Non-required alias of an already-imported image: tag locally only.
+                    loaded.append(image_tag)
+                    continue
+                logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
+                if _load_image_to_local_cluster(image_tag, cluster_name=real_cluster):
+                    loaded.append(image_tag)
+                    if image_id:
+                        loaded_ids.add(image_id)
+                else:
+                    logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
+                    if image_tag in required_tags:
+                        failed_required.append(f"{image_tag}: built but failed to load into cluster")
         except Exception as exc:
             logger.warning("local_image_build_exception", dockerfile=str(rel), error=str(exc))
-            if image_tag in required_tags:
-                failed_required.append(f"{image_tag}: {exc}")
+            for image_tag in tags:
+                if image_tag in required_tags:
+                    failed_required.append(f"{image_tag}: {exc}")
 
     if failed_required:
         raise RuntimeError(

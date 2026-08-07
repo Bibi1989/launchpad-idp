@@ -114,7 +114,11 @@ onMounted(load)
       {{ t('catalog.detail.back') }}
     </NuxtLink>
 
-    <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
+    <AppSplash
+      v-if="loading"
+      compact
+      :message="t('common.loading')"
+    />
     <p v-else-if="errorMessage && !service" class="text-sm text-[var(--lp-danger)]">{{ errorMessage }}</p>
 
     <template v-else-if="service">

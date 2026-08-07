@@ -14,13 +14,15 @@ import { hasAwsAuth, hasGcpAuth } from '~/utils/cloudValidation'
 type PreviewTarget = PreviewLaunchPayload['provider']
 
 const { launchPreview, getKindStatus, getPreviewBuildStatus } = useEnvironments()
-const { listWorkspaces, listGithubInstallations, getGitlabStatus } = useProvisioning()
+const { listWorkspaces, getWorkspace, listGithubInstallations, getGitlabStatus } = useProvisioning()
 const { t } = useI18n()
 const route = useRoute()
 
 const step = ref(1)
 const workspaces = ref<WorkspaceListItem[]>([])
 const loadingWorkspaces = ref(true)
+const linkedWorkspaceLabel = ref<string | null>(null)
+const linkedWorkspaceMissing = ref(false)
 const submitting = ref(false)
 const errorMessage = ref<string | null>(null)
 const kindStatus = ref<KindClusterStatus | null>(null)
@@ -40,6 +42,17 @@ const loadingGitAccounts = ref(false)
 const linkedFromQuery = computed(() => {
   const raw = route.query.workspace
   return typeof raw === 'string' && raw.length > 0 ? raw : null
+})
+
+/** Hide the empty default wizard until a deep-linked workspace is ready. */
+const bootstrappingLinkedWorkspace = computed(
+  () => Boolean(linkedFromQuery.value) && loadingWorkspaces.value,
+)
+
+const splashDetail = computed(() => {
+  if (linkedWorkspaceLabel.value) return linkedWorkspaceLabel.value
+  if (linkedFromQuery.value) return linkedFromQuery.value
+  return null
 })
 
 const form = reactive({
@@ -198,18 +211,59 @@ onMounted(async () => {
   ) {
     form.provider = remembered
   }
-  if (linkedFromQuery.value) {
-    form.workspace_id = linkedFromQuery.value
+  const linkedId = linkedFromQuery.value
+  if (linkedId) {
+    form.workspace_id = linkedId
   }
+
+  // Resolve the deep-linked workspace first so the splash can show its name
+  // and the form is primed before the generic wizard paints.
+  const linkedWarm = linkedId
+    ? getWorkspace(linkedId)
+        .then((ws) => {
+          linkedWorkspaceLabel.value = ws.name || ws.workspace_id
+          const item: WorkspaceListItem = {
+            id: ws.workspace_id,
+            name: ws.name || ws.workspace_id,
+            engine: String(ws.engine),
+            provider: String(ws.provider),
+            status: ws.status || 'ready',
+            artifact_mode: ws.artifact_mode || 'iac_only',
+            created_at: ws.created_at || new Date().toISOString(),
+            root_dir: ws.root_dir,
+            starred: Boolean(ws.starred),
+          }
+          if (!workspaces.value.some((row) => row.id === item.id)) {
+            workspaces.value = [item, ...workspaces.value]
+          }
+          form.workspace_id = item.id
+          applyWorkspaceSelection(item.id)
+        })
+        .catch(() => {
+          linkedWorkspaceMissing.value = true
+        })
+    : Promise.resolve()
+
   try {
     const [workspaceList, buildStatus] = await Promise.all([
       listWorkspaces(),
       getPreviewBuildStatus(),
+      linkedWarm,
     ])
-    workspaces.value = workspaceList
+    // Prefer list metadata when present; keep the warm entry if the list lags.
+    const byId = new Map(workspaceList.map((row) => [row.id, row]))
+    for (const row of workspaces.value) {
+      if (!byId.has(row.id)) byId.set(row.id, row)
+    }
+    workspaces.value = Array.from(byId.values())
     previewBuild.value = buildStatus
-    if (linkedFromQuery.value) {
-      applyWorkspaceSelection(linkedFromQuery.value)
+    if (linkedId) {
+      if (workspaces.value.some((ws) => ws.id === linkedId)) {
+        linkedWorkspaceMissing.value = false
+        applyWorkspaceSelection(linkedId)
+      } else if (!linkedWorkspaceLabel.value) {
+        linkedWorkspaceMissing.value = true
+      }
     }
     void loadGitAccounts()
   } catch (err) {
@@ -504,16 +558,41 @@ async function launch() {
 
 <template>
   <div class="mx-auto max-w-3xl space-y-8 animate-fade-up">
+    <AppSplash
+      v-if="bootstrappingLinkedWorkspace"
+      :message="t('launch.splash.preparingWorkspace')"
+      :detail="splashDetail"
+    />
+
+    <template v-else>
     <header class="space-y-2">
       <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">
-        {{ t('launch.eyebrow') }}
+        {{ usesWorkspaceSource ? t('launch.splash.fromWorkspace') : t('launch.eyebrow') }}
       </p>
-      <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">{{ t('launch.title') }}</h1>
+      <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">
+        <template v-if="usesWorkspaceSource && selectedWorkspace">
+          {{ t('launch.splash.titleForWorkspace', { name: selectedWorkspace.name }) }}
+        </template>
+        <template v-else>
+          {{ t('launch.title') }}
+        </template>
+      </h1>
       <p class="max-w-2xl text-sm text-[var(--lp-muted)]">
-        {{ t('launch.blurb') }}
-        <NuxtLink to="/provision" class="font-medium text-[var(--lp-accent)] hover:underline">
-          {{ t('launch.useProvision') }}
-        </NuxtLink>
+        <template v-if="usesWorkspaceSource && selectedWorkspace">
+          {{ t('launch.splash.blurbForWorkspace') }}
+        </template>
+        <template v-else>
+          {{ t('launch.blurb') }}
+          <NuxtLink to="/provision" class="font-medium text-[var(--lp-accent)] hover:underline">
+            {{ t('launch.useProvision') }}
+          </NuxtLink>
+        </template>
+      </p>
+      <p
+        v-if="linkedWorkspaceMissing"
+        class="rounded-lg border border-[var(--lp-warn)]/40 bg-[var(--lp-warn)]/10 px-3 py-2 text-sm text-[var(--lp-warn)]"
+      >
+        {{ t('launch.splash.workspaceMissing') }}
       </p>
     </header>
 
@@ -1034,5 +1113,6 @@ async function launch() {
       :workspace-id="form.workspace_id || ''"
       :error-context="errorMessage"
     />
+    </template>
   </div>
 </template>

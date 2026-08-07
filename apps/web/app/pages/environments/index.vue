@@ -276,7 +276,11 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
       </div>
 
       <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
-      <p v-else-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('environments.index.loading') }}</p>
+      <AppSplash
+        v-else-if="loading"
+        compact
+        :message="t('environments.index.loading')"
+      />
       <div
         v-else-if="liveEnvironments.length === 0"
         class="rounded-xl border border-dashed border-[var(--lp-line)] px-6 py-12 text-center"

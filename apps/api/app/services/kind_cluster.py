@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import shutil
 from pathlib import Path
 
@@ -21,6 +22,11 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Wall-clock cap for scripts/{k3s,kind}-up.sh. Without this, a stuck docker pull /
+# k3d image import / ingress rollout leaves previews at PROVISION_INITIATED forever.
+LOCAL_CLUSTER_UP_TIMEOUT_SECONDS = 240.0
+LOCAL_CLUSTER_DOWN_TIMEOUT_SECONDS = 120.0
 
 
 def _repo_root() -> Path:
@@ -131,7 +137,78 @@ async def _nodes_ready(context: str) -> bool:
         return False
 
 
-async def _run_lifecycle_script(action: str, name: str, *, extra_env: dict[str, str]) -> tuple[int, str, str]:
+async def _rewrite_loopback_kubeconfig_server(context: str) -> None:
+    """Replace ``0.0.0.0`` apiserver hosts with ``127.0.0.1`` (k3d desktop quirk)."""
+    if not shutil.which("kubectl"):
+        return
+    try:
+        view = await asyncio.create_subprocess_exec(
+            "kubectl",
+            "config",
+            "view",
+            "--raw",
+            "-o",
+            f'jsonpath={{.clusters[?(@.name=="{context}")].cluster.server}}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, _ = await view.communicate()
+        if view.returncode != 0:
+            return
+        server = stdout_b.decode("utf-8", errors="replace").strip()
+        if "0.0.0.0" not in server:
+            return
+        fixed = server.replace("0.0.0.0", "127.0.0.1")
+        proc = await asyncio.create_subprocess_exec(
+            "kubectl",
+            "config",
+            "set-cluster",
+            context,
+            f"--server={fixed}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        if proc.returncode == 0:
+            logger.info("local_cluster_kubeconfig_loopback_rewritten", context=context, server=fixed)
+    except OSError as exc:
+        logger.warning("local_cluster_kubeconfig_rewrite_failed", context=context, error=str(exc))
+
+
+async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Terminate a lifecycle script and its children (new session / process group)."""
+    if proc.returncode is not None or proc.pid is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except (TimeoutError, asyncio.TimeoutError):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+
+
+async def _run_lifecycle_script(
+    action: str,
+    name: str,
+    *,
+    extra_env: dict[str, str],
+    timeout_seconds: float,
+) -> tuple[int, str, str]:
     script = _script_path(_script_name(action))
     if not script.is_file():
         raise RuntimeError(f"{_script_name(action)} not found at {script}")
@@ -140,9 +217,20 @@ async def _run_lifecycle_script(action: str, name: str, *, extra_env: dict[str, 
     env["KIND_CLUSTER_NAME"] = name  # shared cluster-name var across engines
     env["LOCAL_CLUSTER_NAME"] = name
     env["LOCAL_K8S_ENGINE"] = _engine()
+    # When the cluster is already up, scripts should skip docker pull / image import.
+    env.setdefault("PRELOAD_IMAGE", "0")
+    env.setdefault("K3D_PRELOAD_IMAGE", "0")
+    env.setdefault("KIND_PRELOAD_IMAGE", "0")
     env.update(extra_env)
 
-    logger.info("local_cluster_script_start", engine=_engine(), action=action, cluster=name, script=str(script))
+    logger.info(
+        "local_cluster_script_start",
+        engine=_engine(),
+        action=action,
+        cluster=name,
+        script=str(script),
+        timeout_seconds=timeout_seconds,
+    )
     proc = await asyncio.create_subprocess_exec(
         "bash",
         str(script),
@@ -150,8 +238,25 @@ async def _run_lifecycle_script(action: str, name: str, *, extra_env: dict[str, 
         stderr=asyncio.subprocess.PIPE,
         env=env,
         cwd=str(_repo_root()),
+        start_new_session=True,
     )
-    stdout_b, stderr_b = await proc.communicate()
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        await _kill_process_tree(proc)
+        logger.error(
+            "local_cluster_script_timeout",
+            engine=_engine(),
+            action=action,
+            cluster=name,
+            timeout_seconds=timeout_seconds,
+        )
+        raise RuntimeError(
+            f"{_engine()}-{action} for cluster '{name}' timed out after {timeout_seconds:.0f}s. "
+            f"Check Docker Desktop, run `make {_engine()}-down && make {_engine()}-up`, "
+            f"and remove a stale lock under /tmp/launchpad-{_engine()}-*.lockdir if needed."
+        ) from exc
+
     return (
         proc.returncode or 0,
         stdout_b.decode("utf-8", errors="replace"),
@@ -179,6 +284,20 @@ async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, s
         )
 
     name = cluster_name or settings.kind_cluster_name
+    context = _context_for(name)
+
+    # Fast path: skip the heavy up script (ingress wait + image import) when Ready.
+    if name in await _list_clusters() and await _nodes_ready(context):
+        await _rewrite_loopback_kubeconfig_server(context)
+        logger.info("local_cluster_already_ready", engine=engine, cluster=name, context=context)
+        return {
+            "status": "ready",
+            "cluster": name,
+            "engine": engine,
+            "context": context,
+            "output": f"{engine} cluster '{name}' already ready (skipped {_script_name('up')})",
+        }
+
     returncode, stdout, stderr = await _run_lifecycle_script(
         "up",
         name,
@@ -186,7 +305,12 @@ async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, s
             "PREVIEW_NODE_PORT_MIN": str(settings.preview_node_port_min),
             "PREVIEW_NODE_PORT_MAX": str(settings.preview_node_port_max),
             "DEFAULT_WORKLOAD_IMAGE": settings.default_workload_image,
+            # First bring-up may preload; keep best-effort but bounded by Python timeout.
+            "PRELOAD_IMAGE": "1",
+            "K3D_PRELOAD_IMAGE": "1",
+            "KIND_PRELOAD_IMAGE": "1",
         },
+        timeout_seconds=LOCAL_CLUSTER_UP_TIMEOUT_SECONDS,
     )
     if returncode != 0:
         logger.error(
@@ -200,12 +324,13 @@ async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, s
         detail = (stderr or stdout).strip() or f"{engine}-up exited {returncode}"
         raise RuntimeError(f"Failed to start {engine} cluster '{name}': {detail[:800]}")
 
+    await _rewrite_loopback_kubeconfig_server(context)
     logger.info("local_cluster_up_ok", engine=engine, cluster=name)
     return {
         "status": "ready",
         "cluster": name,
         "engine": engine,
-        "context": _context_for(name),
+        "context": context,
         "output": stdout[-1500:],
     }
 
@@ -223,7 +348,12 @@ async def delete_kind_cluster(*, cluster_name: str | None = None) -> dict[str, s
         return {"status": "skipped", "reason": "tool_or_kubectl_missing"}
 
     name = cluster_name or settings.kind_cluster_name
-    returncode, stdout, stderr = await _run_lifecycle_script("down", name, extra_env={})
+    returncode, stdout, stderr = await _run_lifecycle_script(
+        "down",
+        name,
+        extra_env={},
+        timeout_seconds=LOCAL_CLUSTER_DOWN_TIMEOUT_SECONDS,
+    )
     if returncode != 0:
         logger.error(
             "local_cluster_down_failed",
