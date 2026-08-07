@@ -291,6 +291,48 @@ def get_installation_access_token(
         ) from exc
 
 
+def resolve_git_clone_token(
+    *,
+    settings: Settings | None = None,
+    installation_id: int | None = None,
+    organization: str | None = None,
+    prefer_pat: bool = True,
+    allow_github_app: bool = True,
+    strict_app: bool = False,
+) -> str | None:
+    """Resolve a token for git clone / private repo access.
+
+    Prefer ``GITHUB_PAT`` when set (local/dev), then fall back to a GitHub App
+    installation token when the App is configured. Returns ``None`` when neither
+    source is available (callers treat that as public-repo / no-auth clone).
+    """
+    cfg = settings or get_settings()
+    if prefer_pat:
+        pat = (cfg.github_pat or "").strip()
+        if pat:
+            return pat
+    if not allow_github_app:
+        return None
+    try:
+        if not is_github_app_configured(cfg):
+            return None
+        return get_installation_access_token(
+            installation_id=installation_id,
+            organization=organization,
+            settings=cfg,
+        )
+    except GitHubAppAuthError as exc:
+        if strict_app:
+            raise
+        logger.warning("git_clone_token_unavailable", error=str(exc))
+        return None
+    except Exception as exc:
+        if strict_app:
+            raise
+        logger.warning("git_clone_token_unavailable", error=str(exc))
+        return None
+
+
 def get_installation_client(
     *,
     installation_id: int | None = None,

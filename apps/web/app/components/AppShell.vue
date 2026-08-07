@@ -12,7 +12,6 @@ const { listWorkspaces } = useProvisioning()
 const { listServices } = useCatalog()
 
 const terminalOpen = useState('lp-terminal-open', () => false)
-const createEnvOpen = useState('lp-create-env-open', () => false)
 const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
 const mobileNavOpen = ref(false)
 
@@ -506,40 +505,6 @@ watch(
           </ClientOnly>
         </div>
       </aside>
-    </Teleport>
-
-    <!-- Create environment modal -->
-    <Teleport to="body">
-      <div
-        v-if="createEnvOpen"
-        class="fixed inset-0 z-[80] flex items-center justify-center bg-[var(--lp-ink)]/80 p-4 backdrop-blur-md"
-        @click.self="createEnvOpen = false"
-      >
-        <div class="lp-glass flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl shadow-2xl">
-          <div class="flex items-start justify-between border-b border-[var(--lp-line)] px-6 py-5">
-            <div>
-              <h2 class="text-xl font-semibold text-[var(--lp-accent)]">{{ t('shell.launchEnvironment') }}</h2>
-              <p class="mt-1 text-sm text-[var(--lp-muted)]">
-                {{ t('shell.launchEnvironmentBlurb') }}
-              </p>
-            </div>
-            <button
-              type="button"
-              class="rounded-lg p-2 text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
-              :aria-label="t('common.close')"
-              @click="createEnvOpen = false"
-            >
-              <span class="material-symbols-outlined">close</span>
-            </button>
-          </div>
-          <div class="overflow-y-auto p-6">
-            <EnvironmentCreateForm
-              :initial-workspace-id="typeof route.query.workspace === 'string' ? route.query.workspace : null"
-              @created="(id) => { createEnvOpen = false; navigateTo(`/environments/${id}`) }"
-            />
-          </div>
-        </div>
-      </div>
     </Teleport>
   </div>
 </template>

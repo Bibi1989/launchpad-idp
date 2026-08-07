@@ -109,26 +109,9 @@ def _docker_available() -> bool:
 
 
 def _resolve_build_token(settings: Settings) -> str | None:
-    if settings.github_pat:
-        return settings.github_pat.strip() or None
-    try:
-        from app.services.github_app import (
-            GitHubAppAuthError,
-            get_installation_access_token,
-            is_github_app_configured,
-        )
+    from app.services.github_app import resolve_git_clone_token
 
-        if not is_github_app_configured(settings):
-            return None
-        return get_installation_access_token(settings=settings)
-    except Exception as exc:
-        from app.services.github_app import GitHubAppAuthError
-
-        if isinstance(exc, GitHubAppAuthError):
-            logger.warning("preview_build_github_token_unavailable", error=str(exc))
-            return None
-        logger.warning("preview_build_github_token_unavailable", error=str(exc))
-        return None
+    return resolve_git_clone_token(settings=settings)
 
 
 def clone_git_repository(

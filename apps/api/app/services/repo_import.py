@@ -403,22 +403,10 @@ class RepoImportService:
         *,
         installation_id: int | None = None,
     ) -> str | None:
-        if self._settings.github_pat:
-            return self._settings.github_pat.strip() or None
-        if not use_github_app:
-            return None
-        try:
-            from app.services.github_app import (
-                get_installation_access_token,
-                is_github_app_configured,
-            )
+        from app.services.github_app import resolve_git_clone_token
 
-            if not is_github_app_configured(self._settings):
-                return None
-            return get_installation_access_token(
-                installation_id=installation_id,
-                settings=self._settings,
-            )
-        except Exception as exc:
-            logger.warning("repo_import_token_unavailable", error=str(exc))
-            return None
+        return resolve_git_clone_token(
+            settings=self._settings,
+            installation_id=installation_id,
+            allow_github_app=use_github_app,
+        )

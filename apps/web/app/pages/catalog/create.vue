@@ -235,18 +235,12 @@ async function onSubmit() {
             {{ t('catalog.create.createGithubRepo') }}
           </label>
           <template v-if="form.create_github_repo">
-            <label class="block space-y-2">
-              <span class="lp-label">{{ t('catalog.create.githubInstallation') }}</span>
-              <select v-model.number="form.github_installation_id" class="lp-input" required>
-                <option
-                  v-for="inst in githubApp?.installations ?? []"
-                  :key="inst.id"
-                  :value="inst.id"
-                >
-                  {{ inst.account_login }} ({{ inst.account_type }})
-                </option>
-              </select>
-            </label>
+            <GithubInstallationPicker
+              :model-value="form.github_installation_id"
+              :installations="githubApp?.installations ?? []"
+              manage-link
+              @update:model-value="(id) => { form.github_installation_id = id }"
+            />
             <i18n-t
               v-if="isPersonalGithubAccount"
               keypath="catalog.create.personalGithubWarning"

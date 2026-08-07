@@ -6,7 +6,6 @@ const { environments, loading, error, refresh, destroy, retryProvision, pauseEnv
 const { activeOrgId, fetchOrgCosts } = useOrgs()
 const toast = useToast()
 const route = useRoute()
-const createEnvOpen = useState('lp-create-env-open', () => false)
 const destroyingId = ref<string | null>(null)
 const confirmDestroyId = ref<string | null>(null)
 const retryingId = ref<string | null>(null)
@@ -114,7 +113,7 @@ onMounted(async () => {
   }
 
   if (linkedWorkspaceId.value) {
-    createEnvOpen.value = true
+    void navigateTo(`/launch?workspace=${encodeURIComponent(linkedWorkspaceId.value)}`)
   }
 
   recentLogLines.value = [
@@ -290,7 +289,7 @@ function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?:
         <NuxtLink to="/launch" class="lp-btn-primary mt-4 inline-flex">
           {{ t('environments.index.firstPreview') }}
         </NuxtLink>
-        <button type="button" class="mt-3 block w-full text-xs text-[var(--lp-muted)] hover:underline" @click="createEnvOpen = true">
+        <button type="button" class="mt-3 block w-full text-xs text-[var(--lp-muted)] hover:underline" @click="navigateTo('/launch')">
           {{ t('environments.index.advancedForm') }}
         </button>
       </div>

@@ -9,6 +9,7 @@ import type {
   FrameworkOption,
   GitHubInstallationItem,
   GitHubRepositoryItem,
+  GitHubRepositorySearchItem,
   InfraGenerationConfig,
 } from '~/types/provisioning'
 import {
@@ -22,7 +23,7 @@ const WorkspaceMonacoEditor = defineAsyncComponent(
   () => import('~/components/WorkspaceMonacoEditor.vue'),
 )
 
-const { listGithubInstallations, listGithubRepositories } = useProvisioning()
+const { listGithubInstallations } = useProvisioning()
 const {
   loading,
   error,
@@ -43,9 +44,7 @@ const {
 const { t } = useI18n()
 
 const installations = ref<GitHubInstallationItem[]>([])
-const repositories = ref<GitHubRepositoryItem[]>([])
 const loadingInstalls = ref(false)
-const loadingRepos = ref(false)
 const busyAction = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 
@@ -194,7 +193,6 @@ onMounted(async () => {
     const soleInstallation = installations.value[0]
     if (soleInstallation) {
       installationId.value = soleInstallation.id
-      await loadRepos()
     }
   } catch {
     installations.value = []
@@ -203,22 +201,20 @@ onMounted(async () => {
   }
 })
 
-watch(installationId, async (id) => {
+watch(installationId, () => {
   fullName.value = ''
-  repositories.value = []
-  if (id) await loadRepos()
 })
 
-async function loadRepos() {
-  if (!installationId.value) return
-  loadingRepos.value = true
-  try {
-    repositories.value = await listGithubRepositories(installationId.value)
-  } catch {
-    repositories.value = []
-  } finally {
-    loadingRepos.value = false
-  }
+function onGithubInstallationChange(id: number | null) {
+  installationId.value = id
+  fullName.value = ''
+}
+
+function onGithubRepoSelect(repo: GitHubRepositorySearchItem | GitHubRepositoryItem) {
+  const name = 'fullName' in repo ? repo.fullName : repo.full_name
+  const defaultBranch = 'defaultBranch' in repo ? repo.defaultBranch : repo.default_branch
+  fullName.value = name
+  branch.value = defaultBranch || 'main'
 }
 
 function severityClass(severity: DockerfileSeverity): string {
@@ -455,44 +451,25 @@ async function onBuild() {
     <section class="lp-panel space-y-4 p-5">
       <h2 class="text-base font-semibold">{{ t('dockerfiles.repository') }}</h2>
       <div class="grid gap-4 md:grid-cols-2">
-        <label class="block space-y-1.5">
-          <span class="lp-label">{{ t('dockerfiles.githubInstallation') }}</span>
-          <select
-            v-model.number="installationId"
-            class="lp-input"
-            :disabled="loadingInstalls"
-          >
-            <option :value="null" disabled>
-              {{ loadingInstalls ? t('common.loading') : t('dockerfiles.selectInstallation') }}
-            </option>
-            <option
-              v-for="item in installations"
-              :key="item.id"
-              :value="item.id"
-            >
-              {{ item.account_login }} ({{ item.id }})
-            </option>
-          </select>
-        </label>
-        <label class="block space-y-1.5">
+        <div class="block space-y-1.5 md:col-span-2">
+          <p v-if="loadingInstalls" class="text-xs text-[var(--lp-muted)]">{{ t('common.loading') }}</p>
+          <GithubInstallationPicker
+            v-else
+            :model-value="installationId"
+            :installations="installations"
+            manage-link
+            @update:model-value="onGithubInstallationChange"
+          />
+        </div>
+        <div class="block space-y-1.5 md:col-span-2">
           <span class="lp-label">{{ t('dockerfiles.repository') }}</span>
-          <select
+          <GithubRepoPicker
             v-model="fullName"
-            class="lp-input"
-            :disabled="!installationId || loadingRepos"
-          >
-            <option value="" disabled>
-              {{ loadingRepos ? t('common.loading') : t('dockerfiles.selectRepository') }}
-            </option>
-            <option
-              v-for="repo in repositories"
-              :key="repo.id"
-              :value="repo.full_name"
-            >
-              {{ repo.full_name }}
-            </option>
-          </select>
-        </label>
+            :installation-id="installationId"
+            :disabled="!installationId"
+            @select-repo="onGithubRepoSelect"
+          />
+        </div>
         <label class="block space-y-1.5">
           <span class="lp-label">{{ t('dockerfiles.branchRef') }}</span>
           <input v-model="branch" type="text" class="lp-input" placeholder="main">

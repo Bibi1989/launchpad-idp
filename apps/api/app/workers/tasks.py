@@ -1666,11 +1666,7 @@ def _run_dockerfile_build(job_id: str, request_payload: dict) -> None:
     from app.schemas.dockerfile_schema import DockerfileBuildJobStatus, DockerfileBuildRequest
     from app.services.dockerfile_jobs import update_build_job_sync
     from app.services.dockerfile_registry import DockerfileRegistryError, build_and_push_sync
-    from app.services.github_app import (
-        GitHubAppAuthError,
-        get_installation_access_token,
-        is_github_app_configured,
-    )
+    from app.services.github_app import GitHubAppAuthError, resolve_git_clone_token
     from app.services.preview_build import PreviewBuildError, clone_git_repository
 
     update_build_job_sync(job_id, status=DockerfileBuildJobStatus.RUNNING, append_logs=["Build started"])
@@ -1686,22 +1682,19 @@ def _run_dockerfile_build(job_id: str, request_payload: dict) -> None:
         return
 
     settings = get_settings()
-    token: str | None = None
-    if settings.github_pat:
-        token = settings.github_pat.strip() or None
-    elif is_github_app_configured(settings):
-        try:
-            token = get_installation_access_token(
-                installation_id=request.installation_id,
-                settings=settings,
-            )
-        except GitHubAppAuthError as exc:
-            update_build_job_sync(
-                job_id,
-                status=DockerfileBuildJobStatus.FAILED,
-                error=f"GitHub auth failed: {exc}",
-            )
-            return
+    try:
+        token = resolve_git_clone_token(
+            settings=settings,
+            installation_id=request.installation_id,
+            strict_app=True,
+        )
+    except GitHubAppAuthError as exc:
+        update_build_job_sync(
+            job_id,
+            status=DockerfileBuildJobStatus.FAILED,
+            error=f"GitHub auth failed: {exc}",
+        )
+        return
 
     repo_url = f"https://github.com/{request.full_name}.git"
     branch = (request.branch or "main").strip()
@@ -1850,21 +1843,3 @@ async def _attach_cloud_preview_url(
             resources.preview_url = url
     except Exception:
         logger.exception("cloud_preview_url_resolve_failed", environment_id=str(env_uuid))
-
-
-def _build_and_load_kind_docker_images(workspace_root: Path, cluster_name: str = "launchpad") -> list[str]:
-    """Build workspace Dockerfiles and load images into the local cluster.
-
-    Delegates to ``manifest_deploy.build_and_load_kind_images`` so import
-    ``launch-*:latest`` tags stay aligned with Deployment manifests.
-    """
-    from app.services.manifest_deploy import build_and_load_kind_images
-
-    return build_and_load_kind_images(workspace_root, cluster_name=cluster_name)
-
-
-def _remove_kind_docker_images(cluster_name: str, images: "list[str] | None") -> list[str]:
-    """Compatibility wrapper around ``image_cleanup.remove_local_docker_images``."""
-    from app.services.image_cleanup import remove_local_docker_images
-
-    return remove_local_docker_images(images, cluster_name=cluster_name)
