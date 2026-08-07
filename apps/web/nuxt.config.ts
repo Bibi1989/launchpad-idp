@@ -49,12 +49,6 @@ export default defineNuxtConfig({
     build: {
       sourcemap: false,
       cssMinify: true,
-      // Rolldown (Vite 8): silence PLUGIN_TIMINGS noise on large Monaco/Mermaid builds.
-      rolldownOptions: {
-        checks: {
-          pluginTimings: false,
-        },
-      },
     },
     server: {
       allowedHosts: [".trycloudflare.com"],
@@ -100,6 +94,18 @@ export default defineNuxtConfig({
   typescript: {
     strict: true,
     typeCheck: false,
+  },
+  hooks: {
+    // Rolldown (Vite 8) emits PLUGIN_TIMINGS on large Monaco/Mermaid builds.
+    "vite:extendConfig"(config) {
+      const build = (config.build ??= {}) as Record<string, unknown>
+      const existing = (build.rolldownOptions ?? {}) as Record<string, unknown>
+      const checks = (existing.checks ?? {}) as Record<string, unknown>
+      build.rolldownOptions = {
+        ...existing,
+        checks: { ...checks, pluginTimings: false },
+      }
+    },
   },
   app: {
     head: {

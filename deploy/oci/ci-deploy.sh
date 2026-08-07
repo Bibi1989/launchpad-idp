@@ -71,16 +71,11 @@ wait_api_healthy() {
 }
 
 wait_web_ready() {
-  # TCP accept on :3000 is enough. Do not require HTTP 200: Nuxt may redirect or
-  # SSR-error briefly while still being "up" for Caddy.
+  # TCP accept on :3000 is enough. Do not require HTTP 200: Nuxt may redirect.
+  local check
+  check='const n=require("net");const s=n.connect(3000,"127.0.0.1",()=>{s.end();process.exit(0)});s.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),2500)'
   for i in $(seq 1 "$WEB_WAIT_ITERS"); do
-    if container_running web \
-      && dc exec -T web node -e "
-const net = require('net');
-const s = net.connect(3000, '127.0.0.1', () => { s.end(); process.exit(0); });
-s.on('error', () => process.exit(1));
-setTimeout(() => process.exit(1), 2500);
-" 2>/dev/null; then
+    if container_running web && dc exec -T web node -e "$check" 2>/dev/null; then
       echo "web ready"
       return 0
     fi
@@ -107,7 +102,12 @@ chmod +x "${ROOT_DIR}/deploy/oci/caddy-entrypoint.sh" || true
 
 # 1) Build first so a build failure leaves the running stack untouched (site stays up).
 echo "===== build images (old stack keeps serving) ====="
-dc build || fail "docker compose build failed"
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+if ! dc build; then
+  echo "===== last compose build attempt failed ====="
+  fail "docker compose build failed"
+fi
 
 # 2) Ensure Postgres/Redis without bouncing healthy instances when possible.
 dc up -d postgres || fail "postgres failed to start"
@@ -182,9 +182,15 @@ dc up -d --no-deps --force-recreate web || fail "web recreate failed"
 wait_web_ready || fail "web did not become ready within $((WEB_WAIT_ITERS * 5))s after recreate"
 
 echo "===== rolling recreate: worker ====="
-dc up -d --no-deps --force-recreate worker || fail "worker recreate failed"
+if ! dc up -d --no-deps --force-recreate worker; then
+  echo "WARN: worker recreate failed - site will still serve; check worker logs"
+  dc logs --tail=80 worker || true
+fi
 echo "===== rolling recreate: beat ====="
-dc up -d --no-deps --force-recreate beat || fail "beat recreate failed"
+if ! dc up -d --no-deps --force-recreate beat; then
+  echo "WARN: beat recreate failed - site will still serve; check beat logs"
+  dc logs --tail=50 beat || true
+fi
 
 # Keep the public edge up: only recreate caddy when compose detects a config/image change.
 echo "===== ensure caddy ====="
