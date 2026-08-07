@@ -31,6 +31,18 @@ const features = computed(() => [
     blurb: t('landing.features.k8s.blurb'),
   },
 ])
+
+const mobileNavOpen = ref(false)
+
+const hubLink = computed(() =>
+  signedIn.value
+    ? { to: '/home', label: t('landing.openHub') }
+    : { to: '/login', label: t('landing.signIn') },
+)
+
+function closeMobileNav() {
+  mobileNavOpen.value = false
+}
 </script>
 
 <template>
@@ -45,13 +57,18 @@ const features = computed(() => [
       "
     />
 
-    <header class="relative z-10 mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-6">
-      <NuxtLink to="/" class="block">
-        <BrandLogo size="sm" />
+    <header class="relative z-20 mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4 sm:gap-4 sm:px-6 sm:py-6">
+      <NuxtLink to="/" class="min-w-0 shrink-0" @click="closeMobileNav">
+        <span class="sm:hidden">
+          <BrandLogo size="sm" :show-wordmark="false" />
+        </span>
+        <span class="hidden sm:block">
+          <BrandLogo size="sm" />
+        </span>
       </NuxtLink>
-      <div class="flex items-center gap-3 sm:gap-4">
+      <div class="flex min-w-0 shrink items-center gap-2 sm:gap-4">
         <PreferenceControls compact />
-        <nav class="flex items-center gap-4 text-sm">
+        <nav class="hidden items-center gap-4 text-sm sm:flex">
           <NuxtLink
             to="/docs"
             class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
@@ -59,22 +76,47 @@ const features = computed(() => [
             {{ t('landing.docs') }}
           </NuxtLink>
           <NuxtLink
-            v-if="signedIn"
-            to="/home"
+            :to="hubLink.to"
             class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
           >
-            {{ t('landing.openHub') }}
-          </NuxtLink>
-          <NuxtLink
-            v-else
-            to="/login"
-            class="text-[var(--lp-muted)] transition hover:text-[var(--lp-text)]"
-          >
-            {{ t('landing.signIn') }}
+            {{ hubLink.label }}
           </NuxtLink>
         </nav>
+        <button
+          type="button"
+          class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)] sm:hidden"
+          :aria-expanded="mobileNavOpen"
+          :aria-label="mobileNavOpen ? t('common.close') : t('shell.openNav')"
+          @click="mobileNavOpen = !mobileNavOpen"
+        >
+          <span class="material-symbols-outlined text-[1.25rem]">
+            {{ mobileNavOpen ? 'close' : 'menu' }}
+          </span>
+        </button>
       </div>
     </header>
+
+    <div
+      v-if="mobileNavOpen"
+      class="relative z-20 border-b border-[var(--lp-line)] bg-[var(--lp-panel)]/95 px-4 py-3 backdrop-blur-md sm:hidden"
+    >
+      <nav class="mx-auto flex max-w-6xl flex-col gap-1 text-sm">
+        <NuxtLink
+          to="/docs"
+          class="rounded-lg px-3 py-2.5 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
+          @click="closeMobileNav"
+        >
+          {{ t('landing.docs') }}
+        </NuxtLink>
+        <NuxtLink
+          :to="hubLink.to"
+          class="rounded-lg px-3 py-2.5 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
+          @click="closeMobileNav"
+        >
+          {{ hubLink.label }}
+        </NuxtLink>
+      </nav>
+    </div>
 
     <main class="relative z-10 mx-auto flex max-w-6xl flex-col px-6 pb-24 pt-16 md:pt-24">
       <section class="max-w-3xl animate-fade-up space-y-8">

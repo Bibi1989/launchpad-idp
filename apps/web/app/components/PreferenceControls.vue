@@ -39,13 +39,14 @@ async function onLocaleChange(event: Event) {
     <label class="sr-only" for="lp-locale">{{ t('common.language') }}</label>
     <select
       id="lp-locale"
-      class="lp-input h-9 w-auto min-w-[7.5rem] py-1.5 text-xs"
+      class="lp-input h-9 w-auto py-1.5 text-xs"
+      :class="compact ? 'min-w-[4.25rem] max-w-[5.5rem]' : 'min-w-[7.5rem]'"
       :value="locale"
       :aria-label="t('common.toggleLanguage')"
       @change="onLocaleChange"
     >
-      <option value="de">{{ t('common.languageDe') }}</option>
-      <option value="en">{{ t('common.languageEn') }}</option>
+      <option value="de">{{ compact ? 'DE' : t('common.languageDe') }}</option>
+      <option value="en">{{ compact ? 'EN' : t('common.languageEn') }}</option>
     </select>
   </div>
 </template>
