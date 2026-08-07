@@ -82,8 +82,19 @@ export function useProvisioning() {
     })
   }
 
-  async function listWorkspaces(): Promise<WorkspaceListItem[]> {
-    return apiFetch<WorkspaceListItem[]>('/provisioning/workspaces')
+  async function listWorkspaces(opts?: { starred?: boolean }): Promise<WorkspaceListItem[]> {
+    const query = opts?.starred ? '?starred=true' : ''
+    return apiFetch<WorkspaceListItem[]>(`/provisioning/workspaces${query}`)
+  }
+
+  async function setWorkspaceStarred(
+    workspaceId: string,
+    starred: boolean,
+  ): Promise<WorkspaceListItem> {
+    return apiFetch<WorkspaceListItem>(`/provisioning/workspaces/${workspaceId}/star`, {
+      method: 'PUT',
+      body: JSON.stringify({ starred }),
+    })
   }
 
   async function getWorkspace(workspaceId: string): Promise<IaCBundleSummary> {
@@ -363,6 +374,7 @@ export function useProvisioning() {
     createWorkspace,
     updateWorkspace,
     listWorkspaces,
+    setWorkspaceStarred,
     getWorkspace,
     listAudits,
     getWizardConfig,

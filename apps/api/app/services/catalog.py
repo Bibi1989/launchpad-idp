@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -177,6 +178,7 @@ class CatalogServiceManager:
             root_dir=bundle.root_dir,
             status="ready",
             encrypted_credentials=encrypted,
+            starred_at=datetime.now(UTC),
         )
         self._session.add(workspace)
         await self._session.flush()

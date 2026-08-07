@@ -17,7 +17,7 @@ const KubernetesSuite = defineAsyncComponent(
 const route = useRoute()
 const { t } = useI18n()
 const workspaceId = computed(() => String(route.params.id))
-const { getWorkspace, openTerminal, destroyWorkspace, listAudits } = useProvisioning()
+const { getWorkspace, openTerminal, destroyWorkspace, listAudits, setWorkspaceStarred } = useProvisioning()
 const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
 
 const workspace = ref<IaCBundleSummary | null>(null)
@@ -25,6 +25,7 @@ const loadError = ref<string | null>(null)
 const loading = ref(true)
 const openingTerminal = ref(false)
 const destroying = ref(false)
+const starring = ref(false)
 const confirmDestroyOpen = ref(false)
 const wsPath = ref<string | null>(null)
 const runInit = ref(false)
@@ -101,6 +102,26 @@ async function load() {
     workspace.value = null
   } finally {
     loading.value = false
+  }
+}
+
+async function toggleStar() {
+  if (!workspace.value || starring.value) return
+  starring.value = true
+  loadError.value = null
+  try {
+    const updated = await setWorkspaceStarred(
+      workspaceId.value,
+      !(workspace.value.starred ?? false),
+    )
+    workspace.value = {
+      ...workspace.value,
+      starred: updated.starred,
+    }
+  } catch (err) {
+    loadError.value = err instanceof Error ? err.message : t('workspaces.errors.star')
+  } finally {
+    starring.value = false
   }
 }
 
@@ -315,6 +336,23 @@ watch(advancedMode, async (enabled) => {
             </div>
 
             <div class="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/25 transition hover:bg-[var(--lp-panel-2)]"
+                :class="workspace.starred ? 'text-[var(--lp-accent)]' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
+                :disabled="starring"
+                :aria-pressed="Boolean(workspace.starred)"
+                :aria-label="workspace.starred ? t('catalog.index.unstarAction') : t('catalog.index.yours')"
+                :title="workspace.starred ? t('catalog.index.unstarAction') : t('catalog.index.yours')"
+                @click="toggleStar"
+              >
+                <span
+                  class="material-symbols-outlined text-xl"
+                  :class="workspace.starred ? 'filled' : ''"
+                >
+                  star
+                </span>
+              </button>
               <NuxtLink
                 :to="`/launch?workspace=${workspace.workspace_id || (workspace as any).id || workspaceId}`"
                 class="lp-btn-ghost hidden whitespace-nowrap text-xs uppercase tracking-wide sm:inline-flex"

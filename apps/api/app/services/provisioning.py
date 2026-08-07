@@ -128,6 +128,7 @@ class ProvisioningService:
             name=request.name,
             status="ready",
             created_at=datetime.now().astimezone(),
+            starred=False,
         )
 
     async def list_workspaces(
@@ -135,6 +136,7 @@ class ProvisioningService:
         owner: User,
         *,
         org_id: UUID | None = None,
+        starred_only: bool = False,
     ) -> list[WorkspaceListItem]:
         from app.services.orgs import OrganizationService
 
@@ -142,26 +144,43 @@ class ProvisioningService:
         if org_id is not None:
             ctx = await orgs.resolve_context(user=owner, org_id=org_id)
             target_org_id = ctx.org_id
-            result = await self._session.execute(
+            stmt = (
                 select(ProvisioningWorkspace)
                 .where(ProvisioningWorkspace.org_id == target_org_id)
                 .order_by(ProvisioningWorkspace.created_at.desc())
                 .limit(100)
             )
+            if starred_only:
+                stmt = stmt.where(ProvisioningWorkspace.starred_at.is_not(None))
+            result = await self._session.execute(stmt)
             rows = list(result.scalars().all())
         else:
             org = await orgs.ensure_personal_org(owner)
-            result = await self._session.execute(
+            stmt = (
                 select(ProvisioningWorkspace)
                 .where(ProvisioningWorkspace.org_id == org.id)
                 .order_by(ProvisioningWorkspace.created_at.desc())
                 .limit(100)
             )
+            if starred_only:
+                stmt = stmt.where(ProvisioningWorkspace.starred_at.is_not(None))
+            result = await self._session.execute(stmt)
             rows = list(result.scalars().all())
-            if not rows:
+            if not rows and not starred_only:
                 result = await self._session.execute(
                     select(ProvisioningWorkspace)
                     .where(ProvisioningWorkspace.owner_id == owner.id)
+                    .order_by(ProvisioningWorkspace.created_at.desc())
+                    .limit(100)
+                )
+                rows = list(result.scalars().all())
+            elif not rows and starred_only:
+                result = await self._session.execute(
+                    select(ProvisioningWorkspace)
+                    .where(
+                        ProvisioningWorkspace.owner_id == owner.id,
+                        ProvisioningWorkspace.starred_at.is_not(None),
+                    )
                     .order_by(ProvisioningWorkspace.created_at.desc())
                     .limit(100)
                 )
@@ -178,10 +197,35 @@ class ProvisioningService:
                     artifact_mode=self.get_workspace_artifact_mode(row),
                     created_at=row.created_at,
                     root_dir=row.root_dir,
+                    starred=row.starred_at is not None,
                 )
             )
         return items
 
+    async def set_workspace_starred(
+        self,
+        workspace_id: UUID,
+        owner: User,
+        *,
+        starred: bool,
+    ) -> WorkspaceListItem:
+        from datetime import UTC, datetime
+
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        row.starred_at = datetime.now(UTC) if starred else None
+        await self._session.commit()
+        await self._session.refresh(row)
+        return WorkspaceListItem(
+            id=row.id,
+            name=row.name,
+            engine=row.engine,
+            provider=row.provider,
+            status=row.status,
+            artifact_mode=self.get_workspace_artifact_mode(row),
+            created_at=row.created_at,
+            root_dir=row.root_dir,
+            starred=row.starred_at is not None,
+        )
     async def get_workspace(self, workspace_id: UUID) -> ProvisioningWorkspace:
         row = await self._session.get(ProvisioningWorkspace, workspace_id)
         if row is None:
@@ -243,6 +287,7 @@ class ProvisioningService:
             name=row.name,
             status=row.status,
             created_at=row.created_at,
+            starred=row.starred_at is not None,
         )
 
     @staticmethod
@@ -546,6 +591,7 @@ class ProvisioningService:
             name=row.name,
             status=row.status,
             created_at=row.created_at,
+            starred=row.starred_at is not None,
         )
 
     @staticmethod
@@ -1047,6 +1093,7 @@ class ProvisioningService:
                 name=row.name,
                 status=row.status,
                 created_at=row.created_at,
+                starred=row.starred_at is not None,
             )
 
         root = self._relocate_ephemeral_root(row)
@@ -1107,6 +1154,7 @@ class ProvisioningService:
             name=row.name,
             status=row.status,
             created_at=row.created_at,
+            starred=row.starred_at is not None,
         )
 
     def get_workspace_kubernetes_packaging(

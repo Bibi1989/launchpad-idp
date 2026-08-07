@@ -4,11 +4,12 @@ import { artifactModeLabel, workspaceStackLabel } from '~/utils/workspaceDisplay
 
 const { t } = useI18n()
 const route = useRoute()
-const { listWorkspaces, destroyWorkspace } = useProvisioning()
+const { listWorkspaces, destroyWorkspace, setWorkspaceStarred } = useProvisioning()
 const workspaces = ref<WorkspaceListItem[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const destroyingId = ref<string | null>(null)
+const starringId = ref<string | null>(null)
 const confirmDestroyId = ref<string | null>(null)
 const confirmDestroyOpen = computed({
   get: () => confirmDestroyId.value !== null,
@@ -39,6 +40,21 @@ async function refresh() {
 function requestDestroy(id: string) {
   if (destroyingId.value) return
   confirmDestroyId.value = id
+}
+
+async function toggleStar(ws: WorkspaceListItem) {
+  if (starringId.value) return
+  starringId.value = ws.id
+  error.value = null
+  try {
+    const updated = await setWorkspaceStarred(ws.id, !ws.starred)
+    const idx = workspaces.value.findIndex((row) => row.id === ws.id)
+    if (idx >= 0) workspaces.value[idx] = updated
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('workspaces.errors.star')
+  } finally {
+    starringId.value = null
+  }
 }
 
 async function onDestroy() {
@@ -143,6 +159,23 @@ watch(
             </p>
           </div>
           <div class="flex shrink-0 gap-2" @click.stop>
+            <button
+              type="button"
+              class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--lp-line)] transition hover:bg-[var(--lp-panel)]"
+              :class="ws.starred ? 'text-[var(--lp-accent)]' : 'text-[var(--lp-muted)]'"
+              :disabled="starringId === ws.id"
+              :aria-pressed="ws.starred"
+              :aria-label="ws.starred ? t('catalog.index.unstar', { name: ws.name }) : t('catalog.index.yours')"
+              :title="ws.starred ? t('catalog.index.unstarAction') : t('catalog.index.yours')"
+              @click="toggleStar(ws)"
+            >
+              <span
+                class="material-symbols-outlined text-base"
+                :class="ws.starred ? 'filled' : ''"
+              >
+                star
+              </span>
+            </button>
             <NuxtLink :to="`/workspaces/${ws.id}`" class="lp-btn-ghost px-3 py-1.5 text-xs">
               {{ t('workspaces.index.open') }}
             </NuxtLink>

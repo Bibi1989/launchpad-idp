@@ -429,6 +429,7 @@ class ProvisioningWorkspace(Base):
         Index("ix_provisioning_workspaces_status", "status"),
         Index("ix_provisioning_workspaces_owner_id", "owner_id"),
         Index("ix_provisioning_workspaces_org_id", "org_id"),
+        Index("ix_provisioning_workspaces_starred_at", "starred_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -450,6 +451,8 @@ class ProvisioningWorkspace(Base):
     encrypted_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Non-secret wizard snapshot so disk wipe can restore generated files.
     wizard_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When set, workspace appears under Catalog → Starred workspaces.
+    starred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

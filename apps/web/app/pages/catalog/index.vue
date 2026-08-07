@@ -1,52 +1,55 @@
 <script setup lang="ts">
-import type { CatalogService, GoldenPathTemplate } from '~/types/catalog'
+import type { GoldenPathTemplate } from '~/types/catalog'
+import type { WorkspaceListItem } from '~/types/provisioning'
+import { artifactModeLabel, workspaceStackLabel } from '~/utils/workspaceDisplay'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
-const { listTemplates, listServices, deleteService } = useCatalog()
+const { listTemplates } = useCatalog()
+const { listWorkspaces, setWorkspaceStarred } = useProvisioning()
 
-type CatalogTab = 'templates' | 'services'
+type CatalogTab = 'templates' | 'starred'
 
 const templates = ref<GoldenPathTemplate[]>([])
-const services = ref<CatalogService[]>([])
+const starredWorkspaces = ref<WorkspaceListItem[]>([])
 const loading = ref(true)
 const errorMessage = ref<string | null>(null)
-const deletingId = ref<string | null>(null)
-const confirmDeleteService = ref<CatalogService | null>(null)
+const unstarringId = ref<string | null>(null)
+const confirmUnstar = ref<WorkspaceListItem | null>(null)
 
 const activeTab = computed<CatalogTab>(() => {
   const tab = typeof route.query.tab === 'string' ? route.query.tab : ''
-  return tab === 'services' ? 'services' : 'templates'
+  return tab === 'services' || tab === 'starred' ? 'starred' : 'templates'
 })
 
 function setTab(tab: CatalogTab) {
   void router.replace({
     path: '/catalog',
-    query: tab === 'templates' ? {} : { tab },
+    query: tab === 'templates' ? {} : { tab: 'starred' },
   })
 }
 
-function requestDeleteService(svc: CatalogService, event: Event) {
+function requestUnstar(ws: WorkspaceListItem, event: Event) {
   event.preventDefault()
   event.stopPropagation()
-  if (deletingId.value) return
-  confirmDeleteService.value = svc
+  if (unstarringId.value) return
+  confirmUnstar.value = ws
 }
 
-async function confirmDeleteServiceRun() {
-  const svc = confirmDeleteService.value
-  if (!svc || deletingId.value) return
-  deletingId.value = svc.id
+async function confirmUnstarRun() {
+  const ws = confirmUnstar.value
+  if (!ws || unstarringId.value) return
+  unstarringId.value = ws.id
   errorMessage.value = null
   try {
-    await deleteService(svc.id)
-    services.value = services.value.filter((row) => row.id !== svc.id)
-    confirmDeleteService.value = null
+    await setWorkspaceStarred(ws.id, false)
+    starredWorkspaces.value = starredWorkspaces.value.filter((row) => row.id !== ws.id)
+    confirmUnstar.value = null
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('catalog.errors.delete')
   } finally {
-    deletingId.value = null
+    unstarringId.value = null
   }
 }
 
@@ -54,9 +57,12 @@ onMounted(async () => {
   loading.value = true
   errorMessage.value = null
   try {
-    const [tplList, svcList] = await Promise.all([listTemplates(), listServices()])
+    const [tplList, starred] = await Promise.all([
+      listTemplates(),
+      listWorkspaces({ starred: true }),
+    ])
     templates.value = tplList
-    services.value = svcList
+    starredWorkspaces.value = starred
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('catalog.errors.load')
   } finally {
@@ -106,15 +112,16 @@ onMounted(async () => {
         <button
           type="button"
           role="tab"
-          class="rounded-lg px-4 py-2 text-xs font-medium uppercase tracking-wide transition"
-          :class="activeTab === 'services'
+          class="inline-flex items-center rounded-lg px-4 py-2 text-xs font-medium uppercase tracking-wide transition"
+          :class="activeTab === 'starred'
             ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]'
             : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
-          :aria-selected="activeTab === 'services'"
-          @click="setTab('services')"
+          :aria-selected="activeTab === 'starred'"
+          @click="setTab('starred')"
         >
+          <span class="material-symbols-outlined mr-1 text-sm" aria-hidden="true">star</span>
           {{ t('catalog.index.yours') }}
-          <span class="ml-1.5 font-mono text-[10px] opacity-70">{{ services.length }}</span>
+          <span class="ml-1.5 font-mono text-[10px] opacity-70">{{ starredWorkspaces.length }}</span>
         </button>
       </div>
 
@@ -124,58 +131,32 @@ onMounted(async () => {
           <article
             v-for="tpl in templates"
             :key="tpl.id"
-            class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/60 p-5"
+            class="flex flex-col rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)]/40 p-4"
           >
-            <div class="flex items-start gap-3">
-              <span class="material-symbols-outlined text-2xl text-[var(--lp-accent)]">{{ tpl.icon }}</span>
-              <div class="min-w-0">
-                <h3 class="font-semibold">{{ tpl.title }}</h3>
-                <p class="mt-1 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
-                  {{ tpl.id }} · v{{ tpl.version }} · {{ tpl.default_tier }} · SLO {{ tpl.default_slo }}%
-                </p>
-                <p class="mt-2 text-sm text-[var(--lp-muted)]">{{ tpl.description }}</p>
-                <div class="mt-3 space-y-2">
-                  <div v-if="tpl.frameworks.length" class="space-y-1">
-                    <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('catalog.index.stacks') }}</p>
-                    <div class="flex flex-wrap gap-1">
-                      <span
-                        v-for="fw in tpl.frameworks"
-                        :key="fw"
-                        class="rounded border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/10 px-2 py-0.5 font-mono text-[10px] text-[var(--lp-accent)]"
-                      >
-                        {{ fw }}
-                      </span>
-                    </div>
-                  </div>
-                  <div v-if="tpl.docker_images?.length" class="space-y-1">
-                    <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('catalog.index.dockerImages') }}</p>
-                    <div class="flex flex-wrap gap-1">
-                      <span
-                        v-for="image in tpl.docker_images"
-                        :key="image"
-                        class="rounded border border-[var(--lp-line)] bg-[var(--lp-panel)] px-2 py-0.5 font-mono text-[10px] text-[var(--lp-text)]"
-                      >
-                        {{ image }}
-                      </span>
-                    </div>
-                  </div>
-                  <div class="flex flex-wrap gap-1">
-                    <span
-                      v-for="tag in tpl.tags"
-                      :key="tag"
-                      class="rounded border border-[var(--lp-line)] px-2 py-0.5 font-mono text-[10px] text-[var(--lp-muted)]"
-                    >
-                      {{ tag }}
-                    </span>
-                  </div>
-                </div>
-                <NuxtLink
-                  :to="`/catalog/create?template=${tpl.id}`"
-                  class="mt-4 inline-flex lp-btn-ghost py-1.5 text-xs uppercase tracking-wide"
-                >
-                  {{ t('catalog.index.useTemplate') }}
-                </NuxtLink>
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <p class="font-semibold">{{ tpl.title }}</p>
+                <p class="mt-1 text-sm text-[var(--lp-muted)]">{{ tpl.description }}</p>
               </div>
+              <span class="material-symbols-outlined text-[var(--lp-accent)]">{{ tpl.icon }}</span>
+            </div>
+            <div class="mt-4 space-y-2">
+              <div>
+                <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('catalog.index.stacks') }}</p>
+                <p class="mt-1 font-mono text-xs text-[var(--lp-text)]">{{ tpl.frameworks.join(', ') }}</p>
+              </div>
+              <div v-if="tpl.docker_images?.length">
+                <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">{{ t('catalog.index.dockerImages') }}</p>
+                <p class="mt-1 font-mono text-xs text-[var(--lp-text)]">{{ tpl.docker_images.join(', ') }}</p>
+              </div>
+            </div>
+            <div class="mt-auto pt-4">
+              <NuxtLink
+                :to="`/catalog/create?template=${tpl.id}`"
+                class="lp-btn-ghost text-xs uppercase tracking-wide"
+              >
+                {{ t('catalog.index.useTemplate') }}
+              </NuxtLink>
             </div>
           </article>
         </div>
@@ -183,46 +164,41 @@ onMounted(async () => {
 
       <section v-else class="space-y-4" role="tabpanel">
         <h2 class="sr-only">{{ t('catalog.index.yours') }}</h2>
-        <p v-if="!services.length" class="text-sm text-[var(--lp-muted)]">
+        <p v-if="!starredWorkspaces.length" class="text-sm text-[var(--lp-muted)]">
           {{ t('catalog.index.empty') }}
         </p>
         <div v-else class="space-y-3">
           <div
-            v-for="svc in services"
-            :key="svc.id"
+            v-for="ws in starredWorkspaces"
+            :key="ws.id"
             class="flex items-stretch gap-2 rounded-xl border border-[var(--lp-line)] transition hover:border-[var(--lp-accent)]/40 hover:bg-[var(--lp-panel-2)]/40"
           >
             <NuxtLink
-              :to="`/catalog/${svc.id}`"
+              :to="`/workspaces/${ws.id}`"
               class="min-w-0 flex-1 p-4"
             >
               <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <p class="font-semibold">{{ svc.name }}</p>
+                  <p class="flex items-center gap-1.5 font-semibold">
+                    <span class="material-symbols-outlined text-base text-[var(--lp-accent)]" aria-hidden="true">star</span>
+                    {{ ws.name }}
+                  </p>
                   <p class="mt-1 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
-                    {{ svc.tier }} · owner {{ svc.owner }} · SLO {{ svc.slo_target }}%
+                    {{ workspaceStackLabel(ws) }} · {{ artifactModeLabel(ws.artifact_mode) }}
                   </p>
                 </div>
-                <span
-                  class="rounded border px-2 py-1 font-mono text-[10px] uppercase"
-                  :class="svc.scorecard.passed
-                    ? 'border-[var(--lp-ok)]/40 text-[var(--lp-ok)]'
-                    : 'border-amber-500/40 text-amber-400'"
-                >
-                  {{ t('catalog.index.score', { score: svc.compliance_score }) }}
-                </span>
               </div>
             </NuxtLink>
             <div class="flex items-center border-l border-[var(--lp-line)] px-2">
               <button
                 type="button"
-                class="lp-btn-danger px-3 py-1.5 text-[10px] uppercase tracking-wide"
-                :disabled="deletingId === svc.id"
-                :title="`${t('common.delete')} ${svc.name}`"
-                @click="requestDeleteService(svc, $event)"
+                class="lp-btn-ghost px-3 py-1.5 text-[10px] uppercase tracking-wide"
+                :disabled="unstarringId === ws.id"
+                :title="t('catalog.index.unstar', { name: ws.name })"
+                @click="requestUnstar(ws, $event)"
               >
-                <span class="material-symbols-outlined text-sm">delete</span>
-                {{ deletingId === svc.id ? '…' : t('common.delete') }}
+                <span class="material-symbols-outlined text-sm">star</span>
+                {{ unstarringId === ws.id ? '…' : t('catalog.index.unstarAction') }}
               </button>
             </div>
           </div>
@@ -231,16 +207,16 @@ onMounted(async () => {
     </template>
 
     <ConfirmDialog
-      :open="confirmDeleteService !== null"
+      :open="confirmUnstar !== null"
       :title="t('catalog.detail.deleteTitle')"
-      :message="confirmDeleteService
-        ? t('catalog.index.deleteConfirm', { name: confirmDeleteService.name })
+      :message="confirmUnstar
+        ? t('catalog.index.deleteConfirm', { name: confirmUnstar.name })
         : ''"
-      :confirm-label="t('common.confirmDelete')"
+      :confirm-label="t('catalog.index.unstarAction')"
       :cancel-label="t('common.cancel')"
-      :busy="deletingId !== null"
-      @update:open="(value) => { if (!value) confirmDeleteService = null }"
-      @confirm="confirmDeleteServiceRun"
+      :busy="unstarringId !== null"
+      @update:open="(value) => { if (!value) confirmUnstar = null }"
+      @confirm="confirmUnstarRun"
     />
   </div>
 </template>

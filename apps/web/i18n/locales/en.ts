@@ -201,7 +201,7 @@ export default {
       },
       "catalog": {
         "title": "Browse catalog",
-        "blurb": "Golden-path services with scorecards and onboarding."
+        "blurb": "Golden-path templates and workspaces you star in the catalog."
       },
       "credentials": {
         "title": "Cloud credentials",
@@ -325,8 +325,8 @@ export default {
       "blurb": "Spin up an ephemeral app environment from a template or repository."
     },
     "catalog": {
-      "title": "Service catalog",
-      "blurb": "Golden-path services and templates."
+      "title": "Catalog",
+      "blurb": "Golden-path templates and starred workspaces."
     },
     "workspaces": {
       "title": "Workspaces",
@@ -842,34 +842,37 @@ export default {
     "errors": {
       "load": "Failed to load workspace",
       "destroy": "Failed to destroy workspace",
-      "terminal": "Failed to open terminal"
+      "terminal": "Failed to open terminal",
+      "star": "Failed to update workspace star"
     }
   },
   "catalog": {
     "index": {
       "eyebrow": "Golden paths",
-      "title": "Service catalog",
-      "blurb": "Approved templates and your onboarded services.",
-      "create": "Create service",
+      "title": "Catalog",
+      "blurb": "Approved templates and workspaces you star in the catalog.",
+      "create": "Create workspace",
       "approved": "Approved Templates",
-      "yours": "Your services",
-      "useTemplate": "Use template",
-      "empty": "No services yet - create one from a golden-path template.",
+      "yours": "Starred workspaces",
+      "useTemplate": "Create workspace",
+      "empty": "No starred workspaces yet. Star a workspace from Workspaces, or create one from a golden-path template.",
+      "unstar": "Unstar {name}",
+      "unstarAction": "Unstar",
       "loading": "Loading catalog…",
       "tabsAria": "Catalog sections",
       "stacks": "Stacks",
       "dockerImages": "Docker images",
       "score": "Score {score}",
-      "deleteConfirm": "Delete \"{name}\" from Your services? This removes the catalog entry only. Linked workspace (if any) is kept unless you destroy it separately."
+      "deleteConfirm": "Remove \"{name}\" from Starred workspaces? This removes the catalog bookmark only. The linked workspace is kept unless you destroy it separately."
     },
     "create": {
-      "title": "Create service",
+      "title": "Create workspace",
       "template": "Golden path template",
-      "name": "Service name",
+      "name": "Workspace name",
       "owner": "Owner",
       "vcs": "Version Control Integration",
       "back": "← Catalog",
-      "blurb": "Scaffolds Dockerfile, Kubernetes manifests, CI security scans, and a workspace from an approved golden path template.",
+      "blurb": "Scaffolds a workspace (Dockerfile, Kubernetes manifests, CI security scans) from an approved golden path template and stars it in your catalog.",
       "description": "Description",
       "tier": "Tier",
       "sloTarget": "SLO target %",
@@ -892,22 +895,22 @@ export default {
       "scorecardGate": "Scorecard Hard Gate (Require 70/100 pass)",
       "scorecardGateBlurb": "Validates non-root Dockerfile, SAST/container security scanning in CI, and Kubernetes resource requests/limits.",
       "triggerPreview": "Deploy initial PR preview environment",
-      "triggerPreviewBlurb": "Immediately provisions an active preview deployment upon service creation.",
+      "triggerPreviewBlurb": "Immediately provisions an active preview deployment when the workspace is created.",
       "creating": "Creating…",
-      "gitlabConnectFirst": "Connect GitLab under Integrations before creating a GitLab-backed service.",
+      "gitlabConnectFirst": "Connect GitLab under Integrations before creating a GitLab-backed workspace.",
       "images": "Images",
       "loadTemplatesFailed": "Failed to load templates"
     },
     "detail": {
-      "edit": "Edit service metadata",
+      "edit": "Edit catalog metadata",
       "scorecard": "Scorecard",
       "save": "Save changes",
-      "deleteTitle": "Delete service?",
+      "deleteTitle": "Remove from catalog?",
       "back": "← Catalog",
       "noDescription": "No description",
       "openWorkspace": "Open workspace",
-      "updateService": "Update service",
-      "serviceUpdated": "Service updated",
+      "updateService": "Update catalog entry",
+      "serviceUpdated": "Catalog entry updated",
       "ownerLabel": "Owner",
       "tierSlo": "Tier / SLO",
       "templateLabel": "Template",
@@ -916,13 +919,13 @@ export default {
       "gatePassed": "passed",
       "gateNeedsWork": "needs work",
       "scoreOf": "Score {score}/100",
-      "deleteConfirm": "Delete \"{name}\" from Your services? This removes the catalog entry only. Linked workspace (if any) is kept unless you destroy it separately."
+      "deleteConfirm": "Remove \"{name}\" from Starred workspaces? This removes the catalog bookmark only. The linked workspace is kept unless you destroy it separately."
     },
     "errors": {
       "load": "Failed to load catalog",
-      "create": "Failed to create service",
-      "update": "Failed to update service",
-      "delete": "Failed to delete service"
+      "create": "Failed to create workspace",
+      "update": "Failed to update catalog entry",
+      "delete": "Failed to remove catalog bookmark"
     }
   },
   "org": {

@@ -21,9 +21,14 @@ export default defineNuxtConfig({
     },
   },
   fonts: {
+    defaults: {
+      weights: [400, 500, 600, 700],
+      styles: ["normal"],
+      subsets: ["latin"],
+    },
     families: [
-      { name: "Sora", provider: "google" },
-      { name: "IBM Plex Mono", provider: "google" },
+      { name: "Sora", provider: "google", weights: [400, 600, 700] },
+      { name: "IBM Plex Mono", provider: "google", weights: [400, 500] },
     ],
   },
   runtimeConfig: {
@@ -135,6 +140,13 @@ export default defineNuxtConfig({
             "(function(){try{var t=localStorage.getItem('lp_theme');if(t!=='light'&&t!=='dark')t='dark';var r=document.documentElement;r.dataset.theme=t;r.classList.toggle('dark',t==='dark');r.classList.toggle('light',t==='light');var m=document.querySelector('meta[name=\"theme-color\"]');if(m)m.setAttribute('content',t==='light'?'#ffffff':'#0c1219');}catch(e){}})();",
           tagPosition: "head",
         },
+        {
+          // Mark when Material Symbols is ready so icon ligature text stays hidden
+          // until the icon font can render (prevents oversized fallback words).
+          innerHTML:
+            "(function(){function ready(){document.documentElement.classList.add('fonts-icons-ready')}try{if(document.fonts&&document.fonts.load){document.fonts.load('24px \"Material Symbols Outlined\"').then(ready).catch(ready);document.fonts.ready.then(ready).catch(ready);setTimeout(ready,1500)}else{ready()}}catch(e){ready()}})();",
+          tagPosition: "head",
+        },
       ],
       link: [
         { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
@@ -143,8 +155,13 @@ export default defineNuxtConfig({
         { rel: "icon", type: "image/png", sizes: "16x16", href: "/favicon-16.png" },
         { rel: "apple-touch-icon", sizes: "180x180", href: "/apple-touch-icon.png" },
         {
+          rel: "preload",
+          as: "style",
+          href: "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=block",
+        },
+        {
           rel: "stylesheet",
-          href: "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=swap",
+          href: "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=block",
         },
       ],
     },

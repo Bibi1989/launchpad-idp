@@ -37,6 +37,7 @@ from app.schemas.cloud import (
     WorkspaceMkdirRequest,
     WorkspacePushRequest,
     WorkspaceRenameRequest,
+    WorkspaceStarRequest,
     WorkspaceTemplateApplyRequest,
     WorkspaceTemplateInfo,
     WorkspaceWizardConfig,
@@ -125,9 +126,24 @@ async def create_workspace(
 async def list_workspaces(
     user: CurrentUser,
     org: CurrentOrg,
+    starred: bool = Query(default=False),
     service: ProvisioningService = Depends(get_provisioning_service),
 ) -> list[WorkspaceListItem]:
-    return await service.list_workspaces(user, org_id=org.org_id)
+    return await service.list_workspaces(
+        user, org_id=org.org_id, starred_only=starred
+    )
+
+
+@router.put("/workspaces/{workspace_id}/star", response_model=WorkspaceListItem)
+async def set_workspace_starred(
+    workspace_id: UUID,
+    payload: WorkspaceStarRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> WorkspaceListItem:
+    return await service.set_workspace_starred(
+        workspace_id, user, starred=payload.starred
+    )
 
 
 @router.get("/workspaces/{workspace_id}", response_model=IaCBundleSummary)

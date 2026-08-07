@@ -201,7 +201,7 @@ export default {
       },
       "catalog": {
         "title": "Katalog durchsuchen",
-        "blurb": "Golden-Path-Services mit Scorecards und Onboarding."
+        "blurb": "Golden-Path-Vorlagen und Workspaces, die du im Katalog markierst."
       },
       "credentials": {
         "title": "Cloud-Zugangsdaten",
@@ -325,8 +325,8 @@ export default {
       "blurb": "Ephemere App-Umgebung aus Vorlage oder Repository starten."
     },
     "catalog": {
-      "title": "Service-Katalog",
-      "blurb": "Golden-Path-Services und Vorlagen."
+      "title": "Katalog",
+      "blurb": "Golden-Path-Vorlagen und markierte Workspaces."
     },
     "workspaces": {
       "title": "Workspaces",
@@ -842,34 +842,37 @@ export default {
     "errors": {
       "load": "Workspace konnte nicht geladen werden",
       "destroy": "Workspace konnte nicht zerstört werden",
-      "terminal": "Terminal konnte nicht geöffnet werden"
+      "terminal": "Terminal konnte nicht geöffnet werden",
+      "star": "Workspace-Markierung konnte nicht aktualisiert werden"
     }
   },
   "catalog": {
     "index": {
       "eyebrow": "Golden Paths",
-      "title": "Service-Katalog",
-      "blurb": "Freigegebene Vorlagen und deine Services.",
-      "create": "Service erstellen",
+      "title": "Katalog",
+      "blurb": "Freigegebene Vorlagen und Workspaces, die du im Katalog markierst.",
+      "create": "Workspace erstellen",
       "approved": "Freigegebene Vorlagen",
-      "yours": "Deine Services",
-      "useTemplate": "Vorlage nutzen",
-      "empty": "Noch keine Services - erstelle einen aus einer Golden-Path-Vorlage.",
+      "yours": "Markierte Workspaces",
+      "useTemplate": "Workspace erstellen",
+      "empty": "Noch keine markierten Workspaces. Markiere einen Workspace unter Workspaces oder erstelle einen aus einer Golden-Path-Vorlage.",
+      "unstar": "{name} demarkieren",
+      "unstarAction": "Demarkieren",
       "loading": "Katalog wird geladen…",
       "tabsAria": "Katalogbereiche",
       "stacks": "Stacks",
       "dockerImages": "Docker-Images",
       "score": "Score {score}",
-      "deleteConfirm": "\"{name}\" aus Deine Services löschen? Entfernt nur den Katalogeintrag. Verknüpfter Workspace (falls vorhanden) bleibt erhalten, sofern nicht separat zerstört."
+      "deleteConfirm": "\"{name}\" aus Markierte Workspaces entfernen? Entfernt nur den Katalog-Favoriten. Der verknüpfte Workspace bleibt erhalten, sofern nicht separat zerstört."
     },
     "create": {
-      "title": "Service erstellen",
+      "title": "Workspace erstellen",
       "template": "Golden-Path-Vorlage",
-      "name": "Service-Name",
+      "name": "Workspace-Name",
       "owner": "Owner",
       "vcs": "Versionskontrolle",
       "back": "← Katalog",
-      "blurb": "Erzeugt Dockerfile, Kubernetes-Manifeste, CI-Sicherheitsscans und einen Workspace aus einer freigegebenen Golden-Path-Vorlage.",
+      "blurb": "Erzeugt einen Workspace (Dockerfile, Kubernetes-Manifeste, CI-Sicherheitsscans) aus einer freigegebenen Golden-Path-Vorlage und markiert ihn in deinem Katalog.",
       "description": "Beschreibung",
       "tier": "Tier",
       "sloTarget": "SLO-Ziel %",
@@ -892,22 +895,22 @@ export default {
       "scorecardGate": "Scorecard Hard Gate (70/100 erforderlich)",
       "scorecardGateBlurb": "Prüft Non-Root-Dockerfile, SAST/Container-Security-Scanning in CI und Kubernetes-Ressourcen-Requests/Limits.",
       "triggerPreview": "Initiale PR-Preview-Umgebung deployen",
-      "triggerPreviewBlurb": "Stellt sofort nach Service-Erstellung eine aktive Preview-Bereitstellung bereit.",
+      "triggerPreviewBlurb": "Stellt sofort nach Workspace-Erstellung eine aktive Preview-Bereitstellung bereit.",
       "creating": "Erstellen…",
-      "gitlabConnectFirst": "GitLab unter Integrationen verbinden, bevor ein GitLab-Service erstellt wird.",
+      "gitlabConnectFirst": "GitLab unter Integrationen verbinden, bevor ein GitLab-Workspace erstellt wird.",
       "images": "Images",
       "loadTemplatesFailed": "Vorlagen konnten nicht geladen werden"
     },
     "detail": {
-      "edit": "Service-Metadaten bearbeiten",
+      "edit": "Katalog-Metadaten bearbeiten",
       "scorecard": "Scorecard",
       "save": "Änderungen speichern",
-      "deleteTitle": "Service löschen?",
+      "deleteTitle": "Aus Katalog entfernen?",
       "back": "← Katalog",
       "noDescription": "Keine Beschreibung",
       "openWorkspace": "Workspace öffnen",
-      "updateService": "Service aktualisieren",
-      "serviceUpdated": "Service aktualisiert",
+      "updateService": "Katalogeintrag aktualisieren",
+      "serviceUpdated": "Katalogeintrag aktualisiert",
       "ownerLabel": "Owner",
       "tierSlo": "Tier / SLO",
       "templateLabel": "Vorlage",
@@ -916,13 +919,13 @@ export default {
       "gatePassed": "bestanden",
       "gateNeedsWork": "Verbesserung nötig",
       "scoreOf": "Score {score}/100",
-      "deleteConfirm": "\"{name}\" aus Deine Services löschen? Entfernt nur den Katalogeintrag. Verknüpfter Workspace (falls vorhanden) bleibt erhalten, sofern nicht separat zerstört."
+      "deleteConfirm": "\"{name}\" aus Markierte Workspaces entfernen? Entfernt nur den Katalog-Favoriten. Der verknüpfte Workspace bleibt erhalten, sofern nicht separat zerstört."
     },
     "errors": {
       "load": "Katalog konnte nicht geladen werden",
-      "create": "Service konnte nicht erstellt werden",
-      "update": "Service konnte nicht aktualisiert werden",
-      "delete": "Service konnte nicht gelöscht werden"
+      "create": "Workspace konnte nicht erstellt werden",
+      "update": "Katalogeintrag konnte nicht aktualisiert werden",
+      "delete": "Katalog-Favorit konnte nicht entfernt werden"
     }
   },
   "org": {

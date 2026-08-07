@@ -48,7 +48,7 @@ const isPersonalGithubAccount = computed(() => {
 })
 
 const githubNewRepoUrl = computed(() => {
-  const name = form.name.trim() || 'your-service'
+  const name = form.name.trim() || 'your-workspace'
   return `https://github.com/new?name=${encodeURIComponent(name)}`
 })
 
@@ -254,7 +254,7 @@ async function onSubmit() {
               class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/60 px-3 py-2 text-xs leading-5 text-[var(--lp-muted)]"
             >
               <template #name>
-                <span class="font-mono text-[var(--lp-text)]">{{ form.name.trim() || 'your-service' }}</span>
+                <span class="font-mono text-[var(--lp-text)]">{{ form.name.trim() || 'your-workspace' }}</span>
               </template>
               <template #openGithub>
                 <a :href="githubNewRepoUrl" class="text-[var(--lp-accent)] hover:underline" target="_blank" rel="noreferrer">{{ t('catalog.create.openGithub') }}</a>

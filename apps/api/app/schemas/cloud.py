@@ -647,6 +647,7 @@ class IaCBundleSummary(BaseModel):
     name: str | None = None
     status: str | None = None
     created_at: datetime | None = None
+    starred: bool = False
 
 
 class WorkspaceWizardConfig(BaseModel):
@@ -697,6 +698,11 @@ class WorkspaceListItem(BaseModel):
     artifact_mode: WorkspaceArtifactsMode = WorkspaceArtifactsMode.IAC_ONLY
     created_at: datetime
     root_dir: str
+    starred: bool = False
+
+
+class WorkspaceStarRequest(BaseModel):
+    starred: bool
 
 
 class GitHubRepoRequest(BaseModel):

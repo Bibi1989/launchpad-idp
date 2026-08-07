@@ -179,6 +179,7 @@ export interface IaCBundleSummary {
   name?: string | null
   status?: string | null
   created_at?: string | null
+  starred?: boolean
 }
 
 export interface WorkspaceListItem {
@@ -190,6 +191,7 @@ export interface WorkspaceListItem {
   artifact_mode: WorkspaceArtifactsMode
   created_at: string
   root_dir: string
+  starred: boolean
 }
 
 export interface WorkspaceWizardConfig {
