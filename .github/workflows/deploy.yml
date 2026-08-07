@@ -70,6 +70,10 @@ jobs:
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_SLUG: ${{ secrets.GH_APP_SLUG }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          GITLAB_OAUTH_CLIENT_ID: ${{ secrets.GITLAB_OAUTH_CLIENT_ID }}
+          GITLAB_OAUTH_CLIENT_SECRET: ${{ secrets.GITLAB_OAUTH_CLIENT_SECRET }}
+          GITLAB_OAUTH_REDIRECT_URI: ${{ secrets.GITLAB_OAUTH_REDIRECT_URI }}
+          GITLAB_BASE_URL: ${{ secrets.GITLAB_BASE_URL }}
           PREVIEW_INGRESS_CLASS: ${{ secrets.PREVIEW_INGRESS_CLASS }}
           PREVIEW_INGRESS_HTTP_PORT: ${{ secrets.PREVIEW_INGRESS_HTTP_PORT }}
           PREVIEW_INGRESS_HTTPS_PORT: ${{ secrets.PREVIEW_INGRESS_HTTPS_PORT }}
@@ -82,7 +86,7 @@ jobs:
           key: ${{ secrets.OCI_SSH_KEY }}
           port: 22
           command_timeout: 45m
-          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,AUTH_DEV_LOGIN_ENABLED,USE_CLOUDFLARE_TUNNEL,PREVIEW_BASE_DOMAIN,PREVIEW_TUNNEL_MODE,CADDY_HTTP_PORT,CADDY_HTTPS_PORT,KUBERNETES_ENABLED,REPO_URL,OCI_HOST,GH_TOKEN,GITHUB_APP_ID,GITHUB_APP_PRIVATE_KEY,GITHUB_APP_SLUG,WEBHOOK_SECRET
+          envs: POSTGRES_PASSWORD,JWT_SECRET,SECRETS_ENCRYPTION_KEY,LAUNCHPAD_PUBLIC_ORIGIN,LAUNCHPAD_SITE_ADDRESS,AUTH_DEV_LOGIN_ENABLED,USE_CLOUDFLARE_TUNNEL,PREVIEW_BASE_DOMAIN,PREVIEW_TUNNEL_MODE,CADDY_HTTP_PORT,CADDY_HTTPS_PORT,KUBERNETES_ENABLED,REPO_URL,OCI_HOST,GH_TOKEN,GITHUB_APP_ID,GITHUB_APP_PRIVATE_KEY,GITHUB_APP_SLUG,WEBHOOK_SECRET,GITLAB_OAUTH_CLIENT_ID,GITLAB_OAUTH_CLIENT_SECRET,GITLAB_OAUTH_REDIRECT_URI,GITLAB_BASE_URL
           script: |
             set -euo pipefail
             APP_DIR="${HOME}/launchpad-idp"
@@ -209,6 +213,15 @@ jobs:
               GH_APP_KEY_V="$(env_get GITHUB_APP_PRIVATE_KEY "${EXISTING_ENV}")"
             fi
 
+            # GitLab OAuth for "GitLab Connect". Prefer Actions secrets; else keep
+            # values already on the server. Redirect URI defaults to public origin.
+            GL_CLIENT_ID_V="${GITLAB_OAUTH_CLIENT_ID:-$(env_get GITLAB_OAUTH_CLIENT_ID "${EXISTING_ENV}")}"
+            GL_CLIENT_SECRET_V="${GITLAB_OAUTH_CLIENT_SECRET:-$(env_get GITLAB_OAUTH_CLIENT_SECRET "${EXISTING_ENV}")}"
+            GL_BASE_URL_V="${GITLAB_BASE_URL:-$(env_get GITLAB_BASE_URL "${EXISTING_ENV}")}"
+            GL_BASE_URL_V="${GL_BASE_URL_V:-https://gitlab.com}"
+            GL_REDIRECT_V="${GITLAB_OAUTH_REDIRECT_URI:-$(env_get GITLAB_OAUTH_REDIRECT_URI "${EXISTING_ENV}")}"
+            GL_REDIRECT_V="${GL_REDIRECT_V:-${PUBLIC_ORIGIN}/integrations/gitlab}"
+
             # Preserve .env across reset (file is gitignored; still back it up).
             if [ -n "$EXISTING_ENV" ]; then
               cp -a "$EXISTING_ENV" /tmp/launchpad-oci.env.bak
@@ -272,6 +285,10 @@ jobs:
             GITHUB_APP_PRIVATE_KEY=${GH_APP_KEY_V}
             GITHUB_APP_SLUG=${GH_APP_SLUG_V}
             WEBHOOK_SECRET=${WEBHOOK_SECRET_V}
+            GITLAB_BASE_URL=${GL_BASE_URL_V}
+            GITLAB_OAUTH_CLIENT_ID=${GL_CLIENT_ID_V}
+            GITLAB_OAUTH_CLIENT_SECRET=${GL_CLIENT_SECRET_V}
+            GITLAB_OAUTH_REDIRECT_URI=${GL_REDIRECT_V}
             EOF
             sed -i 's/^[[:space:]]*//' deploy/oci/.env
 
@@ -339,6 +356,10 @@ jobs:
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_SLUG: ${{ secrets.GH_APP_SLUG }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          GITLAB_OAUTH_CLIENT_ID: ${{ secrets.GITLAB_OAUTH_CLIENT_ID }}
+          GITLAB_OAUTH_CLIENT_SECRET: ${{ secrets.GITLAB_OAUTH_CLIENT_SECRET }}
+          GITLAB_OAUTH_REDIRECT_URI: ${{ secrets.GITLAB_OAUTH_REDIRECT_URI }}
+          GITLAB_BASE_URL: ${{ secrets.GITLAB_BASE_URL }}
         run: |
           set -euo pipefail
           # actions/checkout wipes the workspace each run, so persist secrets OUTSIDE it.
@@ -376,6 +397,15 @@ jobs:
             GH_APP_KEY_V="$(env_get GITHUB_APP_PRIVATE_KEY "$STABLE_ENV")"
           fi
 
+          # GitLab OAuth for "GitLab Connect". Prefer Actions secrets; else reuse
+          # persisted values. Redirect defaults to the public production origin.
+          GL_CLIENT_ID_V="${GITLAB_OAUTH_CLIENT_ID:-$(env_get GITLAB_OAUTH_CLIENT_ID "$STABLE_ENV")}"
+          GL_CLIENT_SECRET_V="${GITLAB_OAUTH_CLIENT_SECRET:-$(env_get GITLAB_OAUTH_CLIENT_SECRET "$STABLE_ENV")}"
+          GL_BASE_URL_V="${GITLAB_BASE_URL:-$(env_get GITLAB_BASE_URL "$STABLE_ENV")}"
+          GL_BASE_URL_V="${GL_BASE_URL_V:-https://gitlab.com}"
+          GL_REDIRECT_V="${GITLAB_OAUTH_REDIRECT_URI:-$(env_get GITLAB_OAUTH_REDIRECT_URI "$STABLE_ENV")}"
+          GL_REDIRECT_V="${GL_REDIRECT_V:-https://launchpad-idp.online/integrations/gitlab}"
+
           umask 077
           cat > "$STABLE_ENV" <<EOF
           POSTGRES_USER=launchpad
@@ -408,6 +438,10 @@ jobs:
           GITHUB_APP_PRIVATE_KEY=${GH_APP_KEY_V}
           GITHUB_APP_SLUG=${GH_APP_SLUG_V}
           WEBHOOK_SECRET=${WEBHOOK_SECRET_V}
+          GITLAB_BASE_URL=${GL_BASE_URL_V}
+          GITLAB_OAUTH_CLIENT_ID=${GL_CLIENT_ID_V}
+          GITLAB_OAUTH_CLIENT_SECRET=${GL_CLIENT_SECRET_V}
+          GITLAB_OAUTH_REDIRECT_URI=${GL_REDIRECT_V}
           EOF
           sed -i.bak 's/^[[:space:]]*//' "$STABLE_ENV" && rm -f "$STABLE_ENV.bak"
           # Hand the stable env-file path to later steps.
