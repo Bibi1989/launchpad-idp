@@ -27,11 +27,13 @@ dump_diagnostics() {
   dc logs --tail=200 migrate || true
   echo "===== worker logs (tail 100) ====="
   dc logs --tail=100 worker || true
+  echo "===== beat logs (tail 50) ====="
+  dc logs --tail=50 beat || true
   echo "===== web logs (tail 80) ====="
   dc logs --tail=80 web || true
   echo "===== caddy logs (tail 40) ====="
   dc logs --tail=40 caddy || true
-  echo "===== postgres/redis (ps only; full postgres logs omit noise) ====="
+  echo "===== postgres/redis (ps only) ====="
   dc ps postgres redis || true
 }
 
@@ -41,17 +43,26 @@ fail() {
   exit 1
 }
 
+container_running() {
+  local svc="$1"
+  local cid
+  cid="$(dc ps -aq "$svc" 2>/dev/null | head -1 || true)"
+  [ -n "$cid" ] || return 1
+  [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null || echo false)" = "true" ]
+}
+
 wait_api_healthy() {
   local label="${1:-API}"
   for i in $(seq 1 "$API_WAIT_ITERS"); do
-    if dc exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)" 2>/dev/null; then
+    if container_running api \
+      && dc exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)" 2>/dev/null; then
       echo "${label} healthy"
       return 0
     fi
     echo "waiting for ${label} ($i/${API_WAIT_ITERS})..."
     if [ $((i % 6)) -eq 0 ]; then
       echo "===== api status mid-wait ====="
-      dc ps api || true
+      dc ps -a api || true
       dc logs --tail=40 api || true
     fi
     sleep 5
@@ -60,14 +71,22 @@ wait_api_healthy() {
 }
 
 wait_web_ready() {
+  # TCP accept on :3000 is enough. Do not require HTTP 200: Nuxt may redirect or
+  # SSR-error briefly while still being "up" for Caddy.
   for i in $(seq 1 "$WEB_WAIT_ITERS"); do
-    if dc exec -T web node -e "fetch('http://127.0.0.1:3000/').then((r)=>process.exit(r.ok||r.status===404?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
+    if container_running web \
+      && dc exec -T web node -e "
+const net = require('net');
+const s = net.connect(3000, '127.0.0.1', () => { s.end(); process.exit(0); });
+s.on('error', () => process.exit(1));
+setTimeout(() => process.exit(1), 2500);
+" 2>/dev/null; then
       echo "web ready"
       return 0
     fi
     echo "waiting for web ($i/${WEB_WAIT_ITERS})..."
     if [ $((i % 6)) -eq 0 ]; then
-      dc ps web || true
+      dc ps -a web || true
       dc logs --tail=30 web || true
     fi
     sleep 5
@@ -106,8 +125,7 @@ done
 
 dc up -d redis || fail "redis failed to start"
 
-# 3) Clear any stuck one-shot migrate container. A previous hung `alembic upgrade`
-#    holds Postgres' session-level advisory lock and blocks the next migrate forever.
+# 3) Clear any stuck one-shot migrate container.
 echo "===== clearing leftover migrate containers ====="
 dc stop migrate 2>/dev/null || true
 dc rm -f migrate 2>/dev/null || true
@@ -154,8 +172,7 @@ echo "===== migrate finished (exit=${migrate_rc}) ====="
 dc logs --tail=50 migrate || true
 [ "$migrate_rc" = "0" ] || fail "alembic upgrade head failed (exit ${migrate_rc})"
 
-# 5) Rolling cutover: recreate one service at a time so Caddy keeps routing to
-#    whatever is still up. --no-deps avoids yanking the whole dependency tree.
+# 5) Rolling cutover: recreate one service at a time.
 echo "===== rolling recreate: api ====="
 dc up -d --no-deps --force-recreate api || fail "api recreate failed"
 wait_api_healthy "api" || fail "API did not become healthy within $((API_WAIT_ITERS * 5))s after recreate"
@@ -164,20 +181,26 @@ echo "===== rolling recreate: web ====="
 dc up -d --no-deps --force-recreate web || fail "web recreate failed"
 wait_web_ready || fail "web did not become ready within $((WEB_WAIT_ITERS * 5))s after recreate"
 
-echo "===== rolling recreate: worker + beat ====="
-dc up -d --no-deps --force-recreate worker beat || fail "worker/beat recreate failed"
+echo "===== rolling recreate: worker ====="
+dc up -d --no-deps --force-recreate worker || fail "worker recreate failed"
+echo "===== rolling recreate: beat ====="
+dc up -d --no-deps --force-recreate beat || fail "beat recreate failed"
 
-# Caddy: pick up config/image changes without a hard bounce when unchanged.
-# Prefer recreate only when compose detects a diff; avoid --force-recreate so the
-# public edge stays up across most deploys.
+# Keep the public edge up: only recreate caddy when compose detects a config/image change.
 echo "===== ensure caddy ====="
 dc up -d --no-deps caddy || fail "caddy failed to start"
 
-# Start any missing services / drop orphans without bouncing the healthy stack.
-dc up -d --remove-orphans --no-recreate || fail "compose reconcile failed"
-dc ps
+# Drop orphans without forcing a second bounce of healthy api/web.
+echo "===== reconcile (no recreate) ====="
+if ! dc up -d --remove-orphans --no-recreate; then
+  echo "WARN: compose reconcile returned non-zero - checking whether api/web are still healthy"
+  dc ps -a || true
+fi
 
+dc ps -a
 wait_api_healthy "api (final)" || fail "API did not stay healthy after rolling cutover"
+wait_web_ready || fail "web did not stay ready after rolling cutover"
+
 echo "Rolling deploy complete - site served throughout build; brief gaps only during api/web recreate"
 dc ps
 exit 0
