@@ -1,7 +1,8 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
   compatibilityDate: "2025-07-15",
-  devtools: { enabled: true },
+  // Skip DevTools overhead in production Docker builds.
+  devtools: { enabled: process.env.NODE_ENV !== "production" },
   modules: ["@nuxtjs/tailwindcss", "@nuxt/fonts", "@nuxtjs/i18n"],
   css: ["~/assets/css/main.css"],
   i18n: {
@@ -34,6 +35,8 @@ export default defineNuxtConfig({
     },
   },
   nitro: {
+    minify: true,
+    sourceMap: false,
     devProxy: {
       "/api/v1": {
         target: "http://localhost:8000/api/v1",
@@ -43,6 +46,16 @@ export default defineNuxtConfig({
     },
   },
   vite: {
+    build: {
+      sourcemap: false,
+      cssMinify: true,
+      // Rolldown (Vite 8): silence PLUGIN_TIMINGS noise on large Monaco/Mermaid builds.
+      rolldownOptions: {
+        checks: {
+          pluginTimings: false,
+        },
+      },
+    },
     server: {
       allowedHosts: [".trycloudflare.com"],
       proxy: {

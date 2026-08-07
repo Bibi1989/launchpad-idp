@@ -1,21 +1,30 @@
 # Nuxt 4 production image (multi-arch: amd64 / arm64 for OCI Ampere A1)
+# Requires BuildKit (DOCKER_BUILDKIT=1) for npm/font cache mounts.
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm install
+ENV NODE_ENV=production \
+    NUXT_TELEMETRY_DISABLED=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+COPY package.json package-lock.json ./
+
+# Cache npm downloads across CI builds; skip lifecycle until sources are present.
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --ignore-scripts
 
 COPY . .
 
-# Same-origin defaults - Caddy proxies /api/v1 and WebSockets to the API.
 ARG NUXT_PUBLIC_API_BASE=/api/v1
 ARG NUXT_PUBLIC_WS_BASE=
-ENV NUXT_PUBLIC_API_BASE=${NUXT_PUBLIC_API_BASE}
-ENV NUXT_PUBLIC_WS_BASE=${NUXT_PUBLIC_WS_BASE}
-ENV NUXT_TELEMETRY_DISABLED=1
+ENV NUXT_PUBLIC_API_BASE=${NUXT_PUBLIC_API_BASE} \
+    NUXT_PUBLIC_WS_BASE=${NUXT_PUBLIC_WS_BASE}
 
-RUN npm run build
+# Reuse npm + Nuxt/font caches so rebuilds spend less time on install and Google fonts.
+RUN --mount=type=cache,target=/root/.npm \
+    --mount=type=cache,target=/app/node_modules/.cache \
+    npx nuxt prepare && npm run build
 
 FROM node:22-bookworm-slim AS runtime
 
