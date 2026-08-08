@@ -1,0 +1,112 @@
+{
+  "name": "dev-instance",
+  "iac_engine": "terraform",
+  "cloud": {
+    "provider": "local",
+    "resources": {
+      "cluster_name": "launchpad",
+      "context": "kind-launchpad"
+    }
+  },
+  "run_init": true,
+  "runtime_mode": "running_instance",
+  "running_instance": {
+    "kind": "local_machine",
+    "service_name": null,
+    "region": null,
+    "host": null,
+    "ssh_user": "ubuntu",
+    "ssh_port": 22,
+    "ssh_key_path": null,
+    "listen_port": 8080,
+    "preview_url_override": null,
+    "kube_context": null,
+    "endpoint_url": null
+  },
+  "artifact_mode": "iac_only",
+  "kubernetes_packaging": "none",
+  "kubernetes_options": {
+    "deployment": true,
+    "service": true,
+    "pod": false,
+    "job": false,
+    "cronjob": false,
+    "statefulset": false,
+    "daemonset": false,
+    "ingress": false,
+    "ingress_class": "nginx",
+    "install_ingress_nginx": false,
+    "config_map": false,
+    "secret": false,
+    "service_account": false,
+    "pvc": false,
+    "role": false,
+    "role_binding": false,
+    "hpa": false,
+    "vpa": false,
+    "pdb": false,
+    "network_policy": false,
+    "resource_quota": false,
+    "limit_range": false
+  },
+  "cost_optimization": {
+    "spot_scheduling": {
+      "enabled": false,
+      "placement": "stateless_nonprod",
+      "allocation_percent": 80,
+      "provisioner": "karpenter"
+    },
+    "hpa": {
+      "enabled": false,
+      "min_replicas": 2,
+      "max_replicas": 10,
+      "target_cpu_utilization": 70
+    },
+    "vpa": {
+      "enabled": false
+    },
+    "resources": {
+      "preset": "developer",
+      "cpu_request": "100m",
+      "cpu_limit": "250m",
+      "memory_request": "128Mi",
+      "memory_limit": "256Mi"
+    },
+    "idle_shutdown": {
+      "enabled": false,
+      "schedule": "weeknights_weekends"
+    }
+  },
+  "container_scaffold": {
+    "enabled": true,
+    "generate_dockerfile": true,
+    "generate_docker_compose": false,
+    "stack": "node",
+    "frameworks": [],
+    "app_name": "app",
+    "listen_port": 8080,
+    "services": []
+  },
+  "dependencies": {
+    "postgres": {
+      "enabled": false,
+      "placement": "in_cluster"
+    },
+    "mysql": {
+      "enabled": false,
+      "placement": "in_cluster"
+    },
+    "mariadb": {
+      "enabled": false,
+      "placement": "in_cluster"
+    },
+    "mongodb": {
+      "enabled": false,
+      "placement": "in_cluster"
+    },
+    "redis": {
+      "enabled": false,
+      "placement": "in_cluster"
+    }
+  }
+}

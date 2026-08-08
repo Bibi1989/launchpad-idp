@@ -30,7 +30,7 @@ const confirmDestroyOpen = ref(false)
 const wsPath = ref<string | null>(null)
 const runInit = ref(false)
 const advancedMode = useState('lp-workspace-advanced', () => false)
-const activeTabMode = useState<'iac' | 'k8s' | 'ide'>('lp-workspace-view-tab', () => 'k8s')
+const activeTabMode = useState<'iac' | 'k8s' | 'ide'>('lp-workspace-view-tab', () => 'iac')
 const detailsOpen = ref(false)
 const setupOpen = ref(false)
 const selectedInfraFile = ref<string | null>(null)
@@ -46,6 +46,17 @@ const sandboxWarm = ref(false)
 const sandboxWarming = ref(false)
 const formStatusMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
+
+const showsKubernetesSuite = computed(() => {
+  return (workspace.value?.runtime_mode ?? 'kubernetes') === 'kubernetes'
+})
+
+const primarySuiteLabel = computed(() => {
+  const mode = workspace.value?.runtime_mode
+  if (mode === 'docker_compose') return t('workspaces.detail.composeSuite')
+  if (mode === 'running_instance') return t('workspaces.detail.instanceSuite')
+  return t('workspaces.detail.kubernetesSuite')
+})
 
 const stackParts = computed(() =>
   workspace.value ? workspaceStackParts(workspace.value) : null,
@@ -89,6 +100,11 @@ async function load() {
   loadError.value = null
   try {
     workspace.value = await getWorkspace(workspaceId.value)
+    if (workspace.value?.runtime_mode && workspace.value.runtime_mode !== 'kubernetes') {
+      if (activeTabMode.value === 'k8s') activeTabMode.value = 'iac'
+    } else if (showsKubernetesSuite.value && activeTabMode.value === 'iac') {
+      // Keep user preference; only auto-switch away from k8s for non-k8s runtimes.
+    }
     auditsLoading.value = true
     try {
       audits.value = await listAudits(workspaceId.value)
@@ -502,13 +518,14 @@ watch(advancedMode, async (enabled) => {
       <!-- Workspace Suite View Tabs -->
       <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-3 font-mono text-xs">
         <button
+          v-if="showsKubernetesSuite"
           type="button"
           class="flex items-center gap-2 rounded-xl px-4 py-2 font-semibold transition-all"
           :class="activeTabMode === 'k8s' ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)] shadow-md' : 'bg-[var(--lp-panel)] text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
           @click="activeTabMode = 'k8s'; advancedMode = false"
         >
           <span class="material-symbols-outlined text-lg">deployed_code</span>
-          Kubernetes Suite
+          {{ primarySuiteLabel }}
         </button>
         <button
           type="button"
@@ -517,7 +534,7 @@ watch(advancedMode, async (enabled) => {
           @click="activeTabMode = 'iac'; advancedMode = false"
         >
           <span class="material-symbols-outlined text-lg">tune</span>
-          Manifest Configurator
+          {{ showsKubernetesSuite ? t('workspaces.detail.manifestConfigurator') : primarySuiteLabel }}
         </button>
         <button
           type="button"
@@ -531,7 +548,7 @@ watch(advancedMode, async (enabled) => {
       </div>
 
       <!-- Kubernetes Management & Visual Execution Suite -->
-      <ClientOnly v-if="activeTabMode === 'k8s' && !advancedMode">
+      <ClientOnly v-if="showsKubernetesSuite && activeTabMode === 'k8s' && !advancedMode">
         <KubernetesSuite :workspace-id="workspace.workspace_id" />
         <template #fallback>
           <div class="lp-glass flex min-h-[300px] items-center justify-center rounded-xl p-8 text-sm text-[var(--lp-muted)]">

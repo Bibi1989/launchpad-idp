@@ -32,6 +32,7 @@ from app.schemas.cloud import (
     ProvisioningWizardRequest,
     SecretBackend,
     WorkspaceArtifactsMode,
+    WorkspaceRuntimeMode,
 )
 from app.services.k8s_bundle import write_kubernetes_layout
 from app.services.terraform_bundle import write_terraform_bundle
@@ -656,7 +657,10 @@ class IaCGenerator:
         self._write_script(workspace_dir, build_rel, build_content)
         written.append(build_rel)
 
-        if isinstance(request.cloud, LocalCloudConfig):
+        if (
+            isinstance(request.cloud, LocalCloudConfig)
+            and request.runtime_mode == WorkspaceRuntimeMode.KUBERNETES
+        ):
             cluster = request.cloud.resources.cluster_name
             namespace = _namespace_name(request.name)
             for rel, content in scaffold.kind_scripts(  # type: ignore[attr-defined]
@@ -980,24 +984,27 @@ class IaCGenerator:
         workspace_dir: Path,
         request: ProvisioningWizardRequest,
     ) -> list[str]:
-        """Scaffold a kind-only workspace: K8s manifests/Helm + setup README (no cloud TF)."""
+        """Scaffold a local workspace (Kubernetes, Compose, or running instance)."""
         assert isinstance(request.cloud, LocalCloudConfig)
+
+        if request.runtime_mode != WorkspaceRuntimeMode.KUBERNETES:
+            return self._write_local_non_kubernetes(workspace_dir, request)
+
         resources = request.cloud.resources
         packaging = request.kubernetes_packaging
         if packaging == KubernetesPackaging.NONE:
             packaging = KubernetesPackaging.RAW_MANIFESTS
 
-        readme = f"""# {request.name} - Dev (kind)
+        readme = f"""# {request.name} - Local Kubernetes
 
 Local Kubernetes workspace for verifying Launchpad before switching to a cloud provider.
 
 ## Prerequisites
 
-Launchpad starts the kind cluster for you when you provision a Dev (kind) workspace
-(``scripts/kind-up.sh``). Destroying the last Dev workspace tears it down
-(``scripts/kind-down.sh``).
+Launchpad can start a local cluster when needed (kind/k3d). Destroying the last
+local Kubernetes workspace tears it down.
 
-You still need Docker, kind, and kubectl installed, plus:
+You still need Docker, a local cluster tool, and kubectl installed, plus:
 
 ```
 KUBERNETES_ENABLED=true
@@ -1026,7 +1033,7 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
         kind_note.write_text(
             f"Cluster: `{resources.cluster_name}`\n"
             f"kubectl context: `{resources.context}`\n"
-            "Created by Launchpad Advanced → Dev (kind).\n",
+            "Created by Launchpad Advanced → Local Kubernetes.\n",
             encoding="utf-8",
         )
 
@@ -1048,6 +1055,60 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
         ]
         if request.container_scaffold.enabled:
             files.extend(self._write_container_scaffold(workspace_dir, request))
+        return files
+
+    def _write_local_non_kubernetes(
+        self,
+        workspace_dir: Path,
+        request: ProvisioningWizardRequest,
+    ) -> list[str]:
+        """Local Compose or running-instance workspace: containers only, no K8s manifests."""
+        mode = request.runtime_mode
+        kind = request.running_instance.kind.value
+        if mode == WorkspaceRuntimeMode.DOCKER_COMPOSE:
+            title = "Local Docker Compose"
+            howto = (
+                "## Run locally\n\n"
+                "```bash\n"
+                "docker compose up --build\n"
+                "```\n\n"
+                "Preview uses published Compose ports (no local Kubernetes cluster).\n"
+            )
+        else:
+            title = f"Local running instance ({kind})"
+            howto = (
+                "## Run on compute target\n\n"
+                f"Runtime mode: `{mode.value}` / kind: `{kind}`.\n\n"
+                "Launchpad deploys a container image to the selected compute target "
+                "(local Docker, SSH VM, or managed container service). "
+                "No Kubernetes manifests are generated for this workspace.\n"
+            )
+
+        readme = f"""# {request.name} - {title}
+
+{howto}
+When you are ready for managed Kubernetes, reopen **Provision** and choose the
+Kubernetes runtime with a cloud provider (or local Kubernetes).
+"""
+        readme_path = workspace_dir / "README.md"
+        readme_path.write_text(readme, encoding="utf-8")
+        files = ["README.md"]
+
+        # Ensure container artifacts exist for Compose / instance deploy.
+        if not request.container_scaffold.enabled:
+            request = request.model_copy(
+                update={
+                    "container_scaffold": request.container_scaffold.model_copy(
+                        update={
+                            "enabled": True,
+                            "generate_dockerfile": True,
+                            "generate_docker_compose": mode
+                            == WorkspaceRuntimeMode.DOCKER_COMPOSE,
+                        }
+                    )
+                }
+            )
+        files.extend(self._write_container_scaffold(workspace_dir, request))
         return files
 
     @staticmethod

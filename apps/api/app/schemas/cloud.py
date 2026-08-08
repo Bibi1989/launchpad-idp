@@ -797,6 +797,7 @@ class IaCBundleSummary(BaseModel):
     root_dir: str
     files: list[str]
     artifact_mode: WorkspaceArtifactsMode | None = None
+    runtime_mode: WorkspaceRuntimeMode | None = None
     name: str | None = None
     status: str | None = None
     created_at: datetime | None = None

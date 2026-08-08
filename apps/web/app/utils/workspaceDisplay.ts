@@ -3,9 +3,13 @@ import type {
   IaCEngine,
   WorkspaceArtifactsMode,
   WorkspaceListItem,
+  WorkspaceRuntimeMode,
 } from '~/types/provisioning'
 
-type WorkspaceDisplaySource = Pick<IaCBundleSummary, 'engine' | 'provider' | 'artifact_mode' | 'files' | 'status'>
+type WorkspaceDisplaySource = Pick<
+  IaCBundleSummary,
+  'engine' | 'provider' | 'artifact_mode' | 'files' | 'status' | 'runtime_mode'
+>
   | Pick<WorkspaceListItem, 'engine' | 'provider' | 'artifact_mode' | 'status'>
 
 function hasIacFiles(files: string[] | undefined): boolean {
@@ -40,9 +44,17 @@ export function workspaceStackParts(source: WorkspaceDisplaySource): WorkspaceSt
   const engine = String(source.engine || '') as IaCEngine | string
   const provider = source.provider || 'local'
   const status = ('status' in source && source.status) ? String(source.status) : null
+  const runtime: WorkspaceRuntimeMode | undefined =
+    'runtime_mode' in source && source.runtime_mode
+      ? source.runtime_mode
+      : undefined
 
   let stack: string
-  if (mode === 'manifest_only' || (files && hasManifestFiles(files) && !hasIacFiles(files))) {
+  if (runtime === 'docker_compose') {
+    stack = 'compose'
+  } else if (runtime === 'running_instance') {
+    stack = 'instance'
+  } else if (mode === 'manifest_only' || (files && hasManifestFiles(files) && !hasIacFiles(files))) {
     stack = 'k8s'
   } else if (mode === 'both' || (files && hasIacFiles(files) && hasManifestFiles(files))) {
     stack = `${engine || 'iac'} + k8s`

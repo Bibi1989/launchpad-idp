@@ -591,12 +591,12 @@ export const provisioningWizardSchema = z.discriminatedUnion('provider', [
     return
   }
 
-  // kubernetes
+  // kubernetes (and other modes that did not early-return)
   if (value.provider === 'local') {
-    if (value.artifact_mode !== 'manifest_only') {
+    if (value.runtime_mode === 'kubernetes' && value.artifact_mode !== 'manifest_only') {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Local (Sandbox) supports manifest-only workspaces',
+        message: 'Local Kubernetes workspaces use manifest-only artifacts',
         path: ['artifact_mode'],
       })
     }

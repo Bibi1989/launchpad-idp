@@ -194,6 +194,7 @@ export interface IaCBundleSummary {
   root_dir: string
   files: string[]
   artifact_mode?: WorkspaceArtifactsMode | null
+  runtime_mode?: WorkspaceRuntimeMode | null
   name?: string | null
   status?: string | null
   created_at?: string | null

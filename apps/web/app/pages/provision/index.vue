@@ -65,6 +65,7 @@ const {
   updateWorkspace,
   openTerminal,
   createGithubRepo,
+  createGitlabRepo,
   getGithubAppStatus,
   getWizardConfig,
   getWorkspace,
@@ -212,11 +213,21 @@ const form = reactive({
     repo_mode: 'create' as 'create' | 'existing',
     existing_full_name: '',
   },
+  gitlab: {
+    name: '',
+    private: true,
+    repo_mode: 'create' as 'create' | 'existing',
+    existing_path: '',
+    include_ci: true,
+  },
 })
 
+const gitHost = ref<'github' | 'gitlab'>('github')
 const fieldError = ref<string | null>(null)
 const githubError = ref<string | null>(null)
 const githubStatus = ref<string | null>(null)
+const gitlabError = ref<string | null>(null)
+const gitlabStatusMsg = ref<string | null>(null)
 const submitting = ref(false)
 const creationStep = ref(1)
 const creationStepLabel = computed(() => {
@@ -475,10 +486,24 @@ const stepTitle = computed(() => {
     case 2:
       return t('provision.stepTitles.step2', { provider: form.provider.toUpperCase() })
     case 3:
-      return t('integrations.github')
+      return t('common.gitProvider')
     default:
       return isNewWorkspace.value ? t('provision.stepTitles.step3New') : t('provision.stepTitles.step3Existing')
   }
+})
+
+const runInitTitle = computed(() => {
+  if (!isLocalProvider.value) return t('provision.runInit.cloudTitle')
+  if (form.runtime_mode === 'docker_compose') return t('provision.runInit.composeTitle')
+  if (form.runtime_mode === 'running_instance') return t('provision.runInit.instanceTitle')
+  return t('provision.runInit.localTitle')
+})
+
+const runInitBlurb = computed(() => {
+  if (!isLocalProvider.value) return t('provision.runInit.cloudBlurb')
+  if (form.runtime_mode === 'docker_compose') return t('provision.runInit.composeBlurb')
+  if (form.runtime_mode === 'running_instance') return t('provision.runInit.instanceBlurb')
+  return t('provision.runInit.localBlurb')
 })
 
 const gcpResourceOptions = GCP_SERVICE_OPTIONS
@@ -975,8 +1000,11 @@ async function onGenerate() {
       selectedWorkspaceId.value = workspaceId
     }
 
-    if (shouldPushGithub()) {
+    if (gitHost.value === 'github' && shouldPushGithub()) {
       await pushGithubBootstrap(workspaceId)
+    }
+    if (gitHost.value === 'gitlab' && shouldPushGitlab()) {
+      await pushGitlabBootstrap(workspaceId)
     }
     hasStoredCredentials.value = true
     clearCredentials()
@@ -1008,11 +1036,41 @@ async function onGenerate() {
 }
 
 function shouldPushGithub(): boolean {
+  if (gitHost.value !== 'github') return false
   if (!form.github.installation_id) return false
   if (form.github.repo_mode === 'existing') {
     return Boolean(form.github.existing_full_name.trim())
   }
   return Boolean(form.github.name.trim())
+}
+
+function shouldPushGitlab(): boolean {
+  if (gitHost.value !== 'gitlab') return false
+  if (form.gitlab.repo_mode === 'existing') {
+    return Boolean(form.gitlab.existing_path.trim())
+  }
+  return Boolean(form.gitlab.name.trim())
+}
+
+async function pushGitlabBootstrap(workspaceId: string) {
+  gitlabError.value = null
+  gitlabStatusMsg.value = null
+  try {
+    const result = await createGitlabRepo({
+      name: form.gitlab.name.trim() || `launchpad-${form.name}`,
+      private: form.gitlab.private,
+      workspace_id: workspaceId,
+      existing_path:
+        form.gitlab.repo_mode === 'existing' ? form.gitlab.existing_path.trim() : null,
+      include_ci: form.gitlab.include_ci,
+    })
+    gitlabStatusMsg.value = result.created
+      ? t('provision.github.repoCreated')
+      : t('provision.github.infraPushed', { repo: result.path_with_namespace })
+  } catch (err) {
+    gitlabError.value = err instanceof Error ? err.message : t('integrations.gitlabStatusFailed')
+    fieldError.value = gitlabError.value
+  }
 }
 
 async function pushGithubBootstrap(workspaceId: string) {
@@ -1563,58 +1621,103 @@ async function onPrimaryAction() {
           </template>
         </div>
 
-        <!-- Step 3: GitHub -->
+        <!-- Step 3: Source control -->
         <div v-show="currentStep === 3" class="space-y-6">
-          <GithubConnectCard
-            v-model:model-installation-id="form.github.installation_id"
-            v-model:model-repo-name="form.github.name"
-            v-model:model-repo-mode="form.github.repo_mode"
-            v-model:model-repo-full-name="form.github.existing_full_name"
-            show-repo-picker
-            compact
-            @updated="onGithubAppUpdated"
-          />
+          <GitProviderPicker v-model="gitHost" />
 
-          <div class="flex flex-wrap gap-4">
-            <label class="flex items-center gap-2 text-sm">
-              <input v-model="form.github.private" type="checkbox" class="accent-[var(--lp-accent)]">
-              {{ t('provision.github.privateRepo') }}
-            </label>
-            <label class="flex items-center gap-2 text-sm">
-              <input
-                v-model="form.github.set_cloud_secrets"
-                type="checkbox"
-                class="accent-[var(--lp-accent)]"
-                :disabled="isLocalProvider"
+          <template v-if="gitHost === 'github'">
+            <GithubConnectCard
+              v-model:model-installation-id="form.github.installation_id"
+              v-model:model-repo-name="form.github.name"
+              v-model:model-repo-mode="form.github.repo_mode"
+              v-model:model-repo-full-name="form.github.existing_full_name"
+              show-repo-picker
+              compact
+              @updated="onGithubAppUpdated"
+            />
+
+            <div class="flex flex-wrap gap-4">
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="form.github.private" type="checkbox" class="accent-[var(--lp-accent)]">
+                {{ t('provision.github.privateRepo') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input
+                  v-model="form.github.set_cloud_secrets"
+                  type="checkbox"
+                  class="accent-[var(--lp-accent)]"
+                  :disabled="isLocalProvider"
+                >
+                {{ t('provision.github.setCloudSecrets') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="form.github.include_workflow" type="checkbox" class="accent-[var(--lp-accent)]">
+                {{ t('provision.github.addWorkflow') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="form.github.include_dockerfiles" type="checkbox" class="accent-[var(--lp-accent)]">
+                {{ t('provision.github.addDockerfiles') }}
+              </label>
+            </div>
+            <div class="flex items-start gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
+              <span class="material-symbols-outlined text-[var(--lp-ok)]">verified_user</span>
+              <p class="text-sm text-[var(--lp-muted)]">
+                {{ t('provision.github.repoBlurb') }}
+              </p>
+            </div>
+            <p v-if="githubError" class="text-sm text-[var(--lp-danger)]">{{ githubError }}</p>
+            <p v-else-if="githubStatus" class="text-sm text-[var(--lp-ok)]">{{ githubStatus }}</p>
+            <a
+              v-if="githubResult"
+              :href="githubResult.html_url"
+              target="_blank"
+              rel="noreferrer"
+              class="block font-mono text-xs text-[var(--lp-accent)] hover:underline"
+            >
+              {{ githubResult.full_name }}<template v-if="githubResult.workflow_path"> · {{ githubResult.workflow_path }}</template>
+            </a>
+          </template>
+
+          <template v-else>
+            <GitlabConnectCard />
+            <div class="flex flex-wrap gap-2">
+              <button
+                type="button"
+                class="rounded-lg border px-3 py-1.5 text-sm"
+                :class="form.gitlab.repo_mode === 'create' ? 'border-[var(--lp-accent)] text-[var(--lp-accent)]' : 'border-[var(--lp-line)] text-[var(--lp-muted)]'"
+                @click="form.gitlab.repo_mode = 'create'"
               >
-              {{ t('provision.github.setCloudSecrets') }}
-            </label>
-            <label class="flex items-center gap-2 text-sm">
-              <input v-model="form.github.include_workflow" type="checkbox" class="accent-[var(--lp-accent)]">
-              {{ t('provision.github.addWorkflow') }}
-            </label>
-            <label class="flex items-center gap-2 text-sm">
-              <input v-model="form.github.include_dockerfiles" type="checkbox" class="accent-[var(--lp-accent)]">
-              {{ t('provision.github.addDockerfiles') }}
-            </label>
-          </div>
-          <div class="flex items-start gap-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
-            <span class="material-symbols-outlined text-[var(--lp-ok)]">verified_user</span>
-            <p class="text-sm text-[var(--lp-muted)]">
-              {{ t('provision.github.repoBlurb') }}
-            </p>
-          </div>
-          <p v-if="githubError" class="text-sm text-[var(--lp-danger)]">{{ githubError }}</p>
-          <p v-else-if="githubStatus" class="text-sm text-[var(--lp-ok)]">{{ githubStatus }}</p>
-          <a
-            v-if="githubResult"
-            :href="githubResult.html_url"
-            target="_blank"
-            rel="noreferrer"
-            class="block font-mono text-xs text-[var(--lp-accent)] hover:underline"
-          >
-            {{ githubResult.full_name }}<template v-if="githubResult.workflow_path"> · {{ githubResult.workflow_path }}</template>
-          </a>
+                {{ t('integrations.createRepo') }}
+              </button>
+              <button
+                type="button"
+                class="rounded-lg border px-3 py-1.5 text-sm"
+                :class="form.gitlab.repo_mode === 'existing' ? 'border-[var(--lp-accent)] text-[var(--lp-accent)]' : 'border-[var(--lp-line)] text-[var(--lp-muted)]'"
+                @click="form.gitlab.repo_mode = 'existing'"
+              >
+                {{ t('workspaceIde.push.existingRepo') }}
+              </button>
+            </div>
+            <template v-if="form.gitlab.repo_mode === 'create'">
+              <label class="block space-y-2">
+                <span class="lp-label">{{ t('integrations.createRepo') }}</span>
+                <input v-model="form.gitlab.name" class="lp-input" placeholder="launchpad-app">
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="form.gitlab.private" type="checkbox" class="accent-[var(--lp-accent)]">
+                {{ t('provision.github.privateRepo') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="form.gitlab.include_ci" type="checkbox" class="accent-[var(--lp-accent)]">
+                {{ t('provision.github.addWorkflow') }}
+              </label>
+            </template>
+            <template v-else>
+              <GitlabRepoPicker v-model="form.gitlab.existing_path" />
+            </template>
+            <p v-if="gitlabError" class="text-sm text-[var(--lp-danger)]">{{ gitlabError }}</p>
+            <p v-else-if="gitlabStatusMsg" class="text-sm text-[var(--lp-ok)]">{{ gitlabStatusMsg }}</p>
+          </template>
         </div>
 
         <!-- Step 4: Generate -->
@@ -1712,15 +1815,10 @@ async function onPrimaryAction() {
             <input v-model="form.run_init" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
             <div>
               <p class="text-sm font-medium">
-                {{ isLocalProvider ? t('provision.runInit.localTitle') : t('provision.runInit.cloudTitle') }}
+                {{ runInitTitle }}
               </p>
               <p class="text-xs text-[var(--lp-muted)]">
-                <template v-if="isLocalProvider">
-                  {{ t('provision.runInit.localBlurb') }}
-                </template>
-                <template v-else>
-                  {{ t('provision.runInit.cloudBlurb') }}
-                </template>
+                {{ runInitBlurb }}
               </p>
             </div>
           </label>

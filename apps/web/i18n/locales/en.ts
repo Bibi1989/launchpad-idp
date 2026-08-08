@@ -553,7 +553,7 @@ export default {
     "mrNumber": "GitLab MR number (optional)",
     "prSyncBlurb": "Optional PR/MR number enables smoke-test sync for preview URLs.",
     "localTitle": "Local (Sandbox)",
-    "localBlurb": "Run on your machine with kind/k3d - no cloud credentials required.",
+    "localBlurb": "Run on your machine - no cloud credentials required.",
     "targets": {
       "gcp": "Google Cloud",
       "aws": "Amazon Web Services",
@@ -638,7 +638,7 @@ export default {
     "generate": "Generate workspace",
     "saveOpenTerminal": "Save & open terminal",
     "providers": {
-      "local": "Dev (k3s)",
+      "local": "Local",
       "gcp": "Google Cloud",
       "aws": "Amazon Web Services",
       "azure": "Microsoft Azure",
@@ -655,7 +655,7 @@ export default {
     },
     "sandbox": {
       "title": "Verify your local Sandbox setup",
-      "blurb": "Launchpad can start kind/k3d automatically when needed."
+      "blurb": "Run on your machine - no cloud credentials required. A local cluster is started only when you choose Kubernetes."
     },
     "runtimeMode": {
       "title": "Runtime",
@@ -663,7 +663,7 @@ export default {
       "modes": {
         "kubernetes": {
           "title": "Kubernetes",
-          "desc": "kind/k3d locally, or GKE/EKS/AKS in cloud"
+          "desc": "Local cluster or GKE/EKS/AKS in cloud"
         },
         "docker_compose": {
           "title": "Docker Compose",
@@ -761,7 +761,7 @@ export default {
     },
     "stepProgress": "STEP {current}/{total}",
     "workspaceSelectBlurb": "Create a new stack, or reopen an existing one with its previous settings filled in.",
-    "iacEngineLocalHint": "Dev (k3s) scaffolds Kubernetes manifests only - switch to a cloud provider for Terraform, OpenTofu, or Pulumi.",
+    "iacEngineLocalHint": "Local Kubernetes scaffolds manifests only - switch to a cloud provider for Terraform, OpenTofu, or Pulumi.",
     "editingExisting": "Editing",
     "editingExistingSuffix": "prior resource selections are loaded on the next step. Leave credentials blank to keep the ones already stored.",
     "credentialsStored": "Credentials are already stored for this workspace. Paste new values only if you want to replace them; otherwise leave the fields blank.",
@@ -883,8 +883,12 @@ export default {
     },
     "runInit": {
       "localTitle": "Run kubectl apply in sandbox on open",
+      "composeTitle": "Run docker compose up in sandbox on open",
+      "instanceTitle": "Deploy to compute target when sandbox opens",
       "cloudTitle": "Run IaC init in sandbox on open",
-      "localBlurb": "Applies Kubernetes manifests (and Helm chart if selected) against your kind context.",
+      "localBlurb": "Applies Kubernetes manifests (and Helm chart if selected) against your local cluster context.",
+      "composeBlurb": "Starts services from docker-compose.yml in the sandboxed terminal.",
+      "instanceBlurb": "Deploys the container image to the selected compute target (local Docker, VM, or managed container service).",
       "cloudBlurb": "Executes terraform/pulumi init inside the sandboxed terminal session."
     },
     "progress": {
@@ -907,7 +911,7 @@ export default {
       "workspaceNameMin": "Workspace name must be at least 3 characters (lowercase, hyphens).",
       "workspaceNameFormat": "Name must start with a letter and use only a-z, 0-9, hyphens.",
       "localClusterRequired": "Local cluster name and kubectl context are required.",
-      "enableK8sGeneration": "Enable Kubernetes generation for Dev (k3s) workspaces.",
+      "enableK8sGeneration": "Enable Kubernetes generation for local Kubernetes workspaces.",
       "runtimeKubeContext": "local_machine runs via Docker on this host (no kube context).",
       "runtimeEndpoint": "Preview URL override is optional; use it only when linking an existing URL.",
       "runtimeServerless": "Enable Cloud Run, App Runner, or Container Apps for serverless compute.",
@@ -944,7 +948,11 @@ export default {
       "loading": "Loading workspace…",
       "loadingSetup": "Loading setup form…",
       "loadingK8s": "Initializing Kubernetes Visual Suite…",
-      "loadingIde": "Loading workspace IDE…"
+      "loadingIde": "Loading workspace IDE…",
+      "kubernetesSuite": "Kubernetes Suite",
+      "composeSuite": "Compose Suite",
+      "instanceSuite": "Instance Suite",
+      "manifestConfigurator": "Manifest Configurator"
     },
     "errors": {
       "load": "Failed to load workspace",
@@ -1490,7 +1498,7 @@ export default {
         "label": "Provision",
         "title": "Create Provision",
         "blurb": "Scaffold Terraform or Pulumi files under infra/.",
-        "localHint": "Dev (k3s) workspaces use Kubernetes manifests only."
+        "localHint": "Local Kubernetes workspaces use manifests only."
       },
       "kubernetes": {
         "label": "Kubernetes",

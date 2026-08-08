@@ -127,6 +127,7 @@ class ProvisioningService:
             root_dir=bundle.root_dir,
             files=bundle.files,
             artifact_mode=request.artifact_mode,
+            runtime_mode=request.runtime_mode,
             name=request.name,
             status="ready",
             created_at=datetime.now().astimezone(),
@@ -286,6 +287,7 @@ class ProvisioningService:
             root_dir=row.root_dir,
             files=files,
             artifact_mode=self.get_workspace_artifact_mode(row),
+            runtime_mode=self.get_workspace_runtime_mode(row),
             name=row.name,
             status=row.status,
             created_at=row.created_at,
@@ -591,6 +593,7 @@ class ProvisioningService:
             root_dir=row.root_dir,
             files=files,
             artifact_mode=effective.artifact_mode,
+            runtime_mode=effective.runtime_mode,
             name=row.name,
             status=row.status,
             created_at=row.created_at,
@@ -1102,7 +1105,8 @@ class ProvisioningService:
                     for p in root.rglob("*")
                     if p.is_file()
                 )[:200],
-                artifact_mode=WorkspaceArtifactsMode.MANIFEST_ONLY,
+                artifact_mode=self.get_workspace_artifact_mode(row),
+                runtime_mode=self.get_workspace_runtime_mode(row),
                 name=row.name,
                 status=row.status,
                 created_at=row.created_at,
@@ -1167,19 +1171,36 @@ class ProvisioningService:
             root_dir=row.root_dir,
             files=files,
             artifact_mode=request.artifact_mode,
+            runtime_mode=request.runtime_mode,
             name=row.name,
             status=row.status,
             created_at=row.created_at,
             starred=row.starred_at is not None,
         )
 
+    def get_workspace_runtime_mode(
+        self,
+        workspace: ProvisioningWorkspace,
+    ) -> WorkspaceRuntimeMode:
+        snapshot = self._load_wizard_snapshot(workspace)
+        if snapshot and snapshot.get("runtime_mode"):
+            try:
+                return WorkspaceRuntimeMode(str(snapshot["runtime_mode"]))
+            except ValueError:
+                logger.warning(
+                    "workspace_runtime_mode_invalid",
+                    workspace_id=str(workspace.id),
+                    runtime_mode=snapshot.get("runtime_mode"),
+                )
+        return WorkspaceRuntimeMode.KUBERNETES
+
     def get_workspace_kubernetes_packaging(
         self,
         workspace: ProvisioningWorkspace,
     ) -> KubernetesPackaging | None:
         snapshot = self._load_wizard_snapshot(workspace)
-        if snapshot and snapshot.get("kubernetes_packaging"):
-            raw = str(snapshot["kubernetes_packaging"])
+        if snapshot is not None and "kubernetes_packaging" in snapshot:
+            raw = str(snapshot.get("kubernetes_packaging") or "none")
             try:
                 packaging = KubernetesPackaging(raw)
             except ValueError:
@@ -1188,10 +1209,13 @@ class ProvisioningService:
                     workspace_id=str(workspace.id),
                     packaging=raw,
                 )
-                packaging = None
             else:
-                if packaging != KubernetesPackaging.NONE:
-                    return packaging
+                if packaging == KubernetesPackaging.NONE:
+                    return None
+                return packaging
+
+        if self.get_workspace_runtime_mode(workspace) != WorkspaceRuntimeMode.KUBERNETES:
+            return None
 
         root = self._workspace_root(workspace)
         if not root.is_dir():
@@ -1224,6 +1248,9 @@ class ProvisioningService:
                     workspace_id=str(workspace.id),
                     artifact_mode=snapshot.get("artifact_mode"),
                 )
+
+        if self.get_workspace_runtime_mode(workspace) != WorkspaceRuntimeMode.KUBERNETES:
+            return WorkspaceArtifactsMode.IAC_ONLY
 
         root = self._workspace_root(workspace)
         if not root.is_dir():
