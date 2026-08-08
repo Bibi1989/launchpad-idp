@@ -189,7 +189,7 @@ def test_attach_serverless_simulates_without_gcloud() -> None:
 
 def test_attach_local_machine_simulates_without_docker() -> None:
     settings = Settings.model_construct(
-        default_workload_image="nginx:latest",
+        default_workload_image="",
         preview_node_host="127.0.0.1",
     )
     with patch("app.services.attach_deploy._docker_available", return_value=False):
@@ -209,6 +209,46 @@ def test_attach_local_machine_simulates_without_docker() -> None:
     assert resources.simulated is True
     assert resources.node_port == 9090
     assert resources.preview_url == "http://127.0.0.1:9090"
+
+
+def test_resolve_instance_image_from_workspace_dockerfile(tmp_path: Path) -> None:
+    app = tmp_path / "apps" / "app"
+    app.mkdir(parents=True)
+    (app / "Dockerfile").write_text("FROM nginx:alpine\n", encoding="utf-8")
+    settings = Settings.model_construct(default_workload_image="")
+    with patch("app.services.attach_deploy._docker_available", return_value=False):
+        from app.services.attach_deploy import resolve_instance_image
+
+        image = resolve_instance_image(
+            image=None,
+            workspace_root=tmp_path,
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            settings=settings,
+        )
+    assert image.startswith("lp-ws-")
+
+
+def test_resolve_instance_image_skips_default_when_workspace_dockerfile(tmp_path: Path) -> None:
+    app = tmp_path / "apps" / "app"
+    app.mkdir(parents=True)
+    (app / "Dockerfile").write_text("FROM busybox\n", encoding="utf-8")
+    settings = Settings.model_construct(default_workload_image="nginx:1.27-alpine")
+    with (
+        patch("app.services.attach_deploy._docker_available", return_value=True),
+        patch("app.services.attach_deploy._run") as run,
+    ):
+        run.return_value = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        from app.services.attach_deploy import resolve_instance_image
+
+        image = resolve_instance_image(
+            image="nginx:1.27-alpine",
+            workspace_root=tmp_path,
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            settings=settings,
+        )
+    assert image.startswith("lp-ws-")
+    assert run.call_args.args[0][0:2] == ["docker", "build"]
+
 
 
 def test_teardown_attach_local() -> None:

@@ -575,6 +575,9 @@ export default {
     "workspace": {
       "launchingFrom": "Launching from workspace",
       "launchingFromDetail": "if the workspace has raw manifests, Launchpad applies them into a preview namespace (manifest deploy). Otherwise it uses the built-in preview profile.",
+      "launchingFromInstance": "deploy mode is running instance - Launchpad deploys the workspace container to the selected compute target (no Kubernetes apply).",
+      "launchingFromCompose": "deploy mode is Docker Compose - Launchpad runs docker compose from the workspace.",
+      "launchingFromManifest": "Launchpad applies workspace Kubernetes manifests into a preview namespace.",
       "linkBlurb": "Link a workspace to deploy its Kubernetes manifests, or enter a git repo URL below.",
       "launchingFromSkipGit": "skip git on the next step.",
       "storedCredentials": "when available - skip credential fields below.",
@@ -593,6 +596,7 @@ export default {
     "confirmBlurb": "You'll get status logs, TTL, and an Open app link when the workload is Running.",
     "containerImage": "Container image",
     "containerImageRequired": "Required unless you launch from a workspace or repo build.",
+    "containerImageFromWorkspace": "Image is taken from the workspace (Dockerfile, Compose, or manifests). No manual image needed.",
     "afterLaunchRebuild": "After launch: push to {branch} rebuilds the preview when a GitHub webhook is configured.",
     "yourBranch": "your branch",
     "ephemeralDatastores": "Ephemeral Datastores (opt-in)",
@@ -608,6 +612,9 @@ export default {
       "noImage": "No image (set container image or use a workspace/repo)",
       "builtFrom": "Built from {dockerfile}",
       "fromManifests": "From workspace manifests",
+      "fromWorkspace": "From workspace",
+      "fromWorkspaceInstance": "From workspace (running instance)",
+      "fromWorkspaceCompose": "From workspace (Docker Compose)",
       "required": "Required"
     },
     "errors": {

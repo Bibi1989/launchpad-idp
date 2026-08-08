@@ -25,6 +25,11 @@ from app.repositories.environment import DeploymentLogRepository, EnvironmentRep
 from app.repositories.user import UserRepository
 from app.schemas.k8s import DeployMode
 from app.services.audit import AuditService
+from app.services.deploy_mode_routing import (
+    NON_K8S_DEPLOY_MODES,
+    init_workflow_message,
+    normalize_deploy_mode,
+)
 from app.services.drift_scanner import DRIFT_SCANNER_ACTOR, record_drift_if_changed, scan_environment
 from app.services.kubernetes import (
     KubernetesProvisioner,
@@ -47,6 +52,56 @@ from app.workers.celery_app import celery_app
 
 configure_logging()
 logger = get_logger(__name__)
+
+
+async def _effective_deploy_mode(
+    session: AsyncSession,
+    environment: Environment,
+) -> str:
+    """Resolve deploy mode, correcting stale ``preview`` when workspace runtime is non-K8s."""
+    mode = normalize_deploy_mode(getattr(environment, "deploy_mode", None))
+    if mode in NON_K8S_DEPLOY_MODES or mode == DeployMode.MANIFEST.value:
+        return mode
+
+    workspace_id = environment.workspace_id
+    if workspace_id is None:
+        return mode
+
+    from app.schemas.cloud import WorkspaceWizardConfig
+    from app.services.preview_deploy_plan import resolve_preview_deploy_plan
+    from app.services.provisioning import ProvisioningService
+
+    row = await session.get(ProvisioningWorkspace, workspace_id)
+    if row is None:
+        return mode
+    snapshot = ProvisioningService(session)._load_wizard_snapshot(row)
+    if not snapshot:
+        return mode
+    try:
+        config = WorkspaceWizardConfig.model_validate({**snapshot, "has_credentials": False})
+    except Exception:
+        logger.warning(
+            "effective_deploy_mode_snapshot_invalid",
+            workspace_id=str(workspace_id),
+            environment_id=str(environment.id),
+        )
+        return mode
+
+    plan = resolve_preview_deploy_plan(config, requested_deploy_mode=None)
+    if plan.deploy_mode.value not in NON_K8S_DEPLOY_MODES:
+        return mode
+
+    corrected = plan.deploy_mode.value
+    environment.deploy_mode = corrected
+    logger.info(
+        "deploy_mode_corrected_from_workspace",
+        environment_id=str(environment.id),
+        workspace_id=str(workspace_id),
+        from_mode=mode,
+        to_mode=corrected,
+        reason=plan.reason,
+    )
+    return corrected
 
 
 def _session_factory() -> async_sessionmaker[AsyncSession]:
@@ -453,28 +508,21 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                 workspace_id = environment.workspace_id
                 commit_sha = environment.latest_commit_sha
                 current_stage = ExecutionStage.INIT
+                deploy_mode = await _effective_deploy_mode(session, environment)
+                await session.commit()
 
                 await _emit_stage(
                     log_repo,
                     session,
                     environment_id=env_uuid,
                     stage=ExecutionStage.INIT,
-                    message=(
-                        "INIT - starting Compose preview workflow"
-                        if getattr(environment, "deploy_mode", "") == DeployMode.COMPOSE.value
-                        else "INIT - starting attach preview workflow"
-                        if getattr(environment, "deploy_mode", "") == DeployMode.ATTACH.value
-                        else "INIT - starting Kubernetes provision workflow"
-                    ),
+                    message=init_workflow_message(deploy_mode),
                     commit_sha=commit_sha,
                 )
 
                 try:
                     current_stage = ExecutionStage.VALIDATE
-                    deploy_mode_early = getattr(
-                        environment, "deploy_mode", DeployMode.PREVIEW.value
-                    )
-                    if deploy_mode_early == DeployMode.COMPOSE.value:
+                    if deploy_mode == DeployMode.COMPOSE.value:
                         from app.services.compose_deploy import docker_compose_available
 
                         if docker_compose_available():
@@ -484,9 +532,10 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 "VALIDATE - docker compose unavailable; "
                                 "Compose deploy will simulate preview URL"
                             )
-                    elif deploy_mode_early == DeployMode.ATTACH.value:
+                    elif deploy_mode == DeployMode.ATTACH.value:
                         mode_msg = (
-                            "VALIDATE - attach mode (existing kube context / endpoint / serverless)"
+                            "VALIDATE - running instance "
+                            "(local Docker / VM SSH / serverless; no Kubernetes apply)"
                         )
                     elif settings.kubernetes_enabled:
                         provider = getattr(environment, "provider", None)
@@ -536,16 +585,33 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     await asyncio.sleep(settings.provision_step_delay_seconds)
 
                     current_stage = ExecutionStage.PLAN
-                    deploy_mode_for_plan = getattr(environment, "deploy_mode", DeployMode.PREVIEW.value)
-                    plan_image_note = (
-                        environment.workload_image or settings.default_workload_image
-                        if deploy_mode_for_plan != DeployMode.MANIFEST.value
-                        else "from workspace manifests"
-                    )
-                    plan_msg = (
-                        f"PLAN - namespace {environment.namespace_name}, "
-                        f"image {plan_image_note}"
-                    )
+                    if deploy_mode == DeployMode.MANIFEST.value:
+                        plan_image_note = "from workspace manifests"
+                    elif deploy_mode in NON_K8S_DEPLOY_MODES:
+                        plan_image_note = (
+                            environment.workload_image
+                            or settings.default_workload_image
+                            or "from workspace"
+                        )
+                    else:
+                        plan_image_note = (
+                            environment.workload_image or settings.default_workload_image
+                        )
+                    if deploy_mode == DeployMode.ATTACH.value:
+                        plan_msg = (
+                            f"PLAN - running-instance deploy "
+                            f"(mode={deploy_mode}), image {plan_image_note}"
+                        )
+                    elif deploy_mode == DeployMode.COMPOSE.value:
+                        plan_msg = (
+                            f"PLAN - docker compose deploy "
+                            f"(mode={deploy_mode}), image {plan_image_note}"
+                        )
+                    else:
+                        plan_msg = (
+                            f"PLAN - namespace {environment.namespace_name}, "
+                            f"image {plan_image_note}"
+                        )
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
@@ -566,15 +632,18 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     )
                     await session.commit()
 
-                    deploy_mode = getattr(environment, "deploy_mode", DeployMode.PREVIEW.value)
                     deploy_image = environment.workload_image or settings.default_workload_image
-                    built_image, built_sha = await _maybe_build_preview_image(
-                        log_repo,
-                        settings=settings,
-                        environment=environment,
-                        env_uuid=env_uuid,
-                        commit_sha=commit_sha,
-                    )
+                    # Attach/compose resolve images from the workspace; skip git preview builds.
+                    if deploy_mode not in NON_K8S_DEPLOY_MODES:
+                        built_image, built_sha = await _maybe_build_preview_image(
+                            log_repo,
+                            settings=settings,
+                            environment=environment,
+                            env_uuid=env_uuid,
+                            commit_sha=commit_sha,
+                        )
+                    else:
+                        built_image, built_sha = None, None
                     if built_image:
                         deploy_image = built_image
                         commit_sha = built_sha or commit_sha
@@ -1171,7 +1240,8 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         short_sha = built_sha or short_sha
 
                     current_stage = ExecutionStage.APPLY
-                    deploy_mode = getattr(environment, "deploy_mode", DeployMode.PREVIEW.value)
+                    deploy_mode = await _effective_deploy_mode(session, environment)
+                    await session.commit()
                     workspace_root: Path | None = None
                     if workspace_id is not None:
                         workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
@@ -1464,7 +1534,8 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     # Best-effort cluster / compose cleanup: honor the destroy request even if
                     # the runtime is unreachable. A cleanup failure must NOT leave the
                     # environment stuck - we still mark it DESTROYED below.
-                    deploy_mode = getattr(environment, "deploy_mode", DeployMode.PREVIEW.value)
+                    deploy_mode = await _effective_deploy_mode(session, environment)
+                    await session.commit()
                     try:
                         if deploy_mode == DeployMode.COMPOSE.value:
                             from app.services.compose_deploy import teardown_compose

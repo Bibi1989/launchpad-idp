@@ -66,14 +66,87 @@ def _run(
     return completed
 
 
-def _resolve_image(image: str | None, settings: Settings) -> str:
-    workload = (image or settings.default_workload_image or "").strip()
-    if not workload:
-        raise AttachDeployError(
-            "workload image is required for instance deploy "
-            "(set workload_image or DEFAULT_WORKLOAD_IMAGE)"
+def _find_workspace_dockerfile(workspace_root: Path) -> tuple[Path, Path] | None:
+    """Return (dockerfile_path, build_context) for a scaffolded workspace app."""
+    candidates = [
+        workspace_root / "apps" / "app" / "Dockerfile",
+        workspace_root / "Dockerfile",
+        workspace_root / "app" / "Dockerfile",
+    ]
+    for df in candidates:
+        if df.is_file():
+            return df, df.parent
+    # First Dockerfile under apps/*
+    apps = workspace_root / "apps"
+    if apps.is_dir():
+        for child in sorted(apps.iterdir()):
+            df = child / "Dockerfile"
+            if df.is_file():
+                return df, child
+    return None
+
+
+def _try_build_workspace_image(
+    workspace_root: Path,
+    environment_id: str,
+) -> str | None:
+    found = _find_workspace_dockerfile(workspace_root)
+    if found is None:
+        return None
+    dockerfile, context = found
+    tag = f"lp-ws-{environment_id.replace('-', '')[:12]}:local"
+    if not _docker_available():
+        logger.info(
+            "instance_workspace_image_docker_unavailable",
+            tag=tag,
+            dockerfile=str(dockerfile),
         )
-    return workload
+        return tag
+    try:
+        _run(
+            [
+                "docker",
+                "build",
+                "-t",
+                tag,
+                "-f",
+                str(dockerfile),
+                str(context),
+            ],
+            timeout=600,
+        )
+        return tag
+    except AttachDeployError:
+        logger.exception("instance_workspace_image_build_failed", dockerfile=str(dockerfile))
+        return None
+
+
+def resolve_instance_image(
+    *,
+    image: str | None,
+    workspace_root: Path | None,
+    environment_id: str,
+    settings: Settings,
+) -> str:
+    """Resolve a container image for instance deploy.
+
+    Prefer an explicit non-default image, then a workspace Dockerfile build, then
+    DEFAULT_WORKLOAD_IMAGE, then a synthetic local tag (simulate path).
+    """
+    explicit = (image or "").strip()
+    default = (settings.default_workload_image or "").strip()
+    custom = explicit if explicit and explicit != default else ""
+    if custom:
+        return custom
+    if workspace_root is not None:
+        built = _try_build_workspace_image(workspace_root, environment_id)
+        if built:
+            return built
+    if explicit:
+        return explicit
+    if default:
+        return default
+    return f"lp-ws-{environment_id.replace('-', '')[:12]}:local"
 
 
 def _apply_override(
@@ -109,6 +182,23 @@ def _deploy_local_machine(
 
     if not _docker_available():
         logger.warning("instance_local_docker_unavailable_simulate", environment_id=environment_id)
+        resources.simulated = True
+        resources.created_workload = True
+        resources.node_port = port
+        resources.preview_url = _url_for_port(settings, port)
+        return _apply_override(resources, running_instance)
+
+    inspect = _run(
+        ["docker", "image", "inspect", image],
+        timeout=30,
+        check=False,
+    )
+    if inspect.returncode != 0:
+        logger.warning(
+            "instance_local_image_missing_simulate",
+            environment_id=environment_id,
+            image=image,
+        )
         resources.simulated = True
         resources.created_workload = True
         resources.node_port = port
@@ -318,7 +408,12 @@ def deploy_attach(
     """Deploy (or link) a preview onto serverless / VM / local-machine compute."""
     _ = (namespace, git_branch, git_repo_url, ttl_expires_at, owner_label, enable_postgres, enable_redis, workspace_root, packaging)
     cfg = settings or get_settings()
-    workload = _resolve_image(image, cfg)
+    workload = resolve_instance_image(
+        image=image,
+        workspace_root=workspace_root,
+        environment_id=environment_id,
+        settings=cfg,
+    )
     kind = running_instance.kind
 
     if kind == RunningInstanceKind.LOCAL_MACHINE:

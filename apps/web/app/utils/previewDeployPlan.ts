@@ -75,6 +75,41 @@ export function resolvePreviewDeployPlan(
     }
   }
 
+  if (requestedDeployMode === 'compose') {
+    return {
+      deploy_mode: 'compose',
+      runtime_mode: runtime,
+      enable_postgres: enablePostgres,
+      enable_redis: enableRedis,
+      skip_local_cluster: true,
+      reason: 'Client requested compose deploy',
+      manifest_packaging: null,
+      attach_kind: null,
+      attach_host: null,
+      attach_service: null,
+    }
+  }
+
+  if (requestedDeployMode === 'attach') {
+    const instance = config.running_instance ?? {
+      kind: 'local_machine' as const,
+      host: null,
+      service_name: null,
+    }
+    return {
+      deploy_mode: 'attach',
+      runtime_mode: runtime,
+      enable_postgres: enablePostgres,
+      enable_redis: enableRedis,
+      skip_local_cluster: true,
+      reason: 'Client requested running-instance deploy',
+      manifest_packaging: null,
+      attach_kind: instance.kind,
+      attach_host: instance.host ?? null,
+      attach_service: instance.service_name ?? null,
+    }
+  }
+
   if (requestedDeployMode === 'manifest') {
     return {
       deploy_mode: 'manifest',

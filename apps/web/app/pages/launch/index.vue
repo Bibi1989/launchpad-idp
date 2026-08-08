@@ -15,6 +15,10 @@ import {
   resolvePreviewDeployPlan,
   type PreviewDeployPlan,
 } from '~/utils/previewDeployPlan'
+import {
+  launchRequiresWorkloadImage,
+  launchShowsWorkloadImageInput,
+} from '~/utils/launchWorkloadImage'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
 
@@ -122,6 +126,7 @@ const kindBannerTone = computed(() => {
 const localLaunchBlocked = computed(
   () =>
     isLocal.value
+    && showLocalClusterBanner.value
     && !workspacePlan.value?.skip_local_cluster
     && kindStatus.value != null
     && !kindStatus.value.can_launch,
@@ -153,6 +158,36 @@ const workspaceHasManifests = computed(() => {
     selectedWorkspace.value.artifact_mode === 'both'
   )
 })
+
+const showWorkloadImageInput = computed(() =>
+  launchShowsWorkloadImageInput({
+    usesWorkspaceSource: usesWorkspaceSource.value,
+    buildsFromRepo: buildsFromRepo.value,
+    workspaceHasManifests: workspaceHasManifests.value,
+    deployMode: workspacePlan.value?.deploy_mode ?? null,
+  }),
+)
+
+const requiresWorkloadImage = computed(() =>
+  launchRequiresWorkloadImage({
+    usesWorkspaceSource: usesWorkspaceSource.value,
+    buildsFromRepo: buildsFromRepo.value,
+    workspaceHasManifests: workspaceHasManifests.value,
+    deployMode: workspacePlan.value?.deploy_mode ?? null,
+  }),
+)
+
+const workspaceLaunchDetail = computed(() => {
+  const mode = workspacePlan.value?.deploy_mode
+  if (mode === 'attach') return t('launch.workspace.launchingFromInstance')
+  if (mode === 'compose') return t('launch.workspace.launchingFromCompose')
+  if (mode === 'manifest') return t('launch.workspace.launchingFromManifest')
+  return t('launch.workspace.launchingFromDetail')
+})
+
+const showLocalClusterBanner = computed(
+  () => isLocal.value && !workspacePlan.value?.skip_local_cluster,
+)
 
 const showSourceStep = computed(() => !usesWorkspaceSource.value && !isLocal.value)
 
@@ -198,6 +233,18 @@ const sourceSummary = computed(() => {
 const imageSummary = computed(() => {
   if (buildsFromRepo.value) {
     return t('launch.summary.builtFrom', { dockerfile: previewBuild.value?.dockerfile || 'Dockerfile' })
+  }
+  if (usesWorkspaceSource.value) {
+    if (workspacePlan.value?.deploy_mode === 'attach') {
+      return t('launch.summary.fromWorkspaceInstance')
+    }
+    if (workspacePlan.value?.deploy_mode === 'compose') {
+      return t('launch.summary.fromWorkspaceCompose')
+    }
+    if (workspaceHasManifests.value) {
+      return t('launch.summary.fromManifests')
+    }
+    return t('launch.summary.fromWorkspace')
   }
   if (workspaceHasManifests.value) {
     return t('launch.summary.fromManifests')
@@ -539,7 +586,7 @@ async function launch() {
     return
   }
   if (isLocal.value) {
-    if (!workspacePlan.value?.skip_local_cluster) {
+    if (showLocalClusterBanner.value) {
       await refreshKindStatus()
       if (localLaunchBlocked.value) {
         errorMessage.value = kindStatus.value?.message
@@ -547,6 +594,19 @@ async function launch() {
         return
       }
     }
+  }
+
+  if (requiresWorkloadImage.value && !form.workload_image.trim()) {
+    errorMessage.value = t('launch.errors.containerImageRequired')
+    return
+  }
+  if (
+    !form.workspace_id
+    && !form.git_repo_url.trim()
+    && !form.workload_image.trim()
+  ) {
+    errorMessage.value = t('launch.errors.containerImageRequiredLocal')
+    return
   }
 
   submitting.value = true
@@ -565,13 +625,8 @@ async function launch() {
     } else {
       payload.ttl_hours = form.ttl_value
     }
-    if (!buildsFromRepo.value && !workspaceHasManifests.value) {
-      const image = form.workload_image.trim()
-      if (!image) {
-        errorMessage.value = t('launch.errors.containerImageRequired')
-        return
-      }
-      payload.workload_image = image
+    if (form.workload_image.trim()) {
+      payload.workload_image = form.workload_image.trim()
     }
     if (form.workspace_id) {
       payload.workspace_id = form.workspace_id
@@ -581,13 +636,8 @@ async function launch() {
       if (form.github_pr_number && form.github_pr_number > 0) {
         payload.github_pr_number = form.github_pr_number
       }
-    } else {
-      const image = form.workload_image.trim()
-      if (!image) {
-        errorMessage.value = t('launch.errors.containerImageRequiredLocal')
-        return
-      }
-      payload.workload_image = image
+    } else if (form.workload_image.trim()) {
+      payload.workload_image = form.workload_image.trim()
     }
     if (form.provider !== 'local') {
       payload.credentials = { ...form.credentials }
@@ -691,6 +741,7 @@ async function launch() {
       </div>
 
       <div
+        v-if="showLocalClusterBanner"
         class="rounded-lg border px-3 py-2 text-sm"
         :class="{
           'border-[var(--lp-line)] text-[var(--lp-muted)]': kindBannerTone === 'muted',
@@ -756,7 +807,7 @@ async function launch() {
           <template v-if="usesWorkspaceSource && selectedWorkspace">
             {{ t('launch.workspace.launchingFrom') }}
             <strong class="text-[var(--lp-text)]">{{ selectedWorkspace.name }}</strong>
-            - {{ t('launch.workspace.launchingFromDetail') }}
+            - {{ workspaceLaunchDetail }}
           </template>
           <template v-else>
             {{ t('launch.workspace.linkBlurb') }}
@@ -893,19 +944,24 @@ async function launch() {
             </select>
           </div>
         </label>
-        <label v-if="!buildsFromRepo && !workspaceHasManifests" class="block space-y-2 sm:col-span-2">
+        <label v-if="showWorkloadImageInput" class="block space-y-2 sm:col-span-2">
           <span class="lp-label">{{ t('launch.containerImage') }}</span>
           <input
             v-model="form.workload_image"
             class="lp-input font-mono text-xs"
             placeholder="ghcr.io/org/app:tag"
             autocomplete="off"
-            required
           >
           <p class="text-xs text-[var(--lp-muted)]">
             {{ t('launch.containerImageRequired') }}
           </p>
         </label>
+        <p
+          v-else-if="usesWorkspaceSource"
+          class="sm:col-span-2 text-xs text-[var(--lp-muted)]"
+        >
+          {{ t('launch.containerImageFromWorkspace') }}
+        </p>
       </div>
 
       <p v-if="!usesWorkspaceSource" class="text-xs text-[var(--lp-muted)]">
@@ -1107,7 +1163,7 @@ async function launch() {
         </div>
       </label>
       <label
-        v-if="!buildsFromRepo && !workspaceHasManifests"
+        v-if="showWorkloadImageInput"
         class="block space-y-2"
       >
         <span class="lp-label">{{ t('launch.containerImage') }}</span>
@@ -1116,9 +1172,14 @@ async function launch() {
           class="lp-input font-mono text-xs"
           placeholder="ghcr.io/org/app:tag"
           autocomplete="off"
-          required
         >
       </label>
+      <p
+        v-else-if="usesWorkspaceSource"
+        class="text-xs text-[var(--lp-muted)]"
+      >
+        {{ t('launch.containerImageFromWorkspace') }}
+      </p>
       <div class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-4">
         <span class="lp-label">{{ t('launch.ephemeralDatastores') }}</span>
         <div class="grid gap-2 sm:grid-cols-2 pt-1">

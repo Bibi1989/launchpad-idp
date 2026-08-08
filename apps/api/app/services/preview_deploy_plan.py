@@ -94,6 +94,32 @@ def resolve_preview_deploy_plan(
             attach_service=instance.service_name,
         )
 
+    # Explicit non-K8s client requests win over packaging heuristics.
+    if requested_deploy_mode == DeployMode.COMPOSE:
+        return PreviewDeployPlan(
+            deploy_mode=DeployMode.COMPOSE,
+            runtime_mode=runtime,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
+            skip_local_cluster=True,
+            reason="Client requested compose deploy",
+            manifest_packaging=None,
+        )
+    if requested_deploy_mode == DeployMode.ATTACH:
+        instance = config.running_instance
+        return PreviewDeployPlan(
+            deploy_mode=DeployMode.ATTACH,
+            runtime_mode=runtime,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
+            skip_local_cluster=True,
+            reason="Client requested running-instance deploy",
+            manifest_packaging=None,
+            attach_kind=instance.kind.value,
+            attach_host=instance.host,
+            attach_service=instance.service_name,
+        )
+
     if requested_deploy_mode == DeployMode.MANIFEST:
         return PreviewDeployPlan(
             deploy_mode=DeployMode.MANIFEST,

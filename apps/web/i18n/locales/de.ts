@@ -575,11 +575,18 @@ export default {
     "workspace": {
       "launchingFrom": "Start aus Workspace",
       "launchingFromDetail": "Hat der Workspace rohe Manifeste, wendet Launchpad sie in einen Preview-Namespace an (Manifest-Deploy). Sonst nutzt es das eingebaute Preview-Profil.",
+      "launchingFromInstance": "Deploy-Modus Running Instance - Launchpad deployed den Workspace-Container auf das gewählte Compute-Ziel (kein Kubernetes-Apply).",
+      "launchingFromCompose": "Deploy-Modus Docker Compose - Launchpad startet docker compose aus dem Workspace.",
+      "launchingFromManifest": "Launchpad wendet Workspace-Kubernetes-Manifeste in einen Preview-Namespace an.",
       "linkBlurb": "Workspace verknüpfen, um Kubernetes-Manifeste zu deployen, oder unten eine Git-Repo-URL eingeben.",
       "launchingFromSkipGit": "Git im nächsten Schritt überspringen.",
       "storedCredentials": "falls verfügbar - Credential-Felder unten überspringen.",
       "usingStoredFrom": "Gespeicherte Zugangsdaten aus",
-      "noneUseGitRepo": "Git-Repo nutzen"
+      "noneUseGitRepo": "Git-Repo nutzen",
+      "planTitle": "Smart Preview-Plan",
+      "planMode": "Deploy-Modus",
+      "planRuntime": "Runtime",
+      "planDeps": "Datastores aus dem Workspace"
     },
     "cloud": {
       "chooseTargetBlurb": "Lokal nutzt kind auf Ihrem Rechner. Cloud-Optionen verschlüsseln Zugangsdaten auf einen verknüpften Workspace oder nutzen einen bestehenden Provision-Workspace."
@@ -589,6 +596,7 @@ export default {
     "confirmBlurb": "Sie erhalten Status-Logs, TTL und einen Open-app-Link, wenn der Workload Running ist.",
     "containerImage": "Container-Image",
     "containerImageRequired": "Erforderlich, sofern nicht aus Workspace oder Repo-Build gestartet wird.",
+    "containerImageFromWorkspace": "Image kommt aus dem Workspace (Dockerfile, Compose oder Manifeste). Kein manuelles Image nötig.",
     "afterLaunchRebuild": "Nach dem Start: Push auf {branch} rebuildet die Preview, wenn ein GitHub-Webhook konfiguriert ist.",
     "yourBranch": "Ihr Branch",
     "ephemeralDatastores": "Ephemere Datenspeicher (opt-in)",
@@ -604,6 +612,9 @@ export default {
       "noImage": "Kein Image (Container-Image setzen oder Workspace/Repo nutzen)",
       "builtFrom": "Gebaut aus {dockerfile}",
       "fromManifests": "Aus Workspace-Manifesten",
+      "fromWorkspace": "Aus Workspace",
+      "fromWorkspaceInstance": "Aus Workspace (laufende Instanz)",
+      "fromWorkspaceCompose": "Aus Workspace (Docker Compose)",
       "required": "Erforderlich"
     },
     "errors": {
