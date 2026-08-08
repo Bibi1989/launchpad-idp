@@ -308,8 +308,13 @@ function applyRuntimeModeNormalization() {
   Object.assign(form.running_instance, normalized.runningInstance)
   if (form.runtime_mode === 'docker_compose' || form.runtime_mode === 'running_instance') {
     infraGeneration.value.kubernetes.enabled = false
+    // Local compose/instance: enable provision IaC + keep CI selectable.
+    if (!infraGeneration.value.provision.enabled) {
+      infraGeneration.value.provision.enabled = true
+    }
   } else if (form.provider === 'local') {
     infraGeneration.value.kubernetes.enabled = true
+    infraGeneration.value.provision.enabled = false
   }
 }
 
@@ -357,7 +362,7 @@ function packagingFromK8sMode(mode: InfraGenerationConfig['kubernetes']['mode'])
 }
 
 function syncFormFromInfraGeneration() {
-  if (form.provider === 'local') {
+  if (form.provider === 'local' && form.runtime_mode === 'kubernetes') {
     form.artifact_mode = 'manifest_only'
     form.kubernetes_packaging = packagingFromK8sMode(infraGeneration.value.kubernetes.mode)
     return
@@ -373,6 +378,15 @@ watch(
     syncFormFromInfraGeneration()
   },
   { deep: true },
+)
+
+watch(
+  () => form.iac_engine,
+  (engine) => {
+    if (infraGeneration.value.provision.engine !== engine) {
+      infraGeneration.value.provision.engine = engine
+    }
+  },
 )
 
 watch(
@@ -1209,14 +1223,23 @@ async function onPrimaryAction() {
               <select
                 v-model="form.iac_engine"
                 class="lp-input"
-                :disabled="loadingConfig || isLocalProvider"
+                :disabled="loadingConfig || (isLocalProvider && form.runtime_mode === 'kubernetes')"
               >
                 <option value="terraform">Terraform</option>
                 <option value="opentofu">OpenTofu</option>
                 <option value="pulumi">Pulumi</option>
               </select>
-              <p v-if="isLocalProvider" class="text-xs text-[var(--lp-muted)]">
+              <p
+                v-if="isLocalProvider && form.runtime_mode === 'kubernetes'"
+                class="text-xs text-[var(--lp-muted)]"
+              >
                 {{ t('provision.iacEngineLocalHint') }}
+              </p>
+              <p
+                v-else-if="isLocalProvider"
+                class="text-xs text-[var(--lp-muted)]"
+              >
+                {{ t('provision.iacEngineLocalRuntimeHint') }}
               </p>
             </label>
           </div>
@@ -1502,8 +1525,16 @@ async function onPrimaryAction() {
                 </p>
                 <p class="mt-2">{{ t('provision.runtimeMode.composeHint.blurb') }}</p>
               </div>
+              <WorkspaceInfraActions
+                v-model:config="infraGeneration"
+                v-model:container-scaffold="form.container_scaffold"
+                mode="selection"
+                kubernetes-disabled
+                :disabled="loadingConfig"
+              />
               <ContainerScaffoldCard
                 v-model="form.container_scaffold"
+                class="mt-4"
                 :disabled="loadingConfig"
               />
               <WorkloadDependenciesPicker
@@ -1519,6 +1550,20 @@ async function onPrimaryAction() {
               >
                 {{ t('provision.runtimeMode.attach.localBlurb') }}
               </div>
+              <WorkspaceInfraActions
+                v-model:config="infraGeneration"
+                v-model:container-scaffold="form.container_scaffold"
+                mode="selection"
+                kubernetes-disabled
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
+              <ContainerScaffoldCard
+                v-if="form.container_scaffold.enabled"
+                v-model="form.container_scaffold"
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
               <WorkloadDependenciesPicker
                 v-model:dependencies="form.dependencies"
                 provider="local"

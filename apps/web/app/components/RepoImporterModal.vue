@@ -32,6 +32,11 @@ const services = ref<DetectedService[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const error = ref<string | null>(null)
+const runtimeMode = ref<'kubernetes' | 'docker_compose' | 'running_instance'>('kubernetes')
+const iacEngine = ref<'terraform' | 'opentofu' | 'pulumi'>('terraform')
+const enableIac = ref(true)
+const enableCicd = ref(false)
+const cicdPlatform = ref<'github' | 'gitlab'>('github')
 
 const githubInstallations = ref<GitHubInstallationItem[]>([])
 const selectedInstallationId = ref<number | null>(null)
@@ -190,6 +195,12 @@ async function save() {
         is_preview_target: s.is_preview_target,
         name: s.name,
       })),
+      runtime_mode: runtimeMode.value,
+      iac_engine: iacEngine.value,
+      enable_iac: enableIac.value,
+      enable_cicd: enableCicd.value,
+      cicd_platform: cicdPlatform.value,
+      ensure_local_cluster: runtimeMode.value === 'kubernetes',
     })
     open.value = false
     emit('saved', result.workspace_id)
@@ -346,6 +357,54 @@ async function close() {
             <span class="lp-label">{{ t('import.workspaceName') }}</span>
             <input v-model="workspaceName" class="lp-input" autocomplete="off">
           </label>
+
+          <div class="grid gap-3 sm:grid-cols-2">
+            <label class="block space-y-2">
+              <span class="lp-label">{{ t('import.runtimeMode') }}</span>
+              <select v-model="runtimeMode" class="lp-input">
+                <option value="kubernetes">{{ t('provision.runtimeMode.modes.kubernetes.title') }}</option>
+                <option value="docker_compose">{{ t('provision.runtimeMode.modes.docker_compose.title') }}</option>
+                <option value="running_instance">{{ t('provision.runtimeMode.modes.running_instance.title') }}</option>
+              </select>
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">{{ t('provision.iacEngine') }}</span>
+              <select
+                v-model="iacEngine"
+                class="lp-input"
+                :disabled="!enableIac || runtimeMode === 'kubernetes'"
+              >
+                <option value="terraform">Terraform</option>
+                <option value="opentofu">OpenTofu</option>
+                <option value="pulumi">Pulumi</option>
+              </select>
+            </label>
+          </div>
+          <div class="flex flex-wrap gap-4 text-sm">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input
+                v-model="enableIac"
+                type="checkbox"
+                class="accent-[var(--lp-accent)]"
+                :disabled="runtimeMode === 'kubernetes'"
+              >
+              <span>{{ t('import.enableIac') }}</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input v-model="enableCicd" type="checkbox" class="accent-[var(--lp-accent)]">
+              <span>{{ t('import.enableCicd') }}</span>
+            </label>
+            <label v-if="enableCicd" class="flex items-center gap-2">
+              <span class="lp-label">{{ t('import.cicdPlatform') }}</span>
+              <select v-model="cicdPlatform" class="lp-input w-36">
+                <option value="github">GitHub</option>
+                <option value="gitlab">GitLab</option>
+              </select>
+            </label>
+          </div>
+          <p class="text-xs text-[var(--lp-muted)]">
+            {{ t('import.runtimeModeHint') }}
+          </p>
 
           <DetectedStackPreview
             :detection="session.detection"

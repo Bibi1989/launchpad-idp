@@ -55,11 +55,42 @@ class RepoImportSaveRequest(BaseModel):
     name: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     services: list[ServiceOverride] = Field(default_factory=list)
     ensure_local_cluster: bool = True
+    runtime_mode: str = Field(default="kubernetes", max_length=32)
+    iac_engine: str = Field(default="terraform", max_length=32)
+    enable_iac: bool = True
+    enable_cicd: bool = False
+    cicd_platform: str = Field(default="github", max_length=16)
 
     @field_validator("name")
     @classmethod
     def normalize_name(cls, value: str) -> str:
         return value.strip().lower()
+
+    @field_validator("runtime_mode")
+    @classmethod
+    def normalize_runtime_mode(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        allowed = {"kubernetes", "docker_compose", "running_instance"}
+        if cleaned not in allowed:
+            raise ValueError(f"runtime_mode must be one of {sorted(allowed)}")
+        return cleaned
+
+    @field_validator("iac_engine")
+    @classmethod
+    def normalize_iac_engine(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        allowed = {"terraform", "opentofu", "pulumi"}
+        if cleaned not in allowed:
+            raise ValueError(f"iac_engine must be one of {sorted(allowed)}")
+        return cleaned
+
+    @field_validator("cicd_platform")
+    @classmethod
+    def normalize_cicd_platform(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if cleaned not in {"github", "gitlab"}:
+            raise ValueError("cicd_platform must be github or gitlab")
+        return cleaned
 
 
 class RepoImportSessionRead(BaseModel):

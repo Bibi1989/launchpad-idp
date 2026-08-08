@@ -1109,6 +1109,22 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
                 }
             )
         files.extend(self._write_container_scaffold(workspace_dir, request))
+
+        # Optional IaC stubs (Terraform / OpenTofu / Pulumi) when provision is enabled.
+        if request.artifact_mode in {
+            WorkspaceArtifactsMode.IAC_ONLY,
+            WorkspaceArtifactsMode.BOTH,
+        }:
+            from app.services.local_runtime_iac import write_local_runtime_iac
+
+            files.extend(
+                write_local_runtime_iac(
+                    workspace_dir,
+                    name=request.name,
+                    engine=request.iac_engine,
+                    runtime_mode=mode,
+                )
+            )
         return files
 
     @staticmethod

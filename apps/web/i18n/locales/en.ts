@@ -381,7 +381,12 @@ export default {
     "selectGithubAccount": "Select a GitHub account (personal or organization) before importing",
     "importFailed": "Import failed",
     "workspaceNameInvalid": "Workspace name must be lowercase, start with a letter, 3-64 chars",
-    "saveWorkspaceFailed": "Failed to save workspace"
+    "saveWorkspaceFailed": "Failed to save workspace",
+    "runtimeMode": "Runtime",
+    "runtimeModeHint": "Kubernetes imports manifests. Compose and running instance import Docker artifacts and can scaffold IaC + CI/CD.",
+    "enableIac": "Scaffold IaC (Terraform / Pulumi)",
+    "enableCicd": "Scaffold CI/CD",
+    "cicdPlatform": "CI platform"
   },
   "notifications": {
     "title": "Notifications",
@@ -683,7 +688,7 @@ export default {
       },
       "composeHint": {
         "title": "Compose preview path",
-        "blurb": "Dockerfile and docker-compose.yml will be scaffolded. Preview skips the local Kubernetes cluster."
+        "blurb": "Dockerfile, docker-compose.yml, optional IaC (Terraform/Pulumi), and CI/CD (GitHub/GitLab) can be scaffolded. Preview skips the local Kubernetes cluster."
       },
       "attach": {
         "title": "Compute target",
@@ -695,7 +700,7 @@ export default {
         "serverlessConfigHint": "Needs a container image, cloud credentials, and region. Artifact Registry / ECR is recommended.",
         "vmConfigHint": "Needs SSH host reachability from the control plane, Docker on the VM, and an image pull path.",
         "localMachineHint": "Runs the container with Docker on this machine (no Kubernetes cluster).",
-        "localBlurb": "Choose local Docker, or a remote VM over SSH.",
+        "localBlurb": "Choose local Docker, or a remote VM over SSH. Optional IaC and CI/CD scaffolds are available below.",
         "kind": "Compute kind",
         "serviceName": "Service name",
         "region": "Region",
@@ -769,6 +774,7 @@ export default {
     "stepProgress": "STEP {current}/{total}",
     "workspaceSelectBlurb": "Create a new stack, or reopen an existing one with its previous settings filled in.",
     "iacEngineLocalHint": "Local Kubernetes scaffolds manifests only - switch to a cloud provider for Terraform, OpenTofu, or Pulumi.",
+    "iacEngineLocalRuntimeHint": "Local Compose and running-instance workspaces scaffold Terraform, OpenTofu, or Pulumi stubs plus optional CI/CD. Promote to a cloud provider for managed modules.",
     "editingExisting": "Editing",
     "editingExistingSuffix": "prior resource selections are loaded on the next step. Leave credentials blank to keep the ones already stored.",
     "credentialsStored": "Credentials are already stored for this workspace. Paste new values only if you want to replace them; otherwise leave the fields blank.",

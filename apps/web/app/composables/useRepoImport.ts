@@ -36,13 +36,23 @@ export function useRepoImport() {
     name: string
     services: ServiceOverride[]
     ensure_local_cluster?: boolean
+    runtime_mode?: 'kubernetes' | 'docker_compose' | 'running_instance'
+    iac_engine?: 'terraform' | 'opentofu' | 'pulumi'
+    enable_iac?: boolean
+    enable_cicd?: boolean
+    cicd_platform?: 'github' | 'gitlab'
   }): Promise<RepoImportSaveResult> {
     return apiFetch<RepoImportSaveResult>(`/imports/${input.importId}/save`, {
       method: 'POST',
       body: JSON.stringify({
         name: input.name,
         services: input.services,
-        ensure_local_cluster: input.ensure_local_cluster ?? true,
+        ensure_local_cluster: input.ensure_local_cluster ?? input.runtime_mode === 'kubernetes',
+        runtime_mode: input.runtime_mode ?? 'kubernetes',
+        iac_engine: input.iac_engine ?? 'terraform',
+        enable_iac: input.enable_iac ?? true,
+        enable_cicd: input.enable_cicd ?? false,
+        cicd_platform: input.cicd_platform ?? 'github',
       }),
       timeoutMs: IMPORT_TIMEOUT_MS,
     })

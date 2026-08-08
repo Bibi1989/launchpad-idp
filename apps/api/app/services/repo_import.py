@@ -16,7 +16,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.core.secrets import encrypt_secret
 from app.models.domain import ProvisioningWorkspace, User
-from app.schemas.cloud import CloudCredentials, CloudProvider, IaCEngine
+from app.schemas.cloud import CloudCredentials, CloudProvider, IaCEngine, WorkspaceRuntimeMode
 from app.schemas.repo_import import (
     RepoImportCreateRequest,
     RepoImportSaveRequest,
@@ -164,15 +164,40 @@ class RepoImportService:
         shutil.copytree(import_root, durable, symlinks=False, ignore_dangling_symlinks=True)
 
         adjusted = detection.model_copy(update={"services": services})
+        runtime_mode = WorkspaceRuntimeMode(request.runtime_mode)
         generated = self._generator.generate(
             durable,
             adjusted,
             workspace_name=request.name,
             services=services,
+            runtime_mode=runtime_mode.value,
         )
 
+        if request.enable_iac and runtime_mode != WorkspaceRuntimeMode.KUBERNETES:
+            from app.services.local_runtime_iac import write_local_runtime_iac
+
+            iac_files = write_local_runtime_iac(
+                durable,
+                name=request.name,
+                engine=IaCEngine(request.iac_engine),
+                runtime_mode=runtime_mode,
+            )
+            generated.files.extend(iac_files)
+
+        if request.enable_cicd:
+            cicd_files = self._write_cicd_stub(
+                durable,
+                platform=request.cicd_platform,
+                name=request.name,
+            )
+            generated.files.extend(cicd_files)
+
         cluster_ready = False
-        if request.ensure_local_cluster:
+        wants_cluster = (
+            request.ensure_local_cluster
+            and runtime_mode == WorkspaceRuntimeMode.KUBERNETES
+        )
+        if wants_cluster:
             try:
                 from app.services.kind_cluster import ensure_kind_cluster
 
@@ -188,6 +213,16 @@ class RepoImportService:
         from app.services.orgs import OrganizationService
 
         personal = await OrganizationService(self._session).ensure_personal_org(owner)
+        artifact_mode = (
+            "manifest_only"
+            if runtime_mode == WorkspaceRuntimeMode.KUBERNETES
+            else ("iac_only" if request.enable_iac else "iac_only")
+        )
+        packaging = (
+            "raw_manifests"
+            if runtime_mode == WorkspaceRuntimeMode.KUBERNETES
+            else "none"
+        )
         wizard_snapshot = {
             "source": "repo_import",
             "git_repo_url": meta.get("repo_url"),
@@ -196,15 +231,28 @@ class RepoImportService:
             "import_id": import_id,
             "detection": adjusted.model_dump(),
             "preview_service": generated.preview_service,
-            "iac_engine": IaCEngine.TERRAFORM.value,
+            "name": request.name,
+            "iac_engine": request.iac_engine,
             "provider": CloudProvider.LOCAL.value,
+            "cloud": {
+                "provider": CloudProvider.LOCAL.value,
+                "resources": {"cluster_name": "launchpad", "context": "k3d-launchpad"},
+            },
+            "runtime_mode": runtime_mode.value,
+            "running_instance": {
+                "kind": "local_machine",
+                "listen_port": 8088,
+            },
+            "artifact_mode": artifact_mode,
+            "kubernetes_packaging": packaging,
+            "run_init": False,
         }
         row = ProvisioningWorkspace(
             id=workspace_id,
             owner_id=owner.id,
             org_id=org_id or personal.id,
             name=request.name,
-            engine=IaCEngine.TERRAFORM.value,
+            engine=request.iac_engine,
             provider=CloudProvider.LOCAL.value,
             root_dir=str(durable),
             status="ready",
@@ -224,6 +272,25 @@ class RepoImportService:
             name=request.name,
             files=len(generated.files),
         )
+        if runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
+            message = (
+                "Workspace saved. Open Launch and select this workspace to deploy the preview."
+                if cluster_ready
+                else (
+                    "Workspace saved. Local cluster was not ready; "
+                    "Launch will start it on deploy."
+                )
+            )
+        elif runtime_mode == WorkspaceRuntimeMode.DOCKER_COMPOSE:
+            message = (
+                "Workspace saved as Docker Compose. Open Launch and select this workspace "
+                "to run docker compose."
+            )
+        else:
+            message = (
+                "Workspace saved as running instance. Open Launch and select this workspace "
+                "to deploy to local Docker (or the configured compute target)."
+            )
         return RepoImportSaveResult(
             workspace_id=workspace_id,
             name=request.name,
@@ -231,12 +298,52 @@ class RepoImportService:
             files=generated.files,
             preview_service=generated.preview_service,
             cluster_ready=cluster_ready,
-            message=(
-                "Workspace saved. Open Launch and select this workspace to deploy the preview."
-                if cluster_ready
-                else "Workspace saved. Local cluster was not ready; Launch will start it on deploy."
-            ),
+            message=message,
         )
+
+    @staticmethod
+    def _write_cicd_stub(workspace_dir: Path, *, platform: str, name: str) -> list[str]:
+        """Minimal GitHub Actions / GitLab CI stub for imported workspaces."""
+        written: list[str] = []
+        if platform == "gitlab":
+            path = workspace_dir / ".gitlab-ci.yml"
+            path.write_text(
+                f"# Launchpad CI stub for {name}\n"
+                "stages:\n"
+                "  - build\n"
+                "  - test\n\n"
+                "build:\n"
+                "  stage: build\n"
+                "  image: docker:27\n"
+                "  services:\n"
+                "    - docker:27-dind\n"
+                "  script:\n"
+                "    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .\n",
+                encoding="utf-8",
+            )
+            written.append(".gitlab-ci.yml")
+            return written
+
+        path = workspace_dir / ".github" / "workflows" / "launchpad-ci.yml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"# Launchpad CI stub for {name}\n"
+            "name: launchpad-ci\n"
+            "on:\n"
+            "  push:\n"
+            "    branches: [main, master]\n"
+            "  pull_request:\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - name: Build container\n"
+            "        run: docker build -t launchpad/${{ github.repository }}:${{ github.sha }} .\n",
+            encoding="utf-8",
+        )
+        written.append(".github/workflows/launchpad-ci.yml")
+        return written
 
     async def discard(self, import_id: str, *, owner: User) -> None:
         del owner
@@ -309,6 +416,7 @@ class RepoImportService:
             detection,
             workspace_name=workspace.name,
             services=services,
+            runtime_mode=str(snapshot.get("runtime_mode") or "kubernetes"),
         )
         self._write_detection(durable, detection)
 

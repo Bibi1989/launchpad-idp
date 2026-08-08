@@ -381,7 +381,12 @@ export default {
     "selectGithubAccount": "GitHub-Konto (persönlich oder Organisation) vor dem Import auswählen",
     "importFailed": "Import fehlgeschlagen",
     "workspaceNameInvalid": "Workspace-Name muss kleingeschrieben sein, mit Buchstabe beginnen, 3-64 Zeichen",
-    "saveWorkspaceFailed": "Workspace konnte nicht gespeichert werden"
+    "saveWorkspaceFailed": "Workspace konnte nicht gespeichert werden",
+    "runtimeMode": "Runtime",
+    "runtimeModeHint": "Kubernetes importiert Manifeste. Compose und Running Instance importieren Docker-Artefakte und können IaC + CI/CD scaffolden.",
+    "enableIac": "IaC scaffolden (Terraform / Pulumi)",
+    "enableCicd": "CI/CD scaffolden",
+    "cicdPlatform": "CI-Plattform"
   },
   "notifications": {
     "title": "Benachrichtigungen",
@@ -683,7 +688,7 @@ export default {
       },
       "composeHint": {
         "title": "Compose-Preview-Pfad",
-        "blurb": "Dockerfile und docker-compose.yml werden erzeugt. Preview überspringt den lokalen Kubernetes-Cluster."
+        "blurb": "Dockerfile, docker-compose.yml, optionales IaC (Terraform/Pulumi) und CI/CD (GitHub/GitLab) können erzeugt werden. Preview überspringt den lokalen Kubernetes-Cluster."
       },
       "attach": {
         "title": "Compute-Ziel",
@@ -695,7 +700,7 @@ export default {
         "serverlessConfigHint": "Benötigt Container-Image, Cloud-Zugangsdaten und Region. Artifact Registry / ECR empfohlen.",
         "vmConfigHint": "Benötigt SSH-Erreichbarkeit von der Control Plane, Docker auf der VM und Image-Pull.",
         "localMachineHint": "Startet den Container mit Docker auf dieser Maschine (ohne Kubernetes).",
-        "localBlurb": "Lokales Docker oder Remote-VM per SSH wählen.",
+        "localBlurb": "Lokales Docker oder Remote-VM per SSH wählen. Optionale IaC- und CI/CD-Scaffolds finden Sie darunter.",
         "kind": "Compute-Art",
         "serviceName": "Service-Name",
         "region": "Region",
@@ -769,6 +774,7 @@ export default {
     "stepProgress": "SCHRITT {current}/{total}",
     "workspaceSelectBlurb": "Neuen Stack erstellen oder bestehenden mit vorherigen Einstellungen wieder öffnen.",
     "iacEngineLocalHint": "Lokales Kubernetes scaffoldet nur Manifeste - zu Cloud-Anbieter wechseln für Terraform, OpenTofu oder Pulumi.",
+    "iacEngineLocalRuntimeHint": "Lokale Compose- und Running-Instance-Workspaces scaffolden Terraform-, OpenTofu- oder Pulumi-Stubs plus optionales CI/CD. Für Managed Modules zu einem Cloud-Anbieter wechseln.",
     "editingExisting": "Bearbeiten",
     "editingExistingSuffix": "vorherige Ressourcenauswahl wird im nächsten Schritt geladen. Zugangsdaten leer lassen, um gespeicherte zu behalten.",
     "credentialsStored": "Zugangsdaten sind für diesen Workspace gespeichert. Nur neue Werte einfügen zum Ersetzen; sonst Felder leer lassen.",
