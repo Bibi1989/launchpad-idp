@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,7 @@ from app.models.domain import (
     ExecutionStage,
     LogLevel,
     OrgRole,
+    ProvisioningWorkspace,
     User,
 )
 from app.repositories.environment import DeploymentLogRepository, EnvironmentRepository
@@ -879,15 +881,60 @@ class EnvironmentService:
         if environment.status == EnvironmentStatus.PAUSED:
             return self._to_read(environment)
 
-        provisioner = KubernetesProvisioner(settings=self._settings)
-        provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
+        deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
+        if deploy_mode == DeployMode.COMPOSE.value:
+            from app.services.compose_deploy import stop_compose
+
+            workspace_root = None
+            if environment.workspace_id is not None:
+                row = await self._session.get(ProvisioningWorkspace, environment.workspace_id)
+                if row is not None and row.root_dir:
+                    workspace_root = Path(row.root_dir)
+            await asyncio.to_thread(
+                stop_compose,
+                workspace_root=workspace_root,
+                namespace=environment.namespace_name,
+                environment_id=str(environment.id),
+            )
+            pause_msg = "Environment paused (docker compose stop)."
+        elif deploy_mode == DeployMode.ATTACH.value:
+            from app.schemas.cloud import RunningInstanceKind, WorkspaceWizardConfig
+            from app.services.provisioning import ProvisioningService
+
+            kind = RunningInstanceKind.KUBE_CONTEXT
+            if environment.workspace_id is not None:
+                provisioning = ProvisioningService(self._session)
+                row = await self._session.get(ProvisioningWorkspace, environment.workspace_id)
+                if row is not None:
+                    snapshot = provisioning._load_wizard_snapshot(row)
+                    if snapshot is not None:
+                        try:
+                            wizard = WorkspaceWizardConfig.model_validate(
+                                {**snapshot, "has_credentials": False}
+                            )
+                            kind = wizard.running_instance.kind
+                        except Exception:
+                            pass
+            if kind == RunningInstanceKind.KUBE_CONTEXT:
+                provisioner = KubernetesProvisioner(settings=self._settings)
+                provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
+                pause_msg = "Environment paused (scaled attached kube deployment to 0)."
+            else:
+                pause_msg = (
+                    "Environment paused in control plane "
+                    "(endpoint/serverless attach left running externally)."
+                )
+        else:
+            provisioner = KubernetesProvisioner(settings=self._settings)
+            provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
+            pause_msg = "Environment paused (scaled deployment replicas to 0)."
 
         await self._environments.update_status(environment, EnvironmentStatus.PAUSED)
         await self._logs.create(
             environment_id=environment.id,
             log_level=LogLevel.INFO,
             stage=ExecutionStage.APPLY,
-            message="Environment paused (scaled deployment replicas to 0).",
+            message=pause_msg,
         )
         await AuditService(self._session).record(
             action=AuditAction.PAUSE_SUCCEEDED,
@@ -937,15 +984,60 @@ class EnvironmentService:
 
         await self._auto_pause_if_needed(owner, exclude_id=environment.id)
 
-        provisioner = KubernetesProvisioner(settings=self._settings)
-        provisioner.scale_deployment(namespace=environment.namespace_name, replicas=1)
+        deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
+        if deploy_mode == DeployMode.COMPOSE.value:
+            from app.services.compose_deploy import start_compose
+
+            workspace_root = None
+            if environment.workspace_id is not None:
+                row = await self._session.get(ProvisioningWorkspace, environment.workspace_id)
+                if row is not None and row.root_dir:
+                    workspace_root = Path(row.root_dir)
+            await asyncio.to_thread(
+                start_compose,
+                workspace_root=workspace_root,
+                namespace=environment.namespace_name,
+                environment_id=str(environment.id),
+            )
+            resume_msg = "Environment resumed (docker compose start)."
+        elif deploy_mode == DeployMode.ATTACH.value:
+            from app.schemas.cloud import RunningInstanceKind, WorkspaceWizardConfig
+            from app.services.provisioning import ProvisioningService
+
+            kind = RunningInstanceKind.KUBE_CONTEXT
+            if environment.workspace_id is not None:
+                provisioning = ProvisioningService(self._session)
+                row = await self._session.get(ProvisioningWorkspace, environment.workspace_id)
+                if row is not None:
+                    snapshot = provisioning._load_wizard_snapshot(row)
+                    if snapshot is not None:
+                        try:
+                            wizard = WorkspaceWizardConfig.model_validate(
+                                {**snapshot, "has_credentials": False}
+                            )
+                            kind = wizard.running_instance.kind
+                        except Exception:
+                            pass
+            if kind == RunningInstanceKind.KUBE_CONTEXT:
+                provisioner = KubernetesProvisioner(settings=self._settings)
+                provisioner.scale_deployment(namespace=environment.namespace_name, replicas=1)
+                resume_msg = "Environment resumed (scaled attached kube deployment to 1)."
+            else:
+                resume_msg = (
+                    "Environment resumed in control plane "
+                    "(endpoint/serverless attach assumed still reachable)."
+                )
+        else:
+            provisioner = KubernetesProvisioner(settings=self._settings)
+            provisioner.scale_deployment(namespace=environment.namespace_name, replicas=1)
+            resume_msg = "Environment resumed (scaled deployment replicas to 1)."
 
         await self._environments.update_status(environment, EnvironmentStatus.RUNNING)
         await self._logs.create(
             environment_id=environment.id,
             log_level=LogLevel.INFO,
             stage=ExecutionStage.APPLY,
-            message="Environment resumed (scaled deployment replicas to 1).",
+            message=resume_msg,
         )
         await AuditService(self._session).record(
             action=AuditAction.RESUME_SUCCEEDED,

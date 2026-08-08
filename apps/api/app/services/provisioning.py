@@ -961,10 +961,16 @@ class ProvisioningService:
                 )
             else:
                 if isinstance(raw, dict):
-                    return raw
+                    from app.services.runtime_mode import coerce_wizard_snapshot
+
+                    return coerce_wizard_snapshot(raw)
         root = Path(row.root_dir)
         if root.is_dir():
-            return self._iac.read_wizard_snapshot(root)
+            snapshot = self._iac.read_wizard_snapshot(root)
+            if snapshot is not None:
+                from app.services.runtime_mode import coerce_wizard_snapshot
+
+                return coerce_wizard_snapshot(snapshot)
         return None
 
     def _relocate_ephemeral_root(self, row: ProvisioningWorkspace) -> Path:

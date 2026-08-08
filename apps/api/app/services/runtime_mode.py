@@ -154,7 +154,17 @@ def normalize_artifacts_for_runtime_mode(
     return artifact_mode, kubernetes_packaging, container_scaffold, instance
 
 
+def coerce_wizard_snapshot(raw: dict[str, object]) -> dict[str, object]:
+    """Backfill runtime_mode for workspaces created before Phase 0."""
+    out = dict(raw)
+    if "runtime_mode" not in out or not out.get("runtime_mode"):
+        out["runtime_mode"] = WorkspaceRuntimeMode.KUBERNETES.value
+    if "running_instance" not in out or not isinstance(out.get("running_instance"), dict):
+        out["running_instance"] = RunningInstanceConfig().model_dump(mode="json")
+    return out
+
+
 def default_runtime_mode_for_provider(cloud: CloudConfig) -> WorkspaceRuntimeMode:
-    if isinstance(cloud, LocalCloudConfig):
-        return WorkspaceRuntimeMode.KUBERNETES
+    """Historical workspaces and new providers default to Kubernetes."""
+    _ = cloud
     return WorkspaceRuntimeMode.KUBERNETES

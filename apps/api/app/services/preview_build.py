@@ -45,7 +45,11 @@ def preview_build_eligible(
         return False
     if template_id is not None:
         return False
-    if deploy_mode == DeployMode.MANIFEST.value:
+    if deploy_mode in {
+        DeployMode.MANIFEST.value,
+        DeployMode.COMPOSE.value,
+        DeployMode.ATTACH.value,
+    }:
         return False
     if workload_image_override:
         return False

@@ -459,13 +459,36 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     session,
                     environment_id=env_uuid,
                     stage=ExecutionStage.INIT,
-                    message="INIT - starting Kubernetes provision workflow",
+                    message=(
+                        "INIT - starting Compose preview workflow"
+                        if getattr(environment, "deploy_mode", "") == DeployMode.COMPOSE.value
+                        else "INIT - starting attach preview workflow"
+                        if getattr(environment, "deploy_mode", "") == DeployMode.ATTACH.value
+                        else "INIT - starting Kubernetes provision workflow"
+                    ),
                     commit_sha=commit_sha,
                 )
 
                 try:
                     current_stage = ExecutionStage.VALIDATE
-                    if settings.kubernetes_enabled:
+                    deploy_mode_early = getattr(
+                        environment, "deploy_mode", DeployMode.PREVIEW.value
+                    )
+                    if deploy_mode_early == DeployMode.COMPOSE.value:
+                        from app.services.compose_deploy import docker_compose_available
+
+                        if docker_compose_available():
+                            mode_msg = "VALIDATE - docker compose available (local Compose preview)"
+                        else:
+                            mode_msg = (
+                                "VALIDATE - docker compose unavailable; "
+                                "Compose deploy will simulate preview URL"
+                            )
+                    elif deploy_mode_early == DeployMode.ATTACH.value:
+                        mode_msg = (
+                            "VALIDATE - attach mode (existing kube context / endpoint / serverless)"
+                        )
+                    elif settings.kubernetes_enabled:
                         provider = getattr(environment, "provider", None)
                         is_local = str(provider or "").lower() == "local"
                         ctx = settings.resolved_kubernetes_context or settings.kubernetes_context or "default"
@@ -639,35 +662,97 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             owner_label=owner_label,
                             image=manifest_image_override,
                         )
-                    elif deploy_mode in {
-                        DeployMode.COMPOSE.value,
-                        DeployMode.ATTACH.value,
-                    }:
-                        # Phase 3: record the resolved plan; Phase 4 wires full executors.
-                        # Fall back to control-plane preview so Launch still produces a URL.
+                    elif deploy_mode == DeployMode.COMPOSE.value:
+                        from app.services.compose_deploy import ComposeDeployError, deploy_compose
+
+                        if workspace_root is None:
+                            raise RuntimeError(
+                                "Compose deploy requires a linked workspace with docker-compose.yml"
+                            )
+                        await _emit_stage(
+                            log_repo,
+                            session,
+                            environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
+                            message="APPLY - docker compose up (local Compose preview)",
+                            commit_sha=commit_sha,
+                        )
+                        try:
+                            resources = await asyncio.to_thread(
+                                deploy_compose,
+                                workspace_root=workspace_root,
+                                namespace=environment.namespace_name,
+                                environment_id=str(environment.id),
+                                name=environment.name,
+                                image=deploy_image,
+                                settings=settings,
+                            )
+                        except ComposeDeployError as exc:
+                            raise RuntimeError(str(exc)) from exc
+                    elif deploy_mode == DeployMode.ATTACH.value:
+                        from app.schemas.cloud import (
+                            KubernetesPackaging,
+                            RunningInstanceConfig,
+                            WorkspaceWizardConfig,
+                        )
+                        from app.services.attach_deploy import AttachDeployError, deploy_attach
+                        from app.services.provisioning import ProvisioningService
+
+                        running_instance = RunningInstanceConfig()
+                        packaging: KubernetesPackaging | None = None
+                        if workspace_id is not None:
+                            provisioning = ProvisioningService(session)
+                            workspace_row = await session.get(
+                                ProvisioningWorkspace, workspace_id
+                            )
+                            if workspace_row is not None:
+                                packaging = provisioning.get_workspace_kubernetes_packaging(
+                                    workspace_row
+                                )
+                                snapshot = provisioning._load_wizard_snapshot(workspace_row)
+                                if snapshot is not None:
+                                    try:
+                                        wizard = WorkspaceWizardConfig.model_validate(
+                                            {**snapshot, "has_credentials": False}
+                                        )
+                                        running_instance = wizard.running_instance
+                                    except Exception:
+                                        logger.warning(
+                                            "attach_wizard_snapshot_invalid",
+                                            workspace_id=str(workspace_id),
+                                        )
+
                         await _emit_stage(
                             log_repo,
                             session,
                             environment_id=env_uuid,
                             stage=ExecutionStage.APPLY,
                             message=(
-                                f"APPLY - runtime mode '{deploy_mode}' resolved; "
-                                "using control-plane preview until the dedicated executor ships"
+                                f"APPLY - attach to running instance "
+                                f"({running_instance.kind.value})"
                             ),
                             commit_sha=commit_sha,
                         )
-                        resources = provisioner.provision(
-                            namespace=environment.namespace_name,
-                            environment_id=str(environment.id),
-                            name=environment.name,
-                            git_branch=environment.git_branch,
-                            git_repo_url=environment.git_repo_url,
-                            ttl_expires_at=environment.ttl_expires_at.isoformat(),
-                            owner_label=owner_label,
-                            image=deploy_image,
-                            enable_postgres=getattr(environment, "enable_postgres", False),
-                            enable_redis=getattr(environment, "enable_redis", False),
-                        )
+                        try:
+                            resources = await asyncio.to_thread(
+                                deploy_attach,
+                                namespace=environment.namespace_name,
+                                environment_id=str(environment.id),
+                                name=environment.name,
+                                git_branch=environment.git_branch,
+                                git_repo_url=environment.git_repo_url,
+                                ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                                owner_label=owner_label,
+                                image=deploy_image,
+                                enable_postgres=getattr(environment, "enable_postgres", False),
+                                enable_redis=getattr(environment, "enable_redis", False),
+                                running_instance=running_instance,
+                                workspace_root=workspace_root,
+                                packaging=packaging,
+                                settings=settings,
+                            )
+                        except AttachDeployError as exc:
+                            raise RuntimeError(str(exc)) from exc
                     else:
                         await _emit_stage(
                             log_repo,
@@ -699,8 +784,37 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             environment_id=env_uuid,
                             stage=ExecutionStage.APPLY,
                             message=(
-                                "APPLY - simulated ResourceQuota, LimitRange, "
-                                "NetworkPolicy, Deployment, and Service"
+                                "APPLY - simulated preview resources "
+                                f"(mode={deploy_mode})"
+                            ),
+                            commit_sha=commit_sha,
+                        )
+                    elif deploy_mode == DeployMode.COMPOSE.value:
+                        port_note = (
+                            f", host port {resources.node_port}"
+                            if resources.node_port is not None
+                            else ""
+                        )
+                        await _emit_stage(
+                            log_repo,
+                            session,
+                            environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
+                            message=(
+                                f"APPLY - docker compose stack ready"
+                                f"{port_note}; preview={resources.preview_url or '-'}"
+                            ),
+                            commit_sha=commit_sha,
+                        )
+                    elif deploy_mode == DeployMode.ATTACH.value:
+                        await _emit_stage(
+                            log_repo,
+                            session,
+                            environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
+                            message=(
+                                f"APPLY - attached running instance; "
+                                f"preview={resources.preview_url or '-'}"
                             ),
                             commit_sha=commit_sha,
                         )
@@ -1057,27 +1171,146 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         short_sha = built_sha or short_sha
 
                     current_stage = ExecutionStage.APPLY
-                    await _emit_stage(
-                        log_repo,
-                        session,
-                        environment_id=env_uuid,
-                        stage=ExecutionStage.APPLY,
-                        message="APPLY - rolling Deployment",
-                        commit_sha=short_sha,
-                    )
+                    deploy_mode = getattr(environment, "deploy_mode", DeployMode.PREVIEW.value)
+                    workspace_root: Path | None = None
+                    if workspace_id is not None:
+                        workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
+                        if workspace_row is not None and workspace_row.root_dir:
+                            workspace_root = Path(workspace_row.root_dir)
 
-                    provisioner.rebuild_workload(
-                        namespace=environment.namespace_name,
-                        environment_id=str(environment.id),
-                        name=environment.name,
-                        git_branch=environment.git_branch,
-                        git_repo_url=environment.git_repo_url,
-                        commit_sha=short_sha,
-                        owner_label=owner_label,
-                        image=rebuild_image,
-                        enable_postgres=getattr(environment, "enable_postgres", False),
-                        enable_redis=getattr(environment, "enable_redis", False),
-                    )
+                    if deploy_mode == DeployMode.COMPOSE.value:
+                        from app.services.compose_deploy import ComposeDeployError, deploy_compose
+
+                        if workspace_root is None:
+                            raise RuntimeError(
+                                "Compose rebuild requires a linked workspace with docker-compose.yml"
+                            )
+                        await _emit_stage(
+                            log_repo,
+                            session,
+                            environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
+                            message="APPLY - docker compose up --build (rebuild)",
+                            commit_sha=short_sha,
+                        )
+                        try:
+                            resources = await asyncio.to_thread(
+                                deploy_compose,
+                                workspace_root=workspace_root,
+                                namespace=environment.namespace_name,
+                                environment_id=str(environment.id),
+                                name=environment.name,
+                                image=rebuild_image,
+                                settings=settings,
+                            )
+                        except ComposeDeployError as exc:
+                            raise RuntimeError(str(exc)) from exc
+                        if resources.preview_url or resources.node_port:
+                            await env_repo.update_status(
+                                environment,
+                                EnvironmentStatus.PROVISIONING,
+                                preview_url=resources.preview_url,
+                                node_port=resources.node_port,
+                                workload_image=resources.image or rebuild_image,
+                            )
+                    elif deploy_mode == DeployMode.ATTACH.value:
+                        from app.schemas.cloud import (
+                            KubernetesPackaging,
+                            RunningInstanceConfig,
+                            RunningInstanceKind,
+                            WorkspaceWizardConfig,
+                        )
+                        from app.services.attach_deploy import AttachDeployError, deploy_attach
+                        from app.services.provisioning import ProvisioningService
+
+                        running_instance = RunningInstanceConfig()
+                        packaging: KubernetesPackaging | None = None
+                        if workspace_id is not None:
+                            provisioning = ProvisioningService(session)
+                            workspace_row = await session.get(
+                                ProvisioningWorkspace, workspace_id
+                            )
+                            if workspace_row is not None:
+                                packaging = provisioning.get_workspace_kubernetes_packaging(
+                                    workspace_row
+                                )
+                                snapshot = provisioning._load_wizard_snapshot(workspace_row)
+                                if snapshot is not None:
+                                    try:
+                                        wizard = WorkspaceWizardConfig.model_validate(
+                                            {**snapshot, "has_credentials": False}
+                                        )
+                                        running_instance = wizard.running_instance
+                                    except Exception:
+                                        pass
+
+                        if running_instance.kind in {
+                            RunningInstanceKind.ENDPOINT,
+                            RunningInstanceKind.SERVERLESS,
+                        }:
+                            await _emit_stage(
+                                log_repo,
+                                session,
+                                environment_id=env_uuid,
+                                stage=ExecutionStage.APPLY,
+                                message=(
+                                    "APPLY - attach rebuild is a no-op for "
+                                    f"{running_instance.kind.value} (external runtime)"
+                                ),
+                                commit_sha=short_sha,
+                            )
+                        else:
+                            await _emit_stage(
+                                log_repo,
+                                session,
+                                environment_id=env_uuid,
+                                stage=ExecutionStage.APPLY,
+                                message="APPLY - re-attaching kube context workload",
+                                commit_sha=short_sha,
+                            )
+                            try:
+                                await asyncio.to_thread(
+                                    deploy_attach,
+                                    namespace=environment.namespace_name,
+                                    environment_id=str(environment.id),
+                                    name=environment.name,
+                                    git_branch=environment.git_branch,
+                                    git_repo_url=environment.git_repo_url,
+                                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                                    owner_label=owner_label,
+                                    image=rebuild_image,
+                                    enable_postgres=getattr(
+                                        environment, "enable_postgres", False
+                                    ),
+                                    enable_redis=getattr(environment, "enable_redis", False),
+                                    running_instance=running_instance,
+                                    workspace_root=workspace_root,
+                                    packaging=packaging,
+                                    settings=settings,
+                                )
+                            except AttachDeployError as exc:
+                                raise RuntimeError(str(exc)) from exc
+                    else:
+                        await _emit_stage(
+                            log_repo,
+                            session,
+                            environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
+                            message="APPLY - rolling Deployment",
+                            commit_sha=short_sha,
+                        )
+                        provisioner.rebuild_workload(
+                            namespace=environment.namespace_name,
+                            environment_id=str(environment.id),
+                            name=environment.name,
+                            git_branch=environment.git_branch,
+                            git_repo_url=environment.git_repo_url,
+                            commit_sha=short_sha,
+                            owner_label=owner_label,
+                            image=rebuild_image,
+                            enable_postgres=getattr(environment, "enable_postgres", False),
+                            enable_redis=getattr(environment, "enable_redis", False),
+                        )
                     # New revision rolled out and passed readiness; from here a
                     # failure must not roll the healthy workload back.
                     new_rollout_ok = True
@@ -1242,24 +1475,72 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         status=EnvironmentStatus.TEARDOWN_PENDING.value,
                     )
 
-                    # Best-effort cluster cleanup: honor the destroy request even if
-                    # the cluster is unreachable. A cleanup failure must NOT leave the
-                    # environment stuck - we still mark it DESTROYED below and let the
-                    # cluster GC / TTL reaper reclaim any orphaned namespace.
+                    # Best-effort cluster / compose cleanup: honor the destroy request even if
+                    # the runtime is unreachable. A cleanup failure must NOT leave the
+                    # environment stuck - we still mark it DESTROYED below.
+                    deploy_mode = getattr(environment, "deploy_mode", DeployMode.PREVIEW.value)
                     try:
-                        provisioner.teardown(environment.namespace_name)
+                        if deploy_mode == DeployMode.COMPOSE.value:
+                            from app.services.compose_deploy import teardown_compose
+
+                            workspace_root: Path | None = None
+                            if environment.workspace_id is not None:
+                                workspace_row = await session.get(
+                                    ProvisioningWorkspace, environment.workspace_id
+                                )
+                                if workspace_row is not None and workspace_row.root_dir:
+                                    workspace_root = Path(workspace_row.root_dir)
+                            await asyncio.to_thread(
+                                teardown_compose,
+                                workspace_root=workspace_root,
+                                namespace=environment.namespace_name,
+                                environment_id=str(environment.id),
+                            )
+                        elif deploy_mode == DeployMode.ATTACH.value:
+                            from app.schemas.cloud import (
+                                RunningInstanceConfig,
+                                WorkspaceWizardConfig,
+                            )
+                            from app.services.attach_deploy import teardown_attach
+                            from app.services.provisioning import ProvisioningService
+
+                            running_instance = RunningInstanceConfig()
+                            if environment.workspace_id is not None:
+                                provisioning = ProvisioningService(session)
+                                workspace_row = await session.get(
+                                    ProvisioningWorkspace, environment.workspace_id
+                                )
+                                if workspace_row is not None:
+                                    snapshot = provisioning._load_wizard_snapshot(workspace_row)
+                                    if snapshot is not None:
+                                        try:
+                                            wizard = WorkspaceWizardConfig.model_validate(
+                                                {**snapshot, "has_credentials": False}
+                                            )
+                                            running_instance = wizard.running_instance
+                                        except Exception:
+                                            pass
+                            await asyncio.to_thread(
+                                teardown_attach,
+                                running_instance=running_instance,
+                                namespace=environment.namespace_name,
+                                settings=settings,
+                            )
+                        else:
+                            provisioner.teardown(environment.namespace_name)
                     except Exception as cleanup_exc:
                         logger.warning(
                             "teardown_namespace_cleanup_failed",
                             environment_id=environment_id,
                             namespace=environment.namespace_name,
+                            deploy_mode=deploy_mode,
                             error=str(cleanup_exc),
                         )
                         await _emit_log(
                             log_repo,
                             environment_id=env_uuid,
                             message=(
-                                "APPLY - namespace cleanup could not reach the cluster "
+                                "APPLY - runtime cleanup could not complete "
                                 f"({sanitize_log_message(str(cleanup_exc))}); marking DESTROYED anyway"
                             ),
                             log_level=LogLevel.WARN,
