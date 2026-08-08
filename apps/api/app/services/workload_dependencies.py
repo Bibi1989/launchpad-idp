@@ -8,9 +8,11 @@ from app.schemas.cloud import (
     AwsCloudConfig,
     AzureCloudConfig,
     CloudConfig,
+    CosmosApiKind,
     DependencyPlacement,
     GcpCloudConfig,
     LocalCloudConfig,
+    SqlDatabaseEngine,
     WorkloadDependenciesConfig,
 )
 
@@ -45,8 +47,16 @@ def validate_managed_dependencies(
                 cloud.resources.cloud_sql,
                 "Managed Postgres requires Cloud SQL (enable in GCP resources)",
             )
+            _require(
+                cloud.resources.cloud_sql_engine == SqlDatabaseEngine.POSTGRES,
+                "Managed Postgres requires Cloud SQL engine set to postgres",
+            )
         elif isinstance(cloud, AwsCloudConfig):
             _require(cloud.resources.rds, "Managed Postgres requires RDS (enable in AWS resources)")
+            _require(
+                cloud.resources.rds_engine == SqlDatabaseEngine.POSTGRES,
+                "Managed Postgres requires RDS engine set to postgres",
+            )
         elif isinstance(cloud, LocalCloudConfig):
             raise ValueError("Managed Postgres is not available for local (kind) workspaces")
         else:
@@ -58,8 +68,16 @@ def validate_managed_dependencies(
                 cloud.resources.cloud_sql,
                 "Managed MySQL requires Cloud SQL (enable in GCP resources)",
             )
+            _require(
+                cloud.resources.cloud_sql_engine == SqlDatabaseEngine.MYSQL,
+                "Managed MySQL requires Cloud SQL engine set to mysql",
+            )
         elif isinstance(cloud, AwsCloudConfig):
             _require(cloud.resources.rds, "Managed MySQL requires RDS (enable in AWS resources)")
+            _require(
+                cloud.resources.rds_engine == SqlDatabaseEngine.MYSQL,
+                "Managed MySQL requires RDS engine set to mysql",
+            )
         elif isinstance(cloud, LocalCloudConfig):
             raise ValueError("Managed MySQL is not available for local (kind) workspaces")
         else:
@@ -67,12 +85,13 @@ def validate_managed_dependencies(
 
     if dependencies.mariadb.enabled and dependencies.mariadb.placement == DependencyPlacement.MANAGED:
         if isinstance(cloud, GcpCloudConfig):
-            _require(
-                cloud.resources.cloud_sql,
-                "Managed MariaDB requires Cloud SQL (enable in GCP resources)",
-            )
+            raise ValueError("Managed MariaDB is not available on Cloud SQL; use MySQL or in-cluster")
         elif isinstance(cloud, AwsCloudConfig):
             _require(cloud.resources.rds, "Managed MariaDB requires RDS (enable in AWS resources)")
+            _require(
+                cloud.resources.rds_engine == SqlDatabaseEngine.MARIADB,
+                "Managed MariaDB requires RDS engine set to mariadb",
+            )
         elif isinstance(cloud, LocalCloudConfig):
             raise ValueError("Managed MariaDB is not available for local (kind) workspaces")
         else:
@@ -83,6 +102,10 @@ def validate_managed_dependencies(
             _require(
                 cloud.resources.cosmos_db,
                 "Managed MongoDB requires Cosmos DB (enable in Azure resources)",
+            )
+            _require(
+                cloud.resources.cosmos_api == CosmosApiKind.MONGODB,
+                "Managed MongoDB requires Cosmos DB API set to mongodb",
             )
         elif isinstance(cloud, LocalCloudConfig):
             raise ValueError("Managed MongoDB is not available for local (kind) workspaces")
@@ -97,10 +120,18 @@ def validate_managed_dependencies(
                 cloud.resources.memorystore,
                 "Managed Redis requires Memorystore (enable in GCP resources)",
             )
+            _require(
+                cloud.resources.memorystore_engine.value == "redis",
+                "Managed Redis requires Memorystore engine set to redis",
+            )
         elif isinstance(cloud, AwsCloudConfig):
             _require(
                 cloud.resources.elasticache,
                 "Managed Redis requires ElastiCache (enable in AWS resources)",
+            )
+            _require(
+                cloud.resources.elasticache_engine.value == "redis",
+                "Managed Redis requires ElastiCache engine set to redis",
             )
         elif isinstance(cloud, AzureCloudConfig):
             _require(

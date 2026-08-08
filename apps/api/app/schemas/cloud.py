@@ -38,6 +38,36 @@ class NetworkTopology(str, Enum):
     STANDARD = "standard"
 
 
+class SqlDatabaseEngine(str, Enum):
+    """Managed relational engine for Cloud SQL / RDS."""
+
+    POSTGRES = "postgres"
+    MYSQL = "mysql"
+    MARIADB = "mariadb"
+
+
+class CacheEngine(str, Enum):
+    """Managed cache engine for Memorystore / ElastiCache."""
+
+    REDIS = "redis"
+    MEMCACHED = "memcached"
+
+
+class CosmosApiKind(str, Enum):
+    """Azure Cosmos DB API surface."""
+
+    MONGODB = "mongodb"
+    SQL = "sql"
+
+
+class LambdaRuntime(str, Enum):
+    """AWS Lambda runtime for scaffolded functions."""
+
+    NODEJS20 = "nodejs20.x"
+    PYTHON312 = "python3.12"
+    GO1X = "provided.al2023"
+
+
 class KubernetesPackaging(str, Enum):
     """Workload packaging layout written under ``infra/`` when a cluster is selected."""
 
@@ -283,13 +313,21 @@ class GcpResources(BaseModel):
     cloud_run: bool = False
     cloud_functions: bool = False
     cloud_sql: bool = False
+    cloud_sql_engine: SqlDatabaseEngine = SqlDatabaseEngine.POSTGRES
     cloud_storage: bool = False
     pubsub: bool = False
     memorystore: bool = False
+    memorystore_engine: CacheEngine = CacheEngine.REDIS
     bigquery: bool = False
     region: str = Field(default="us-central1", min_length=2, max_length=64)
     machine_type: str = Field(default="e2-standard-4", min_length=3, max_length=64)
     project_id: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
+
+    @model_validator(mode="after")
+    def validate_gcp_service_options(self) -> GcpResources:
+        if self.cloud_sql and self.cloud_sql_engine == SqlDatabaseEngine.MARIADB:
+            raise ValueError("Cloud SQL supports postgres or mysql (not mariadb)")
+        return self
 
 
 # --- AWS ---
@@ -304,9 +342,12 @@ class AwsResources(BaseModel):
     eks: bool = False
     secrets_manager: bool = True
     rds: bool = False
+    rds_engine: SqlDatabaseEngine = SqlDatabaseEngine.POSTGRES
     ecr: bool = False
     elasticache: bool = False
+    elasticache_engine: CacheEngine = CacheEngine.REDIS
     lambda_fn: bool = False
+    lambda_runtime: LambdaRuntime = LambdaRuntime.NODEJS20
     dynamodb: bool = False
     sqs: bool = False
     alb: bool = False
@@ -328,6 +369,7 @@ class AzureResources(BaseModel):
     acr: bool = False
     storage_account: bool = False
     cosmos_db: bool = False
+    cosmos_api: CosmosApiKind = CosmosApiKind.MONGODB
     redis_cache: bool = False
     app_service: bool = False
     log_analytics: bool = False

@@ -14,10 +14,15 @@ const { t } = useI18n()
 const props = defineProps<{
   provider: CloudProvider
   gcpCloudSql?: boolean
+  gcpCloudSqlEngine?: 'postgres' | 'mysql' | 'mariadb'
   gcpMemorystore?: boolean
+  gcpMemorystoreEngine?: 'redis' | 'memcached'
   awsRds?: boolean
+  awsRdsEngine?: 'postgres' | 'mysql' | 'mariadb'
   awsElasticache?: boolean
+  awsElasticacheEngine?: 'redis' | 'memcached'
   azureCosmosDb?: boolean
+  azureCosmosApi?: 'mongodb' | 'sql'
   azureRedisCache?: boolean
   disabled?: boolean
 }>()
@@ -60,17 +65,42 @@ function storeRef(key: DataStoreKind): DataStoreDependency {
 
 function managedAvailable(key: DataStoreKind): boolean {
   if (props.provider === 'local') return false
-  if (key === 'postgres' || key === 'mysql') {
-    if (props.provider === 'gcp') return Boolean(props.gcpCloudSql)
-    if (props.provider === 'aws') return Boolean(props.awsRds)
+  if (key === 'postgres') {
+    if (props.provider === 'gcp') {
+      return Boolean(props.gcpCloudSql) && (props.gcpCloudSqlEngine ?? 'postgres') === 'postgres'
+    }
+    if (props.provider === 'aws') {
+      return Boolean(props.awsRds) && (props.awsRdsEngine ?? 'postgres') === 'postgres'
+    }
+    return false
+  }
+  if (key === 'mysql') {
+    if (props.provider === 'gcp') {
+      return Boolean(props.gcpCloudSql) && props.gcpCloudSqlEngine === 'mysql'
+    }
+    if (props.provider === 'aws') {
+      return Boolean(props.awsRds) && props.awsRdsEngine === 'mysql'
+    }
     return false
   }
   if (key === 'mongodb') {
-    return props.provider === 'azure' && Boolean(props.azureCosmosDb)
+    return (
+      props.provider === 'azure' &&
+      Boolean(props.azureCosmosDb) &&
+      (props.azureCosmosApi ?? 'mongodb') === 'mongodb'
+    )
   }
   if (key === 'redis') {
-    if (props.provider === 'gcp') return Boolean(props.gcpMemorystore)
-    if (props.provider === 'aws') return Boolean(props.awsElasticache)
+    if (props.provider === 'gcp') {
+      return (
+        Boolean(props.gcpMemorystore) && (props.gcpMemorystoreEngine ?? 'redis') === 'redis'
+      )
+    }
+    if (props.provider === 'aws') {
+      return (
+        Boolean(props.awsElasticache) && (props.awsElasticacheEngine ?? 'redis') === 'redis'
+      )
+    }
     if (props.provider === 'azure') return Boolean(props.azureRedisCache)
     return false
   }

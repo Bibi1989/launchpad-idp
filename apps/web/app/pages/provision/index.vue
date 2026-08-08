@@ -43,6 +43,13 @@ import {
   enhanceDockerScaffoldTargets,
 } from '~/utils/workspaceRepoScaffold'
 import { AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, AWS_INSTANCE_TYPES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
+import {
+  AWS_SERVICE_OPTIONS,
+  AZURE_SERVICE_OPTIONS,
+  CLOUDFLARE_SERVICE_OPTIONS,
+  GCP_SERVICE_OPTIONS,
+  hasKubernetesClusterService,
+} from '~/utils/cloudServiceOptions'
 
 const {
   createWorkspace,
@@ -102,9 +109,11 @@ const form = reactive({
     cloud_run: false,
     cloud_functions: false,
     cloud_sql: false,
+    cloud_sql_engine: 'postgres' as 'postgres' | 'mysql' | 'mariadb',
     cloud_storage: false,
     pubsub: false,
     memorystore: false,
+    memorystore_engine: 'redis' as 'redis' | 'memcached',
     bigquery: false,
     region: 'us-central1',
     machine_type: 'e2-standard-4',
@@ -119,9 +128,12 @@ const form = reactive({
     eks: false,
     secrets_manager: true,
     rds: false,
+    rds_engine: 'postgres' as 'postgres' | 'mysql' | 'mariadb',
     ecr: false,
     elasticache: false,
+    elasticache_engine: 'redis' as 'redis' | 'memcached',
     lambda_fn: false,
+    lambda_runtime: 'nodejs20.x' as 'nodejs20.x' | 'python3.12' | 'provided.al2023',
     dynamodb: false,
     sqs: false,
     alb: false,
@@ -139,6 +151,7 @@ const form = reactive({
     acr: false,
     storage_account: false,
     cosmos_db: false,
+    cosmos_api: 'mongodb' as 'mongodb' | 'sql',
     redis_cache: false,
     app_service: false,
     log_analytics: false,
@@ -220,10 +233,23 @@ const selectedExisting = computed(() =>
 
 const hasKubernetesRuntime = computed(() => {
   if (form.provider === 'local') return true
-  if (form.provider === 'gcp') return form.gcp.gke || form.gcp.cloud_run
-  if (form.provider === 'aws') return form.aws.eks
-  if (form.provider === 'azure') return form.azure.aks || form.azure.container_apps
+  if (form.provider === 'gcp') {
+    return hasKubernetesClusterService('gcp', form.gcp as unknown as Record<string, unknown>)
+  }
+  if (form.provider === 'aws') {
+    return hasKubernetesClusterService('aws', form.aws as unknown as Record<string, unknown>)
+  }
+  if (form.provider === 'azure') {
+    return hasKubernetesClusterService('azure', form.azure as unknown as Record<string, unknown>)
+  }
   return false
+})
+
+watch(hasKubernetesRuntime, (ok) => {
+  if (ok || form.provider === 'local') return
+  infraGeneration.value.kubernetes.enabled = false
+  form.kubernetes_packaging = 'none'
+  form.kubernetes_options = defaultKubernetesWorkloadOptions()
 })
 
 const showsKubernetesPackaging = computed(() => {
@@ -396,81 +422,10 @@ const stepTitle = computed(() => {
   }
 })
 
-const gcpResourceOptions = computed(() =>
-  ([
-    'vpc',
-    'subnets',
-    'gke',
-    'artifact_registry',
-    'cloud_run',
-    'cloud_functions',
-    'cloud_sql',
-    'cloud_storage',
-    'pubsub',
-    'memorystore',
-    'bigquery',
-  ] as const).map((key) => ({
-    key,
-    title: t(`provision.resources.gcp.${key}.title`),
-    desc: t(`provision.resources.gcp.${key}.desc`),
-  })),
-)
-
-const awsResourceOptions = computed(() =>
-  ([
-    'vpc',
-    'subnets',
-    'ec2',
-    's3',
-    'eks',
-    'secrets_manager',
-    'rds',
-    'ecr',
-    'elasticache',
-    'lambda_fn',
-    'dynamodb',
-    'sqs',
-    'alb',
-  ] as const).map((key) => ({
-    key,
-    title: t(`provision.resources.aws.${key}.title`),
-  })),
-)
-
-const azureResourceOptions = computed(() =>
-  ([
-    'vnet',
-    'subnets',
-    'aks',
-    'key_vault',
-    'container_apps',
-    'acr',
-    'storage_account',
-    'cosmos_db',
-    'redis_cache',
-    'app_service',
-    'log_analytics',
-  ] as const).map((key) => ({
-    key,
-    title: t(`provision.resources.azure.${key}.title`),
-  })),
-)
-
-const cloudflareResourceOptions = computed(() =>
-  ([
-    'workers',
-    'r2',
-    'dns_records',
-    'pages',
-    'kv',
-    'd1',
-    'tunnels',
-    'queues',
-  ] as const).map((key) => ({
-    key,
-    title: t(`provision.resources.cloudflare.${key}.title`),
-  })),
-)
+const gcpResourceOptions = GCP_SERVICE_OPTIONS
+const awsResourceOptions = AWS_SERVICE_OPTIONS
+const azureResourceOptions = AZURE_SERVICE_OPTIONS
+const cloudflareResourceOptions = CLOUDFLARE_SERVICE_OPTIONS
 
 function clearCredentials() {
   form.credentials.gcp_sa_key_json = ''
@@ -540,9 +495,11 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       cloud_run: false,
       cloud_functions: false,
       cloud_sql: false,
+      cloud_sql_engine: 'postgres',
       cloud_storage: false,
       pubsub: false,
       memorystore: false,
+      memorystore_engine: 'redis',
       bigquery: false,
       region: 'us-central1',
       machine_type: 'e2-standard-4',
@@ -560,9 +517,12 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       eks: false,
       secrets_manager: true,
       rds: false,
+      rds_engine: 'postgres',
       ecr: false,
       elasticache: false,
+      elasticache_engine: 'redis',
       lambda_fn: false,
+      lambda_runtime: 'nodejs20.x',
       dynamodb: false,
       sqs: false,
       alb: false,
@@ -582,6 +542,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       acr: false,
       storage_account: false,
       cosmos_db: false,
+      cosmos_api: 'mongodb',
       redis_cache: false,
       app_service: false,
       log_analytics: false,
@@ -1172,20 +1133,12 @@ async function onPrimaryAction() {
               </select>
             </label>
             <div class="space-y-2">
-              <label
-                v-for="opt in gcpResourceOptions"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-4 transition hover:bg-[var(--lp-panel-2)]"
-              >
-                <div class="flex items-center gap-3">
-                  <span class="material-symbols-outlined text-[var(--lp-muted)]">lan</span>
-                  <div>
-                    <p class="text-sm font-medium">{{ opt.title }}</p>
-                    <p class="text-xs text-[var(--lp-muted)]">{{ opt.desc }}</p>
-                  </div>
-                </div>
-                <input v-model="form.gcp[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
+              <p class="lp-label">{{ t('provision.fields.services') }}</p>
+              <CloudServiceToggleList
+                :options="gcpResourceOptions"
+                :resources="form.gcp as unknown as Record<string, boolean | string | null | undefined>"
+                :disabled="loadingConfig"
+              />
             </div>
           </template>
 
@@ -1213,15 +1166,14 @@ async function onPrimaryAction() {
                 <option value="standard">{{ t('provision.topology.standard') }}</option>
               </select>
             </label>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label
-                v-for="opt in awsResourceOptions"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input v-model="form.aws[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
+            <div class="space-y-2">
+              <p class="lp-label">{{ t('provision.fields.services') }}</p>
+              <CloudServiceToggleList
+                :options="awsResourceOptions"
+                :resources="form.aws as unknown as Record<string, boolean | string | null | undefined>"
+                :columns="2"
+                :disabled="loadingConfig"
+              />
             </div>
           </template>
 
@@ -1253,15 +1205,14 @@ async function onPrimaryAction() {
                 <option value="standard">{{ t('provision.topology.standard') }}</option>
               </select>
             </label>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label
-                v-for="opt in azureResourceOptions"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input v-model="form.azure[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
+            <div class="space-y-2">
+              <p class="lp-label">{{ t('provision.fields.services') }}</p>
+              <CloudServiceToggleList
+                :options="azureResourceOptions"
+                :resources="form.azure as unknown as Record<string, boolean | string | null | undefined>"
+                :columns="2"
+                :disabled="loadingConfig"
+              />
             </div>
           </template>
 
@@ -1274,15 +1225,14 @@ async function onPrimaryAction() {
               <span class="lp-label">{{ t('provision.fields.zoneNameOptional') }}</span>
               <input v-model="form.cloudflare.zone_name" class="lp-input" placeholder="example.com">
             </label>
-            <div class="grid gap-2 sm:grid-cols-3">
-              <label
-                v-for="opt in cloudflareResourceOptions"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input v-model="form.cloudflare[opt.key]" type="checkbox" class="h-5 w-5 accent-[var(--lp-accent)]">
-              </label>
+            <div class="space-y-2">
+              <p class="lp-label">{{ t('provision.fields.services') }}</p>
+              <CloudServiceToggleList
+                :options="cloudflareResourceOptions"
+                :resources="form.cloudflare as unknown as Record<string, boolean | string | null | undefined>"
+                :columns="3"
+                :disabled="loadingConfig"
+              />
             </div>
           </template>
 
@@ -1373,7 +1323,9 @@ async function onPrimaryAction() {
                 v-model:dependencies="form.dependencies"
                 provider="gcp"
                 :gcp-cloud-sql="form.gcp.cloud_sql"
+                :gcp-cloud-sql-engine="form.gcp.cloud_sql_engine"
                 :gcp-memorystore="form.gcp.memorystore"
+                :gcp-memorystore-engine="form.gcp.memorystore_engine"
                 class="mt-4"
                 :disabled="loadingConfig"
               />
@@ -1408,7 +1360,9 @@ async function onPrimaryAction() {
                 v-model:dependencies="form.dependencies"
                 provider="aws"
                 :aws-rds="form.aws.rds"
+                :aws-rds-engine="form.aws.rds_engine"
                 :aws-elasticache="form.aws.elasticache"
+                :aws-elasticache-engine="form.aws.elasticache_engine"
                 class="mt-4"
                 :disabled="loadingConfig"
               />
@@ -1432,6 +1386,7 @@ async function onPrimaryAction() {
                 v-model:dependencies="form.dependencies"
                 provider="azure"
                 :azure-cosmos-db="form.azure.cosmos_db"
+                :azure-cosmos-api="form.azure.cosmos_api"
                 :azure-redis-cache="form.azure.redis_cache"
                 class="mt-4"
                 :disabled="loadingConfig"

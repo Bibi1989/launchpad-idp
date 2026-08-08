@@ -45,6 +45,32 @@ def test_managed_postgres_requires_cloud_sql() -> None:
         validate_managed_dependencies(cloud, deps)
 
 
+def test_managed_mysql_requires_matching_engine() -> None:
+    cloud = GcpCloudConfig(
+        resources=GcpResources(
+            project_id="my-project",
+            cloud_sql=True,
+            cloud_sql_engine="postgres",
+            gke=True,
+        ),
+    )
+    deps = WorkloadDependenciesConfig(
+        mysql=DataStoreDependency(enabled=True, placement=DependencyPlacement.MANAGED),
+    )
+    with pytest.raises(ValueError, match="mysql"):
+        validate_managed_dependencies(cloud, deps)
+
+
+def test_managed_postgres_ok_with_matching_engine() -> None:
+    cloud = GcpCloudConfig(
+        resources=GcpResources(project_id="my-project", cloud_sql=True, gke=True),
+    )
+    deps = WorkloadDependenciesConfig(
+        postgres=DataStoreDependency(enabled=True, placement=DependencyPlacement.MANAGED),
+    )
+    validate_managed_dependencies(cloud, deps)
+
+
 def test_managed_postgres_wizard_validation() -> None:
     cloud = GcpCloudConfig(
         resources=GcpResources(project_id="my-project", cloud_sql=True, gke=True),

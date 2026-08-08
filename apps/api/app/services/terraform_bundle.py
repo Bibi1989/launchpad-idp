@@ -18,13 +18,35 @@ from app.schemas.cloud import (
     AwsResources,
     AzureCloudConfig,
     AzureResources,
+    CacheEngine,
     CloudConfig,
     CloudflareResources,
+    CosmosApiKind,
     GcpCloudConfig,
     GcpResources,
     NetworkTopology,
     SecretBackend,
+    SqlDatabaseEngine,
 )
+
+
+def _gcp_cloud_sql_database_version(engine: SqlDatabaseEngine) -> str:
+    if engine == SqlDatabaseEngine.MYSQL:
+        return "MYSQL_8_0"
+    if engine == SqlDatabaseEngine.MARIADB:
+        # Cloud SQL has no MariaDB product; closest wire-compatible path is MySQL.
+        return "MYSQL_8_0"
+    return "POSTGRES_15"
+
+
+def _aws_rds_engine(engine: SqlDatabaseEngine) -> str:
+    return engine.value
+
+
+def _azure_cosmos_kind(api: CosmosApiKind) -> str:
+    if api == CosmosApiKind.MONGODB:
+        return "MongoDB"
+    return "GlobalDocumentDB"
 
 TF_ROOT = Path("infra") / "terraform"
 
@@ -314,7 +336,10 @@ def gcp_required_apis(r: GcpResources) -> list[str]:
     if r.pubsub:
         apis.append("pubsub.googleapis.com")
     if r.memorystore:
-        apis.append("redis.googleapis.com")
+        if r.memorystore_engine == CacheEngine.MEMCACHED:
+            apis.append("memcache.googleapis.com")
+        else:
+            apis.append("redis.googleapis.com")
     if r.bigquery:
         apis.append("bigquery.googleapis.com")
     if r.secret_backend == SecretBackend.SECRET_MANAGER:
@@ -1726,6 +1751,7 @@ def _extras_gcp(r: GcpResources) -> str:
         )
 
     if r.cloud_sql:
+        db_version = _gcp_cloud_sql_database_version(r.cloud_sql_engine)
         blocks.append(
             "\n".join(
                 [
@@ -1733,7 +1759,7 @@ def _extras_gcp(r: GcpResources) -> str:
                     '  name             = "${local.name_55}-sql"',
                     "  project          = var.project_id",
                     "  region           = var.region",
-                    '  database_version = "POSTGRES_15"',
+                    f'  database_version = "{db_version}"',
                     "",
                     "  settings {",
                     '    tier = "db-f1-micro"',
@@ -1784,24 +1810,47 @@ def _extras_gcp(r: GcpResources) -> str:
             )
         )
     if r.memorystore:
-        blocks.append(
-            "\n".join(
-                [
-                    'resource "google_redis_instance" "cache" {',
-                    '  name           = "${local.name_55}-redis"',
-                    "  project        = var.project_id",
-                    "  region         = var.region",
-                    '  tier           = "BASIC"',
-                    "  memory_size_gb = 1",
-                    '  redis_version  = "REDIS_7_0"',
-                    "",
-                    "  depends_on = [google_project_service.apis]",
-                    "",
-                    _governance_tags_hcl("labels", gcp=True),
-                    "}",
-                ]
+        if r.memorystore_engine == CacheEngine.MEMCACHED:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "google_memcache_instance" "cache" {',
+                        '  name           = "${local.name_55}-memcache"',
+                        "  project        = var.project_id",
+                        "  region         = var.region",
+                        "  node_count     = 1",
+                        "",
+                        "  node_config {",
+                        "    cpu_count      = 1",
+                        "    memory_size_mb = 1024",
+                        "  }",
+                        "",
+                        "  depends_on = [google_project_service.apis]",
+                        "",
+                        _governance_tags_hcl("labels", gcp=True),
+                        "}",
+                    ]
+                )
             )
-        )
+        else:
+            blocks.append(
+                "\n".join(
+                    [
+                        'resource "google_redis_instance" "cache" {',
+                        '  name           = "${local.name_55}-redis"',
+                        "  project        = var.project_id",
+                        "  region         = var.region",
+                        '  tier           = "BASIC"',
+                        "  memory_size_gb = 1",
+                        '  redis_version  = "REDIS_7_0"',
+                        "",
+                        "  depends_on = [google_project_service.apis]",
+                        "",
+                        _governance_tags_hcl("labels", gcp=True),
+                        "}",
+                    ]
+                )
+            )
     if r.bigquery:
         blocks.append(
             "\n".join(
@@ -1848,12 +1897,13 @@ def _extras_aws(r: AwsResources) -> str:
             )
         )
     if r.rds:
+        rds_engine = _aws_rds_engine(r.rds_engine)
         blocks.append(
             "\n".join(
                 [
                     'resource "aws_db_instance" "primary" {',
                     '  identifier          = "${local.name_55}-db"',
-                    '  engine              = "postgres"',
+                    f'  engine              = "{rds_engine}"',
                     '  instance_class      = "db.t3.micro"',
                     "  allocated_storage   = 20",
                     '  username            = "launchpad"',
@@ -1879,12 +1929,13 @@ def _extras_aws(r: AwsResources) -> str:
             )
         )
     if r.elasticache:
+        cache_engine = r.elasticache_engine.value
         blocks.append(
             "\n".join(
                 [
-                    'resource "aws_elasticache_cluster" "redis" {',
+                    'resource "aws_elasticache_cluster" "cache" {',
                     "  cluster_id      = local.name_40",
-                    '  engine          = "redis"',
+                    f'  engine          = "{cache_engine}"',
                     '  node_type       = "cache.t3.micro"',
                     "  num_cache_nodes = 1",
                     "",
@@ -1894,6 +1945,14 @@ def _extras_aws(r: AwsResources) -> str:
             )
         )
     if r.lambda_fn:
+        lambda_runtime = r.lambda_runtime.value
+        lambda_handler = (
+            "index.handler"
+            if lambda_runtime.startswith("nodejs")
+            else "index.handler"
+            if lambda_runtime.startswith("python")
+            else "bootstrap"
+        )
         blocks.append(
             "\n".join(
                 [
@@ -1910,8 +1969,8 @@ def _extras_aws(r: AwsResources) -> str:
                     'resource "aws_lambda_function" "app" {',
                     "  function_name = local.name_63",
                     "  role          = aws_iam_role.lambda.arn",
-                    '  handler       = "index.handler"',
-                    '  runtime       = "nodejs20.x"',
+                    f'  handler       = "{lambda_handler}"',
+                    f'  runtime       = "{lambda_runtime}"',
                     '  filename      = "placeholder.zip"',
                     "",
                     _governance_tags_hcl("tags"),
@@ -2005,6 +2064,7 @@ def _extras_azure(r: AzureResources) -> str:
             )
         )
     if r.cosmos_db:
+        cosmos_kind = _azure_cosmos_kind(r.cosmos_api)
         blocks.append(
             "\n".join(
                 [
@@ -2013,7 +2073,7 @@ def _extras_azure(r: AzureResources) -> str:
                     "  resource_group_name = var.resource_group",
                     "  location            = var.location",
                     '  offer_type          = "Standard"',
-                    '  kind                = "GlobalDocumentDB"',
+                    f'  kind                = "{cosmos_kind}"',
                     "",
                     "  consistency_policy { consistency_level = \"Session\" }",
                     "  geo_location { location = var.location; failover_priority = 0 }",
@@ -2253,38 +2313,50 @@ def _root_outputs(cloud: CloudConfig) -> str:
                 "",
             ]
         if r.cloud_sql:
-            lines += [
-                'output "managed_postgres_host" {',
-                "  value = google_sql_database_instance.primary.private_ip_address",
-                "}",
-                "",
-                'output "managed_postgres_connection_url" {',
-                '  value     = format("postgresql://launchpad:change-me@%s:5432/app", google_sql_database_instance.primary.private_ip_address)',
-                "  sensitive = true",
-                "}",
-                "",
-                'output "managed_mysql_host" {',
-                "  value = google_sql_database_instance.primary.private_ip_address",
-                "}",
-                "",
-                'output "managed_mysql_connection_url" {',
-                '  value     = format("mysql://launchpad:change-me@%s:3306/app", google_sql_database_instance.primary.private_ip_address)',
-                "  sensitive = true",
-                "}",
-                "",
-            ]
+            if r.cloud_sql_engine == SqlDatabaseEngine.POSTGRES:
+                lines += [
+                    'output "managed_postgres_host" {',
+                    "  value = google_sql_database_instance.primary.private_ip_address",
+                    "}",
+                    "",
+                    'output "managed_postgres_connection_url" {',
+                    '  value     = format("postgresql://launchpad:change-me@%s:5432/app", google_sql_database_instance.primary.private_ip_address)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
+            else:
+                lines += [
+                    'output "managed_mysql_host" {',
+                    "  value = google_sql_database_instance.primary.private_ip_address",
+                    "}",
+                    "",
+                    'output "managed_mysql_connection_url" {',
+                    '  value     = format("mysql://launchpad:change-me@%s:3306/app", google_sql_database_instance.primary.private_ip_address)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
         if r.memorystore:
-            lines += [
-                'output "managed_redis_host" {',
-                "  value = google_redis_instance.cache.host",
-                "}",
-                "",
-                'output "managed_redis_connection_url" {',
-                '  value     = format("redis://%s:6379/0", google_redis_instance.cache.host)',
-                "  sensitive = true",
-                "}",
-                "",
-            ]
+            if r.memorystore_engine == CacheEngine.MEMCACHED:
+                lines += [
+                    'output "managed_memcached_host" {',
+                    "  value = google_memcache_instance.cache.discovery_endpoint",
+                    "}",
+                    "",
+                ]
+            else:
+                lines += [
+                    'output "managed_redis_host" {',
+                    "  value = google_redis_instance.cache.host",
+                    "}",
+                    "",
+                    'output "managed_redis_connection_url" {',
+                    '  value     = format("redis://%s:6379/0", google_redis_instance.cache.host)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
         if r.secret_backend == SecretBackend.SECRET_MANAGER:
             lines += [
                 'output "secret_id" {',
@@ -2319,38 +2391,62 @@ def _root_outputs(cloud: CloudConfig) -> str:
                 "",
             ]
         if r.rds:
-            lines += [
-                'output "managed_postgres_host" {',
-                "  value = aws_db_instance.primary.address",
-                "}",
-                "",
-                'output "managed_postgres_connection_url" {',
-                '  value     = format("postgresql://launchpad:change-me@%s:5432/app", aws_db_instance.primary.address)',
-                "  sensitive = true",
-                "}",
-                "",
-                'output "managed_mysql_host" {',
-                "  value = aws_db_instance.primary.address",
-                "}",
-                "",
-                'output "managed_mysql_connection_url" {',
-                '  value     = format("mysql://launchpad:change-me@%s:3306/app", aws_db_instance.primary.address)',
-                "  sensitive = true",
-                "}",
-                "",
-            ]
+            if r.rds_engine == SqlDatabaseEngine.POSTGRES:
+                lines += [
+                    'output "managed_postgres_host" {',
+                    "  value = aws_db_instance.primary.address",
+                    "}",
+                    "",
+                    'output "managed_postgres_connection_url" {',
+                    '  value     = format("postgresql://launchpad:change-me@%s:5432/app", aws_db_instance.primary.address)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
+            elif r.rds_engine == SqlDatabaseEngine.MARIADB:
+                lines += [
+                    'output "managed_mariadb_host" {',
+                    "  value = aws_db_instance.primary.address",
+                    "}",
+                    "",
+                    'output "managed_mariadb_connection_url" {',
+                    '  value     = format("mysql://launchpad:change-me@%s:3306/app", aws_db_instance.primary.address)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
+            else:
+                lines += [
+                    'output "managed_mysql_host" {',
+                    "  value = aws_db_instance.primary.address",
+                    "}",
+                    "",
+                    'output "managed_mysql_connection_url" {',
+                    '  value     = format("mysql://launchpad:change-me@%s:3306/app", aws_db_instance.primary.address)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
         if r.elasticache:
-            lines += [
-                'output "managed_redis_host" {',
-                "  value = aws_elasticache_cluster.redis.cache_nodes[0].address",
-                "}",
-                "",
-                'output "managed_redis_connection_url" {',
-                '  value     = format("redis://%s:6379/0", aws_elasticache_cluster.redis.cache_nodes[0].address)',
-                "  sensitive = true",
-                "}",
-                "",
-            ]
+            if r.elasticache_engine == CacheEngine.MEMCACHED:
+                lines += [
+                    'output "managed_memcached_host" {',
+                    "  value = aws_elasticache_cluster.cache.cache_nodes[0].address",
+                    "}",
+                    "",
+                ]
+            else:
+                lines += [
+                    'output "managed_redis_host" {',
+                    "  value = aws_elasticache_cluster.cache.cache_nodes[0].address",
+                    "}",
+                    "",
+                    'output "managed_redis_connection_url" {',
+                    '  value     = format("redis://%s:6379/0", aws_elasticache_cluster.cache.cache_nodes[0].address)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
     elif isinstance(cloud, AzureCloudConfig):
         r = cloud.resources
         lines += [
@@ -2381,17 +2477,30 @@ def _root_outputs(cloud: CloudConfig) -> str:
                 "",
             ]
         if r.cosmos_db:
-            lines += [
-                'output "managed_mongodb_host" {',
-                "  value = azurerm_cosmosdb_account.app.name",
-                "}",
-                "",
-                'output "managed_mongodb_connection_url" {',
-                '  value     = format("mongodb://launchpad:change-me@%s:10255/app", azurerm_cosmosdb_account.app.name)',
-                "  sensitive = true",
-                "}",
-                "",
-            ]
+            if r.cosmos_api == CosmosApiKind.MONGODB:
+                lines += [
+                    'output "managed_mongodb_host" {',
+                    "  value = azurerm_cosmosdb_account.app.name",
+                    "}",
+                    "",
+                    'output "managed_mongodb_connection_url" {',
+                    '  value     = format("mongodb://launchpad:change-me@%s:10255/app", azurerm_cosmosdb_account.app.name)',
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
+            else:
+                lines += [
+                    'output "managed_cosmos_sql_host" {',
+                    "  value = azurerm_cosmosdb_account.app.name",
+                    "}",
+                    "",
+                    'output "managed_cosmos_sql_endpoint" {',
+                    "  value     = azurerm_cosmosdb_account.app.endpoint",
+                    "  sensitive = true",
+                    "}",
+                    "",
+                ]
         if r.redis_cache:
             lines += [
                 'output "managed_redis_host" {',

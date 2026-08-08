@@ -37,6 +37,7 @@ import {
   CLOUDFLARE_SERVICE_OPTIONS,
   enabledCloudServices,
   GCP_SERVICE_OPTIONS,
+  hasKubernetesClusterService,
 } from '~/utils/cloudServiceOptions'
 
 const { t } = useI18n()
@@ -91,9 +92,11 @@ const form = reactive({
     cloud_run: false,
     cloud_functions: false,
     cloud_sql: false,
+    cloud_sql_engine: 'postgres' as 'postgres' | 'mysql' | 'mariadb',
     cloud_storage: false,
     pubsub: false,
     memorystore: false,
+    memorystore_engine: 'redis' as 'redis' | 'memcached',
     bigquery: false,
     region: 'us-central1',
     machine_type: 'e2-standard-4',
@@ -108,9 +111,12 @@ const form = reactive({
     eks: false,
     secrets_manager: true,
     rds: false,
+    rds_engine: 'postgres' as 'postgres' | 'mysql' | 'mariadb',
     ecr: false,
     elasticache: false,
+    elasticache_engine: 'redis' as 'redis' | 'memcached',
     lambda_fn: false,
+    lambda_runtime: 'nodejs20.x' as 'nodejs20.x' | 'python3.12' | 'provided.al2023',
     dynamodb: false,
     sqs: false,
     alb: false,
@@ -128,6 +134,7 @@ const form = reactive({
     acr: false,
     storage_account: false,
     cosmos_db: false,
+    cosmos_api: 'mongodb' as 'mongodb' | 'sql',
     redis_cache: false,
     app_service: false,
     log_analytics: false,
@@ -174,15 +181,27 @@ const progressPct = computed(() => (currentStep.value / TOTAL_STEPS) * 100)
 const isLocalProvider = computed(() => provider.value === 'local')
 const hasKubernetesRuntime = computed(() => {
   if (provider.value === 'local') return true
-  if (provider.value === 'gcp') return form.gcp.gke || form.gcp.cloud_run
-  if (provider.value === 'aws') return form.aws.eks
-  if (provider.value === 'azure') return form.azure.aks || form.azure.container_apps
+  if (provider.value === 'gcp') {
+    return hasKubernetesClusterService('gcp', form.gcp as unknown as Record<string, unknown>)
+  }
+  if (provider.value === 'aws') {
+    return hasKubernetesClusterService('aws', form.aws as unknown as Record<string, unknown>)
+  }
+  if (provider.value === 'azure') {
+    return hasKubernetesClusterService('azure', form.azure as unknown as Record<string, unknown>)
+  }
   return false
 })
 const showsKubernetesPackaging = computed(() => {
   if (!hasKubernetesRuntime.value) return false
   if (provider.value === 'local') return true
   return infraGeneration.value.kubernetes.enabled
+})
+
+watch(hasKubernetesRuntime, (ok) => {
+  if (ok || provider.value === 'local') return
+  infraGeneration.value.kubernetes.enabled = false
+  form.kubernetes_packaging = 'none'
 })
 
 const stepTitle = computed(() => {
@@ -527,24 +546,28 @@ onMounted(async () => {
             </li>
           </ul>
         </div>
-        <WorkspaceInfraActions
-          v-model:config="infraGeneration"
-          v-model:container-scaffold="form.container_scaffold"
-          mode="selection"
-          :provision-disabled="isLocalProvider"
-          :kubernetes-disabled="!hasKubernetesRuntime"
-          :disabled="saving"
-        />
-        <ContainerScaffoldCard
-          v-if="form.container_scaffold.enabled"
-          v-model="form.container_scaffold"
-          :disabled="saving"
-        />
-        <CostOptimizationCard
-          v-if="infraGeneration.kubernetes.enabled"
-          v-model:cost="form.cost_optimization"
-          :disabled="saving"
-        />
+        <template v-if="isLocalProvider">
+          <WorkspaceInfraActions
+            v-model:config="infraGeneration"
+            v-model:container-scaffold="form.container_scaffold"
+            mode="selection"
+            provision-disabled
+            :disabled="saving"
+          />
+          <ContainerScaffoldCard
+            v-if="form.container_scaffold.enabled"
+            v-model="form.container_scaffold"
+            :disabled="saving"
+          />
+          <CostOptimizationCard
+            v-if="infraGeneration.kubernetes.enabled"
+            v-model:cost="form.cost_optimization"
+            :disabled="saving"
+          />
+        </template>
+        <p v-else class="text-sm text-[var(--lp-muted)]">
+          {{ t('scaffold.setup.selectServicesFirst') }}
+        </p>
       </div>
 
       <div v-show="currentStep === 2" class="space-y-4">
@@ -591,21 +614,11 @@ onMounted(async () => {
           </label>
           <div class="space-y-2">
             <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
-            <label
-              v-for="opt in GCP_SERVICE_OPTIONS"
-              :key="opt.key"
-              class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3 transition hover:bg-[var(--lp-panel-2)]"
-            >
-              <div>
-                <p class="text-sm font-medium">{{ opt.title }}</p>
-                <p v-if="opt.desc" class="text-xs text-[var(--lp-muted)]">{{ opt.desc }}</p>
-              </div>
-              <input
-                v-model="(form.gcp as Record<string, boolean | string>)[opt.key]"
-                type="checkbox"
-                class="h-5 w-5 accent-[var(--lp-accent)]"
-              >
-            </label>
+            <CloudServiceToggleList
+              :options="GCP_SERVICE_OPTIONS"
+              :resources="form.gcp as unknown as Record<string, boolean | string | null | undefined>"
+              :disabled="saving"
+            />
           </div>
           <CloudCredentialsFields v-model:credentials="form.credentials" provider="gcp" />
         </template>
@@ -629,20 +642,12 @@ onMounted(async () => {
           </label>
           <div class="space-y-2">
             <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label
-                v-for="opt in AWS_SERVICE_OPTIONS"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input
-                  v-model="(form.aws as Record<string, boolean | string | null>)[opt.key]"
-                  type="checkbox"
-                  class="h-5 w-5 accent-[var(--lp-accent)]"
-                >
-              </label>
-            </div>
+            <CloudServiceToggleList
+              :options="AWS_SERVICE_OPTIONS"
+              :resources="form.aws as unknown as Record<string, boolean | string | null | undefined>"
+              :columns="2"
+              :disabled="saving"
+            />
           </div>
           <CloudCredentialsFields v-model:credentials="form.credentials" provider="aws" />
         </template>
@@ -670,20 +675,12 @@ onMounted(async () => {
           </label>
           <div class="space-y-2">
             <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label
-                v-for="opt in AZURE_SERVICE_OPTIONS"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input
-                  v-model="(form.azure as Record<string, boolean | string>)[opt.key]"
-                  type="checkbox"
-                  class="h-5 w-5 accent-[var(--lp-accent)]"
-                >
-              </label>
-            </div>
+            <CloudServiceToggleList
+              :options="AZURE_SERVICE_OPTIONS"
+              :resources="form.azure as unknown as Record<string, boolean | string | null | undefined>"
+              :columns="2"
+              :disabled="saving"
+            />
           </div>
           <CloudCredentialsFields v-model:credentials="form.credentials" provider="azure" />
         </template>
@@ -693,25 +690,47 @@ onMounted(async () => {
             <span class="lp-label">Account ID</span>
             <input v-model="form.cloudflare.account_id" class="lp-input">
           </label>
+          <label class="block space-y-2">
+            <span class="lp-label">Zone name (optional)</span>
+            <input v-model="form.cloudflare.zone_name" class="lp-input" placeholder="example.com">
+          </label>
           <div class="space-y-2">
             <p class="lp-label">{{ t('scaffold.setup.servicesInIac') }}</p>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label
-                v-for="opt in CLOUDFLARE_SERVICE_OPTIONS"
-                :key="opt.key"
-                class="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--lp-line)] p-3"
-              >
-                <span class="text-sm">{{ opt.title }}</span>
-                <input
-                  v-model="(form.cloudflare as Record<string, boolean | string | null>)[opt.key]"
-                  type="checkbox"
-                  class="h-5 w-5 accent-[var(--lp-accent)]"
-                >
-              </label>
-            </div>
+            <CloudServiceToggleList
+              :options="CLOUDFLARE_SERVICE_OPTIONS"
+              :resources="form.cloudflare as unknown as Record<string, boolean | string | null | undefined>"
+              :columns="3"
+              :disabled="saving"
+            />
           </div>
           <CloudCredentialsFields v-model:credentials="form.credentials" provider="cloudflare" />
         </template>
+
+        <div
+          v-if="!isLocalProvider"
+          class="rounded-xl border border-[var(--lp-line)] p-4"
+        >
+          <p class="lp-label mb-3">{{ t('provision.infraGeneration') }}</p>
+          <WorkspaceInfraActions
+            v-model:config="infraGeneration"
+            v-model:container-scaffold="form.container_scaffold"
+            mode="selection"
+            :kubernetes-disabled="!hasKubernetesRuntime"
+            :disabled="saving"
+          />
+          <ContainerScaffoldCard
+            v-if="form.container_scaffold.enabled"
+            v-model="form.container_scaffold"
+            class="mt-4"
+            :disabled="saving"
+          />
+          <CostOptimizationCard
+            v-if="infraGeneration.kubernetes.enabled"
+            v-model:cost="form.cost_optimization"
+            class="mt-4"
+            :disabled="saving"
+          />
+        </div>
       </div>
 
       <div v-show="currentStep === 3" class="space-y-4">

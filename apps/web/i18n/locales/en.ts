@@ -694,7 +694,8 @@ export default {
       "accountId": "Account ID",
       "zoneNameOptional": "Zone name (optional)",
       "clusterName": "Cluster name",
-      "kubectlContext": "kubectl context"
+      "kubectlContext": "kubectl context",
+      "services": "Cloud services"
     },
     "resources": {
       "gcp": {
@@ -1396,7 +1397,7 @@ export default {
         "label": "Kubernetes",
         "title": "Create Kubernetes",
         "blurb": "Scaffold raw manifests, Helm chart, or Kustomize layout under infra/.",
-        "runtimeHint": "Enable a Kubernetes runtime (GKE, EKS, AKS, Cloud Run, or Container Apps) first.",
+        "runtimeHint": "Enable a Kubernetes cluster service (GKE, EKS, or AKS) first.",
         "modeK8s": "K8s manifests",
         "modeHelm": "Helm chart",
         "modeKustomize": "Kustomize"
@@ -1528,6 +1529,7 @@ export default {
       "clusterName": "Cluster name",
       "kubectlContext": "kubectl context",
       "servicesInIac": "Services to include in IaC",
+      "selectServicesFirst": "Next: select cloud services, then enable Infrastructure generation (Kubernetes unlocks when GKE, EKS, or AKS is selected).",
       "reviewWorkspace": "Workspace",
       "reviewProvider": "Provider",
       "reviewProvision": "Provision",

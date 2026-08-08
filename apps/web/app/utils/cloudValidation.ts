@@ -183,6 +183,11 @@ export const defaultKubernetesWorkloadOptions = (): z.infer<
 
 export const networkTopologySchema = z.enum(['simple', 'standard'])
 
+export const sqlDatabaseEngineSchema = z.enum(['postgres', 'mysql', 'mariadb'])
+export const cacheEngineSchema = z.enum(['redis', 'memcached'])
+export const cosmosApiKindSchema = z.enum(['mongodb', 'sql'])
+export const lambdaRuntimeSchema = z.enum(['nodejs20.x', 'python3.12', 'provided.al2023'])
+
 export const gcpResourcesSchema = z.object({
   vpc: z.boolean().default(true),
   subnets: z.boolean().default(true),
@@ -193,9 +198,11 @@ export const gcpResourcesSchema = z.object({
   cloud_run: z.boolean().default(false),
   cloud_functions: z.boolean().default(false),
   cloud_sql: z.boolean().default(false),
+  cloud_sql_engine: sqlDatabaseEngineSchema.default('postgres'),
   cloud_storage: z.boolean().default(false),
   pubsub: z.boolean().default(false),
   memorystore: z.boolean().default(false),
+  memorystore_engine: cacheEngineSchema.default('redis'),
   bigquery: z.boolean().default(false),
   region: z.string().min(2).max(64).default('us-central1'),
   machine_type: z.string().min(3).max(64).default('e2-standard-4'),
@@ -205,6 +212,14 @@ export const gcpResourcesSchema = z.object({
     .min(3, 'GCP Project ID is required (at least 3 characters)')
     .max(64)
     .regex(/^[a-z][a-z0-9-]*$/, 'Use lowercase letters, numbers, and hyphens'),
+}).superRefine((value, ctx) => {
+  if (value.cloud_sql && value.cloud_sql_engine === 'mariadb') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Cloud SQL supports postgres or mysql (not mariadb)',
+      path: ['cloud_sql_engine'],
+    })
+  }
 })
 
 export const awsResourcesSchema = z.object({
@@ -216,9 +231,12 @@ export const awsResourcesSchema = z.object({
   eks: z.boolean().default(false),
   secrets_manager: z.boolean().default(true),
   rds: z.boolean().default(false),
+  rds_engine: sqlDatabaseEngineSchema.default('postgres'),
   ecr: z.boolean().default(false),
   elasticache: z.boolean().default(false),
+  elasticache_engine: cacheEngineSchema.default('redis'),
   lambda_fn: z.boolean().default(false),
+  lambda_runtime: lambdaRuntimeSchema.default('nodejs20.x'),
   dynamodb: z.boolean().default(false),
   sqs: z.boolean().default(false),
   alb: z.boolean().default(false),
@@ -237,6 +255,7 @@ export const azureResourcesSchema = z.object({
   acr: z.boolean().default(false),
   storage_account: z.boolean().default(false),
   cosmos_db: z.boolean().default(false),
+  cosmos_api: cosmosApiKindSchema.default('mongodb'),
   redis_cache: z.boolean().default(false),
   app_service: z.boolean().default(false),
   log_analytics: z.boolean().default(false),

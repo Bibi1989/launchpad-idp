@@ -694,7 +694,8 @@ export default {
       "accountId": "Account-ID",
       "zoneNameOptional": "Zonenname (optional)",
       "clusterName": "Cluster-Name",
-      "kubectlContext": "kubectl-Kontext"
+      "kubectlContext": "kubectl-Kontext",
+      "services": "Cloud-Services"
     },
     "resources": {
       "gcp": {
@@ -1396,7 +1397,7 @@ export default {
         "label": "Kubernetes",
         "title": "Kubernetes erstellen",
         "blurb": "Rohe Manifeste, Helm-Chart oder Kustomize-Layout unter infra/ scaffolden.",
-        "runtimeHint": "Zuerst Kubernetes-Runtime aktivieren (GKE, EKS, AKS, Cloud Run oder Container Apps).",
+        "runtimeHint": "Zuerst einen Kubernetes-Cluster-Service aktivieren (GKE, EKS oder AKS).",
         "modeK8s": "K8s-Manifeste",
         "modeHelm": "Helm-Chart",
         "modeKustomize": "Kustomize"
@@ -1528,6 +1529,7 @@ export default {
       "clusterName": "Cluster-Name",
       "kubectlContext": "kubectl-Kontext",
       "servicesInIac": "In IaC einzubeziehende Services",
+      "selectServicesFirst": "Als Nächstes Cloud-Services auswählen, dann Infrastruktur-Generierung aktivieren (Kubernetes wird freigeschaltet, wenn GKE, EKS oder AKS ausgewählt ist).",
       "reviewWorkspace": "Workspace",
       "reviewProvider": "Anbieter",
       "reviewProvision": "Provision",
