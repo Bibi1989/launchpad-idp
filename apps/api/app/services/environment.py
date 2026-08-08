@@ -400,6 +400,7 @@ class EnvironmentService:
             workload_image=workload_image,
             github_pr_number=payload.github_pr_number,
             github_pr_url=payload.github_pr_url,
+            deploy_mode=payload.deploy_mode,
             enable_postgres=payload.enable_postgres,
             enable_redis=payload.enable_redis,
         )
@@ -1099,6 +1100,47 @@ class EnvironmentService:
         workspace,
         provisioning: ProvisioningService,
     ) -> tuple[DeployMode, str | None]:
+        from app.services.preview_deploy_plan import resolve_preview_deploy_plan
+
+        config = None
+        try:
+            snapshot = provisioning._load_wizard_snapshot(workspace)
+            if snapshot is not None:
+                from app.schemas.cloud import WorkspaceWizardConfig
+
+                config = WorkspaceWizardConfig.model_validate(
+                    {**snapshot, "has_credentials": False}
+                )
+        except Exception:
+            config = None
+
+        if config is not None:
+            plan = resolve_preview_deploy_plan(
+                config,
+                requested_deploy_mode=payload.deploy_mode,
+            )
+            # Merge smart dependency defaults when the client left them off.
+            if not payload.enable_postgres and plan.enable_postgres:
+                payload.enable_postgres = True
+            if not payload.enable_redis and plan.enable_redis:
+                payload.enable_redis = True
+            if plan.deploy_mode == DeployMode.MANIFEST:
+                packaging = provisioning.get_workspace_kubernetes_packaging(workspace)
+                if packaging not in {KubernetesPackaging.RAW_MANIFESTS, KubernetesPackaging.HELM}:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "manifest_unavailable",
+                            "message": (
+                                "Manifest deploy requires a workspace with either raw Kubernetes "
+                                "manifests under infra/k8s/manifests/ or a Helm chart under "
+                                "infra/helm/app-chart/"
+                            ),
+                        },
+                    )
+                return DeployMode.MANIFEST, packaging.value
+            return plan.deploy_mode, plan.manifest_packaging
+
         packaging = provisioning.get_workspace_kubernetes_packaging(workspace)
         if payload.deploy_mode == DeployMode.MANIFEST:
             if packaging not in {KubernetesPackaging.RAW_MANIFESTS, KubernetesPackaging.HELM}:
@@ -1116,6 +1158,8 @@ class EnvironmentService:
             return DeployMode.MANIFEST, packaging.value
         if payload.deploy_mode == DeployMode.PREVIEW:
             return DeployMode.PREVIEW, packaging.value if packaging else None
+        if payload.deploy_mode in {DeployMode.COMPOSE, DeployMode.ATTACH}:
+            return payload.deploy_mode, packaging.value if packaging else None
         if packaging in {KubernetesPackaging.RAW_MANIFESTS, KubernetesPackaging.HELM}:
             return DeployMode.MANIFEST, packaging.value
         return DeployMode.PREVIEW, packaging.value if packaging else None

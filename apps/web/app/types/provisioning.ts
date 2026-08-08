@@ -2,6 +2,8 @@ export type CloudProvider = 'local' | 'gcp' | 'aws' | 'azure' | 'cloudflare'
 export type IaCEngine = 'terraform' | 'opentofu' | 'pulumi'
 export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm' | 'kustomize'
 export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
+export type WorkspaceRuntimeMode = 'kubernetes' | 'docker_compose' | 'running_instance'
+export type RunningInstanceKind = 'kube_context' | 'serverless' | 'endpoint'
 export type ProvisionEngine = IaCEngine
 export type K8sScaffoldMode = 'k8s' | 'helm' | 'kustomize'
 export type CicdPlatform = 'github' | 'gitlab'
@@ -169,6 +171,12 @@ export interface WorkloadDependenciesConfig {
   redis: DataStoreDependency
 }
 
+export interface RunningInstanceConfig {
+  kind: RunningInstanceKind
+  kube_context?: string | null
+  endpoint_url?: string | null
+}
+
 export interface IaCBundleSummary {
   workspace_id: string
   engine: IaCEngine
@@ -204,6 +212,8 @@ export interface WorkspaceWizardConfig {
     | { provider: 'azure'; resources: Record<string, unknown> }
     | { provider: 'cloudflare'; resources: Record<string, unknown> }
   run_init: boolean
+  runtime_mode: WorkspaceRuntimeMode
+  running_instance: RunningInstanceConfig
   artifact_mode: WorkspaceArtifactsMode
   kubernetes_packaging: KubernetesPackaging
   kubernetes_options: KubernetesWorkloadOptions

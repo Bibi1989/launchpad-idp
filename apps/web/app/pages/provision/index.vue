@@ -20,8 +20,10 @@ import type {
   InfraGenerationConfig,
   KubernetesPackaging,
   KubernetesWorkloadOptions,
+  RunningInstanceConfig,
   WorkspaceArtifactsMode,
   WorkspaceListItem,
+  WorkspaceRuntimeMode,
   WorkspaceWizardConfig,
   WorkloadDependenciesConfig,
 } from '~/types/provisioning'
@@ -38,6 +40,13 @@ import {
   infraConfigToArtifactMode,
   infraConfigToKubernetesPackaging,
 } from '~/utils/workspaceInfraScaffold'
+import {
+  defaultRunningInstanceConfig,
+  defaultRuntimeModeForProvider,
+  normalizeArtifactsForRuntimeMode,
+  showsKubernetesRuntimeUi,
+  validateRunningInstanceFields,
+} from '~/utils/workspaceRuntimeMode'
 import {
   detectRepoStackForScaffold,
   enhanceDockerScaffoldTargets,
@@ -88,6 +97,8 @@ const form = reactive({
   name: '',
   iac_engine: 'terraform' as IaCEngine,
   provider: 'local' as CloudProvider,
+  runtime_mode: 'kubernetes' as WorkspaceRuntimeMode,
+  running_instance: defaultRunningInstanceConfig() as RunningInstanceConfig,
   run_init: true,
   artifact_mode: 'manifest_only' as WorkspaceArtifactsMode,
   kubernetes_packaging: 'raw_manifests' as KubernetesPackaging,
@@ -253,12 +264,59 @@ watch(hasKubernetesRuntime, (ok) => {
 })
 
 const showsKubernetesPackaging = computed(() => {
+  if (!showsKubernetesRuntimeUi(form.runtime_mode)) return false
   if (!hasKubernetesRuntime.value) return false
   if (form.provider === 'local') return form.artifact_mode !== 'iac_only'
   return infraGeneration.value.kubernetes.enabled
 })
 
 const isLocalProvider = computed(() => form.provider === 'local')
+
+const currentProviderResources = computed((): Record<string, unknown> => {
+  if (form.provider === 'gcp') return form.gcp as unknown as Record<string, unknown>
+  if (form.provider === 'aws') return form.aws as unknown as Record<string, unknown>
+  if (form.provider === 'azure') return form.azure as unknown as Record<string, unknown>
+  if (form.provider === 'cloudflare') return form.cloudflare as unknown as Record<string, unknown>
+  return form.local as unknown as Record<string, unknown>
+})
+
+function applyRuntimeModeNormalization() {
+  const normalized = normalizeArtifactsForRuntimeMode({
+    provider: form.provider,
+    runtimeMode: form.runtime_mode,
+    artifactMode: form.artifact_mode,
+    kubernetesPackaging: form.kubernetes_packaging,
+    containerScaffold: form.container_scaffold,
+    runningInstance: form.running_instance,
+    resources: currentProviderResources.value,
+  })
+  form.artifact_mode = normalized.artifactMode
+  form.kubernetes_packaging = normalized.kubernetesPackaging
+  Object.assign(form.container_scaffold, normalized.containerScaffold)
+  Object.assign(form.running_instance, normalized.runningInstance)
+  if (form.runtime_mode === 'docker_compose' || form.runtime_mode === 'running_instance') {
+    infraGeneration.value.kubernetes.enabled = false
+  } else if (form.provider === 'local') {
+    infraGeneration.value.kubernetes.enabled = true
+  }
+}
+
+watch(
+  () => form.runtime_mode,
+  () => {
+    applyRuntimeModeNormalization()
+  },
+)
+
+watch(
+  () => form.provider,
+  (provider) => {
+    if (provider !== 'local' && form.runtime_mode === 'docker_compose') {
+      form.runtime_mode = defaultRuntimeModeForProvider(provider)
+    }
+    applyRuntimeModeNormalization()
+  },
+)
 
 const packagingSectionEl = ref<HTMLElement | null>(null)
 
@@ -449,6 +507,11 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
   form.name = config.name
   form.iac_engine = config.iac_engine
   form.run_init = config.run_init
+  form.runtime_mode = config.runtime_mode ?? 'kubernetes'
+  Object.assign(form.running_instance, {
+    ...defaultRunningInstanceConfig(),
+    ...(config.running_instance ?? {}),
+  })
   form.artifact_mode = config.artifact_mode
   form.kubernetes_packaging = config.kubernetes_packaging
   infraGeneration.value = artifactModeToInfraConfig(
@@ -480,7 +543,10 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       context: 'kind-launchpad',
       ...resources,
     })
-    if (form.kubernetes_packaging === 'none') {
+    if (
+      form.runtime_mode === 'kubernetes'
+      && form.kubernetes_packaging === 'none'
+    ) {
       form.kubernetes_packaging = 'raw_manifests'
     }
     form.github.set_cloud_secrets = false
@@ -614,11 +680,14 @@ function buildWizardPayload(): ProvisioningWizardInput {
     form.cost_optimization,
   )
   form.kubernetes_options = syncedOptions
+  applyRuntimeModeNormalization()
   const base = {
     name: form.name,
     iac_engine: form.iac_engine,
     credentials: form.credentials,
     run_init: form.run_init,
+    runtime_mode: form.runtime_mode,
+    running_instance: form.running_instance,
     kubernetes_packaging: form.kubernetes_packaging,
     kubernetes_options: syncedOptions,
     cost_optimization: form.cost_optimization,
@@ -626,13 +695,15 @@ function buildWizardPayload(): ProvisioningWizardInput {
     dependencies: workloadDependenciesSchema.parse(form.dependencies),
   }
   if (form.provider === 'local') {
+    const isK8s = form.runtime_mode === 'kubernetes'
     return {
       ...base,
       provider: 'local',
       resources: form.local,
-      artifact_mode: 'manifest_only',
-      kubernetes_packaging:
-        form.kubernetes_packaging === 'none' ? 'raw_manifests' : form.kubernetes_packaging,
+      artifact_mode: isK8s ? 'manifest_only' : form.artifact_mode,
+      kubernetes_packaging: isK8s
+        ? (form.kubernetes_packaging === 'none' ? 'raw_manifests' : form.kubernetes_packaging)
+        : 'none',
     }
   }
   if (form.provider === 'gcp') {
@@ -678,17 +749,55 @@ function validateStep(): boolean {
   }
   if (currentStep.value === 2) {
     if (form.provider === 'local') {
-      if (!form.local.cluster_name.trim() || !form.local.context.trim()) {
-        fieldError.value = t('provision.errors.localClusterRequired')
+      if (form.runtime_mode === 'kubernetes') {
+        if (!form.local.cluster_name.trim() || !form.local.context.trim()) {
+          fieldError.value = t('provision.errors.localClusterRequired')
+          return false
+        }
+        if (!infraGeneration.value.kubernetes.enabled) {
+          fieldError.value = t('provision.errors.enableK8sGeneration')
+          return false
+        }
+      }
+      const attachErr = validateRunningInstanceFields({
+        provider: form.provider,
+        mode: form.runtime_mode,
+        runningInstance: form.running_instance,
+        resources: currentProviderResources.value,
+      })
+      if (attachErr === 'kube_context') {
+        fieldError.value = t('provision.errors.runtimeKubeContext')
         return false
       }
-      if (!infraGeneration.value.kubernetes.enabled) {
-        fieldError.value = t('provision.errors.enableK8sGeneration')
+      if (attachErr === 'endpoint_url') {
+        fieldError.value = t('provision.errors.runtimeEndpoint')
         return false
       }
       return true
     }
-    if (!infraGeneration.value.provision.enabled && !infraGeneration.value.kubernetes.enabled) {
+    const attachErr = validateRunningInstanceFields({
+      provider: form.provider,
+      mode: form.runtime_mode,
+      runningInstance: form.running_instance,
+      resources: currentProviderResources.value,
+    })
+    if (attachErr === 'kube_context') {
+      fieldError.value = t('provision.errors.runtimeKubeContext')
+      return false
+    }
+    if (attachErr === 'endpoint_url') {
+      fieldError.value = t('provision.errors.runtimeEndpoint')
+      return false
+    }
+    if (attachErr === 'serverless_unavailable') {
+      fieldError.value = t('provision.errors.runtimeServerless')
+      return false
+    }
+    if (
+      form.runtime_mode === 'kubernetes'
+      && !infraGeneration.value.provision.enabled
+      && !infraGeneration.value.kubernetes.enabled
+    ) {
       fieldError.value = t('provision.errors.enableProvisionOrK8s')
       return false
     }
@@ -1093,6 +1202,14 @@ async function onPrimaryAction() {
               <p class="mt-2 text-xs text-[var(--lp-muted)]">{{ p.blurb }}</p>
             </button>
           </div>
+
+          <WorkspaceRuntimeModePicker
+            v-model:mode="form.runtime_mode"
+            v-model:running-instance="form.running_instance"
+            :provider="form.provider"
+            :resources="currentProviderResources"
+            :disabled="loadingConfig"
+          />
         </div>
 
         <!-- Step 2: Resources -->
@@ -1255,48 +1372,75 @@ async function onPrimaryAction() {
           />
 
           <template v-if="isLocalProvider">
-            <div
-              class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
-            >
-              <p class="font-medium text-[var(--lp-text)]">{{ t('provision.sandbox.title') }}</p>
-              <ol class="mt-2 list-decimal space-y-1 pl-5">
-                <li>{{ t('provision.sandboxSteps.kindUp') }}</li>
-                <li>
-                  {{ t('provision.sandboxSteps.envVars', { context: form.local.context }) }}
-                </li>
-                <li>{{ t('provision.sandboxSteps.applyDestroy') }}</li>
-                <li>{{ t('provision.sandboxSteps.switchProvider') }}</li>
-              </ol>
-            </div>
-            <div class="grid gap-4 sm:grid-cols-2">
-              <label class="block space-y-2">
-                <span class="lp-label">{{ t('provision.fields.clusterName') }}</span>
-                <input v-model="form.local.cluster_name" class="lp-input" placeholder="launchpad">
-              </label>
-              <label class="block space-y-2">
-                <span class="lp-label">{{ t('provision.fields.kubectlContext') }}</span>
-                <input v-model="form.local.context" class="lp-input" placeholder="kind-launchpad">
-              </label>
-            </div>
-            <div ref="packagingSectionEl">
-              <WorkspaceInfraActions
-                v-model:config="infraGeneration"
-                v-model:container-scaffold="form.container_scaffold"
-                mode="selection"
-                provision-disabled
-                :disabled="loadingConfig"
-              />
+            <template v-if="form.runtime_mode === 'kubernetes'">
+              <div
+                class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
+              >
+                <p class="font-medium text-[var(--lp-text)]">{{ t('provision.sandbox.title') }}</p>
+                <ol class="mt-2 list-decimal space-y-1 pl-5">
+                  <li>{{ t('provision.sandboxSteps.kindUp') }}</li>
+                  <li>
+                    {{ t('provision.sandboxSteps.envVars', { context: form.local.context }) }}
+                  </li>
+                  <li>{{ t('provision.sandboxSteps.applyDestroy') }}</li>
+                  <li>{{ t('provision.sandboxSteps.switchProvider') }}</li>
+                </ol>
+              </div>
+              <div class="grid gap-4 sm:grid-cols-2">
+                <label class="block space-y-2">
+                  <span class="lp-label">{{ t('provision.fields.clusterName') }}</span>
+                  <input v-model="form.local.cluster_name" class="lp-input" placeholder="launchpad">
+                </label>
+                <label class="block space-y-2">
+                  <span class="lp-label">{{ t('provision.fields.kubectlContext') }}</span>
+                  <input v-model="form.local.context" class="lp-input" placeholder="kind-launchpad">
+                </label>
+              </div>
+              <div ref="packagingSectionEl">
+                <WorkspaceInfraActions
+                  v-model:config="infraGeneration"
+                  v-model:container-scaffold="form.container_scaffold"
+                  mode="selection"
+                  provision-disabled
+                  :disabled="loadingConfig"
+                />
+                <ContainerScaffoldCard
+                  v-if="form.container_scaffold.enabled"
+                  v-model="form.container_scaffold"
+                  class="mt-4"
+                  :disabled="loadingConfig"
+                />
+                <KubernetesPackagingPicker
+                  v-model:packaging="form.kubernetes_packaging"
+                  v-model:options="form.kubernetes_options"
+                  :allow-none="false"
+                  class="mt-4"
+                />
+                <WorkloadDependenciesPicker
+                  v-model:dependencies="form.dependencies"
+                  provider="local"
+                  class="mt-4"
+                  :disabled="loadingConfig"
+                />
+                <CostOptimizationCard
+                  v-model:cost="form.cost_optimization"
+                  class="mt-4"
+                  :disabled="loadingConfig"
+                />
+              </div>
+            </template>
+            <template v-else-if="form.runtime_mode === 'docker_compose'">
+              <div
+                class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
+              >
+                <p class="font-medium text-[var(--lp-text)]">
+                  {{ t('provision.runtimeMode.composeHint.title') }}
+                </p>
+                <p class="mt-2">{{ t('provision.runtimeMode.composeHint.blurb') }}</p>
+              </div>
               <ContainerScaffoldCard
-                v-if="form.container_scaffold.enabled"
                 v-model="form.container_scaffold"
-                class="mt-4"
                 :disabled="loadingConfig"
-              />
-              <KubernetesPackagingPicker
-                v-model:packaging="form.kubernetes_packaging"
-                v-model:options="form.kubernetes_options"
-                :allow-none="false"
-                class="mt-4"
               />
               <WorkloadDependenciesPicker
                 v-model:dependencies="form.dependencies"
@@ -1304,12 +1448,20 @@ async function onPrimaryAction() {
                 class="mt-4"
                 :disabled="loadingConfig"
               />
-              <CostOptimizationCard
-                v-model:cost="form.cost_optimization"
+            </template>
+            <template v-else>
+              <div
+                class="rounded-xl border border-[var(--lp-line)] p-4 text-sm text-[var(--lp-muted)]"
+              >
+                {{ t('provision.runtimeMode.attach.localBlurb') }}
+              </div>
+              <WorkloadDependenciesPicker
+                v-model:dependencies="form.dependencies"
+                provider="local"
                 class="mt-4"
                 :disabled="loadingConfig"
               />
-            </div>
+            </template>
           </template>
 
           <template v-if="form.provider === 'gcp'">
@@ -1474,6 +1626,10 @@ async function onPrimaryAction() {
               <div>
                 <dt class="lp-label">{{ t('provision.review.provider') }}</dt>
                 <dd class="font-mono uppercase">{{ form.provider }}</dd>
+              </div>
+              <div>
+                <dt class="lp-label">{{ t('provision.runtimeMode.title') }}</dt>
+                <dd class="font-mono">{{ form.runtime_mode }}</dd>
               </div>
               <div>
                 <dt class="lp-label">{{ t('provision.review.engine') }}</dt>

@@ -48,6 +48,7 @@ from app.schemas.cloud import (
     WorkspaceTemplateInfo,
     WorkspaceWizardConfig,
     WorkspaceArtifactsMode,
+    WorkspaceRuntimeMode,
     GcpApiEnablementResponse,
 )
 from app.services.github_service import GitHubProvisioningService
@@ -79,16 +80,17 @@ class ProvisioningService:
         org_id: UUID | None = None,
     ) -> IaCBundleSummary:
         if isinstance(request.cloud, LocalCloudConfig):
-            try:
-                await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
-            except RuntimeError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={
-                        "code": "kind_cluster_unavailable",
-                        "message": str(exc),
-                    },
-                ) from exc
+            if request.runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
+                try:
+                    await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
+                except RuntimeError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail={
+                            "code": "kind_cluster_unavailable",
+                            "message": str(exc),
+                        },
+                    ) from exc
 
         request = await self._with_account_credentials(request, owner)
         request = self._with_gcp_project_from_sa(request)
@@ -536,16 +538,17 @@ class ProvisioningService:
         is_local = isinstance(request.cloud, LocalCloudConfig)
 
         if is_local:
-            try:
-                await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
-            except RuntimeError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={
-                        "code": "kind_cluster_unavailable",
-                        "message": str(exc),
-                    },
-                ) from exc
+            if request.runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
+                try:
+                    await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
+                except RuntimeError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail={
+                            "code": "kind_cluster_unavailable",
+                            "message": str(exc),
+                        },
+                    ) from exc
 
         workspace_path = self._workspace_root(row)
         try:
@@ -933,6 +936,8 @@ class ProvisioningService:
             "iac_engine": request.iac_engine.value,
             "cloud": request.cloud.model_dump(mode="json"),
             "run_init": request.run_init,
+            "runtime_mode": request.runtime_mode.value,
+            "running_instance": request.running_instance.model_dump(mode="json"),
             "artifact_mode": request.artifact_mode.value,
             "kubernetes_packaging": request.kubernetes_packaging.value,
             "kubernetes_options": request.kubernetes_options.model_dump(mode="json"),
@@ -1057,6 +1062,8 @@ class ProvisioningService:
             cloud=config.cloud,
             credentials=credentials,
             run_init=config.run_init,
+            runtime_mode=config.runtime_mode,
+            running_instance=config.running_instance,
             artifact_mode=config.artifact_mode,
             kubernetes_packaging=config.kubernetes_packaging,
             kubernetes_options=config.kubernetes_options,
@@ -1112,7 +1119,10 @@ class ProvisioningService:
                 )
 
         request = self._request_from_wizard_config(config, credentials)
-        if isinstance(request.cloud, LocalCloudConfig):
+        if (
+            isinstance(request.cloud, LocalCloudConfig)
+            and request.runtime_mode == WorkspaceRuntimeMode.KUBERNETES
+        ):
             try:
                 await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
             except Exception as exc:

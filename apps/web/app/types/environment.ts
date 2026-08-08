@@ -57,7 +57,7 @@ export interface Environment {
   concurrent_active_count?: number | null
   max_concurrent_environments?: number | null
   runtime_summary?: string | null
-  deploy_mode?: 'preview' | 'manifest'
+  deploy_mode?: 'preview' | 'manifest' | 'compose' | 'attach'
   manifest_packaging?: string | null
   enable_postgres?: boolean
   enable_redis?: boolean
@@ -146,6 +146,7 @@ export interface PreviewLaunchPayload {
   github_pr_url?: string | null
   enable_postgres?: boolean
   enable_redis?: boolean
+  deploy_mode?: 'preview' | 'manifest' | 'compose' | 'attach'
 }
 
 export interface EnvironmentExtendPayload {

@@ -6,15 +6,26 @@ import type {
   GitHubRepositorySearchItem,
   GitlabProjectItem,
   WorkspaceListItem,
+  WorkspaceWizardConfig,
 } from '~/types/provisioning'
 import type { GitHost } from '~/types/git'
 import { githubCloneUrl } from '~/utils/githubAccount'
 import { hasAwsAuth, hasGcpAuth } from '~/utils/cloudValidation'
+import {
+  resolvePreviewDeployPlan,
+  type PreviewDeployPlan,
+} from '~/utils/previewDeployPlan'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
 
 const { launchPreview, getKindStatus, getPreviewBuildStatus } = useEnvironments()
-const { listWorkspaces, getWorkspace, listGithubInstallations, getGitlabStatus } = useProvisioning()
+const {
+  listWorkspaces,
+  getWorkspace,
+  getWizardConfig,
+  listGithubInstallations,
+  getGitlabStatus,
+} = useProvisioning()
 const { t } = useI18n()
 const route = useRoute()
 
@@ -30,6 +41,8 @@ const kindStatusLoading = ref(false)
 const kindStatusError = ref<string | null>(null)
 const previewBuild = ref<PreviewBuildStatus | null>(null)
 const gitHost = ref<GitHost>('github')
+const workspacePlan = ref<PreviewDeployPlan | null>(null)
+const workspaceWizard = ref<WorkspaceWizardConfig | null>(null)
 
 const githubInstallations = ref<GitHubInstallationItem[]>([])
 const selectedInstallationId = ref<number | null>(null)
@@ -107,7 +120,11 @@ const kindBannerTone = computed(() => {
 })
 
 const localLaunchBlocked = computed(
-  () => isLocal.value && kindStatus.value != null && !kindStatus.value.can_launch,
+  () =>
+    isLocal.value
+    && !workspacePlan.value?.skip_local_cluster
+    && kindStatus.value != null
+    && !kindStatus.value.can_launch,
 )
 
 const buildsFromRepo = computed(
@@ -126,6 +143,9 @@ const usesWorkspaceSource = computed(() => Boolean(form.workspace_id && selected
 
 const workspaceHasManifests = computed(() => {
   if (!usesWorkspaceSource.value || !selectedWorkspace.value) return false
+  if (workspacePlan.value?.deploy_mode === 'compose' || workspacePlan.value?.deploy_mode === 'attach') {
+    return false
+  }
   // If the workspace carries Kubernetes manifests, MANIFEST deploy takes the image from the
   // Deployment/Helm chart itself. So the user should not override with the default nginx image.
   return (
@@ -296,6 +316,24 @@ function applyWorkspaceSelection(workspaceId: string) {
   if (ws.provider !== 'local' && isPreviewProvider(ws.provider)) {
     form.provider = ws.provider
   }
+  void applyWorkspacePlan(workspaceId)
+}
+
+async function applyWorkspacePlan(workspaceId: string) {
+  try {
+    const config = await getWizardConfig(workspaceId)
+    workspaceWizard.value = config
+    const plan = resolvePreviewDeployPlan(config)
+    workspacePlan.value = plan
+    form.enable_postgres = plan.enable_postgres
+    form.enable_redis = plan.enable_redis
+    if (config.cloud.provider !== 'local' && isPreviewProvider(config.cloud.provider)) {
+      form.provider = config.cloud.provider
+    }
+  } catch {
+    workspaceWizard.value = null
+    workspacePlan.value = null
+  }
 }
 
 watch(linkedFromQuery, (id) => {
@@ -310,6 +348,9 @@ watch(
   (id) => {
     if (id) {
       applyWorkspaceSelection(id)
+    } else {
+      workspacePlan.value = null
+      workspaceWizard.value = null
     }
     if (!isLocal.value) {
       step.value = 1
@@ -498,11 +539,13 @@ async function launch() {
     return
   }
   if (isLocal.value) {
-    await refreshKindStatus()
-    if (localLaunchBlocked.value) {
-      errorMessage.value = kindStatus.value?.message
-        || t('launch.errors.localClusterNotReady')
-      return
+    if (!workspacePlan.value?.skip_local_cluster) {
+      await refreshKindStatus()
+      if (localLaunchBlocked.value) {
+        errorMessage.value = kindStatus.value?.message
+          || t('launch.errors.localClusterNotReady')
+        return
+      }
     }
   }
 
@@ -513,6 +556,9 @@ async function launch() {
       provider: form.provider,
       enable_postgres: form.enable_postgres,
       enable_redis: form.enable_redis,
+    }
+    if (workspacePlan.value?.deploy_mode) {
+      payload.deploy_mode = workspacePlan.value.deploy_mode
     }
     if (form.ttl_unit === 'minutes') {
       payload.ttl_minutes = form.ttl_value
@@ -717,6 +763,23 @@ async function launch() {
             <NuxtLink to="/provision" class="text-[var(--lp-accent)] hover:underline">{{ t('launch.createOne') }}</NuxtLink>
           </template>
         </p>
+        <div
+          v-if="workspacePlan"
+          class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-3 text-xs text-[var(--lp-muted)]"
+        >
+          <p class="font-medium text-[var(--lp-text)]">{{ t('launch.workspace.planTitle') }}</p>
+          <p class="mt-1 font-mono">
+            {{ t('launch.workspace.planMode') }}: {{ workspacePlan.deploy_mode }}
+            · {{ t('launch.workspace.planRuntime') }}: {{ workspacePlan.runtime_mode }}
+          </p>
+          <p class="mt-1">{{ workspacePlan.reason }}</p>
+          <p v-if="workspacePlan.enable_postgres || workspacePlan.enable_redis" class="mt-1">
+            {{ t('launch.workspace.planDeps') }}:
+            <span v-if="workspacePlan.enable_postgres">Postgres/MySQL/Mongo</span>
+            <span v-if="workspacePlan.enable_postgres && workspacePlan.enable_redis"> · </span>
+            <span v-if="workspacePlan.enable_redis">Redis</span>
+          </p>
+        </div>
       </label>
 
       <template v-if="!usesWorkspaceSource">

@@ -13,6 +13,8 @@ import type {
   IaCEngine,
   InfraGenerationConfig,
   KubernetesPackaging,
+  RunningInstanceConfig,
+  WorkspaceRuntimeMode,
   WorkspaceWizardConfig,
 } from '~/types/provisioning'
 import {
@@ -39,6 +41,11 @@ import {
   GCP_SERVICE_OPTIONS,
   hasKubernetesClusterService,
 } from '~/utils/cloudServiceOptions'
+import {
+  defaultRunningInstanceConfig,
+  defaultRuntimeModeForProvider,
+  normalizeArtifactsForRuntimeMode,
+} from '~/utils/workspaceRuntimeMode'
 
 const { t } = useI18n()
 
@@ -75,6 +82,8 @@ const hasStoredCredentials = ref(false)
 const form = reactive({
   iac_engine: 'terraform' as IaCEngine,
   run_init: true,
+  runtime_mode: 'kubernetes' as WorkspaceRuntimeMode,
+  running_instance: defaultRunningInstanceConfig() as RunningInstanceConfig,
   kubernetes_packaging: 'none' as KubernetesPackaging,
   cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
   container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
@@ -249,6 +258,11 @@ function applyConfig(config: WorkspaceWizardConfig) {
   provider.value = config.cloud.provider
   form.iac_engine = config.iac_engine
   form.run_init = config.run_init
+  form.runtime_mode = config.runtime_mode ?? 'kubernetes'
+  Object.assign(form.running_instance, {
+    ...defaultRunningInstanceConfig(),
+    ...(config.running_instance ?? {}),
+  })
   form.kubernetes_packaging = config.kubernetes_packaging
   form.cost_optimization = costOptimizationFromApi(
     config.cost_optimization as unknown as Record<string, unknown>,
@@ -391,25 +405,57 @@ function buildPayload(): ProvisioningWizardInput {
     },
     form.cost_optimization,
   )
+  const resources =
+    provider.value === 'gcp'
+      ? (form.gcp as unknown as Record<string, unknown>)
+      : provider.value === 'aws'
+        ? (form.aws as unknown as Record<string, unknown>)
+        : provider.value === 'azure'
+          ? (form.azure as unknown as Record<string, unknown>)
+          : provider.value === 'cloudflare'
+            ? (form.cloudflare as unknown as Record<string, unknown>)
+            : (form.local as unknown as Record<string, unknown>)
+  if (provider.value !== 'local' && form.runtime_mode === 'docker_compose') {
+    form.runtime_mode = defaultRuntimeModeForProvider(provider.value)
+  }
+  let artifact_mode = infraConfigToArtifactMode(infraGeneration.value)
+  let kubernetes_packaging = infraConfigToKubernetesPackaging(infraGeneration.value)
+  const normalized = normalizeArtifactsForRuntimeMode({
+    provider: provider.value,
+    runtimeMode: form.runtime_mode,
+    artifactMode: artifact_mode,
+    kubernetesPackaging: kubernetes_packaging,
+    containerScaffold: form.container_scaffold,
+    runningInstance: form.running_instance,
+    resources,
+  })
+  artifact_mode = normalized.artifactMode
+  kubernetes_packaging = normalized.kubernetesPackaging
+  Object.assign(form.container_scaffold, normalized.containerScaffold)
+  Object.assign(form.running_instance, normalized.runningInstance)
+
   const base = {
     name: workspaceName.value,
     iac_engine: infraGeneration.value.provision.engine,
     credentials: form.credentials,
     run_init: form.run_init,
-    kubernetes_packaging: infraConfigToKubernetesPackaging(infraGeneration.value),
+    runtime_mode: form.runtime_mode,
+    running_instance: form.running_instance,
+    kubernetes_packaging,
     kubernetes_options,
     cost_optimization: form.cost_optimization,
     container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
   }
-  const artifact_mode = infraConfigToArtifactMode(infraGeneration.value)
 
   if (provider.value === 'local') {
+    const isK8s = form.runtime_mode === 'kubernetes'
     return {
       ...base,
       provider: 'local',
-      artifact_mode: 'manifest_only',
-      kubernetes_packaging:
-        base.kubernetes_packaging === 'none' ? 'raw_manifests' : base.kubernetes_packaging,
+      artifact_mode: isK8s ? 'manifest_only' : artifact_mode,
+      kubernetes_packaging: isK8s
+        ? (kubernetes_packaging === 'none' ? 'raw_manifests' : kubernetes_packaging)
+        : 'none',
       resources: form.local,
     }
   }
@@ -528,6 +574,23 @@ onMounted(async () => {
 
     <template v-else>
       <div v-show="currentStep === 1" class="space-y-4">
+        <WorkspaceRuntimeModePicker
+          v-model:mode="form.runtime_mode"
+          v-model:running-instance="form.running_instance"
+          :provider="provider"
+          :resources="
+            provider === 'gcp'
+              ? (form.gcp as unknown as Record<string, unknown>)
+              : provider === 'aws'
+                ? (form.aws as unknown as Record<string, unknown>)
+                : provider === 'azure'
+                  ? (form.azure as unknown as Record<string, unknown>)
+                  : provider === 'cloudflare'
+                    ? (form.cloudflare as unknown as Record<string, unknown>)
+                    : (form.local as unknown as Record<string, unknown>)
+          "
+          :disabled="saving"
+        />
         <div
           v-if="detectionSummary.length"
           class="rounded-xl border border-[var(--lp-accent)]/25 bg-[var(--lp-accent)]/5 px-3 py-2.5 text-sm text-[var(--lp-text)]"

@@ -5,6 +5,21 @@ export const iacEngineSchema = z.enum(['terraform', 'opentofu', 'pulumi'])
 export const secretBackendSchema = z.enum(['secret_manager', 'native_k8s'])
 export const kubernetesPackagingSchema = z.enum(['none', 'raw_manifests', 'helm', 'kustomize'])
 export const workspaceArtifactsModeSchema = z.enum(['iac_only', 'manifest_only', 'both'])
+export const workspaceRuntimeModeSchema = z.enum([
+  'kubernetes',
+  'docker_compose',
+  'running_instance',
+])
+export const runningInstanceKindSchema = z.enum([
+  'kube_context',
+  'serverless',
+  'endpoint',
+])
+export const runningInstanceSchema = z.object({
+  kind: runningInstanceKindSchema.default('kube_context'),
+  kube_context: z.string().max(128).nullable().optional(),
+  endpoint_url: z.string().max(512).nullable().optional(),
+})
 export const ingressClassSchema = z.enum([
   'nginx',
   'traefik',
@@ -451,6 +466,12 @@ const wizardCommonFields = {
   iac_engine: iacEngineSchema.default('terraform'),
   credentials: cloudCredentialsSchema.default({}),
   run_init: z.boolean().default(true),
+  runtime_mode: workspaceRuntimeModeSchema.default('kubernetes'),
+  running_instance: runningInstanceSchema.default({
+    kind: 'kube_context',
+    kube_context: null,
+    endpoint_url: null,
+  }),
   kubernetes_options: kubernetesWorkloadOptionsSchema.default(defaultKubernetesWorkloadOptions()),
   cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
   container_scaffold: containerScaffoldSchema.default(defaultContainerScaffold()),
@@ -497,6 +518,56 @@ export const provisioningWizardSchema = z.discriminatedUnion('provider', [
     kubernetes_packaging: kubernetesPackagingSchema.default('none'),
   }),
 ]).superRefine((value, ctx) => {
+  if (value.runtime_mode === 'docker_compose' && value.provider !== 'local') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Docker Compose runtime is local-only',
+      path: ['runtime_mode'],
+    })
+    return
+  }
+
+  if (value.runtime_mode === 'docker_compose') {
+    if (value.kubernetes_packaging !== 'none') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Compose runtime does not use Kubernetes packaging',
+        path: ['kubernetes_packaging'],
+      })
+    }
+    return
+  }
+
+  if (value.runtime_mode === 'running_instance') {
+    const serverless =
+      (value.provider === 'gcp' && value.resources.cloud_run) ||
+      (value.provider === 'azure' && value.resources.container_apps)
+    if (!serverless) {
+      if (
+        value.running_instance.kind === 'endpoint' &&
+        !value.running_instance.endpoint_url?.trim()
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Endpoint URL is required',
+          path: ['running_instance', 'endpoint_url'],
+        })
+      }
+      if (
+        value.running_instance.kind === 'kube_context' &&
+        !value.running_instance.kube_context?.trim()
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'kubectl context is required',
+          path: ['running_instance', 'kube_context'],
+        })
+      }
+    }
+    return
+  }
+
+  // kubernetes
   if (value.provider === 'local') {
     if (value.artifact_mode !== 'manifest_only') {
       ctx.addIssue({

@@ -639,6 +639,35 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             owner_label=owner_label,
                             image=manifest_image_override,
                         )
+                    elif deploy_mode in {
+                        DeployMode.COMPOSE.value,
+                        DeployMode.ATTACH.value,
+                    }:
+                        # Phase 3: record the resolved plan; Phase 4 wires full executors.
+                        # Fall back to control-plane preview so Launch still produces a URL.
+                        await _emit_stage(
+                            log_repo,
+                            session,
+                            environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
+                            message=(
+                                f"APPLY - runtime mode '{deploy_mode}' resolved; "
+                                "using control-plane preview until the dedicated executor ships"
+                            ),
+                            commit_sha=commit_sha,
+                        )
+                        resources = provisioner.provision(
+                            namespace=environment.namespace_name,
+                            environment_id=str(environment.id),
+                            name=environment.name,
+                            git_branch=environment.git_branch,
+                            git_repo_url=environment.git_repo_url,
+                            ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                            owner_label=owner_label,
+                            image=deploy_image,
+                            enable_postgres=getattr(environment, "enable_postgres", False),
+                            enable_redis=getattr(environment, "enable_redis", False),
+                        )
                     else:
                         await _emit_stage(
                             log_repo,

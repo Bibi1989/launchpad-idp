@@ -1052,6 +1052,8 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
             "iac_engine": request.iac_engine.value,
             "cloud": request.cloud.model_dump(mode="json"),
             "run_init": request.run_init,
+            "runtime_mode": request.runtime_mode.value,
+            "running_instance": request.running_instance.model_dump(mode="json"),
             "artifact_mode": request.artifact_mode.value,
             "kubernetes_packaging": request.kubernetes_packaging.value,
             "kubernetes_options": request.kubernetes_options.model_dump(mode="json"),

@@ -85,6 +85,38 @@ class WorkspaceArtifactsMode(str, Enum):
     BOTH = "both"
 
 
+class WorkspaceRuntimeMode(str, Enum):
+    """How the workspace runs at preview time (independent of cloud provider)."""
+
+    KUBERNETES = "kubernetes"
+    DOCKER_COMPOSE = "docker_compose"
+    RUNNING_INSTANCE = "running_instance"
+
+
+class RunningInstanceKind(str, Enum):
+    """Attach target for ``running_instance`` mode."""
+
+    KUBE_CONTEXT = "kube_context"
+    SERVERLESS = "serverless"
+    ENDPOINT = "endpoint"
+
+
+class RunningInstanceConfig(BaseModel):
+    """Metadata for attaching to an existing runtime (no new long-lived VMs)."""
+
+    kind: RunningInstanceKind = RunningInstanceKind.KUBE_CONTEXT
+    kube_context: str | None = Field(default=None, max_length=128)
+    endpoint_url: str | None = Field(default=None, max_length=512)
+
+    @field_validator("kube_context", "endpoint_url")
+    @classmethod
+    def strip_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
 class IngressClassName(str, Enum):
     NGINX = "nginx"
     TRAEFIK = "traefik"
@@ -526,6 +558,8 @@ class ProvisioningWizardRequest(BaseModel):
     cloud: CloudConfig
     credentials: CloudCredentials = Field(default_factory=CloudCredentials)
     run_init: bool = True
+    runtime_mode: WorkspaceRuntimeMode = WorkspaceRuntimeMode.KUBERNETES
+    running_instance: RunningInstanceConfig = Field(default_factory=RunningInstanceConfig)
     artifact_mode: WorkspaceArtifactsMode = WorkspaceArtifactsMode.IAC_ONLY
     kubernetes_packaging: KubernetesPackaging = KubernetesPackaging.NONE
     kubernetes_options: KubernetesWorkloadOptions = Field(
@@ -547,8 +581,33 @@ class ProvisioningWizardRequest(BaseModel):
         return value.strip().lower()
 
     @model_validator(mode="after")
+    def apply_runtime_mode_matrix(self) -> ProvisioningWizardRequest:
+        from app.services.runtime_mode import (
+            normalize_artifacts_for_runtime_mode,
+            validate_runtime_mode,
+        )
+
+        validate_runtime_mode(self.cloud, self.runtime_mode, self.running_instance)
+        (
+            self.artifact_mode,
+            self.kubernetes_packaging,
+            self.container_scaffold,
+            self.running_instance,
+        ) = normalize_artifacts_for_runtime_mode(
+            cloud=self.cloud,
+            runtime_mode=self.runtime_mode,
+            artifact_mode=self.artifact_mode,
+            kubernetes_packaging=self.kubernetes_packaging,
+            container_scaffold=self.container_scaffold,
+            running_instance=self.running_instance,
+        )
+        return self
+
+    @model_validator(mode="after")
     def sync_cost_autoscaling_flags(self) -> ProvisioningWizardRequest:
         """Enable HPA/VPA object scaffolding when cost suite toggles them on."""
+        if self.runtime_mode != WorkspaceRuntimeMode.KUBERNETES:
+            return self
         opts = self.kubernetes_options
         if self.cost_optimization.hpa.enabled and not opts.hpa:
             self.kubernetes_options = opts.model_copy(update={"hpa": True})
@@ -559,6 +618,10 @@ class ProvisioningWizardRequest(BaseModel):
 
     @model_validator(mode="after")
     def packaging_requires_cluster(self) -> ProvisioningWizardRequest:
+        if self.runtime_mode != WorkspaceRuntimeMode.KUBERNETES:
+            self.kubernetes_packaging = KubernetesPackaging.NONE
+            return self
+
         # Local kind always targets an existing Kubernetes cluster.
         if isinstance(self.cloud, LocalCloudConfig):
             self.artifact_mode = WorkspaceArtifactsMode.MANIFEST_ONLY
@@ -699,6 +762,8 @@ class WorkspaceWizardConfig(BaseModel):
     iac_engine: IaCEngine
     cloud: CloudConfig
     run_init: bool = True
+    runtime_mode: WorkspaceRuntimeMode = WorkspaceRuntimeMode.KUBERNETES
+    running_instance: RunningInstanceConfig = Field(default_factory=RunningInstanceConfig)
     artifact_mode: WorkspaceArtifactsMode = WorkspaceArtifactsMode.IAC_ONLY
     kubernetes_packaging: KubernetesPackaging = KubernetesPackaging.NONE
     kubernetes_options: KubernetesWorkloadOptions = Field(

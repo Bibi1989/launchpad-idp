@@ -579,7 +579,11 @@ export default {
       "launchingFromSkipGit": "skip git on the next step.",
       "storedCredentials": "when available - skip credential fields below.",
       "usingStoredFrom": "Using stored credentials from",
-      "noneUseGitRepo": "use git repo"
+      "noneUseGitRepo": "use git repo",
+      "planTitle": "Smart preview plan",
+      "planMode": "Deploy mode",
+      "planRuntime": "Runtime",
+      "planDeps": "Datastores from workspace"
     },
     "cloud": {
       "chooseTargetBlurb": "Local uses kind on your machine. Cloud options encrypt credentials onto a linked workspace, or reuse an existing Provision workspace."
@@ -652,6 +656,39 @@ export default {
     "sandbox": {
       "title": "Verify your local Sandbox setup",
       "blurb": "Launchpad can start kind/k3d automatically when needed."
+    },
+    "runtimeMode": {
+      "title": "Runtime",
+      "blurb": "Choose how previews run. One runtime wins; packaging follows it.",
+      "modes": {
+        "kubernetes": {
+          "title": "Kubernetes",
+          "desc": "kind/k3d locally, or GKE/EKS/AKS in cloud"
+        },
+        "docker_compose": {
+          "title": "Docker Compose",
+          "desc": "Local Docker only - no remoted socket"
+        },
+        "running_instance": {
+          "title": "Running instance",
+          "desc": "Attach kube context, endpoint, or serverless"
+        }
+      },
+      "composeHint": {
+        "title": "Compose preview path",
+        "blurb": "Dockerfile and docker-compose.yml will be scaffolded. Preview skips the local Kubernetes cluster."
+      },
+      "attach": {
+        "title": "Attach target",
+        "serverlessHint": "Cloud Run / Container Apps is selected - previews attach to that serverless runtime.",
+        "localBlurb": "Point Launchpad at an existing kube context or HTTP endpoint. No new cluster is created.",
+        "kind": "Attach kind",
+        "endpointUrl": "Endpoint URL",
+        "kinds": {
+          "kube_context": "Existing kubectl context",
+          "endpoint": "Existing HTTP endpoint"
+        }
+      }
     },
     "cta": {
       "startLocal": "Start local cluster & sandbox",
@@ -814,6 +851,9 @@ export default {
       "workspaceNameFormat": "Name must start with a letter and use only a-z, 0-9, hyphens.",
       "localClusterRequired": "Local cluster name and kubectl context are required.",
       "enableK8sGeneration": "Enable Kubernetes generation for Dev (k3s) workspaces.",
+      "runtimeKubeContext": "kubectl context is required for running-instance attach.",
+      "runtimeEndpoint": "Endpoint URL is required for running-instance attach.",
+      "runtimeServerless": "Enable Cloud Run or Container Apps, or choose kube context / endpoint.",
       "enableProvisionOrK8s": "Enable at least Provision or Kubernetes generation.",
       "gcpProjectRequired": "GCP Project ID is required.",
       "azureResourceGroupRequired": "Azure resource group is required.",

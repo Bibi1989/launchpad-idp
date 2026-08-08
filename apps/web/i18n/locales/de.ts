@@ -653,6 +653,39 @@ export default {
       "title": "Lokales Sandbox-Setup prüfen",
       "blurb": "Launchpad kann kind/k3d bei Bedarf automatisch starten."
     },
+    "runtimeMode": {
+      "title": "Laufzeit",
+      "blurb": "Wähle, wie Previews laufen. Eine Laufzeit gewinnt; Packaging folgt ihr.",
+      "modes": {
+        "kubernetes": {
+          "title": "Kubernetes",
+          "desc": "kind/k3d lokal oder GKE/EKS/AKS in der Cloud"
+        },
+        "docker_compose": {
+          "title": "Docker Compose",
+          "desc": "Nur lokales Docker - kein entfernter Socket"
+        },
+        "running_instance": {
+          "title": "Laufende Instanz",
+          "desc": "Kube-Kontext, Endpoint oder Serverless anbinden"
+        }
+      },
+      "composeHint": {
+        "title": "Compose-Preview-Pfad",
+        "blurb": "Dockerfile und docker-compose.yml werden erzeugt. Preview überspringt den lokalen Kubernetes-Cluster."
+      },
+      "attach": {
+        "title": "Anbindeziel",
+        "serverlessHint": "Cloud Run / Container Apps ist gewählt - Previews nutzen diese Serverless-Laufzeit.",
+        "localBlurb": "Zeige Launchpad auf einen bestehenden kube-Kontext oder HTTP-Endpoint. Es wird kein neuer Cluster erstellt.",
+        "kind": "Anbindeart",
+        "endpointUrl": "Endpoint-URL",
+        "kinds": {
+          "kube_context": "Bestehender kubectl-Kontext",
+          "endpoint": "Bestehender HTTP-Endpoint"
+        }
+      }
+    },
     "cta": {
       "startLocal": "Lokalen Cluster & Sandbox starten",
       "generateLaunch": "Erzeugen & Sandbox starten",
@@ -814,6 +847,9 @@ export default {
       "workspaceNameFormat": "Name muss mit Buchstabe beginnen und nur a-z, 0-9, Bindestriche nutzen.",
       "localClusterRequired": "Lokaler Cluster-Name und kubectl-Kontext sind erforderlich.",
       "enableK8sGeneration": "Kubernetes-Generierung für Dev-(k3s)-Workspaces aktivieren.",
+      "runtimeKubeContext": "kubectl-Kontext ist für die Anbindung einer laufenden Instanz erforderlich.",
+      "runtimeEndpoint": "Endpoint-URL ist für die Anbindung einer laufenden Instanz erforderlich.",
+      "runtimeServerless": "Cloud Run oder Container Apps aktivieren, oder kube-Kontext / Endpoint wählen.",
       "enableProvisionOrK8s": "Mindestens Provision oder Kubernetes-Generierung aktivieren.",
       "gcpProjectRequired": "GCP-Projekt-ID ist erforderlich.",
       "azureResourceGroupRequired": "Azure-Ressourcengruppe ist erforderlich.",
