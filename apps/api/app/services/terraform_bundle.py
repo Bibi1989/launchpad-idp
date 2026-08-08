@@ -1256,6 +1256,36 @@ def _cluster_aws(r: AwsResources) -> str:
                 ]
             )
         )
+    if r.app_runner:
+        blocks.append(
+            "\n".join(
+                [
+                    'resource "aws_apprunner_service" "app" {',
+                    '  service_name = "${local.name_55}-runner"',
+                    "",
+                    "  source_configuration {",
+                    "    auto_deployments_enabled = false",
+                    "",
+                    "    image_repository {",
+                    '      image_identifier      = "public.ecr.aws/aws-containers/hello-app-runner:latest"',
+                    '      image_repository_type = "ECR_PUBLIC"',
+                    "",
+                    "      image_configuration {",
+                    '        port = "8080"',
+                    "      }",
+                    "    }",
+                    "  }",
+                    "",
+                    "  instance_configuration {",
+                    '    cpu    = "256"',
+                    '    memory = "512"',
+                    "  }",
+                    "",
+                    _governance_tags_hcl("tags"),
+                    "}",
+                ]
+            )
+        )
     if len(blocks) == 1:
         return _join_blocks([], "# No cluster resources selected.")
     return _join_blocks(blocks, "# No cluster resources selected.")
@@ -1384,6 +1414,14 @@ def _cluster_module_outputs(cloud: CloudConfig) -> str:
             lines += [
                 'output "ec2_instance_id" {',
                 "  value = aws_instance.app.id",
+                "}",
+            ]
+        if r.app_runner:
+            if lines:
+                lines.append("")
+            lines += [
+                'output "app_runner_service_url" {',
+                "  value = aws_apprunner_service.app.service_url",
                 "}",
             ]
         if not lines:
@@ -2380,6 +2418,13 @@ def _root_outputs(cloud: CloudConfig) -> str:
                 'output "eks_cluster_endpoint" {',
                 "  value     = module.cluster.eks_cluster_endpoint",
                 "  sensitive = true",
+                "}",
+                "",
+            ]
+        if r.app_runner:
+            lines += [
+                'output "app_runner_service_url" {',
+                "  value = module.cluster.app_runner_service_url",
                 "}",
                 "",
             ]

@@ -94,27 +94,73 @@ class WorkspaceRuntimeMode(str, Enum):
 
 
 class RunningInstanceKind(str, Enum):
-    """Attach target for ``running_instance`` mode."""
+    """Compute target for ``running_instance`` mode (preview runs on this host/runtime)."""
 
-    KUBE_CONTEXT = "kube_context"
     SERVERLESS = "serverless"
-    ENDPOINT = "endpoint"
+    """GCP Cloud Run or Azure Container Apps."""
+
+    VM = "vm"
+    """EC2, VPS, or any SSH-reachable Linux host."""
+
+    LOCAL_MACHINE = "local_machine"
+    """Operator machine via local Docker (no Kubernetes)."""
 
 
 class RunningInstanceConfig(BaseModel):
-    """Metadata for attaching to an existing runtime (no new long-lived VMs)."""
+    """Where a running-instance preview should deploy.
 
-    kind: RunningInstanceKind = RunningInstanceKind.KUBE_CONTEXT
+    Preview URL is an *output* of deploy (optional override only). SSH private key
+    material must not live here; use ``ssh_key_path`` on the control plane host.
+    """
+
+    kind: RunningInstanceKind = RunningInstanceKind.LOCAL_MACHINE
+    # Serverless (Cloud Run / Container Apps)
+    service_name: str | None = Field(default=None, max_length=63)
+    region: str | None = Field(default=None, max_length=64)
+    # VM / VPS / EC2
+    host: str | None = Field(default=None, max_length=255)
+    ssh_user: str | None = Field(default="ubuntu", max_length=64)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_key_path: str | None = Field(default=None, max_length=512)
+    # Local machine
+    listen_port: int = Field(default=8080, ge=1, le=65535)
+    # Optional: force Open-app URL after deploy (advanced)
+    preview_url_override: str | None = Field(default=None, max_length=512)
+    # Legacy fields (coerced from older wizard snapshots)
     kube_context: str | None = Field(default=None, max_length=128)
     endpoint_url: str | None = Field(default=None, max_length=512)
 
-    @field_validator("kube_context", "endpoint_url")
+    @field_validator("kind", mode="before")
+    @classmethod
+    def coerce_legacy_kind(cls, value: object) -> object:
+        if value == "kube_context":
+            return RunningInstanceKind.LOCAL_MACHINE
+        if value == "endpoint":
+            return RunningInstanceKind.VM
+        return value
+
+    @field_validator(
+        "service_name",
+        "region",
+        "host",
+        "ssh_user",
+        "ssh_key_path",
+        "preview_url_override",
+        "kube_context",
+        "endpoint_url",
+    )
     @classmethod
     def strip_optional(cls, value: str | None) -> str | None:
         if value is None:
             return None
         cleaned = value.strip()
         return cleaned or None
+
+    @model_validator(mode="after")
+    def coerce_legacy_and_override(self) -> RunningInstanceConfig:
+        if self.preview_url_override is None and self.endpoint_url:
+            self.preview_url_override = self.endpoint_url
+        return self
 
 
 class IngressClassName(str, Enum):
@@ -383,6 +429,8 @@ class AwsResources(BaseModel):
     dynamodb: bool = False
     sqs: bool = False
     alb: bool = False
+    app_runner: bool = False
+    """AWS App Runner: managed container service (Docker OCI images)."""
     region: str = Field(default="us-east-1", min_length=2, max_length=32)
     instance_type: str = Field(default="t3.medium", min_length=3, max_length=64)
     account_alias: str | None = Field(default=None, max_length=64)
@@ -659,7 +707,7 @@ def _cloud_has_kubernetes_runtime(cloud: CloudConfig) -> bool:
     if isinstance(cloud, GcpCloudConfig):
         return cloud.resources.gke or cloud.resources.cloud_run
     if isinstance(cloud, AwsCloudConfig):
-        return cloud.resources.eks
+        return cloud.resources.eks or cloud.resources.app_runner
     if isinstance(cloud, AzureCloudConfig):
         return cloud.resources.aks or cloud.resources.container_apps
     return False

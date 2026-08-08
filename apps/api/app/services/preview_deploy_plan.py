@@ -27,8 +27,8 @@ class PreviewDeployPlan:
     reason: str
     manifest_packaging: str | None = None
     attach_kind: str | None = None
-    attach_kube_context: str | None = None
-    attach_endpoint_url: str | None = None
+    attach_host: str | None = None
+    attach_service: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -40,8 +40,8 @@ class PreviewDeployPlan:
             "reason": self.reason,
             "manifest_packaging": self.manifest_packaging,
             "attach_kind": self.attach_kind,
-            "attach_kube_context": self.attach_kube_context,
-            "attach_endpoint_url": self.attach_endpoint_url,
+            "attach_host": self.attach_host,
+            "attach_service": self.attach_service,
         }
 
 
@@ -58,11 +58,7 @@ def resolve_preview_deploy_plan(
     *,
     requested_deploy_mode: DeployMode | None = None,
 ) -> PreviewDeployPlan:
-    """Map provider + runtime_mode + services/deps → preview deploy plan.
-
-    Explicit client ``requested_deploy_mode`` is honored when compatible;
-    otherwise the workspace runtime mode wins.
-    """
+    """Map provider + runtime_mode + services/deps → preview deploy plan."""
     runtime = config.runtime_mode
     enable_postgres = _deps_want_postgres(config.dependencies)
     enable_redis = _deps_want_redis(config.dependencies)
@@ -70,9 +66,6 @@ def resolve_preview_deploy_plan(
     packaging_value = packaging.value if packaging != KubernetesPackaging.NONE else None
 
     if runtime == WorkspaceRuntimeMode.DOCKER_COMPOSE:
-        if requested_deploy_mode not in (None, DeployMode.COMPOSE):
-            # Workspace is compose-primary; do not silently fall back to K8s.
-            pass
         return PreviewDeployPlan(
             deploy_mode=DeployMode.COMPOSE,
             runtime_mode=runtime,
@@ -86,7 +79,7 @@ def resolve_preview_deploy_plan(
     if runtime == WorkspaceRuntimeMode.RUNNING_INSTANCE:
         instance = config.running_instance
         kind = instance.kind
-        if has_serverless_runtime(config.cloud):
+        if has_serverless_runtime(config.cloud) and kind == RunningInstanceKind.LOCAL_MACHINE:
             kind = RunningInstanceKind.SERVERLESS
         return PreviewDeployPlan(
             deploy_mode=DeployMode.ATTACH,
@@ -97,11 +90,10 @@ def resolve_preview_deploy_plan(
             reason=f"Workspace runtime_mode=running_instance ({kind.value})",
             manifest_packaging=None,
             attach_kind=kind.value,
-            attach_kube_context=instance.kube_context,
-            attach_endpoint_url=instance.endpoint_url,
+            attach_host=instance.host,
+            attach_service=instance.service_name,
         )
 
-    # kubernetes
     if requested_deploy_mode == DeployMode.MANIFEST:
         return PreviewDeployPlan(
             deploy_mode=DeployMode.MANIFEST,

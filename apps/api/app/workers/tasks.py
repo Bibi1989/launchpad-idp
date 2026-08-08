@@ -728,7 +728,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             environment_id=env_uuid,
                             stage=ExecutionStage.APPLY,
                             message=(
-                                f"APPLY - attach to running instance "
+                                f"APPLY - deploying to running instance "
                                 f"({running_instance.kind.value})"
                             ),
                             commit_sha=commit_sha,
@@ -1217,7 +1217,6 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         from app.schemas.cloud import (
                             KubernetesPackaging,
                             RunningInstanceConfig,
-                            RunningInstanceKind,
                             WorkspaceWizardConfig,
                         )
                         from app.services.attach_deploy import AttachDeployError, deploy_attach
@@ -1244,52 +1243,39 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                     except Exception:
                                         pass
 
-                        if running_instance.kind in {
-                            RunningInstanceKind.ENDPOINT,
-                            RunningInstanceKind.SERVERLESS,
-                        }:
-                            await _emit_stage(
-                                log_repo,
-                                session,
-                                environment_id=env_uuid,
-                                stage=ExecutionStage.APPLY,
-                                message=(
-                                    "APPLY - attach rebuild is a no-op for "
-                                    f"{running_instance.kind.value} (external runtime)"
+                        await _emit_stage(
+                            log_repo,
+                            session,
+                            environment_id=env_uuid,
+                            stage=ExecutionStage.APPLY,
+                            message=(
+                                "APPLY - redeploying running instance "
+                                f"({running_instance.kind.value})"
+                            ),
+                            commit_sha=short_sha,
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                deploy_attach,
+                                namespace=environment.namespace_name,
+                                environment_id=str(environment.id),
+                                name=environment.name,
+                                git_branch=environment.git_branch,
+                                git_repo_url=environment.git_repo_url,
+                                ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                                owner_label=owner_label,
+                                image=rebuild_image,
+                                enable_postgres=getattr(
+                                    environment, "enable_postgres", False
                                 ),
-                                commit_sha=short_sha,
+                                enable_redis=getattr(environment, "enable_redis", False),
+                                running_instance=running_instance,
+                                workspace_root=workspace_root,
+                                packaging=packaging,
+                                settings=settings,
                             )
-                        else:
-                            await _emit_stage(
-                                log_repo,
-                                session,
-                                environment_id=env_uuid,
-                                stage=ExecutionStage.APPLY,
-                                message="APPLY - re-attaching kube context workload",
-                                commit_sha=short_sha,
-                            )
-                            try:
-                                await asyncio.to_thread(
-                                    deploy_attach,
-                                    namespace=environment.namespace_name,
-                                    environment_id=str(environment.id),
-                                    name=environment.name,
-                                    git_branch=environment.git_branch,
-                                    git_repo_url=environment.git_repo_url,
-                                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
-                                    owner_label=owner_label,
-                                    image=rebuild_image,
-                                    enable_postgres=getattr(
-                                        environment, "enable_postgres", False
-                                    ),
-                                    enable_redis=getattr(environment, "enable_redis", False),
-                                    running_instance=running_instance,
-                                    workspace_root=workspace_root,
-                                    packaging=packaging,
-                                    settings=settings,
-                                )
-                            except AttachDeployError as exc:
-                                raise RuntimeError(str(exc)) from exc
+                        except AttachDeployError as exc:
+                            raise RuntimeError(str(exc)) from exc
                     else:
                         await _emit_stage(
                             log_repo,
@@ -1524,6 +1510,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                 teardown_attach,
                                 running_instance=running_instance,
                                 namespace=environment.namespace_name,
+                                environment_id=str(environment.id),
                                 settings=settings,
                             )
                         else:

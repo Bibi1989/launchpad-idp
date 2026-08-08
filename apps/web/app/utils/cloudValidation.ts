@@ -11,12 +11,20 @@ export const workspaceRuntimeModeSchema = z.enum([
   'running_instance',
 ])
 export const runningInstanceKindSchema = z.enum([
-  'kube_context',
   'serverless',
-  'endpoint',
+  'vm',
+  'local_machine',
 ])
 export const runningInstanceSchema = z.object({
-  kind: runningInstanceKindSchema.default('kube_context'),
+  kind: runningInstanceKindSchema.default('local_machine'),
+  service_name: z.string().max(63).nullable().optional(),
+  region: z.string().max(64).nullable().optional(),
+  host: z.string().max(255).nullable().optional(),
+  ssh_user: z.string().max(64).nullable().optional(),
+  ssh_port: z.number().int().min(1).max(65535).default(22),
+  ssh_key_path: z.string().max(512).nullable().optional(),
+  listen_port: z.number().int().min(1).max(65535).default(8080),
+  preview_url_override: z.string().max(512).nullable().optional(),
   kube_context: z.string().max(128).nullable().optional(),
   endpoint_url: z.string().max(512).nullable().optional(),
 })
@@ -248,6 +256,7 @@ export const awsResourcesSchema = z.object({
   rds: z.boolean().default(false),
   rds_engine: sqlDatabaseEngineSchema.default('postgres'),
   ecr: z.boolean().default(false),
+  app_runner: z.boolean().default(false),
   elasticache: z.boolean().default(false),
   elasticache_engine: cacheEngineSchema.default('redis'),
   lambda_fn: z.boolean().default(false),
@@ -468,7 +477,15 @@ const wizardCommonFields = {
   run_init: z.boolean().default(true),
   runtime_mode: workspaceRuntimeModeSchema.default('kubernetes'),
   running_instance: runningInstanceSchema.default({
-    kind: 'kube_context',
+    kind: 'local_machine',
+    service_name: null,
+    region: null,
+    host: null,
+    ssh_user: 'ubuntu',
+    ssh_port: 22,
+    ssh_key_path: null,
+    listen_port: 8080,
+    preview_url_override: null,
     kube_context: null,
     endpoint_url: null,
   }),
@@ -541,26 +558,33 @@ export const provisioningWizardSchema = z.discriminatedUnion('provider', [
   if (value.runtime_mode === 'running_instance') {
     const serverless =
       (value.provider === 'gcp' && value.resources.cloud_run) ||
+      (value.provider === 'aws' && value.resources.app_runner) ||
       (value.provider === 'azure' && value.resources.container_apps)
-    if (!serverless) {
-      if (
-        value.running_instance.kind === 'endpoint' &&
-        !value.running_instance.endpoint_url?.trim()
-      ) {
+    if (value.running_instance.kind === 'serverless' && !serverless) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Enable Cloud Run, App Runner, or Container Apps for serverless compute',
+        path: ['running_instance', 'kind'],
+      })
+    }
+    if (value.running_instance.kind === 'local_machine' && value.provider !== 'local') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'local_machine is only available for the local provider',
+        path: ['running_instance', 'kind'],
+      })
+    }
+    if (value.running_instance.kind === 'vm') {
+      const hasHost = Boolean(value.running_instance.host?.trim())
+      const hasOverride = Boolean(
+        value.running_instance.preview_url_override?.trim()
+        || value.running_instance.endpoint_url?.trim(),
+      )
+      if (!hasHost && !hasOverride) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'Endpoint URL is required',
-          path: ['running_instance', 'endpoint_url'],
-        })
-      }
-      if (
-        value.running_instance.kind === 'kube_context' &&
-        !value.running_instance.kube_context?.trim()
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'kubectl context is required',
-          path: ['running_instance', 'kube_context'],
+          message: 'VM host (IP/hostname) is required',
+          path: ['running_instance', 'host'],
         })
       }
     }

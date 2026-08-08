@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from app.schemas.cloud import (
+    AwsCloudConfig,
+    AwsResources,
     ContainerScaffoldConfig,
     GcpCloudConfig,
     GcpResources,
@@ -79,15 +81,27 @@ def test_wizard_request_rejects_cloud_compose() -> None:
         )
 
 
-def test_running_instance_requires_context() -> None:
+def test_running_instance_vm_requires_host() -> None:
     with pytest.raises(Exception):
         ProvisioningWizardRequest(
             name="attach-demo",
             cloud=LocalCloudConfig(resources=LocalResources()),
             credentials=CloudCredentials(),
             runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
-            running_instance=RunningInstanceConfig(kind=RunningInstanceKind.KUBE_CONTEXT),
+            running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
         )
+
+
+def test_running_instance_local_machine_ok() -> None:
+    req = ProvisioningWizardRequest(
+        name="attach-local",
+        cloud=LocalCloudConfig(resources=LocalResources()),
+        credentials=CloudCredentials(),
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(kind=RunningInstanceKind.LOCAL_MACHINE),
+    )
+    assert req.running_instance.kind == RunningInstanceKind.LOCAL_MACHINE
+    assert req.kubernetes_packaging == KubernetesPackaging.NONE
 
 
 def test_preview_plan_compose() -> None:
@@ -128,7 +142,49 @@ def test_preview_plan_attach_serverless() -> None:
         iac_engine=IaCEngine.TERRAFORM,
         cloud=GcpCloudConfig(resources=GcpResources(project_id="demo-proj", cloud_run=True)),
         runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(
+            kind=RunningInstanceKind.SERVERLESS,
+            service_name="demo-svc",
+        ),
     )
     plan = resolve_preview_deploy_plan(config)
     assert plan.deploy_mode == DeployMode.ATTACH
     assert plan.attach_kind == RunningInstanceKind.SERVERLESS.value
+    assert plan.attach_service == "demo-svc"
+
+
+def test_preview_plan_attach_aws_app_runner() -> None:
+    config = WorkspaceWizardConfig(
+        name="runner-demo",
+        iac_engine=IaCEngine.TERRAFORM,
+        cloud=AwsCloudConfig(
+            resources=AwsResources(app_runner=True, region="us-east-1"),
+        ),
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(
+            kind=RunningInstanceKind.SERVERLESS,
+            service_name="demo-runner",
+            region="us-east-1",
+        ),
+    )
+    plan = resolve_preview_deploy_plan(config)
+    assert plan.deploy_mode == DeployMode.ATTACH
+    assert plan.attach_kind == RunningInstanceKind.SERVERLESS.value
+    assert plan.attach_service == "demo-runner"
+
+
+def test_preview_plan_attach_vm() -> None:
+    config = WorkspaceWizardConfig(
+        name="vm-demo",
+        iac_engine=IaCEngine.TERRAFORM,
+        cloud=LocalCloudConfig(resources=LocalResources()),
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(
+            kind=RunningInstanceKind.VM,
+            host="203.0.113.10",
+        ),
+    )
+    plan = resolve_preview_deploy_plan(config)
+    assert plan.deploy_mode == DeployMode.ATTACH
+    assert plan.attach_kind == RunningInstanceKind.VM.value
+    assert plan.attach_host == "203.0.113.10"

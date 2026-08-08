@@ -901,7 +901,7 @@ class EnvironmentService:
             from app.schemas.cloud import RunningInstanceKind, WorkspaceWizardConfig
             from app.services.provisioning import ProvisioningService
 
-            kind = RunningInstanceKind.KUBE_CONTEXT
+            kind = RunningInstanceKind.LOCAL_MACHINE
             if environment.workspace_id is not None:
                 provisioning = ProvisioningService(self._session)
                 row = await self._session.get(ProvisioningWorkspace, environment.workspace_id)
@@ -915,14 +915,26 @@ class EnvironmentService:
                             kind = wizard.running_instance.kind
                         except Exception:
                             pass
-            if kind == RunningInstanceKind.KUBE_CONTEXT:
-                provisioner = KubernetesProvisioner(settings=self._settings)
-                provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
-                pause_msg = "Environment paused (scaled attached kube deployment to 0)."
+            if kind == RunningInstanceKind.LOCAL_MACHINE:
+                from app.schemas.cloud import RunningInstanceConfig
+                from app.services.attach_deploy import teardown_attach
+
+                await asyncio.to_thread(
+                    teardown_attach,
+                    running_instance=RunningInstanceConfig(kind=RunningInstanceKind.LOCAL_MACHINE),
+                    namespace=environment.namespace_name,
+                    environment_id=str(environment.id),
+                )
+                pause_msg = "Environment paused (stopped local instance container)."
+            elif kind == RunningInstanceKind.VM:
+                pause_msg = (
+                    "Environment paused in control plane "
+                    "(VM container left running; destroy to remove)."
+                )
             else:
                 pause_msg = (
                     "Environment paused in control plane "
-                    "(endpoint/serverless attach left running externally)."
+                    "(serverless service left running externally)."
                 )
         else:
             provisioner = KubernetesProvisioner(settings=self._settings)
@@ -1004,7 +1016,7 @@ class EnvironmentService:
             from app.schemas.cloud import RunningInstanceKind, WorkspaceWizardConfig
             from app.services.provisioning import ProvisioningService
 
-            kind = RunningInstanceKind.KUBE_CONTEXT
+            kind = RunningInstanceKind.LOCAL_MACHINE
             if environment.workspace_id is not None:
                 provisioning = ProvisioningService(self._session)
                 row = await self._session.get(ProvisioningWorkspace, environment.workspace_id)
@@ -1018,14 +1030,35 @@ class EnvironmentService:
                             kind = wizard.running_instance.kind
                         except Exception:
                             pass
-            if kind == RunningInstanceKind.KUBE_CONTEXT:
-                provisioner = KubernetesProvisioner(settings=self._settings)
-                provisioner.scale_deployment(namespace=environment.namespace_name, replicas=1)
-                resume_msg = "Environment resumed (scaled attached kube deployment to 1)."
+            if kind == RunningInstanceKind.LOCAL_MACHINE:
+                from app.schemas.cloud import RunningInstanceConfig
+                from app.services.attach_deploy import deploy_attach
+
+                await asyncio.to_thread(
+                    deploy_attach,
+                    namespace=environment.namespace_name,
+                    environment_id=str(environment.id),
+                    name=environment.name,
+                    git_branch=environment.git_branch,
+                    git_repo_url=environment.git_repo_url,
+                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                    image=environment.workload_image,
+                    running_instance=RunningInstanceConfig(
+                        kind=RunningInstanceKind.LOCAL_MACHINE,
+                        listen_port=environment.node_port or 8080,
+                    ),
+                    settings=self._settings,
+                )
+                resume_msg = "Environment resumed (restarted local instance container)."
+            elif kind == RunningInstanceKind.VM:
+                resume_msg = (
+                    "Environment resumed in control plane "
+                    "(VM assumed still reachable)."
+                )
             else:
                 resume_msg = (
                     "Environment resumed in control plane "
-                    "(endpoint/serverless attach assumed still reachable)."
+                    "(serverless service assumed still reachable)."
                 )
         else:
             provisioner = KubernetesProvisioner(settings=self._settings)

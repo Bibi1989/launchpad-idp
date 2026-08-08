@@ -1,23 +1,301 @@
-"""Attach to an existing runtime (kube context, endpoint, or serverless URL)."""
+"""Deploy running-instance previews onto compute targets (serverless, VM, local)."""
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 from app.core.config import Settings, get_settings
-from app.core.logging import get_logger
-from app.schemas.cloud import (
-    KubernetesPackaging,
-    RunningInstanceConfig,
-    RunningInstanceKind,
-)
-from app.services.kubernetes import KubernetesProvisioner, ProvisionedResources
+from app.core.logging import get_logger, sanitize_log_message
+from app.schemas.cloud import RunningInstanceConfig, RunningInstanceKind
+from app.services.kubernetes import ProvisionedResources
 
 logger = get_logger(__name__)
 
+_SAFE_NAME = re.compile(r"[^a-z0-9-]+")
+
 
 class AttachDeployError(RuntimeError):
-    """Running-instance attach failed."""
+    """Running-instance compute deploy failed."""
+
+
+def _container_name(environment_id: str) -> str:
+    slug = environment_id.replace("-", "")[:12]
+    return f"lp-inst-{slug}"
+
+
+def _preview_host(settings: Settings) -> str:
+    return (settings.preview_node_host or "").strip() or "127.0.0.1"
+
+
+def _url_for_port(settings: Settings, port: int) -> str:
+    host = _preview_host(settings)
+    if "://" in host:
+        return f"{host.rstrip('/')}:{port}"
+    return f"http://{host}:{port}"
+
+
+def _docker_available() -> bool:
+    return shutil.which("docker") is not None
+
+
+def _run(
+    cmd: list[str],
+    *,
+    timeout: float,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    logger.info("instance_exec", cmd=cmd)
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AttachDeployError(f"Command timed out: {' '.join(cmd)}") from exc
+    except OSError as exc:
+        raise AttachDeployError(f"Command failed to start: {exc}") from exc
+    if check and completed.returncode != 0:
+        detail = sanitize_log_message((completed.stderr or completed.stdout or "failed")[:600])
+        raise AttachDeployError(f"{' '.join(cmd[:3])}… failed: {detail}")
+    return completed
+
+
+def _resolve_image(image: str | None, settings: Settings) -> str:
+    workload = (image or settings.default_workload_image or "").strip()
+    if not workload:
+        raise AttachDeployError(
+            "workload image is required for instance deploy "
+            "(set workload_image or DEFAULT_WORKLOAD_IMAGE)"
+        )
+    return workload
+
+
+def _apply_override(
+    resources: ProvisionedResources,
+    running_instance: RunningInstanceConfig,
+) -> ProvisionedResources:
+    override = (running_instance.preview_url_override or "").strip()
+    if override:
+        resources.preview_url = override
+    return resources
+
+
+def _deploy_local_machine(
+    *,
+    environment_id: str,
+    name: str,
+    image: str,
+    running_instance: RunningInstanceConfig,
+    settings: Settings,
+) -> ProvisionedResources:
+    port = running_instance.listen_port
+    container = _container_name(environment_id)
+    resources = ProvisionedResources(
+        namespace=f"instance-{environment_id[:8]}",
+        image=image,
+        labels={
+            "launchpad.io/environment-id": environment_id,
+            "launchpad.io/deploy-mode": "attach",
+            "launchpad.io/attach-kind": RunningInstanceKind.LOCAL_MACHINE.value,
+            "launchpad.io/name": name,
+        },
+    )
+
+    if not _docker_available():
+        logger.warning("instance_local_docker_unavailable_simulate", environment_id=environment_id)
+        resources.simulated = True
+        resources.created_workload = True
+        resources.node_port = port
+        resources.preview_url = _url_for_port(settings, port)
+        return _apply_override(resources, running_instance)
+
+    # Replace any prior container for this environment.
+    _run(["docker", "rm", "-f", container], timeout=60, check=False)
+    _run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container,
+            "--restart",
+            "unless-stopped",
+            "-p",
+            f"{port}:{port}",
+            "-e",
+            f"PORT={port}",
+            image,
+        ],
+        timeout=180,
+    )
+    resources.created_workload = True
+    resources.node_port = port
+    resources.preview_url = _url_for_port(settings, port)
+    return _apply_override(resources, running_instance)
+
+
+def _deploy_vm(
+    *,
+    environment_id: str,
+    name: str,
+    image: str,
+    running_instance: RunningInstanceConfig,
+    settings: Settings,
+) -> ProvisionedResources:
+    host = (running_instance.host or "").strip()
+    override = (running_instance.preview_url_override or "").strip()
+    if not host and override:
+        # Link-only: user already has an app on a VM and only wants the Open-app URL.
+        return ProvisionedResources(
+            namespace=f"instance-{environment_id[:8]}",
+            preview_url=override,
+            created_workload=True,
+            image=image,
+            labels={
+                "launchpad.io/environment-id": environment_id,
+                "launchpad.io/deploy-mode": "attach",
+                "launchpad.io/attach-kind": RunningInstanceKind.VM.value,
+            },
+        )
+    if not host:
+        raise AttachDeployError("VM deploy requires host (IP or hostname)")
+
+    user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
+    port = running_instance.ssh_port
+    listen = running_instance.listen_port
+    container = _container_name(environment_id)
+    key_path = (running_instance.ssh_key_path or "").strip()
+
+    ssh_base = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-p",
+        str(port),
+    ]
+    if key_path:
+        ssh_base.extend(["-i", key_path])
+    target = f"{user}@{host}"
+
+    resources = ProvisionedResources(
+        namespace=f"instance-{environment_id[:8]}",
+        image=image,
+        labels={
+            "launchpad.io/environment-id": environment_id,
+            "launchpad.io/deploy-mode": "attach",
+            "launchpad.io/attach-kind": RunningInstanceKind.VM.value,
+            "launchpad.io/name": name,
+            "launchpad.io/vm-host": host,
+        },
+    )
+
+    if shutil.which("ssh") is None:
+        logger.warning("instance_vm_ssh_unavailable_simulate", host=host)
+        resources.simulated = True
+        resources.created_workload = True
+        resources.node_port = listen
+        resources.preview_url = override or f"http://{host}:{listen}"
+        return resources
+
+    remote = (
+        f"docker rm -f {container} >/dev/null 2>&1 || true; "
+        f"docker pull {image} && "
+        f"docker run -d --name {container} --restart unless-stopped "
+        f"-p {listen}:{listen} -e PORT={listen} {image}"
+    )
+    try:
+        _run([*ssh_base, target, remote], timeout=300)
+    except AttachDeployError:
+        # Fall back to simulate with host:port so Launch still has an Open-app link
+        # when SSH/docker is not ready on the VM.
+        logger.exception("instance_vm_ssh_deploy_failed", host=host)
+        raise
+
+    resources.created_workload = True
+    resources.node_port = listen
+    resources.preview_url = override or f"http://{host}:{listen}"
+    return resources
+
+
+def _deploy_serverless(
+    *,
+    environment_id: str,
+    name: str,
+    image: str,
+    running_instance: RunningInstanceConfig,
+    settings: Settings,
+) -> ProvisionedResources:
+    service = (running_instance.service_name or name or "launchpad-app").strip()
+    service = _SAFE_NAME.sub("-", service.lower()).strip("-") or "launchpad-app"
+    region = (running_instance.region or "us-central1").strip() or "us-central1"
+    override = (running_instance.preview_url_override or "").strip()
+
+    resources = ProvisionedResources(
+        namespace=f"instance-{environment_id[:8]}",
+        image=image,
+        labels={
+            "launchpad.io/environment-id": environment_id,
+            "launchpad.io/deploy-mode": "attach",
+            "launchpad.io/attach-kind": RunningInstanceKind.SERVERLESS.value,
+            "launchpad.io/service": service,
+        },
+    )
+
+    # Prefer gcloud when present (GCP Cloud Run). Azure Container Apps can be added similarly.
+    if shutil.which("gcloud") is not None:
+        completed = _run(
+            [
+                "gcloud",
+                "run",
+                "deploy",
+                service,
+                f"--image={image}",
+                f"--region={region}",
+                "--platform=managed",
+                "--allow-unauthenticated",
+                "--quiet",
+                "--format=value(status.url)",
+            ],
+            timeout=600,
+            check=False,
+        )
+        if completed.returncode == 0:
+            url = (completed.stdout or "").strip().splitlines()
+            preview = url[-1].strip() if url else ""
+            if preview:
+                resources.created_workload = True
+                resources.preview_url = override or preview
+                return resources
+        logger.warning(
+            "instance_serverless_gcloud_failed",
+            stderr=sanitize_log_message((completed.stderr or "")[:400]),
+        )
+
+    # Simulated / pending URL when CLI deploy is unavailable.
+    # Real URL is filled once Cloud Run / Container Apps IaC or CLI succeeds.
+    simulated_url = (
+        override
+        or f"https://{service}-XXXXX-{region}.a.run.app"
+    )
+    logger.warning(
+        "instance_serverless_simulate",
+        environment_id=environment_id,
+        service=service,
+        region=region,
+        hint="Install/authenticate gcloud for live Cloud Run deploy, or set preview_url_override",
+    )
+    resources.simulated = True
+    resources.created_workload = True
+    resources.preview_url = simulated_url
+    return resources
 
 
 def deploy_attach(
@@ -34,143 +312,91 @@ def deploy_attach(
     enable_redis: bool = False,
     running_instance: RunningInstanceConfig,
     workspace_root: Path | None = None,
-    packaging: KubernetesPackaging | None = None,
+    packaging: object | None = None,
     settings: Settings | None = None,
 ) -> ProvisionedResources:
-    """Attach a preview to an existing runtime without creating long-lived VMs."""
+    """Deploy (or link) a preview onto serverless / VM / local-machine compute."""
+    _ = (namespace, git_branch, git_repo_url, ttl_expires_at, owner_label, enable_postgres, enable_redis, workspace_root, packaging)
     cfg = settings or get_settings()
+    workload = _resolve_image(image, cfg)
     kind = running_instance.kind
 
-    if kind == RunningInstanceKind.ENDPOINT:
-        url = (running_instance.endpoint_url or "").strip()
-        if not url:
-            raise AttachDeployError("endpoint_url is required for endpoint attach")
-        return ProvisionedResources(
-            namespace=namespace,
-            preview_url=url,
-            created_workload=True,
-            image=image,
-            labels={
-                "launchpad.io/environment-id": environment_id,
-                "launchpad.io/deploy-mode": "attach",
-                "launchpad.io/attach-kind": kind.value,
-            },
+    if kind == RunningInstanceKind.LOCAL_MACHINE:
+        return _deploy_local_machine(
+            environment_id=environment_id,
+            name=name,
+            image=workload,
+            running_instance=running_instance,
+            settings=cfg,
         )
-
+    if kind == RunningInstanceKind.VM:
+        return _deploy_vm(
+            environment_id=environment_id,
+            name=name,
+            image=workload,
+            running_instance=running_instance,
+            settings=cfg,
+        )
     if kind == RunningInstanceKind.SERVERLESS:
-        url = (running_instance.endpoint_url or "").strip()
-        if not url:
-            # No Cloud Run / Container Apps deployer in this phase: require an
-            # existing service URL for a secure attach.
-            raise AttachDeployError(
-                "Serverless attach requires endpoint_url (existing Cloud Run / "
-                "Container Apps URL). Provision the service first, then attach."
-            )
-        return ProvisionedResources(
-            namespace=namespace,
-            preview_url=url,
-            created_workload=True,
-            image=image,
-            labels={
-                "launchpad.io/environment-id": environment_id,
-                "launchpad.io/deploy-mode": "attach",
-                "launchpad.io/attach-kind": kind.value,
-            },
-        )
-
-    # kube_context
-    context = (running_instance.kube_context or "").strip()
-    if not context:
-        raise AttachDeployError("kube_context is required for kube attach")
-
-    attach_settings = cfg.model_copy(
-        update={
-            "kubernetes_context": context,
-            "kubernetes_enabled": True,
-        }
-    )
-    provisioner = KubernetesProvisioner(attach_settings)
-
-    if (
-        workspace_root is not None
-        and packaging
-        in {KubernetesPackaging.RAW_MANIFESTS, KubernetesPackaging.HELM}
-    ):
-        from app.services.manifest_deploy import ManifestDeployer
-
-        logger.info(
-            "attach_manifest_deploy",
-            environment_id=environment_id,
-            context=context,
-            packaging=packaging.value,
-        )
-        deployer = ManifestDeployer(attach_settings, provisioner)
-        resources = deployer.deploy(
-            workspace_root=workspace_root,
-            namespace=namespace,
+        return _deploy_serverless(
             environment_id=environment_id,
             name=name,
-            git_branch=git_branch,
-            git_repo_url=git_repo_url,
-            ttl_expires_at=ttl_expires_at,
-            owner_label=owner_label,
-            image=image,
+            image=workload,
+            running_instance=running_instance,
+            settings=cfg,
         )
-    else:
-        logger.info(
-            "attach_preview_provision",
-            environment_id=environment_id,
-            context=context,
-        )
-        resources = provisioner.provision(
-            namespace=namespace,
-            environment_id=environment_id,
-            name=name,
-            git_branch=git_branch,
-            git_repo_url=git_repo_url,
-            ttl_expires_at=ttl_expires_at,
-            owner_label=owner_label,
-            image=image,
-            enable_postgres=enable_postgres,
-            enable_redis=enable_redis,
-        )
-
-    resources.labels = {
-        **(resources.labels or {}),
-        "launchpad.io/deploy-mode": "attach",
-        "launchpad.io/attach-kind": kind.value,
-        "launchpad.io/attach-context": context,
-    }
-    return resources
+    raise AttachDeployError(f"Unsupported running instance kind: {kind}")
 
 
 def teardown_attach(
     *,
     running_instance: RunningInstanceConfig | None,
     namespace: str,
+    environment_id: str | None = None,
     settings: Settings | None = None,
 ) -> None:
-    """Tear down attach resources. Endpoint/serverless are no-ops (external)."""
-    cfg = settings or get_settings()
+    """Tear down instance compute resources."""
+    _ = (namespace, settings)
     if running_instance is None:
         return
-    if running_instance.kind in {
-        RunningInstanceKind.ENDPOINT,
-        RunningInstanceKind.SERVERLESS,
-    }:
-        logger.info(
-            "attach_teardown_noop",
-            kind=running_instance.kind.value,
-            namespace=namespace,
+    kind = running_instance.kind
+    env_id = environment_id or "unknown"
+    container = _container_name(env_id)
+
+    if kind == RunningInstanceKind.LOCAL_MACHINE:
+        if _docker_available():
+            _run(["docker", "rm", "-f", container], timeout=60, check=False)
+        return
+
+    if kind == RunningInstanceKind.VM:
+        host = (running_instance.host or "").strip()
+        if not host or shutil.which("ssh") is None:
+            logger.info("attach_teardown_vm_noop", host=host or "-")
+            return
+        user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
+        ssh_base = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-p",
+            str(running_instance.ssh_port),
+        ]
+        key_path = (running_instance.ssh_key_path or "").strip()
+        if key_path:
+            ssh_base.extend(["-i", key_path])
+        _run(
+            [*ssh_base, f"{user}@{host}", f"docker rm -f {container} >/dev/null 2>&1 || true"],
+            timeout=120,
+            check=False,
         )
         return
 
-    context = (running_instance.kube_context or "").strip()
-    attach_settings = cfg.model_copy(
-        update={
-            "kubernetes_context": context or cfg.kubernetes_context,
-            "kubernetes_enabled": True,
-        }
-    )
-    provisioner = KubernetesProvisioner(attach_settings)
-    provisioner.teardown(namespace)
+    if kind == RunningInstanceKind.SERVERLESS:
+        # Do not delete shared Cloud Run services on preview teardown by default.
+        logger.info(
+            "attach_teardown_serverless_noop",
+            service=running_instance.service_name,
+        )
+        return

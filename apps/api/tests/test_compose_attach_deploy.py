@@ -9,11 +9,10 @@ import pytest
 
 from app.core.config import Settings
 from app.schemas.cloud import (
-    KubernetesPackaging,
     RunningInstanceConfig,
     RunningInstanceKind,
 )
-from app.services.attach_deploy import AttachDeployError, deploy_attach
+from app.services.attach_deploy import AttachDeployError, deploy_attach, teardown_attach
 from app.services.compose_deploy import (
     ComposeDeployError,
     compose_project_name,
@@ -111,7 +110,8 @@ def test_teardown_compose_without_docker(tmp_path: Path) -> None:
         )
 
 
-def test_attach_endpoint() -> None:
+def test_attach_vm_link_only_override() -> None:
+    settings = Settings.model_construct(default_workload_image="nginx:latest")
     resources = deploy_attach(
         namespace="ns",
         environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -120,16 +120,38 @@ def test_attach_endpoint() -> None:
         git_repo_url="https://example.com/repo.git",
         ttl_expires_at="2099-01-01T00:00:00+00:00",
         running_instance=RunningInstanceConfig(
-            kind=RunningInstanceKind.ENDPOINT,
-            endpoint_url="https://app.example.com",
+            kind=RunningInstanceKind.VM,
+            preview_url_override="https://app.example.com",
         ),
+        settings=settings,
     )
     assert resources.preview_url == "https://app.example.com"
     assert resources.created_workload is True
 
 
-def test_attach_serverless_requires_url() -> None:
-    with pytest.raises(AttachDeployError, match="endpoint_url"):
+def test_attach_legacy_endpoint_coerces_to_vm() -> None:
+    settings = Settings.model_construct(default_workload_image="nginx:latest")
+    cfg = RunningInstanceConfig.model_validate(
+        {"kind": "endpoint", "endpoint_url": "https://legacy.example.com"}
+    )
+    assert cfg.kind == RunningInstanceKind.VM
+    assert cfg.preview_url_override == "https://legacy.example.com"
+    resources = deploy_attach(
+        namespace="ns",
+        environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        name="demo",
+        git_branch="main",
+        git_repo_url="https://example.com/repo.git",
+        ttl_expires_at="2099-01-01T00:00:00+00:00",
+        running_instance=cfg,
+        settings=settings,
+    )
+    assert resources.preview_url == "https://legacy.example.com"
+
+
+def test_attach_vm_requires_host() -> None:
+    settings = Settings.model_construct(default_workload_image="nginx:latest")
+    with pytest.raises(AttachDeployError, match="host"):
         deploy_attach(
             namespace="ns",
             environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -137,19 +159,14 @@ def test_attach_serverless_requires_url() -> None:
             git_branch="main",
             git_repo_url="https://example.com/repo.git",
             ttl_expires_at="2099-01-01T00:00:00+00:00",
-            running_instance=RunningInstanceConfig(kind=RunningInstanceKind.SERVERLESS),
+            running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+            settings=settings,
         )
 
 
-def test_attach_kube_uses_provisioner() -> None:
-    fake = MagicMock()
-    fake.provision.return_value = MagicMock(
-        namespace="ns",
-        preview_url="http://127.0.0.1:30080",
-        labels={},
-        created_workload=True,
-    )
-    with patch("app.services.attach_deploy.KubernetesProvisioner", return_value=fake):
+def test_attach_serverless_simulates_without_gcloud() -> None:
+    settings = Settings.model_construct(default_workload_image="nginx:latest")
+    with patch("app.services.attach_deploy.shutil.which", return_value=None):
         resources = deploy_attach(
             namespace="ns",
             environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -158,13 +175,54 @@ def test_attach_kube_uses_provisioner() -> None:
             git_repo_url="https://example.com/repo.git",
             ttl_expires_at="2099-01-01T00:00:00+00:00",
             running_instance=RunningInstanceConfig(
-                kind=RunningInstanceKind.KUBE_CONTEXT,
-                kube_context="kind-launchpad",
+                kind=RunningInstanceKind.SERVERLESS,
+                service_name="my-svc",
+                region="europe-west1",
             ),
-            packaging=KubernetesPackaging.NONE,
+            settings=settings,
         )
-    assert resources.preview_url == "http://127.0.0.1:30080"
-    fake.provision.assert_called_once()
+    assert resources.simulated is True
+    assert resources.created_workload is True
+    assert "my-svc" in (resources.preview_url or "")
+    assert "europe-west1" in (resources.preview_url or "")
+
+
+def test_attach_local_machine_simulates_without_docker() -> None:
+    settings = Settings.model_construct(
+        default_workload_image="nginx:latest",
+        preview_node_host="127.0.0.1",
+    )
+    with patch("app.services.attach_deploy._docker_available", return_value=False):
+        resources = deploy_attach(
+            namespace="ns",
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            name="demo",
+            git_branch="main",
+            git_repo_url="https://example.com/repo.git",
+            ttl_expires_at="2099-01-01T00:00:00+00:00",
+            running_instance=RunningInstanceConfig(
+                kind=RunningInstanceKind.LOCAL_MACHINE,
+                listen_port=9090,
+            ),
+            settings=settings,
+        )
+    assert resources.simulated is True
+    assert resources.node_port == 9090
+    assert resources.preview_url == "http://127.0.0.1:9090"
+
+
+def test_teardown_attach_local() -> None:
+    with (
+        patch("app.services.attach_deploy._docker_available", return_value=True),
+        patch("app.services.attach_deploy._run") as run,
+    ):
+        teardown_attach(
+            running_instance=RunningInstanceConfig(kind=RunningInstanceKind.LOCAL_MACHINE),
+            namespace="ns",
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+    run.assert_called_once()
+    assert run.call_args.args[0][0] == "docker"
 
 
 def test_coerce_wizard_snapshot_defaults_runtime() -> None:

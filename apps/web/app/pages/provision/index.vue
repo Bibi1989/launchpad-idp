@@ -141,6 +141,7 @@ const form = reactive({
     rds: false,
     rds_engine: 'postgres' as 'postgres' | 'mysql' | 'mariadb',
     ecr: false,
+    app_runner: false,
     elasticache: false,
     elasticache_engine: 'redis' as 'redis' | 'memcached',
     lambda_fn: false,
@@ -585,6 +586,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
       rds: false,
       rds_engine: 'postgres',
       ecr: false,
+      app_runner: false,
       elasticache: false,
       elasticache_engine: 'redis',
       lambda_fn: false,
@@ -765,12 +767,16 @@ function validateStep(): boolean {
         runningInstance: form.running_instance,
         resources: currentProviderResources.value,
       })
-      if (attachErr === 'kube_context') {
-        fieldError.value = t('provision.errors.runtimeKubeContext')
+      if (attachErr === 'vm_host') {
+        fieldError.value = t('provision.errors.runtimeVmHost')
         return false
       }
-      if (attachErr === 'endpoint_url') {
-        fieldError.value = t('provision.errors.runtimeEndpoint')
+      if (attachErr === 'serverless_unavailable') {
+        fieldError.value = t('provision.errors.runtimeServerless')
+        return false
+      }
+      if (attachErr === 'local_machine_provider') {
+        fieldError.value = t('provision.errors.runtimeLocalMachine')
         return false
       }
       return true
@@ -781,16 +787,16 @@ function validateStep(): boolean {
       runningInstance: form.running_instance,
       resources: currentProviderResources.value,
     })
-    if (attachErr === 'kube_context') {
-      fieldError.value = t('provision.errors.runtimeKubeContext')
-      return false
-    }
-    if (attachErr === 'endpoint_url') {
-      fieldError.value = t('provision.errors.runtimeEndpoint')
+    if (attachErr === 'vm_host') {
+      fieldError.value = t('provision.errors.runtimeVmHost')
       return false
     }
     if (attachErr === 'serverless_unavailable') {
       fieldError.value = t('provision.errors.runtimeServerless')
+      return false
+    }
+    if (attachErr === 'local_machine_provider') {
+      fieldError.value = t('provision.errors.runtimeLocalMachine')
       return false
     }
     if (

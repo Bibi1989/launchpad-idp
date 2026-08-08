@@ -15,8 +15,8 @@ export type PreviewDeployPlan = {
   reason: string
   manifest_packaging: string | null
   attach_kind: string | null
-  attach_kube_context: string | null
-  attach_endpoint_url: string | null
+  attach_host: string | null
+  attach_service: string | null
 }
 
 function depsWantPostgres(deps: WorkloadDependenciesConfig): boolean {
@@ -29,7 +29,6 @@ function depsWantRedis(deps: WorkloadDependenciesConfig): boolean {
 
 /**
  * Client-side mirror of ``app.services.preview_deploy_plan.resolve_preview_deploy_plan``.
- * Used to autofill Launch from a linked workspace wizard config.
  */
 export function resolvePreviewDeployPlan(
   config: WorkspaceWizardConfig,
@@ -51,16 +50,16 @@ export function resolvePreviewDeployPlan(
       reason: 'Workspace runtime_mode=docker_compose (local Compose preview)',
       manifest_packaging: null,
       attach_kind: null,
-      attach_kube_context: null,
-      attach_endpoint_url: null,
+      attach_host: null,
+      attach_service: null,
     }
   }
 
   if (runtime === 'running_instance') {
     const instance = config.running_instance ?? {
-      kind: 'kube_context' as const,
-      kube_context: null,
-      endpoint_url: null,
+      kind: 'local_machine' as const,
+      host: null,
+      service_name: null,
     }
     return {
       deploy_mode: 'attach',
@@ -71,8 +70,8 @@ export function resolvePreviewDeployPlan(
       reason: `Workspace runtime_mode=running_instance (${instance.kind})`,
       manifest_packaging: null,
       attach_kind: instance.kind,
-      attach_kube_context: instance.kube_context ?? null,
-      attach_endpoint_url: instance.endpoint_url ?? null,
+      attach_host: instance.host ?? null,
+      attach_service: instance.service_name ?? null,
     }
   }
 
@@ -86,8 +85,8 @@ export function resolvePreviewDeployPlan(
       reason: 'Client requested manifest deploy',
       manifest_packaging: packaging,
       attach_kind: null,
-      attach_kube_context: null,
-      attach_endpoint_url: null,
+      attach_host: null,
+      attach_service: null,
     }
   }
 
@@ -101,8 +100,8 @@ export function resolvePreviewDeployPlan(
       reason: 'Client requested control-plane preview deploy',
       manifest_packaging: packaging,
       attach_kind: null,
-      attach_kube_context: null,
-      attach_endpoint_url: null,
+      attach_host: null,
+      attach_service: null,
     }
   }
 
@@ -119,8 +118,8 @@ export function resolvePreviewDeployPlan(
       reason: 'Workspace has Kubernetes packaging; using manifest deploy',
       manifest_packaging: packaging,
       attach_kind: null,
-      attach_kube_context: null,
-      attach_endpoint_url: null,
+      attach_host: null,
+      attach_service: null,
     }
   }
 
@@ -133,7 +132,7 @@ export function resolvePreviewDeployPlan(
     reason: 'Default control-plane preview deploy',
     manifest_packaging: packaging,
     attach_kind: null,
-    attach_kube_context: null,
-    attach_endpoint_url: null,
+    attach_host: null,
+    attach_service: null,
   }
 }

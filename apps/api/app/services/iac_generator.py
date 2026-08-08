@@ -313,6 +313,19 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 f" tags: {tags_obj} }},"
                 " { dependsOn: [eksRole] });"
             )
+        if r.app_runner:
+            lines.append(
+                "new aws.apprunner.Service('lp-runner', {"
+                " serviceName: `${name55}-runner`,"
+                " sourceConfiguration: {"
+                " autoDeploymentsEnabled: false,"
+                " imageRepository: {"
+                " imageIdentifier: 'public.ecr.aws/aws-containers/hello-app-runner:latest',"
+                " imageRepositoryType: 'ECR_PUBLIC',"
+                " imageConfiguration: { port: '8080' } } },"
+                " instanceConfiguration: { cpu: '256', memory: '512' },"
+                f" tags: {tags_obj} }});"
+            )
         if r.secrets_manager:
             lines.append(
                 "new aws.secretsmanager.Secret('lp-secrets', {"

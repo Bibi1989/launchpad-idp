@@ -103,6 +103,11 @@ export const AWS_SERVICE_OPTIONS: CloudServiceOption[] = [
   },
   { key: 'ecr', title: 'ECR' },
   {
+    key: 'app_runner',
+    title: 'App Runner',
+    desc: 'Managed containers from a Docker image (similar to Cloud Run)',
+  },
+  {
     key: 'elasticache',
     title: 'ElastiCache',
     nestedOptions: [

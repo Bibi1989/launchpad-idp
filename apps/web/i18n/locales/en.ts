@@ -671,7 +671,7 @@ export default {
         },
         "running_instance": {
           "title": "Running instance",
-          "desc": "Attach kube context, endpoint, or serverless"
+          "desc": "Cloud Run, EC2/VPS, or your local machine"
         }
       },
       "composeHint": {
@@ -679,14 +679,67 @@ export default {
         "blurb": "Dockerfile and docker-compose.yml will be scaffolded. Preview skips the local Kubernetes cluster."
       },
       "attach": {
-        "title": "Attach target",
-        "serverlessHint": "Cloud Run / Container Apps is selected - previews attach to that serverless runtime.",
-        "localBlurb": "Point Launchpad at an existing kube context or HTTP endpoint. No new cluster is created.",
-        "kind": "Attach kind",
-        "endpointUrl": "Endpoint URL",
+        "title": "Compute target",
+        "blurb": "Pick the cloud service that will run your app. Preview URL is created after deploy.",
+        "dockerNote": "Cloud Run, App Runner, and Container Apps all run Docker/OCI container images. VMs run Docker over SSH.",
+        "cloudflareNote": "Cloudflare Workers/Pages are edge runtimes, not Docker hosts. Use a VM over SSH, or pick Kubernetes / Workers in IaC services.",
+        "containerBadge": "Container image",
+        "serverlessHint": "Deploys the container image to the managed service (gcloud / AWS when available).",
+        "serverlessConfigHint": "Needs a container image, cloud credentials, and region. Artifact Registry / ECR is recommended.",
+        "vmConfigHint": "Needs SSH host reachability from the control plane, Docker on the VM, and an image pull path.",
+        "localMachineHint": "Runs the container with Docker on this machine (no Kubernetes cluster).",
+        "localBlurb": "Choose local Docker, or a remote VM over SSH.",
+        "kind": "Compute kind",
+        "serviceName": "Service name",
+        "region": "Region",
+        "host": "Host (IP or hostname)",
+        "sshUser": "SSH user",
+        "sshPort": "SSH port",
+        "sshKeyPath": "SSH private key path (on control plane)",
+        "listenPort": "App listen port",
+        "endpointUrl": "Preview URL override (optional)",
         "kinds": {
-          "kube_context": "Existing kubectl context",
-          "endpoint": "Existing HTTP endpoint"
+          "serverless": "Cloud Run / Container Apps",
+          "vm": "VM / VPS / EC2 (SSH)",
+          "local_machine": "Local machine (Docker)"
+        },
+        "targets": {
+          "local_docker": {
+            "title": "Local Docker",
+            "desc": "docker run on this machine"
+          },
+          "local_vm_ssh": {
+            "title": "Remote VM (SSH)",
+            "desc": "Any Linux host with Docker"
+          },
+          "gcp_cloud_run": {
+            "title": "Cloud Run",
+            "desc": "Serverless containers from a Docker image"
+          },
+          "gcp_vm_ssh": {
+            "title": "Compute Engine / VM (SSH)",
+            "desc": "SSH + Docker on a GCE or other VM"
+          },
+          "aws_app_runner": {
+            "title": "App Runner",
+            "desc": "Managed containers from ECR / public images"
+          },
+          "aws_ec2": {
+            "title": "EC2 (SSH + Docker)",
+            "desc": "Full VM control; Docker runs on the instance"
+          },
+          "azure_container_apps": {
+            "title": "Container Apps",
+            "desc": "Serverless containers on Azure"
+          },
+          "azure_vm_ssh": {
+            "title": "Azure VM (SSH)",
+            "desc": "SSH + Docker on a Linux VM"
+          },
+          "cloudflare_vm_ssh": {
+            "title": "BYO VM (SSH)",
+            "desc": "Workers are not Docker; use SSH Docker elsewhere"
+          }
         }
       }
     },
@@ -757,6 +810,10 @@ export default {
         "secrets_manager": { "title": "Secrets Manager" },
         "rds": { "title": "RDS" },
         "ecr": { "title": "ECR" },
+        "app_runner": {
+          "title": "App Runner",
+          "desc": "Managed containers from a Docker image"
+        },
         "elasticache": { "title": "ElastiCache" },
         "lambda_fn": { "title": "Lambda" },
         "dynamodb": { "title": "DynamoDB" },
@@ -851,9 +908,11 @@ export default {
       "workspaceNameFormat": "Name must start with a letter and use only a-z, 0-9, hyphens.",
       "localClusterRequired": "Local cluster name and kubectl context are required.",
       "enableK8sGeneration": "Enable Kubernetes generation for Dev (k3s) workspaces.",
-      "runtimeKubeContext": "kubectl context is required for running-instance attach.",
-      "runtimeEndpoint": "Endpoint URL is required for running-instance attach.",
-      "runtimeServerless": "Enable Cloud Run or Container Apps, or choose kube context / endpoint.",
+      "runtimeKubeContext": "local_machine runs via Docker on this host (no kube context).",
+      "runtimeEndpoint": "Preview URL override is optional; use it only when linking an existing URL.",
+      "runtimeServerless": "Enable Cloud Run, App Runner, or Container Apps for serverless compute.",
+      "runtimeVmHost": "VM host (IP or hostname) is required.",
+      "runtimeLocalMachine": "local_machine compute is only available for the local provider.",
       "enableProvisionOrK8s": "Enable at least Provision or Kubernetes generation.",
       "gcpProjectRequired": "GCP Project ID is required.",
       "azureResourceGroupRequired": "Azure resource group is required.",

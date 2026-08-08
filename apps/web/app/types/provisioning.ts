@@ -3,7 +3,7 @@ export type IaCEngine = 'terraform' | 'opentofu' | 'pulumi'
 export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm' | 'kustomize'
 export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
 export type WorkspaceRuntimeMode = 'kubernetes' | 'docker_compose' | 'running_instance'
-export type RunningInstanceKind = 'kube_context' | 'serverless' | 'endpoint'
+export type RunningInstanceKind = 'serverless' | 'vm' | 'local_machine'
 export type ProvisionEngine = IaCEngine
 export type K8sScaffoldMode = 'k8s' | 'helm' | 'kustomize'
 export type CicdPlatform = 'github' | 'gitlab'
@@ -173,7 +173,17 @@ export interface WorkloadDependenciesConfig {
 
 export interface RunningInstanceConfig {
   kind: RunningInstanceKind
+  service_name?: string | null
+  region?: string | null
+  host?: string | null
+  ssh_user?: string | null
+  ssh_port?: number
+  ssh_key_path?: string | null
+  listen_port?: number
+  preview_url_override?: string | null
+  /** @deprecated coerced from older snapshots */
   kube_context?: string | null
+  /** @deprecated use preview_url_override */
   endpoint_url?: string | null
 }
 

@@ -122,6 +122,7 @@ const form = reactive({
     rds: false,
     rds_engine: 'postgres' as 'postgres' | 'mysql' | 'mariadb',
     ecr: false,
+    app_runner: false,
     elasticache: false,
     elasticache_engine: 'redis' as 'redis' | 'memcached',
     lambda_fn: false,

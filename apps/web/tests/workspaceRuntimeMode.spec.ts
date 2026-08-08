@@ -76,21 +76,36 @@ describe('resolvePreviewDeployPlan', () => {
     expect(plan.deploy_mode).toBe('manifest')
   })
 
-  it('resolves attach mode from running_instance', () => {
+  it('resolves attach mode from running_instance vm', () => {
     const plan = resolvePreviewDeployPlan(
       baseConfig({
         runtime_mode: 'running_instance',
         kubernetes_packaging: 'none',
         artifact_mode: 'iac_only',
         running_instance: {
-          kind: 'endpoint',
-          endpoint_url: 'https://app.example.com',
-          kube_context: null,
+          ...defaultRunningInstanceConfig(),
+          kind: 'vm',
+          host: '203.0.113.10',
+          preview_url_override: 'https://app.example.com',
         },
       }),
     )
     expect(plan.deploy_mode).toBe('attach')
     expect(plan.skip_local_cluster).toBe(true)
-    expect(plan.attach_endpoint_url).toBe('https://app.example.com')
+    expect(plan.attach_kind).toBe('vm')
+    expect(plan.attach_host).toBe('203.0.113.10')
+  })
+
+  it('resolves attach mode for local_machine', () => {
+    const plan = resolvePreviewDeployPlan(
+      baseConfig({
+        runtime_mode: 'running_instance',
+        kubernetes_packaging: 'none',
+        artifact_mode: 'iac_only',
+        running_instance: defaultRunningInstanceConfig('local'),
+      }),
+    )
+    expect(plan.deploy_mode).toBe('attach')
+    expect(plan.attach_kind).toBe('local_machine')
   })
 })
