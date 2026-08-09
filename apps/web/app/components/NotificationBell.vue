@@ -7,15 +7,19 @@ const { t } = useI18n()
 const open = ref(false)
 const rootRef = ref<HTMLElement | null>(null)
 
+function onDocClick(e: MouseEvent) {
+  if (open.value && rootRef.value && !rootRef.value.contains(e.target as Node)) {
+    open.value = false
+  }
+}
+
 onMounted(() => {
   hydrate()
-  const onDocClick = (e: MouseEvent) => {
-    if (open.value && rootRef.value && !rootRef.value.contains(e.target as Node)) {
-      open.value = false
-    }
-  }
   document.addEventListener('click', onDocClick)
-  onUnmounted(() => document.removeEventListener('click', onDocClick))
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
 })
 
 function toggle() {
@@ -30,12 +34,17 @@ const toneFor: Record<NotificationKind, string> = {
   cost: 'text-[var(--lp-danger)]',
   paused: 'text-amber-400',
   info: 'text-[var(--lp-accent)]',
+  invite: 'text-[var(--lp-accent)]',
 }
 
-async function goToEnv(id: string | undefined, notificationId: string) {
-  markRead(notificationId)
+async function openNotification(n: { id: string, envId?: string, href?: string }) {
+  markRead(n.id)
   open.value = false
-  if (id) await navigateTo(`/environments/${id}`)
+  if (n.href?.startsWith('/')) {
+    await navigateTo(n.href)
+    return
+  }
+  if (n.envId) await navigateTo(`/environments/${n.envId}`)
 }
 </script>
 
@@ -87,8 +96,8 @@ async function goToEnv(id: string | undefined, notificationId: string) {
             v-for="n in items"
             :key="n.id"
             class="group flex items-start gap-3 px-4 py-3 transition hover:bg-[var(--lp-panel-2)]"
-            :class="n.envId ? 'cursor-pointer' : ''"
-            @click="goToEnv(n.envId, n.id)"
+            :class="n.envId || n.href ? 'cursor-pointer' : ''"
+            @click="openNotification(n)"
           >
             <span
               class="material-symbols-outlined mt-0.5 text-lg"

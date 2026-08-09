@@ -210,9 +210,21 @@ class RepoImportService:
                     error=str(exc),
                 )
 
+        from app.models.domain import Organization
         from app.services.orgs import OrganizationService
+        from app.services.plans import assert_can_create_workspace
+        from app.services.projects import ProjectService
 
-        personal = await OrganizationService(self._session).ensure_personal_org(owner)
+        orgs = OrganizationService(self._session)
+        personal = await orgs.ensure_personal_org(owner)
+        resolved_org_id = org_id or personal.id
+        org = await self._session.get(Organization, resolved_org_id)
+        if org is not None:
+            await assert_can_create_workspace(self._session, org)
+        org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
+        project = await ProjectService(self._session).ensure_default_project(
+            org=org_ctx.organization, actor=owner
+        )
         artifact_mode = (
             "manifest_only"
             if runtime_mode == WorkspaceRuntimeMode.KUBERNETES
@@ -250,7 +262,8 @@ class RepoImportService:
         row = ProvisioningWorkspace(
             id=workspace_id,
             owner_id=owner.id,
-            org_id=org_id or personal.id,
+            org_id=resolved_org_id,
+            project_id=project.id,
             name=request.name,
             engine=request.iac_engine,
             provider=CloudProvider.LOCAL.value,

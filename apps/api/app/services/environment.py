@@ -765,6 +765,8 @@ class EnvironmentService:
                 commit_sha=environment.latest_commit_sha,
                 message="Retry provision queued",
                 stage=ExecutionStage.INIT,
+                app_ready=False,
+                error_message=None,
             )
         except Exception:
             logger.exception(

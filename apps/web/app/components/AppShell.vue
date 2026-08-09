@@ -3,6 +3,18 @@ import type { Environment } from '~/types/environment'
 import type { CatalogService } from '~/types/catalog'
 import type { WorkspaceListItem } from '~/types/provisioning'
 
+withDefaults(
+  defineProps<{
+    /**
+     * Public-route mode: hide sidebar/header/terminal (landing, login, invite, /p/).
+     * Exists so app.vue can keep one <NuxtPage /> (no remount / lost page state)
+     * instead of swapping layouts. Never tie this to auth ready - use AppSplash.
+     */
+    bare?: boolean
+  }>(),
+  { bare: false },
+)
+
 const route = useRoute()
 const { t } = useI18n()
 const { user, logout } = useAuth()
@@ -21,6 +33,7 @@ const navItems = computed(() => [
   { key: 'launch', label: t('nav.launch'), to: '/launch', icon: 'rocket_launch', match: (path: string) => path.startsWith('/launch') },
   { key: 'catalog', label: t('nav.catalog'), to: '/catalog', icon: 'inventory_2', match: (path: string) => path.startsWith('/catalog') },
   { key: 'workspaces', label: t('nav.workspaces'), to: '/workspaces', icon: 'layers', match: (path: string) => path.startsWith('/workspaces') },
+  { key: 'projects', label: t('nav.projects'), to: '/projects', icon: 'folder_managed', match: (path: string) => path.startsWith('/projects') },
   { key: 'provision', label: t('nav.provision'), to: '/provision', icon: 'schema', match: (path: string) => path.startsWith('/provision') },
   { key: 'integrations', label: t('nav.integrations'), to: '/integrations', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
   { key: 'organization', label: t('nav.organization'), to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
@@ -234,7 +247,7 @@ watch(
   <div class="relative min-h-screen">
     <!-- Mobile nav backdrop -->
     <button
-      v-if="mobileNavOpen"
+      v-if="!bare && mobileNavOpen"
       type="button"
       class="fixed inset-0 z-40 bg-[var(--lp-ink)]/70 backdrop-blur-sm lg:hidden"
       :aria-label="t('shell.closeNav')"
@@ -243,8 +256,9 @@ watch(
 
     <!-- Sidebar -->
     <aside
-      class="fixed left-0 top-0 z-50 flex h-full w-[var(--lp-sidebar-w)] flex-col border-r border-[var(--lp-line)] bg-[var(--lp-panel)]/90 py-6 backdrop-blur-md transition-transform duration-300 lg:translate-x-0"
-      :class="mobileNavOpen ? 'translate-x-0' : '-translate-x-full'"
+      v-if="!bare"
+      class="fixed left-0 top-0 z-50 flex h-full w-[var(--lp-sidebar-w)] flex-col border-r border-[var(--lp-line)] bg-[var(--lp-panel)] py-6 transition-transform duration-300 lg:translate-x-0"
+      :class="mobileNavOpen ? 'translate-x-0' : 'max-lg:-translate-x-full'"
     >
       <div class="px-6 mb-6">
         <NuxtLink to="/" class="block">
@@ -338,9 +352,13 @@ watch(
       </div>
     </aside>
 
-    <!-- Main column -->
-    <div class="flex min-h-screen flex-col lg:ml-[var(--lp-sidebar-w)]">
+    <!-- Main column (single slot so page outlet never remounts when bare toggles) -->
+    <div
+      class="flex min-h-screen min-w-0 flex-col"
+      :data-shell="bare ? 'bare' : 'app'"
+    >
       <header
+        v-if="!bare"
         class="sticky top-0 z-30 flex h-[var(--lp-header-h)] shrink-0 items-center justify-between gap-4 border-b border-[var(--lp-line)] bg-[var(--lp-ink)]/80 px-4 backdrop-blur-md sm:px-8"
       >
         <div class="flex flex-1 items-center gap-3">
@@ -428,8 +446,14 @@ watch(
         </div>
       </header>
 
-      <main class="flex-1 px-4 py-8 sm:px-8">
-        <div class="mx-auto w-full max-w-[1440px]">
+      <main :class="bare ? 'flex-1 min-w-0' : 'flex-1 min-w-0 px-4 py-8 sm:px-8'">
+        <div
+          :class="
+            bare
+              ? 'w-full'
+              : 'lp-dashboard-main mx-auto w-full max-w-6xl'
+          "
+        >
           <slot />
         </div>
       </main>
@@ -437,6 +461,7 @@ watch(
 
     <!-- Floating terminal toggle -->
     <button
+      v-if="!bare"
       type="button"
       class="fixed bottom-8 right-8 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--lp-accent)] text-[var(--lp-ink)] shadow-lg shadow-[var(--lp-accent)]/25 transition hover:scale-105 active:scale-95"
       :aria-label="t('shell.toggleTerminal')"
@@ -446,7 +471,7 @@ watch(
     </button>
 
     <!-- Terminal drawer -->
-    <Teleport to="body">
+    <Teleport v-if="!bare" to="body">
       <div
         v-if="terminalOpen"
         class="fixed inset-0 z-[60] bg-[var(--lp-ink)]/50 backdrop-blur-sm transition-opacity"

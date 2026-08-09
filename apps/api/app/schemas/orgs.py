@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models.domain import OrgRole
+from app.models.domain import OrgPlan, OrgRole
 
 
 class OrganizationCreate(BaseModel):
@@ -30,6 +30,18 @@ class OrganizationCreate(BaseModel):
         return cleaned or None
 
 
+class OrganizationUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=128)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 2:
+            raise ValueError("name must be at least 2 characters")
+        return cleaned
+
+
 class OrganizationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,6 +49,7 @@ class OrganizationRead(BaseModel):
     slug: str
     name: str
     role: OrgRole
+    plan: OrgPlan = OrgPlan.FREE
     created_at: datetime | None = None
 
 
@@ -54,6 +67,8 @@ class OrgMemberRead(BaseModel):
     email: str
     display_name: str
     role: OrgRole
+    org_id: UUID | None = None
+    org_name: str | None = None
 
 
 class OrgInviteCreate(BaseModel):
@@ -73,6 +88,7 @@ class OrgInviteRead(BaseModel):
     created_at: datetime
     invite_url: str | None = None
     email_sent: bool = False
+    email_error: str | None = None
 
 
 class OrgInviteAccept(BaseModel):

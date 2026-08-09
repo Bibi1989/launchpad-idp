@@ -72,7 +72,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-5xl animate-fade-up space-y-8 pb-12">
+  <div class="w-full animate-fade-up space-y-8 pb-12">
     <header class="flex flex-wrap items-end justify-between gap-4">
       <div>
         <p class="lp-label mb-1">{{ t('catalog.index.eyebrow') }}</p>

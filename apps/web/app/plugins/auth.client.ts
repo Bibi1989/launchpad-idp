@@ -1,4 +1,8 @@
 export default defineNuxtPlugin(async () => {
   const { init } = useAuth()
-  await init()
+  try {
+    await init()
+  } catch {
+    // init() already marks ready in finally; never block app bootstrap.
+  }
 })

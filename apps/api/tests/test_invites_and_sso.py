@@ -72,9 +72,19 @@ async def test_invite_create_accept_and_sso_mapping(
     )
     assert owner_resp.status_code == 201
     owner_token = owner_resp.json()["access_token"]
-    org_id = owner_resp.json()["active_org_id"]
+    assert owner_resp.json()["needs_org_setup"] is True
+    org_resp = await client.post(
+        "/api/v1/orgs",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"name": "Invite Org"},
+    )
+    assert org_resp.status_code == 201
+    org_id = org_resp.json()["id"]
 
-    with patch("app.services.orgs.EmailService.send_org_invite", return_value=False):
+    with patch(
+        "app.services.orgs.EmailService.send_org_invite",
+        return_value=(False, "email not configured"),
+    ):
         invite_resp = await client.post(
             f"/api/v1/orgs/{org_id}/invites",
             headers={"Authorization": f"Bearer {owner_token}"},
@@ -96,9 +106,22 @@ async def test_invite_create_accept_and_sso_mapping(
         },
     )
     assert invitee_resp.status_code == 201
-    # Auto-accept on register should already join - also exercise explicit accept path on second invite.
-    orgs = {org["id"] for org in invitee_resp.json()["orgs"]}
-    assert org_id in orgs
+    invitee_token = invitee_resp.json()["access_token"]
+    # Invites stay pending until accepted (in-app inbox / email link).
+    pending = await client.get(
+        "/api/v1/invites/pending",
+        headers={"Authorization": f"Bearer {invitee_token}"},
+    )
+    assert pending.status_code == 200
+    assert any(row["invite_id"] for row in pending.json() if row["kind"] == "org")
+
+    accepted = await client.post(
+        "/api/v1/orgs/invites/accept",
+        headers={"Authorization": f"Bearer {invitee_token}"},
+        json={"token": token},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["org_id"] == org_id
 
     # Create SSO mapping and sync via service
     mapping = await client.post(
@@ -139,7 +162,10 @@ async def test_invite_create_accept_and_sso_mapping(
         assert membership.role == OrgRole.ADMIN
 
     # Explicit accept still works for a new invite
-    with patch("app.services.orgs.EmailService.send_org_invite", return_value=True):
+    with patch(
+        "app.services.orgs.EmailService.send_org_invite",
+        return_value=(True, None),
+    ):
         second = await client.post(
             f"/api/v1/orgs/{org_id}/invites",
             headers={"Authorization": f"Bearer {owner_token}"},
@@ -158,12 +184,17 @@ async def test_invite_create_accept_and_sso_mapping(
         },
     )
     late_auth = late.json()["access_token"]
-    # Already auto-accepted; accepting again should 409
     again = await client.post(
         "/api/v1/orgs/invites/accept",
         headers={"Authorization": f"Bearer {late_auth}"},
         json={"token": late_token},
     )
-    assert again.status_code in {409, 200}
-    # Keep token variable used
-    assert token
+    assert again.status_code == 200
+    assert again.json()["email"] == "late@example.com"
+    # Idempotent re-accept
+    again2 = await client.post(
+        "/api/v1/orgs/invites/accept",
+        headers={"Authorization": f"Bearer {late_auth}"},
+        json={"token": late_token},
+    )
+    assert again2.status_code == 200

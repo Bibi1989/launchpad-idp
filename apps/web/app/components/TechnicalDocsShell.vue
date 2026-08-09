@@ -88,7 +88,7 @@ function isActive(path: string): boolean {
       </p>
     </aside>
 
-    <article class="technical-prose max-w-3xl space-y-10">
+    <article class="technical-prose min-w-0 space-y-10">
       <slot />
     </article>
   </div>

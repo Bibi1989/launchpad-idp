@@ -28,6 +28,12 @@ class EnvChannelEvent(BaseModel):
     environment_id: str | None = None
     stage: ExecutionStage | None = None
     timestamp: str | None = None
+    # Rich lifecycle fields so SSE clients can open the preview / toast without REST.
+    preview_url: str | None = None
+    node_port: int | None = None
+    app_ready: bool | None = None
+    notice: str | None = None
+    error_message: str | None = None
 
 
 def env_channel(environment_id: UUID | str) -> str:
@@ -104,6 +110,11 @@ async def publish_env_event(
     log_level: str | None = None,
     stage: ExecutionStage | None = None,
     timestamp: datetime | None = None,
+    preview_url: str | None = None,
+    node_port: int | None = None,
+    app_ready: bool | None = None,
+    notice: str | None = None,
+    error_message: str | None = None,
 ) -> None:
     ts = timestamp or datetime.now(UTC)
     payload = EnvChannelEvent(
@@ -115,6 +126,11 @@ async def publish_env_event(
         environment_id=str(environment_id),
         stage=stage,
         timestamp=ts.isoformat(),
+        preview_url=preview_url,
+        node_port=node_port,
+        app_ready=app_ready,
+        notice=notice,
+        error_message=error_message,
     )
     channel = env_channel(environment_id)
     # Short-lived client: safe across Celery asyncio.run() per-task loops.

@@ -411,6 +411,7 @@ function downloadWorkflowYaml() {
             <option value="terraform">{{ t('workspaceIde.engines.terraform') }}</option>
             <option value="opentofu">{{ t('workspaceIde.engines.opentofu') }}</option>
             <option value="pulumi">{{ t('workspaceIde.engines.pulumi') }}</option>
+            <option value="ansible">{{ t('workspaceIde.engines.ansible') }}</option>
           </select>
 
           <div v-if="mode === 'execution'" class="flex items-center gap-2">

@@ -587,8 +587,42 @@ class IaCGenerator:
                 files.extend(self._write_terraform(workspace_dir, request))
             elif request.iac_engine == IaCEngine.PULUMI:
                 files.extend(self._write_pulumi(workspace_dir, request))
+            elif request.iac_engine == IaCEngine.ANSIBLE:
+                from app.services.local_runtime_iac import write_local_runtime_iac
+
+                ansible_cfg = request.ansible
+                if not ansible_cfg.enabled:
+                    ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+                files.extend(
+                    write_local_runtime_iac(
+                        workspace_dir,
+                        name=request.name,
+                        engine=IaCEngine.ANSIBLE,
+                        runtime_mode=request.runtime_mode,
+                        ansible=ansible_cfg,
+                        listen_port=request.running_instance.listen_port,
+                    )
+                )
             else:  # pragma: no cover
                 raise ValueError(f"Unsupported IaC engine: {request.iac_engine!r}")
+
+            # Optional Ansible host tree alongside Terraform/Pulumi for VM targets.
+            if (
+                request.iac_engine != IaCEngine.ANSIBLE
+                and request.ansible.enabled
+            ):
+                from app.services.local_runtime_iac import write_local_runtime_iac
+
+                files.extend(
+                    write_local_runtime_iac(
+                        workspace_dir,
+                        name=request.name,
+                        engine=IaCEngine.ANSIBLE,
+                        runtime_mode=request.runtime_mode,
+                        ansible=request.ansible,
+                        listen_port=request.running_instance.listen_port,
+                    )
+                )
 
         if request.artifact_mode in {
             WorkspaceArtifactsMode.MANIFEST_ONLY,
@@ -834,6 +868,11 @@ class IaCGenerator:
                             "dockerfile_path": "Dockerfile",
                             "context": scaffold.app_dir,
                             "health_path": health_path,
+                            "app_kind": (
+                                str(s_spec.app_kind or "").strip().lower()
+                                or ("frontend" if is_frontend else "backend")
+                            ),
+                            "expose_preview": expose_preview,
                         }
                     )
                 else:
@@ -856,6 +895,11 @@ class IaCGenerator:
                             "name": app_slug,
                             "listen_port": port,
                             "dockerfile_path": rel_dockerfile,
+                            "app_kind": (
+                                str(s_spec.app_kind or "").strip().lower()
+                                or ("frontend" if is_frontend else "backend")
+                            ),
+                            "expose_preview": expose_preview,
                         }
                     )
 
@@ -951,26 +995,63 @@ class IaCGenerator:
                     self._emit_launch_manifests(workspace_dir, request, workload_specs, written)
             else:
                 stack = stacks[0]
-                port = c_cfg.listen_port or default_listen_port_for_stack(stack, 8080)
-                service_name = app_name
-                rel_dockerfile = f"dockers/{app_name}/Dockerfile"
-                if c_cfg.generate_dockerfile:
-                    df_path = workspace_dir / rel_dockerfile
-                    df_path.parent.mkdir(parents=True, exist_ok=True)
-                    df_path.write_text(
-                        scaffold_dockerfile(stack, app_name=service_name, listen_port=port),
-                        encoding="utf-8",
+                from app.services.app_scaffold import CoreScaffold, is_core_stack, resolve_app_port
+
+                if is_core_stack(stack):
+                    # Defense in depth: single core stacks should normally be handled by
+                    # resolve_core_scaffold / _write_core_app_scaffold. If we reach here
+                    # (e.g. unexpected frameworks), still emit a runnable app + context.
+                    port = resolve_app_port(stack, c_cfg.listen_port)
+                    scaffold = CoreScaffold(
+                        stack=stack,
+                        app_name=self._sanitize_service_name(app_name),
+                        port=port,
+                        dependencies=request.dependencies,
                     )
-                    written.append(rel_dockerfile)
-                compose_services.append(
-                    {"name": service_name, "listen_port": port, "dockerfile_path": rel_dockerfile}
-                )
+                    for rel, content in scaffold.files().items():
+                        path = workspace_dir / rel
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(content, encoding="utf-8")
+                        written.append(rel)
+                    compose_services.append(
+                        {
+                            "name": scaffold.app_name,
+                            "listen_port": scaffold.image_spec().container_port,
+                            "dockerfile_path": "Dockerfile",
+                            "context": scaffold.app_dir,
+                            "health_path": scaffold.image_spec().liveness_path,
+                        }
+                    )
+                else:
+                    port = c_cfg.listen_port or default_listen_port_for_stack(stack, 8080)
+                    service_name = app_name
+                    rel_dockerfile = f"dockers/{app_name}/Dockerfile"
+                    if c_cfg.generate_dockerfile:
+                        df_path = workspace_dir / rel_dockerfile
+                        df_path.parent.mkdir(parents=True, exist_ok=True)
+                        df_path.write_text(
+                            scaffold_dockerfile(stack, app_name=service_name, listen_port=port),
+                            encoding="utf-8",
+                        )
+                        written.append(rel_dockerfile)
+                    compose_services.append(
+                        {"name": service_name, "listen_port": port, "dockerfile_path": rel_dockerfile}
+                    )
 
-        if c_cfg.generate_docker_compose:
-            from app.services.dockerfile_scaffold import scaffold_dependency_compose_blocks
+        # Compose file only when the wizard opted in (docker_compose runtime sets this).
+        # Running-instance keeps attach deploy; Ansible can still provision the VM.
+        if c_cfg.generate_docker_compose and compose_services:
+            from app.services.dockerfile_scaffold import (
+                scaffold_dependency_compose_blocks,
+                wire_compose_service_links,
+            )
 
-            dc_content = scaffold_docker_compose_services(
+            linked = wire_compose_service_links(
                 compose_services,
+                dependencies=request.dependencies,
+            )
+            dc_content = scaffold_docker_compose_services(
+                linked,
                 dependency_blocks=scaffold_dependency_compose_blocks(request.dependencies),
             )
             dc_path = workspace_dir / "docker-compose.yml"
@@ -1110,21 +1191,56 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
             )
         files.extend(self._write_container_scaffold(workspace_dir, request))
 
-        # Optional IaC stubs (Terraform / OpenTofu / Pulumi) when provision is enabled.
+        # Optional IaC stubs (Terraform / OpenTofu / Pulumi / Ansible).
         if request.artifact_mode in {
             WorkspaceArtifactsMode.IAC_ONLY,
             WorkspaceArtifactsMode.BOTH,
         }:
             from app.services.local_runtime_iac import write_local_runtime_iac
 
-            files.extend(
-                write_local_runtime_iac(
-                    workspace_dir,
-                    name=request.name,
-                    engine=request.iac_engine,
-                    runtime_mode=mode,
+            ansible_cfg = request.ansible
+            # Auto-enable Ansible artifacts when engine is ansible or VM-targeted instance.
+            if request.iac_engine == IaCEngine.ANSIBLE and not ansible_cfg.enabled:
+                ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+            if (
+                mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
+                and request.running_instance.kind.value == "vm"
+                and request.running_instance.host
+            ):
+                ansible_cfg = ansible_cfg.model_copy(
+                    update={
+                        "enabled": True,
+                        "hosts": request.running_instance.host
+                        or ansible_cfg.hosts,
+                        "ssh_user": request.running_instance.ssh_user
+                        or ansible_cfg.ssh_user,
+                        "ssh_port": request.running_instance.ssh_port,
+                        "ssh_private_key_path": request.running_instance.ssh_key_path
+                        or ansible_cfg.ssh_private_key_path,
+                        "app_listen_port": request.running_instance.listen_port,
+                    }
                 )
-            )
+
+            if request.iac_engine == IaCEngine.ANSIBLE or ansible_cfg.enabled:
+                files.extend(
+                    write_local_runtime_iac(
+                        workspace_dir,
+                        name=request.name,
+                        engine=IaCEngine.ANSIBLE,
+                        runtime_mode=mode,
+                        ansible=ansible_cfg,
+                        listen_port=request.running_instance.listen_port,
+                    )
+                )
+            if request.iac_engine != IaCEngine.ANSIBLE:
+                files.extend(
+                    write_local_runtime_iac(
+                        workspace_dir,
+                        name=request.name,
+                        engine=request.iac_engine,
+                        runtime_mode=mode,
+                    )
+                )
         return files
 
     @staticmethod
@@ -1150,6 +1266,7 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
             "cost_optimization": request.cost_optimization.model_dump(mode="json"),
             "container_scaffold": request.container_scaffold.model_dump(mode="json"),
             "dependencies": request.dependencies.model_dump(mode="json"),
+            "ansible": request.ansible.model_dump(mode="json"),
         }
         path = self.wizard_snapshot_path(workspace_dir)
         path.parent.mkdir(parents=True, exist_ok=True)

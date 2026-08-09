@@ -9,7 +9,7 @@ export type EnvironmentStatus =
 
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR'
 
-export type EnvStreamEventType = 'STATUS_CHANGE' | 'LOG'
+export type EnvStreamEventType = 'STATUS_CHANGE' | 'LOG' | 'EXECUTION_FAILED'
 
 export interface EnvStreamEvent {
   type: EnvStreamEventType
@@ -18,7 +18,13 @@ export interface EnvStreamEvent {
   message?: string | null
   log_level?: string | null
   environment_id?: string | null
+  stage?: string | null
+  timestamp?: string | null
   preview_url?: string | null
+  node_port?: number | null
+  app_ready?: boolean | null
+  notice?: string | null
+  error_message?: string | null
 }
 
 export interface Environment {

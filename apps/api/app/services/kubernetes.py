@@ -198,6 +198,8 @@ class ProvisionedResources:
     node_port: int | None = None
     image: str | None = None
     labels: dict[str, str] = field(default_factory=dict)
+    # User-facing note (e.g. Compose host port remapped because preferred was busy).
+    notice: str | None = None
 
 
 class KubernetesProvisioner:

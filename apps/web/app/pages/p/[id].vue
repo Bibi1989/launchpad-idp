@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { Environment } from '~/types/environment'
+import { applyEnvStreamPatch } from '~/utils/envStreamPatch'
 
 const route = useRoute()
 const { t } = useI18n()
 const id = computed(() => String(route.params.id))
+const environmentId = computed(() => id.value || null)
 const { getById } = useEnvironments()
 const { reconcileEnvironment } = useNotifications()
 const toast = useToast()
@@ -41,8 +43,6 @@ const remainingLabel = computed(() => {
 
 const isLive = computed(() => environment.value?.status === 'RUNNING')
 
-// Keep polling until the environment reaches a settled state so cost, time
-// remaining, and the app-ready flip stay live on this shareable page.
 const isSettled = computed(() => {
   const s = environment.value?.status
   return s === 'DESTROYED' || s === 'EXPIRED' || s === 'TEARDOWN_PENDING'
@@ -57,16 +57,36 @@ async function load() {
   }
 }
 
+useEnvironmentLiveStream(environmentId, {
+  onEvent: (event) => {
+    if (!environment.value) return
+    applyEnvStreamPatch(environment.value, event)
+    reconcileEnvironment(environment.value)
+    if (
+      event.type === 'STATUS_CHANGE'
+      && (event.status === 'RUNNING' || event.status === 'FAILED')
+    ) {
+      void load()
+    }
+  },
+})
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(async () => {
   shareUrl.value = window.location.href
   await load()
-  const timer = setInterval(() => {
+  // TTL / cost tick; status and Open-app flip via SSE.
+  pollTimer = setInterval(() => {
     tick.value += 1
-    if (!isSettled.value) {
+    if (!isSettled.value && tick.value % 30 === 0) {
       void load()
     }
-  }, 4000)
-  onUnmounted(() => clearInterval(timer))
+  }, 1_000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
 })
 </script>
 

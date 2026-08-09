@@ -58,10 +58,8 @@ async def _effective_deploy_mode(
     session: AsyncSession,
     environment: Environment,
 ) -> str:
-    """Resolve deploy mode, correcting stale ``preview`` when workspace runtime is non-K8s."""
+    """Resolve deploy mode from the workspace runtime; fix stale compose/attach/preview."""
     mode = normalize_deploy_mode(getattr(environment, "deploy_mode", None))
-    if mode in NON_K8S_DEPLOY_MODES or mode == DeployMode.MANIFEST.value:
-        return mode
 
     workspace_id = environment.workspace_id
     if workspace_id is None:
@@ -88,10 +86,10 @@ async def _effective_deploy_mode(
         return mode
 
     plan = resolve_preview_deploy_plan(config, requested_deploy_mode=None)
-    if plan.deploy_mode.value not in NON_K8S_DEPLOY_MODES:
+    corrected = plan.deploy_mode.value
+    if corrected == mode:
         return mode
 
-    corrected = plan.deploy_mode.value
     environment.deploy_mode = corrected
     logger.info(
         "deploy_mode_corrected_from_workspace",
@@ -185,6 +183,11 @@ async def _publish_status(
     commit_sha: str | None = None,
     message: str | None = None,
     stage: ExecutionStage | None = None,
+    preview_url: str | None = None,
+    node_port: int | None = None,
+    app_ready: bool | None = None,
+    notice: str | None = None,
+    error_message: str | None = None,
 ) -> None:
     await publish_env_event(
         environment_id,
@@ -193,6 +196,11 @@ async def _publish_status(
         commit_sha=commit_sha,
         message=message,
         stage=stage,
+        preview_url=preview_url,
+        node_port=node_port,
+        app_ready=app_ready,
+        notice=notice,
+        error_message=error_message,
     )
 
 
@@ -353,6 +361,8 @@ async def _fail_execution(
             commit_sha=commit_sha or environment.latest_commit_sha,
             message=error_text,
             stage=stage,
+            app_ready=False,
+            error_message=error_text,
         )
 
 
@@ -864,6 +874,11 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             if resources.node_port is not None
                             else ""
                         )
+                        remap_note = (
+                            f"; {resources.notice}"
+                            if getattr(resources, "notice", None)
+                            else ""
+                        )
                         await _emit_stage(
                             log_repo,
                             session,
@@ -871,7 +886,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             stage=ExecutionStage.APPLY,
                             message=(
                                 f"APPLY - docker compose stack ready"
-                                f"{port_note}; preview={resources.preview_url or '-'}"
+                                f"{port_note}{remap_note}; "
+                                f"preview={resources.preview_url or '-'}"
                             ),
                             commit_sha=commit_sha,
                         )
@@ -930,10 +946,17 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         if resources.preview_url
                         else ""
                     )
+                    remap_note = (
+                        f" {resources.notice}."
+                        if getattr(resources, "notice", None)
+                        else ""
+                    )
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
-                        message=f"APPLY - provision completed, RUNNING.{preview_note}",
+                        message=(
+                            f"APPLY - provision completed, RUNNING.{remap_note}{preview_note}"
+                        ),
                         status=EnvironmentStatus.RUNNING.value,
                         commit_sha=commit_sha,
                         stage=ExecutionStage.APPLY,
@@ -994,6 +1017,10 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         commit_sha=commit_sha,
                         message=resources.preview_url or "Provision completed",
                         stage=ExecutionStage.APPLY,
+                        preview_url=resources.preview_url,
+                        node_port=resources.node_port,
+                        app_ready=bool(resources.preview_url),
+                        notice=getattr(resources, "notice", None),
                     )
                 except PreviewCancelled:
                     # Force-delete during provisioning. Leave status TEARDOWN_PENDING
@@ -1052,6 +1079,10 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                     commit_sha=commit_sha,
                                     message=resources.preview_url,
                                     stage=ExecutionStage.APPLY,
+                                    preview_url=resources.preview_url,
+                                    node_port=resources.node_port,
+                                    app_ready=bool(resources.preview_url),
+                                    notice=getattr(resources, "notice", None),
                                 )
                                 return
                         except Exception:
@@ -1413,6 +1444,9 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         commit_sha=short_sha,
                         message="Rebuild succeeded",
                         stage=ExecutionStage.APPLY,
+                        preview_url=environment.preview_url,
+                        node_port=environment.node_port,
+                        app_ready=bool(environment.preview_url),
                     )
                 except Exception as exc:
                     logger.exception("rebuild_failed", environment_id=environment_id)
@@ -1852,6 +1886,8 @@ async def _run_ttl_reaper() -> int:
                 commit_sha=commit_sha,
                 message="Provisioning timed out - no active worker",
                 stage=ExecutionStage.APPLY,
+                app_ready=False,
+                error_message="Provisioning timed out - no active worker",
             )
 
     logger.info("ttl_reaper_complete", reaped=reaped, interval=settings.ttl_reaper_interval_seconds)

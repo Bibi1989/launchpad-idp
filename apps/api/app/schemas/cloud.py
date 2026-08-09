@@ -20,6 +20,7 @@ class IaCEngine(str, Enum):
     TERRAFORM = "terraform"
     OPENTOFU = "opentofu"
     PULUMI = "pulumi"
+    ANSIBLE = "ansible"
 
 
 class SecretBackend(str, Enum):
@@ -104,6 +105,90 @@ class RunningInstanceKind(str, Enum):
 
     LOCAL_MACHINE = "local_machine"
     """Operator machine via local Docker (no Kubernetes)."""
+
+
+class AnsibleAppDeployMode(str, Enum):
+    """How the Ansible app role starts the workload on the target host."""
+
+    DOCKER_RUN = "docker_run"
+    DOCKER_COMPOSE = "docker_compose"
+    SYSTEMD = "systemd"
+    NONE = "none"
+
+
+class AnsibleConfig(BaseModel):
+    """Interactive Ansible scaffold options for VM / Compose host provisioning."""
+
+    enabled: bool = False
+    # Inventory / connection
+    hosts: str = Field(
+        default="127.0.0.1",
+        max_length=2048,
+        description="Comma or newline separated hosts / IPs for inventory",
+    )
+    inventory_group: str = Field(default="app_servers", max_length=64)
+    ssh_user: str = Field(default="ubuntu", max_length=64)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_private_key_path: str | None = Field(default="~/.ssh/id_ed25519", max_length=512)
+    become: bool = True
+    become_user: str = Field(default="root", max_length=64)
+    python_interpreter: str = Field(default="auto", max_length=128)
+    # Host bootstrap
+    set_hostname: bool = True
+    hostname: str | None = Field(default=None, max_length=253)
+    timezone: str = Field(default="UTC", max_length=64)
+    packages: list[str] = Field(
+        default_factory=lambda: ["curl", "ca-certificates", "gnupg", "jq", "htop"],
+    )
+    # Docker
+    install_docker: bool = True
+    install_compose_plugin: bool = True
+    # Firewall / hardening
+    enable_ufw: bool = True
+    ufw_allow_ports: list[int] = Field(default_factory=lambda: [22, 80, 443])
+    enable_fail2ban: bool = True
+    enable_unattended_upgrades: bool = True
+    # Deploy user
+    create_deploy_user: bool = True
+    deploy_user: str = Field(default="deploy", max_length=64)
+    deploy_user_groups: list[str] = Field(default_factory=lambda: ["docker"])
+    # App
+    app_deploy_mode: AnsibleAppDeployMode = AnsibleAppDeployMode.DOCKER_RUN
+    app_dir: str = Field(default="/opt/launchpad/app", max_length=512)
+    app_listen_port: int = Field(default=8080, ge=1, le=65535)
+    sync_workspace: bool = True
+    # Vault
+    use_vault: bool = False
+    vault_password_file: str | None = Field(default=None, max_length=512)
+
+    @field_validator("hosts", "inventory_group", "ssh_user", "become_user", "deploy_user", "timezone", "app_dir")
+    @classmethod
+    def strip_required(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("hostname", "ssh_private_key_path", "vault_password_file", "python_interpreter")
+    @classmethod
+    def strip_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @field_validator("packages", "deploy_user_groups")
+    @classmethod
+    def clean_str_lists(cls, value: list[str]) -> list[str]:
+        out: list[str] = []
+        for item in value:
+            cleaned = str(item).strip()
+            if cleaned and cleaned not in out:
+                out.append(cleaned)
+        return out
+
+    @field_validator("ufw_allow_ports")
+    @classmethod
+    def clean_ports(cls, value: list[int]) -> list[int]:
+        ports = sorted({int(p) for p in value if 1 <= int(p) <= 65535})
+        return ports or [22]
 
 
 class RunningInstanceConfig(BaseModel):
@@ -622,6 +707,7 @@ class ProvisioningWizardRequest(BaseModel):
     dependencies: WorkloadDependenciesConfig = Field(
         default_factory=WorkloadDependenciesConfig
     )
+    ansible: AnsibleConfig = Field(default_factory=AnsibleConfig)
 
     @field_validator("name")
     @classmethod
@@ -827,6 +913,7 @@ class WorkspaceWizardConfig(BaseModel):
     dependencies: WorkloadDependenciesConfig = Field(
         default_factory=WorkloadDependenciesConfig
     )
+    ansible: AnsibleConfig = Field(default_factory=AnsibleConfig)
     has_credentials: bool = False
     """Safe display name for the stored cloud key (never the secret itself)."""
     credential_label: str | None = None

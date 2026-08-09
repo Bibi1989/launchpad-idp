@@ -10,11 +10,21 @@ from pathlib import Path
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, sanitize_log_message
 from app.schemas.cloud import RunningInstanceConfig, RunningInstanceKind
+from app.services.compose_deploy import (
+    ComposeDeployError,
+    list_docker_published_host_ports,
+    next_available_host_port,
+)
 from app.services.kubernetes import ProvisionedResources
 
 logger = get_logger(__name__)
 
 _SAFE_NAME = re.compile(r"[^a-z0-9-]+")
+_BIND_ALLOCATED_RE = re.compile(
+    r"Bind for [^\s]+?:(\d+)\s+failed:\s+port is already allocated",
+    re.IGNORECASE,
+)
+_ATTACH_PORT_RETRY_ATTEMPTS = 3
 
 
 class AttachDeployError(RuntimeError):
@@ -66,8 +76,17 @@ def _run(
     return completed
 
 
+def _is_frontend_app_dir(name: str) -> bool:
+    lowered = name.strip().lower()
+    return any(token in lowered for token in ("web", "ui", "frontend", "spa", "next", "nuxt"))
+
+
 def _find_workspace_dockerfile(workspace_root: Path) -> tuple[Path, Path] | None:
-    """Return (dockerfile_path, build_context) for a scaffolded workspace app."""
+    """Return (dockerfile_path, build_context) for a scaffolded workspace app.
+
+    Prefer a frontend app (Open-app / browser target) over alphabetical
+    ``apps/*`` order so ``api-server`` does not win over ``web-ui``.
+    """
     candidates = [
         workspace_root / "apps" / "app" / "Dockerfile",
         workspace_root / "Dockerfile",
@@ -76,14 +95,19 @@ def _find_workspace_dockerfile(workspace_root: Path) -> tuple[Path, Path] | None
     for df in candidates:
         if df.is_file():
             return df, df.parent
-    # First Dockerfile under apps/*
+
     apps = workspace_root / "apps"
-    if apps.is_dir():
-        for child in sorted(apps.iterdir()):
-            df = child / "Dockerfile"
-            if df.is_file():
-                return df, child
-    return None
+    if not apps.is_dir():
+        return None
+
+    app_dirs = [child for child in apps.iterdir() if child.is_dir() and (child / "Dockerfile").is_file()]
+    if not app_dirs:
+        return None
+
+    frontends = [d for d in app_dirs if _is_frontend_app_dir(d.name)]
+    chosen = sorted(frontends, key=lambda p: p.name) if frontends else sorted(app_dirs, key=lambda p: p.name)
+    target = chosen[0]
+    return target / "Dockerfile", target
 
 
 def _try_build_workspace_image(
@@ -159,6 +183,58 @@ def _apply_override(
     return resources
 
 
+def _parse_allocated_bind_ports(detail: str) -> set[int]:
+    ports: set[int] = set()
+    for match in _BIND_ALLOCATED_RE.finditer(detail or ""):
+        try:
+            ports.add(int(match.group(1)))
+        except ValueError:
+            continue
+    return ports
+
+
+def _resolve_local_host_port(preferred: int, *, extra_busy: set[int]) -> int:
+    """Pick preferred host port when free, otherwise the next free publish port."""
+    docker_ports = list_docker_published_host_ports() | extra_busy
+    try:
+        return next_available_host_port(
+            preferred,
+            reserved=extra_busy,
+            docker_ports=docker_ports,
+        )
+    except ComposeDeployError as exc:
+        raise AttachDeployError(str(exc)) from exc
+
+
+_EXPOSE_RE = re.compile(r"^EXPOSE\s+(\d+)", re.MULTILINE | re.IGNORECASE)
+
+
+def _container_listen_port(
+    *,
+    workspace_root: Path | None,
+    fallback: int,
+) -> int:
+    """Prefer EXPOSE from the workspace Dockerfile so Open-app hits the app, not nginx :80."""
+    if workspace_root is None:
+        return fallback
+    found = _find_workspace_dockerfile(workspace_root)
+    if found is None:
+        return fallback
+    dockerfile, _ctx = found
+    try:
+        text = dockerfile.read_text(encoding="utf-8")
+    except OSError:
+        return fallback
+    match = _EXPOSE_RE.search(text)
+    if not match:
+        return fallback
+    try:
+        port = int(match.group(1))
+    except ValueError:
+        return fallback
+    return port if 1 <= port <= 65535 else fallback
+
+
 def _deploy_local_machine(
     *,
     environment_id: str,
@@ -166,8 +242,10 @@ def _deploy_local_machine(
     image: str,
     running_instance: RunningInstanceConfig,
     settings: Settings,
+    workspace_root: Path | None = None,
 ) -> ProvisionedResources:
-    port = running_instance.listen_port
+    preferred = int(running_instance.listen_port)
+    container_port = _container_listen_port(workspace_root=workspace_root, fallback=preferred)
     container = _container_name(environment_id)
     resources = ProvisionedResources(
         namespace=f"instance-{environment_id[:8]}",
@@ -184,8 +262,8 @@ def _deploy_local_machine(
         logger.warning("instance_local_docker_unavailable_simulate", environment_id=environment_id)
         resources.simulated = True
         resources.created_workload = True
-        resources.node_port = port
-        resources.preview_url = _url_for_port(settings, port)
+        resources.node_port = container_port
+        resources.preview_url = _url_for_port(settings, container_port)
         return _apply_override(resources, running_instance)
 
     inspect = _run(
@@ -201,32 +279,81 @@ def _deploy_local_machine(
         )
         resources.simulated = True
         resources.created_workload = True
-        resources.node_port = port
-        resources.preview_url = _url_for_port(settings, port)
+        resources.node_port = container_port
+        resources.preview_url = _url_for_port(settings, container_port)
         return _apply_override(resources, running_instance)
 
     # Replace any prior container for this environment.
     _run(["docker", "rm", "-f", container], timeout=60, check=False)
-    _run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            container,
-            "--restart",
-            "unless-stopped",
-            "-p",
-            f"{port}:{port}",
-            "-e",
-            f"PORT={port}",
-            image,
-        ],
-        timeout=180,
-    )
+
+    extra_busy: set[int] = set()
+    host_port = container_port
+    notice: str | None = None
+    last_error: AttachDeployError | None = None
+
+    for attempt in range(1, _ATTACH_PORT_RETRY_ATTEMPTS + 1):
+        host_port = _resolve_local_host_port(preferred, extra_busy=extra_busy)
+        if host_port != preferred or container_port != preferred:
+            notice = (
+                f"Port map: publishing host {host_port} → container {container_port}"
+                + (
+                    f" (preferred host {preferred} busy)"
+                    if host_port != preferred
+                    else ""
+                )
+            )
+        else:
+            notice = None
+
+        try:
+            _run(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--name",
+                    container,
+                    "--restart",
+                    "unless-stopped",
+                    "-p",
+                    f"{host_port}:{container_port}",
+                    "-e",
+                    f"PORT={container_port}",
+                    image,
+                ],
+                timeout=180,
+            )
+            break
+        except AttachDeployError as exc:
+            last_error = exc
+            conflicted = _parse_allocated_bind_ports(str(exc))
+            if not conflicted or attempt >= _ATTACH_PORT_RETRY_ATTEMPTS:
+                raise
+            extra_busy |= conflicted
+            logger.warning(
+                "instance_local_port_conflict_retry",
+                environment_id=environment_id,
+                conflicted=sorted(conflicted),
+                attempt=attempt,
+            )
+            _run(["docker", "rm", "-f", container], timeout=60, check=False)
+    else:
+        if last_error is not None:
+            raise last_error
+        raise AttachDeployError("docker run failed: no free host port")
+
+    if notice:
+        resources.notice = notice
+        logger.warning(
+            "instance_local_host_port_remapped",
+            environment_id=environment_id,
+            preferred=container_port,
+            host_port=host_port,
+        )
+
     resources.created_workload = True
-    resources.node_port = port
-    resources.preview_url = _url_for_port(settings, port)
+    resources.node_port = host_port
+    resources.preview_url = _url_for_port(settings, host_port)
     return _apply_override(resources, running_instance)
 
 
@@ -406,7 +533,7 @@ def deploy_attach(
     settings: Settings | None = None,
 ) -> ProvisionedResources:
     """Deploy (or link) a preview onto serverless / VM / local-machine compute."""
-    _ = (namespace, git_branch, git_repo_url, ttl_expires_at, owner_label, enable_postgres, enable_redis, workspace_root, packaging)
+    _ = (namespace, git_branch, git_repo_url, ttl_expires_at, owner_label, enable_postgres, enable_redis, packaging)
     cfg = settings or get_settings()
     workload = resolve_instance_image(
         image=image,
@@ -423,6 +550,7 @@ def deploy_attach(
             image=workload,
             running_instance=running_instance,
             settings=cfg,
+            workspace_root=workspace_root,
         )
     if kind == RunningInstanceKind.VM:
         return _deploy_vm(

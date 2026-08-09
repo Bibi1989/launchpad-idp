@@ -4,11 +4,13 @@ import {
   provisioningWizardSchema,
   containerScaffoldSchema,
   defaultContainerScaffold,
+  defaultAnsibleConfig,
   defaultWorkloadDependencies,
   workloadDependenciesSchema,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
+  AnsibleConfig,
   CloudProvider,
   ContainerScaffoldConfig,
   CostOptimizationConfig,
@@ -94,6 +96,9 @@ const loadingConfig = ref(false)
 
 const infraGeneration = ref<InfraGenerationConfig>(defaultInfraGenerationConfig({ isLocal: true }))
 
+const { listProjects, projects: launchpadProjects } = useProjects()
+const launchpadProjectId = ref<string>('')
+
 const form = reactive({
   name: '',
   iac_engine: 'terraform' as IaCEngine,
@@ -106,6 +111,7 @@ const form = reactive({
   kubernetes_options: defaultKubernetesWorkloadOptions() as KubernetesWorkloadOptions,
   cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
   container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
+  ansible: defaultAnsibleConfig() as AnsibleConfig,
   dependencies: defaultWorkloadDependencies() as WorkloadDependenciesConfig,
   local: {
     cluster_name: 'launchpad',
@@ -428,6 +434,14 @@ onMounted(async () => {
     existingWorkspaces.value = []
   }
   try {
+    const listed = await listProjects()
+    if (!launchpadProjectId.value && listed[0]) {
+      launchpadProjectId.value = listed[0].id
+    }
+  } catch {
+    // Projects optional until user creates one
+  }
+  try {
     githubApp.value = await getGithubAppStatus()
     applyGithubDefaults(githubApp.value)
   } catch {
@@ -569,6 +583,7 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
   if (config.container_scaffold) {
     Object.assign(form.container_scaffold, config.container_scaffold)
   }
+  Object.assign(form.ansible, defaultAnsibleConfig(), config.ansible ?? {})
   if (config.dependencies) {
     Object.assign(form.dependencies, config.dependencies)
   }
@@ -724,6 +739,7 @@ function buildWizardPayload(): ProvisioningWizardInput {
   applyRuntimeModeNormalization()
   const base = {
     name: form.name,
+    launchpad_project_id: launchpadProjectId.value || null,
     iac_engine: form.iac_engine,
     credentials: form.credentials,
     run_init: form.run_init,
@@ -734,6 +750,22 @@ function buildWizardPayload(): ProvisioningWizardInput {
     cost_optimization: form.cost_optimization,
     container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
     dependencies: workloadDependenciesSchema.parse(form.dependencies),
+    ansible: {
+      ...form.ansible,
+      enabled:
+        form.ansible.enabled
+        || form.iac_engine === 'ansible'
+        || infraGeneration.value.provision.engine === 'ansible',
+      hosts:
+        form.ansible.hosts
+        || form.running_instance.host
+        || '127.0.0.1',
+      ssh_user: form.running_instance.ssh_user || form.ansible.ssh_user,
+      ssh_port: form.running_instance.ssh_port || form.ansible.ssh_port,
+      ssh_private_key_path:
+        form.running_instance.ssh_key_path || form.ansible.ssh_private_key_path,
+      app_listen_port: form.running_instance.listen_port || form.ansible.app_listen_port,
+    },
   }
   if (form.provider === 'local') {
     const isK8s = form.runtime_mode === 'kubernetes'
@@ -785,6 +817,10 @@ function validateStep(): boolean {
     }
     if (!/^[a-z][a-z0-9-]*$/.test(form.name.trim().toLowerCase())) {
       fieldError.value = t('provision.errors.workspaceNameFormat')
+      return false
+    }
+    if (!launchpadProjectId.value) {
+      fieldError.value = t('provision.errors.selectProject')
       return false
     }
   }
@@ -905,6 +941,18 @@ async function scaffoldDockerFiles(
   scaffold: ContainerScaffoldConfig = form.container_scaffold,
 ) {
   if (!scaffold.enabled) return
+  // API IaCGenerator already writes apps/<slug>/ (sources + Dockerfile) and a
+  // compose file with the correct build context. Client templates use
+  // context: . + dockers/Dockerfile.* and overwrite that, causing
+  // "COPY package.json: not found" on compose up.
+  if (isLocalProvider.value) return
+  if ((scaffold.services?.length ?? 0) > 0) return
+  try {
+    const nodes = await listWorkspaceFiles(workspaceId)
+    if (nodes.some((n) => /^apps\/[^/]+\/Dockerfile$/.test(n.path))) return
+  } catch {
+    // Fall through to client scaffold if the tree cannot be listed.
+  }
   let resolvedScaffold = { ...scaffold }
   if (
     form.github.repo_mode === 'existing'
@@ -1150,7 +1198,7 @@ async function onPrimaryAction() {
 </script>
 
 <template>
-  <div class="mx-auto max-w-4xl animate-fade-up space-y-6 pb-10">
+  <div class="w-full animate-fade-up space-y-6 pb-10">
     <header class="flex flex-wrap items-end justify-between gap-4">
       <div>
         <p class="lp-label mb-1">{{ t('provision.eyebrow') }}</p>
@@ -1217,6 +1265,25 @@ async function onPrimaryAction() {
                 autocomplete="off"
                 :disabled="!isNewWorkspace || loadingConfig"
               >
+            </label>
+            <label v-if="isNewWorkspace" class="block space-y-2">
+              <span class="lp-label">{{ t('provision.launchpadProject') }}</span>
+              <select v-model="launchpadProjectId" class="lp-input" :disabled="loadingConfig">
+                <option disabled value="">{{ t('provision.selectProject') }}</option>
+                <option
+                  v-for="project in launchpadProjects"
+                  :key="project.id"
+                  :value="project.id"
+                >
+                  {{ project.name }}
+                </option>
+              </select>
+              <p class="text-xs text-[var(--lp-muted)]">
+                {{ t('provision.launchpadProjectBlurb') }}
+                <NuxtLink to="/projects" class="text-[var(--lp-accent)] underline">
+                  {{ t('provision.manageProjects') }}
+                </NuxtLink>
+              </p>
             </label>
             <label class="block space-y-2">
               <span class="lp-label">{{ t('provision.iacEngine') }}</span>
@@ -1537,6 +1604,11 @@ async function onPrimaryAction() {
                 class="mt-4"
                 :disabled="loadingConfig"
               />
+              <AnsibleConfigurator
+                v-model="form.ansible"
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
               <WorkloadDependenciesPicker
                 v-model:dependencies="form.dependencies"
                 provider="local"
@@ -1561,6 +1633,11 @@ async function onPrimaryAction() {
               <ContainerScaffoldCard
                 v-if="form.container_scaffold.enabled"
                 v-model="form.container_scaffold"
+                class="mt-4"
+                :disabled="loadingConfig"
+              />
+              <AnsibleConfigurator
+                v-model="form.ansible"
                 class="mt-4"
                 :disabled="loadingConfig"
               />

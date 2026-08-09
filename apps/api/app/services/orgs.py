@@ -57,6 +57,7 @@ class CreatedInvite:
     raw_token: str
     invite_url: str
     email_sent: bool
+    email_error: str | None = None
 
 
 def role_at_least(role: OrgRole, minimum: OrgRole) -> bool:
@@ -111,12 +112,16 @@ class OrganizationService:
         )
         self._session.add(membership_row)
         await self._session.flush()
+        from app.services.projects import ProjectService
+
+        await ProjectService(self._session, self._settings).ensure_default_project(
+            org=org, actor=user
+        )
         await self._session.refresh(org)
         logger.info("personal_org_created", org_id=str(org.id), user_id=str(user.id), slug=slug)
         return org
 
     async def list_for_user(self, user: User) -> list[tuple[Organization, OrgRole]]:
-        await self.ensure_personal_org(user)
         result = await self._session.execute(
             select(OrgMembership)
             .where(OrgMembership.user_id == user.id)
@@ -142,6 +147,11 @@ class OrganizationService:
             OrgMembership(org_id=org.id, user_id=user.id, role=OrgRole.OWNER)
         )
         await self._session.flush()
+        from app.services.projects import ProjectService
+
+        await ProjectService(self._session, self._settings).ensure_default_project(
+            org=org, actor=user
+        )
         await self._session.refresh(org)
         return org
 
@@ -149,7 +159,10 @@ class OrganizationService:
         result = await self._session.execute(
             select(OrgMembership)
             .where(OrgMembership.org_id == org_id, OrgMembership.user_id == user_id)
-            .options(selectinload(OrgMembership.organization))
+            .options(
+                selectinload(OrgMembership.organization),
+                selectinload(OrgMembership.user),
+            )
         )
         return result.scalar_one_or_none()
 
@@ -159,13 +172,15 @@ class OrganizationService:
         user: User,
         org_id: UUID | None,
     ) -> OrgContext:
-        await self.ensure_personal_org(user)
         if org_id is None:
             rows = await self.list_for_user(user)
             if not rows:
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail={"code": "org_not_found", "message": "No organization found"},
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "needs_org_setup",
+                        "message": "Create an organization to continue",
+                    },
                 )
             organization, _role = rows[0]
             membership = await self.get_membership(org_id=organization.id, user_id=user.id)
@@ -344,7 +359,7 @@ class OrganizationService:
         await self._session.refresh(invite)
 
         invite_url = f"{self._settings.invite_base_url.rstrip('/')}/{raw_token}"
-        email_sent = self._email.send_org_invite(
+        email_sent, email_error = self._email.send_org_invite(
             to_email=cleaned_email,
             org_name=actor.organization.name,
             role=role.value,
@@ -357,13 +372,38 @@ class OrganizationService:
             org_id=str(org_id),
             email=cleaned_email,
             email_sent=email_sent,
+            email_error=email_error,
         )
         return CreatedInvite(
             invite=invite,
             raw_token=raw_token,
             invite_url=invite_url,
             email_sent=email_sent,
+            email_error=email_error,
         )
+
+    async def rename_org(
+        self,
+        *,
+        org_id: UUID,
+        actor: OrgContext,
+        name: str,
+    ) -> Organization:
+        if not role_at_least(actor.role, OrgRole.ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "Admin role required"},
+            )
+        org = actor.organization
+        if org.id != org_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "org_not_found", "message": "Organization not found"},
+            )
+        org.name = name
+        await self._session.flush()
+        await self._session.refresh(org)
+        return org
 
     async def list_invites(self, *, org_id: UUID) -> list[OrgInvite]:
         result = await self._session.execute(
@@ -398,8 +438,51 @@ class OrganizationService:
         invite.revoked_at = datetime.now(UTC)
         await self._session.flush()
 
+    async def list_pending_for_user(self, user: User) -> list[OrgInvite]:
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            select(OrgInvite)
+            .where(
+                OrgInvite.email == user.email.lower(),
+                OrgInvite.accepted_at.is_(None),
+                OrgInvite.revoked_at.is_(None),
+                OrgInvite.expires_at > now,
+            )
+            .options(
+                selectinload(OrgInvite.organization),
+                selectinload(OrgInvite.invited_by),
+            )
+            .order_by(OrgInvite.created_at.desc())
+        )
+        return list(result.scalars().all())
+
     async def accept_invite(self, *, user: User, token: str) -> OrgMembership:
-        invite = await self._invite_by_token(token)
+        invite = await self._invite_by_token(token, allow_accepted=True)
+        return await self._accept_org_invite(user=user, invite=invite)
+
+    async def accept_invite_by_id(self, *, user: User, invite_id: UUID) -> OrgMembership:
+        result = await self._session.execute(
+            select(OrgInvite)
+            .where(OrgInvite.id == invite_id)
+            .options(selectinload(OrgInvite.organization))
+        )
+        invite = result.scalar_one_or_none()
+        if invite is None or invite.revoked_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "invite_not_found", "message": "Invite not found"},
+            )
+        expires = invite.expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        if invite.accepted_at is None and expires <= datetime.now(UTC):
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail={"code": "invite_expired", "message": "Invite has expired"},
+            )
+        return await self._accept_org_invite(user=user, invite=invite)
+
+    async def _accept_org_invite(self, *, user: User, invite: OrgInvite) -> OrgMembership:
         if invite.email.lower() != user.email.lower():
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -410,15 +493,26 @@ class OrganizationService:
             )
         existing = await self.get_membership(org_id=invite.org_id, user_id=user.id)
         if existing is not None:
-            invite.accepted_at = datetime.now(UTC)
-            await self._session.flush()
+            if invite.accepted_at is None:
+                invite.accepted_at = datetime.now(UTC)
+                await self._session.flush()
+            await self._session.refresh(existing, attribute_names=["user", "organization"])
             return existing
+
+        if invite.accepted_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "invite_already_accepted",
+                    "message": "Invite already accepted",
+                },
+            )
 
         membership = OrgMembership(org_id=invite.org_id, user_id=user.id, role=invite.role)
         self._session.add(membership)
         invite.accepted_at = datetime.now(UTC)
         await self._session.flush()
-        await self._session.refresh(membership)
+        await self._session.refresh(membership, attribute_names=["user", "organization"])
         return membership
 
     async def accept_pending_invites_for_user(self, user: User) -> int:
@@ -628,7 +722,9 @@ class OrganizationService:
         )
         return result.scalar_one_or_none()
 
-    async def _invite_by_token(self, token: str) -> OrgInvite:
+    async def _invite_by_token(
+        self, token: str, *, allow_accepted: bool = False
+    ) -> OrgInvite:
         token_hash = hash_invite_token(token.strip())
         result = await self._session.execute(
             select(OrgInvite)
@@ -641,7 +737,7 @@ class OrganizationService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "invite_not_found", "message": "Invite not found"},
             )
-        if invite.accepted_at is not None:
+        if invite.accepted_at is not None and not allow_accepted:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "invite_already_accepted", "message": "Invite already accepted"},
@@ -649,7 +745,8 @@ class OrganizationService:
         expires = invite.expires_at
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
-        if expires <= datetime.now(UTC):
+        # Already-accepted invites may be past TTL; still allow the member to continue.
+        if invite.accepted_at is None and expires <= datetime.now(UTC):
             raise HTTPException(
                 status_code=status.HTTP_410_GONE,
                 detail={"code": "invite_expired", "message": "Invite has expired"},

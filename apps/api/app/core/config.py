@@ -4,7 +4,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -150,6 +150,25 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_from: str | None = None
     smtp_use_tls: bool = True
+    resend_api_key: str | None = None
+    # Accept RESEND_FROM or common RESEND_FROM_EMAIL spelling from .env files.
+    resend_from: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "RESEND_FROM",
+            "RESEND_FROM_EMAIL",
+            "resend_from",
+            "resend_from_email",
+        ),
+    )
+
+    # Public web app URL (Stripe redirects, email links)
+    public_app_url: str = "http://localhost:3000"
+
+    # Stripe SaaS (Pro plan)
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    stripe_price_id_pro: str | None = None
 
     # Default container image applied into ephemeral namespaces
     # Empty: image must come from workspace manifests, a build, or an explicit Launch override.
@@ -310,6 +329,11 @@ class Settings(BaseSettings):
         "smtp_username",
         "smtp_password",
         "smtp_from",
+        "resend_api_key",
+        "resend_from",
+        "stripe_secret_key",
+        "stripe_webhook_secret",
+        "stripe_price_id_pro",
         "oidc_default_org_slug",
         "launchpad_oidc_private_key",
         "launchpad_oidc_private_key_path",

@@ -109,7 +109,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="mx-auto max-w-3xl animate-fade-up space-y-6 pb-12">
+  <div class="w-full animate-fade-up space-y-6 pb-12">
     <NuxtLink to="/catalog" class="font-mono text-xs uppercase tracking-wide text-[var(--lp-muted)] hover:text-[var(--lp-text)]">
       {{ t('catalog.detail.back') }}
     </NuxtLink>

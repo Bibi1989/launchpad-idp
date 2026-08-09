@@ -62,18 +62,27 @@ export function useAuth() {
   async function init() {
     loadTokenFromStorage()
     loadActiveOrgFromStorage()
-    await fetchConfig()
-    await refreshMe()
-    ready.value = true
+    try {
+      await fetchConfig()
+      await refreshMe()
+    } catch {
+      // Control plane may be down during boot; still unblock the UI shell.
+      if (!authConfig.value) {
+        authConfig.value = { dev_login_enabled: false, oidc_enabled: false }
+      }
+    } finally {
+      ready.value = true
+    }
   }
 
-  async function applyTokenResponse(body: TokenResponse) {
+  async function applyTokenResponse(body: TokenResponse): Promise<TokenResponse> {
     persistToken(body.access_token)
     user.value = body.user
     applyFromTokenResponse(body)
+    return body
   }
 
-  async function login(payload: LoginInput) {
+  async function login(payload: LoginInput): Promise<TokenResponse> {
     const response = await fetch(`${config.public.apiBase}/auth/login`, {
       method: 'POST',
       headers: {
@@ -86,10 +95,10 @@ export function useAuth() {
       const err = await response.json().catch(() => null)
       throw new Error(err?.error?.message ?? 'Login failed')
     }
-    await applyTokenResponse((await response.json()) as TokenResponse)
+    return applyTokenResponse((await response.json()) as TokenResponse)
   }
 
-  async function register(payload: RegisterInput) {
+  async function register(payload: RegisterInput): Promise<TokenResponse> {
     const response = await fetch(`${config.public.apiBase}/auth/register`, {
       method: 'POST',
       headers: {
@@ -102,10 +111,10 @@ export function useAuth() {
       const err = await response.json().catch(() => null)
       throw new Error(err?.error?.message ?? 'Registration failed')
     }
-    await applyTokenResponse((await response.json()) as TokenResponse)
+    return applyTokenResponse((await response.json()) as TokenResponse)
   }
 
-  async function devLogin() {
+  async function devLogin(): Promise<TokenResponse> {
     const response = await fetch(`${config.public.apiBase}/auth/dev-login`, {
       method: 'POST',
       headers: { Accept: 'application/json' },
@@ -114,7 +123,7 @@ export function useAuth() {
       const err = await response.json().catch(() => null)
       throw new Error(err?.error?.message ?? 'Dev login failed')
     }
-    await applyTokenResponse((await response.json()) as TokenResponse)
+    return applyTokenResponse((await response.json()) as TokenResponse)
   }
 
   async function startOidcLogin() {

@@ -4,19 +4,26 @@ const { ready } = useAuth()
 
 const bareShell = computed(() => {
   const path = route.path
-  return path === '/' || path === '/login' || path.startsWith('/invite/')
+  return (
+    path === '/'
+    || path === '/login'
+    || path.startsWith('/onboarding/')
+    || path.startsWith('/invite/')
+    || path.startsWith('/auth/')
+    || path.startsWith('/p/')
+  )
 })
 </script>
 
 <template>
+  <!--
+    One AppShell + one NuxtPage for the whole app.
+    bare = public routes only (login, invite, landing). Auth boot uses AppSplash
+    overlay - do not flip bare on !ready or the main column loses its sidebar offset.
+  -->
+  <AppShell :bare="bareShell">
+    <NuxtPage />
+  </AppShell>
   <AppSplash v-if="!ready" fullscreen />
-  <template v-else>
-    <div v-if="bareShell">
-      <NuxtPage />
-    </div>
-    <AppShell v-else>
-      <NuxtPage />
-    </AppShell>
-  </template>
   <ToastHost />
 </template>

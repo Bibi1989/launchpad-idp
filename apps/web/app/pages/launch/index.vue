@@ -653,7 +653,7 @@ async function launch() {
 </script>
 
 <template>
-  <div class="mx-auto max-w-3xl space-y-8 animate-fade-up">
+  <div class="w-full space-y-8 animate-fade-up">
     <AppSplash
       v-if="bootstrappingLinkedWorkspace"
       :message="t('launch.splash.preparingWorkspace')"

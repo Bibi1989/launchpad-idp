@@ -52,7 +52,7 @@ def test_role_rank() -> None:
 
 
 @pytest.mark.asyncio
-async def test_register_creates_personal_org(client: AsyncClient) -> None:
+async def test_register_needs_org_setup(client: AsyncClient) -> None:
     response = await client.post(
         "/api/v1/auth/register",
         json={
@@ -63,9 +63,17 @@ async def test_register_creates_personal_org(client: AsyncClient) -> None:
     )
     assert response.status_code == 201
     body = response.json()
-    assert body["orgs"]
-    assert body["orgs"][0]["role"] == "owner"
-    assert body["active_org_id"] == body["orgs"][0]["id"]
+    assert body["needs_org_setup"] is True
+    assert body["orgs"] == []
+    assert body["active_org_id"] is None
+
+    created = await client.post(
+        "/api/v1/orgs",
+        headers={"Authorization": f"Bearer {body['access_token']}"},
+        json={"name": "Acme"},
+    )
+    assert created.status_code == 201
+    assert created.json()["role"] == "owner"
 
 
 @pytest.mark.asyncio
@@ -82,7 +90,13 @@ async def test_list_and_add_org_member(
         },
     )
     owner_token = owner_resp.json()["access_token"]
-    org_id = owner_resp.json()["active_org_id"]
+    org_resp = await client.post(
+        "/api/v1/orgs",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"name": "Owner Org"},
+    )
+    assert org_resp.status_code == 201
+    org_id = org_resp.json()["id"]
 
     async with session_factory() as session:
         member = User(
@@ -204,7 +218,13 @@ async def test_org_cost_summary(
     )
     assert owner_resp.status_code == 201
     token = owner_resp.json()["access_token"]
-    org_id = owner_resp.json()["active_org_id"]
+    org_resp = await client.post(
+        "/api/v1/orgs",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Cost Org"},
+    )
+    assert org_resp.status_code == 201
+    org_id = org_resp.json()["id"]
     owner_id = UUID(owner_resp.json()["user"]["id"])
 
     async with session_factory() as session:

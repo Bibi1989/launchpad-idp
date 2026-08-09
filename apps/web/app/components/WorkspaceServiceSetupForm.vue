@@ -3,9 +3,11 @@ import {
   provisioningWizardSchema,
   containerScaffoldSchema,
   defaultContainerScaffold,
+  defaultAnsibleConfig,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
+  AnsibleConfig,
   CloudProvider,
   ContainerScaffoldConfig,
   CostOptimizationConfig,
@@ -87,6 +89,7 @@ const form = reactive({
   kubernetes_packaging: 'none' as KubernetesPackaging,
   cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
   container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
+  ansible: defaultAnsibleConfig() as AnsibleConfig,
   local: {
     cluster_name: 'launchpad',
     context: 'kind-launchpad',
@@ -271,6 +274,7 @@ function applyConfig(config: WorkspaceWizardConfig) {
   if (config.container_scaffold) {
     Object.assign(form.container_scaffold, config.container_scaffold)
   }
+  Object.assign(form.ansible, defaultAnsibleConfig(), config.ansible ?? {})
   hasStoredCredentials.value = config.has_credentials
   clearCredentials()
 
@@ -446,6 +450,22 @@ function buildPayload(): ProvisioningWizardInput {
     kubernetes_options,
     cost_optimization: form.cost_optimization,
     container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
+    ansible: {
+      ...form.ansible,
+      enabled:
+        form.ansible.enabled
+        || form.iac_engine === 'ansible'
+        || infraGeneration.value.provision.engine === 'ansible',
+      hosts:
+        form.ansible.hosts
+        || form.running_instance.host
+        || '127.0.0.1',
+      ssh_user: form.running_instance.ssh_user || form.ansible.ssh_user,
+      ssh_port: form.running_instance.ssh_port || form.ansible.ssh_port,
+      ssh_private_key_path:
+        form.running_instance.ssh_key_path || form.ansible.ssh_private_key_path,
+      app_listen_port: form.running_instance.listen_port || form.ansible.app_listen_port,
+    },
   }
 
   if (provider.value === 'local') {
@@ -496,9 +516,15 @@ async function onSave() {
     }
 
     await updateWorkspace(props.workspaceId, parsed.data)
-    const dockerTargets = buildDockerScaffold(form.container_scaffold)
-    for (const target of dockerTargets) {
-      await writeWorkspaceFile(props.workspaceId, target.path, target.content)
+    // Skip client docker overwrite when the API already wrote CoreScaffold apps
+    // (apps/<slug>/Dockerfile). Client templates use context "." and break builds.
+    const tree = await listWorkspaceFiles(props.workspaceId).catch(() => [])
+    const hasCoreApps = tree.some((n) => /^apps\/[^/]+\/Dockerfile$/.test(n.path))
+    if (!hasCoreApps && !(form.container_scaffold.services?.length)) {
+      const dockerTargets = buildDockerScaffold(form.container_scaffold)
+      for (const target of dockerTargets) {
+        await writeWorkspaceFile(props.workspaceId, target.path, target.content)
+      }
     }
     if (infraGeneration.value.cicd.enabled) {
       const frameworks =
@@ -621,6 +647,11 @@ onMounted(async () => {
           <ContainerScaffoldCard
             v-if="form.container_scaffold.enabled"
             v-model="form.container_scaffold"
+            :disabled="saving"
+          />
+          <AnsibleConfigurator
+            v-if="form.runtime_mode === 'running_instance' || form.runtime_mode === 'docker_compose'"
+            v-model="form.ansible"
             :disabled="saving"
           />
           <CostOptimizationCard

@@ -144,6 +144,22 @@ export function buildProvisionScaffold(
       },
     ]
   }
+  if (engine === 'ansible') {
+    return [
+      {
+        path: 'infra/ansible/README.md',
+        content: [
+          `# Ansible - ${workspaceName || 'launchpad-workspace'}`,
+          '',
+          'Host configuration scaffold. Full inventory and roles are written by the',
+          'control plane when you save the workspace with Ansible enabled.',
+          '',
+          `Workspace id: ${workspaceId}`,
+          '',
+        ].join('\n'),
+      },
+    ]
+  }
   return [
     {
       path: 'infra/pulumi/Pulumi.yaml',
@@ -419,8 +435,8 @@ function dockerComposeForServices(
       '      context: .',
       `      dockerfile: ${service.dockerfilePath}`,
       `    image: \${${imageEnv}:-${safeName}:latest}`,
-      `    container_name: ${safeName}`,
       '    ports:',
+      // Preferred host port; API compose deploy remaps to the next free port if busy.
       `      - "${service.listenPort}:${service.listenPort}"`,
       '    environment:',
       `      - PORT=${service.listenPort}`,
@@ -443,6 +459,10 @@ function dockerComposeForServices(
  */
 export function buildDockerScaffold(cfg: ContainerScaffoldConfig): ScaffoldTarget[] {
   if (!cfg.enabled) return []
+  // Multi-service CoreScaffold apps are owned by the API (apps/<slug>/ + compose
+  // context). Client-only Dockerfiles assume repo-root context and must not
+  // overwrite those artifacts after provision.
+  if ((cfg.services?.length ?? 0) > 0) return []
 
   const stacks = resolveDockerStacks(cfg)
   const multi = stacks.length > 1 || (cfg.frameworks?.length ?? 0) > 0
@@ -856,6 +876,13 @@ export function iacEnsureDirPrefix(engine: ProvisionEngine): string {
       'else echo "Pulumi directory not found (expected infra/pulumi or Pulumi.yaml)" >&2; exit 1; fi;',
     ].join(' ')
   }
+  if (engine === 'ansible') {
+    return [
+      'if [ -f ansible.cfg ] && [ -d playbooks ]; then :;',
+      'elif [ -d infra/ansible ]; then cd infra/ansible;',
+      'else echo "Ansible directory not found (expected infra/ansible)" >&2; exit 1; fi;',
+    ].join(' ')
+  }
   // terraform + opentofu share infra/terraform
   return [
     'if ls ./*.tf >/dev/null 2>&1 || [ -d .terraform ]; then :;',
@@ -896,6 +923,12 @@ export function iacToolbarActions(engine: ProvisionEngine): {
 export function iacDestroyCommand(engine: ProvisionEngine): string {
   if (engine === 'pulumi') {
     return iacCmd(engine, 'pulumi destroy --yes')
+  }
+  if (engine === 'ansible') {
+    return iacCmd(
+      engine,
+      "echo 'Ansible does not destroy cloud resources; remove app containers/services manually on the host.' >&2; exit 1",
+    )
   }
   const bin = engine === 'opentofu' ? 'tofu' : 'terraform'
   return iacCmd(engine, `${bin} destroy -auto-approve`)
@@ -948,6 +981,26 @@ export function iacRunShortcuts(engine: ProvisionEngine): IacRunShortcut[] {
         label: 'destroy',
         command: iacDestroyCommand(engine),
         danger: true,
+      },
+    ]
+  }
+  if (engine === 'ansible') {
+    return [
+      {
+        id: 'ansible-galaxy',
+        label: 'galaxy',
+        command: iacCmd(engine, 'ansible-galaxy collection install -r requirements.yml'),
+      },
+      {
+        id: 'ansible-check',
+        label: 'check',
+        command: iacCmd(engine, 'ansible-playbook playbooks/site.yml --check'),
+      },
+      {
+        id: 'ansible-apply',
+        label: 'apply',
+        command: iacCmd(engine, 'ansible-playbook playbooks/site.yml'),
+        opensInitWizard: true,
       },
     ]
   }
@@ -1013,6 +1066,29 @@ export function iacInitWizardSteps(
     ]
     return enableApisStep ? [enableApisStep, ...pulumiSteps] : pulumiSteps
   }
+  if (engine === 'ansible') {
+    const ansibleSteps: IacRunShortcut[] = [
+      {
+        id: 'ansible-galaxy',
+        label: 'galaxy',
+        description: 'Install Ansible collections from requirements.yml',
+        command: iacCmd(engine, 'ansible-galaxy collection install -r requirements.yml'),
+      },
+      {
+        id: 'ansible-check',
+        label: 'check',
+        description: 'Dry-run the site playbook against inventory hosts',
+        command: iacCmd(engine, 'ansible-playbook playbooks/site.yml --check'),
+      },
+      {
+        id: 'ansible-apply',
+        label: 'apply',
+        description: 'Configure the VM / Compose host with Ansible',
+        command: iacCmd(engine, 'ansible-playbook playbooks/site.yml'),
+      },
+    ]
+    return enableApisStep ? [enableApisStep, ...ansibleSteps] : ansibleSteps
+  }
   const bin = engine === 'opentofu' ? 'tofu' : 'terraform'
   const label = engine === 'opentofu' ? 'OpenTofu' : 'Terraform'
   const tfSteps: IacRunShortcut[] = [
@@ -1061,6 +1137,7 @@ export function iacDestroyWizardSteps(engine: ProvisionEngine): IacRunShortcut[]
 export function iacEngineLabel(engine: ProvisionEngine): string {
   if (engine === 'opentofu') return 'OpenTofu'
   if (engine === 'pulumi') return 'Pulumi'
+  if (engine === 'ansible') return 'Ansible'
   return 'Terraform'
 }
 

@@ -50,12 +50,20 @@ class AuthService:
             password_hash=hash_password(payload.password),
             display_name=payload.display_name,
         )
-        org = await self._orgs.ensure_personal_org(user)
-        await self._orgs.accept_pending_invites_for_user(user)
+        # Invites stay pending so the user can accept via email link or in-app inbox.
         await self._session.commit()
         await self._session.refresh(user)
         logger.info("user_registered", user_id=str(user.id), email=user.email)
-        return await self._token_response(user, org_id=org.id, org_role="owner")
+        memberships = await self._orgs.list_for_user(user)
+        if memberships:
+            org, role = memberships[0]
+            return await self._token_response(
+                user,
+                org_id=org.id,
+                org_role=role.value,
+                needs_org_setup=False,
+            )
+        return await self._token_response(user, needs_org_setup=True)
 
     async def login(self, payload: UserLogin) -> TokenResponse:
         user = await self._users.get_by_email(str(payload.email))
@@ -69,13 +77,14 @@ class AuthService:
                 detail={"code": "invalid_credentials", "message": "Invalid email or password"},
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        org = await self._orgs.ensure_personal_org(user)
-        await self._orgs.accept_pending_invites_for_user(user)
-        await self._session.commit()
         logger.info("user_login", user_id=str(user.id), email=user.email)
-        membership = await self._orgs.get_membership(org_id=org.id, user_id=user.id)
-        role = membership.role.value if membership else "owner"
-        return await self._token_response(user, org_id=org.id, org_role=role)
+        memberships = await self._orgs.list_for_user(user)
+        if not memberships:
+            return await self._token_response(user, needs_org_setup=True)
+        org, role = memberships[0]
+        return await self._token_response(
+            user, org_id=org.id, org_role=role.value, needs_org_setup=False
+        )
 
     async def ensure_dev_user(self) -> User:
         user = await self._users.get_by_email(DEV_USER_EMAIL)
@@ -136,14 +145,16 @@ class AuthService:
                     oidc_issuer=issuer,
                     oidc_sub=subject,
                 )
-        org = await self._orgs.ensure_personal_org(user)
-        await self._orgs.accept_pending_invites_for_user(user)
         await self._orgs.sync_sso_group_memberships(user=user, groups=list(groups or []))
         await self._session.commit()
         await self._session.refresh(user)
-        membership = await self._orgs.get_membership(org_id=org.id, user_id=user.id)
-        role = membership.role.value if membership else "owner"
-        return await self._token_response(user, org_id=org.id, org_role=role)
+        memberships = await self._orgs.list_for_user(user)
+        if not memberships:
+            return await self._token_response(user, needs_org_setup=True)
+        org, role = memberships[0]
+        return await self._token_response(
+            user, org_id=org.id, org_role=role.value, needs_org_setup=False
+        )
 
     async def _token_response(
         self,
@@ -151,6 +162,7 @@ class AuthService:
         *,
         org_id: UUID | None = None,
         org_role: str | None = None,
+        needs_org_setup: bool | None = None,
     ) -> TokenResponse:
         token = create_access_token(
             user_id=user.id,
@@ -160,6 +172,11 @@ class AuthService:
             settings=self._settings,
         )
         orgs = await self._orgs.list_for_user(user)
+        setup_needed = (
+            bool(needs_org_setup)
+            if needs_org_setup is not None
+            else len(orgs) == 0
+        )
         return TokenResponse(
             access_token=token,
             user=UserRead.model_validate(user),
@@ -173,4 +190,5 @@ class AuthService:
                 for org, role in orgs
             ],
             active_org_id=str(org_id) if org_id else (str(orgs[0][0].id) if orgs else None),
+            needs_org_setup=setup_needed,
         )

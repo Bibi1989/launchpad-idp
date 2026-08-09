@@ -437,7 +437,7 @@ async function onBuild() {
 </script>
 
 <template>
-  <div class="mx-auto max-w-6xl space-y-8 animate-fade-up pb-16">
+  <div class="w-full space-y-8 animate-fade-up pb-16">
     <header class="space-y-2">
       <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">
         {{ t('dockerfiles.title') }}

@@ -413,7 +413,7 @@ a:hover { text-decoration: underline; }
         <span class="card-link">VIEW LOGS</span>
       </div>
     </div>
-    <div class="card">
+    <div class="card" id="k8s-card" style="display:none">
       <div class="card-header">
         <div class="card-header-left">
           <p>DEPLOYMENT</p>
@@ -516,9 +516,14 @@ async function refresh() {
     appStatus.innerHTML = '<span class="dot"></span> ' + (up ? "Healthy" : "Unhealthy");
     document.getElementById("app-version").textContent = s.app.version;
     document.getElementById("app-uptime").textContent = s.app.uptimeSeconds + "s";
-    document.getElementById("k8s-ns").textContent = s.kubernetes.namespace;
-    document.getElementById("k8s-pod").textContent = s.kubernetes.pod;
-    document.getElementById("k8s-replicas").textContent = s.kubernetes.replicas;
+    var k8sCard = document.getElementById("k8s-card");
+    var k8sConfigured = !!(s.kubernetes && s.kubernetes.configured);
+    if (k8sCard) k8sCard.style.display = k8sConfigured ? "flex" : "none";
+    if (k8sConfigured) {
+      document.getElementById("k8s-ns").textContent = s.kubernetes.namespace;
+      document.getElementById("k8s-pod").textContent = s.kubernetes.pod;
+      document.getElementById("k8s-replicas").textContent = s.kubernetes.replicas;
+    }
     fmtDep("db-pill", "db-err", s.database);
     document.getElementById("db-kind").textContent = (s.database.kind || "database").toUpperCase();
     document.getElementById("db-last").textContent = s.database.lastSuccess || "never";
@@ -557,9 +562,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 APP_NAME = os.environ.get("ENVIRONMENT_NAME", "launchpad-app")
 APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
+# Only show Deployment Metadata when the downward API injects POD_NAME (Kubernetes).
+_POD_NAME_ENV = os.environ.get("POD_NAME")
 NAMESPACE = os.environ.get("POD_NAMESPACE", "default")
-POD_NAME = os.environ.get("POD_NAME", socket.gethostname())
+POD_NAME = _POD_NAME_ENV or socket.gethostname()
 REPLICA_COUNT = os.environ.get("REPLICA_COUNT", "1")
+K8S_CONFIGURED = _POD_NAME_ENV is not None
 PORT = int(os.environ.get("PORT", "8000"))
 DATABASE_URL = (
     os.environ.get("DATABASE_URL")
@@ -665,10 +673,11 @@ def build_status():
             "uptimeSeconds": round(time.time() - STARTED_AT, 1),
         },
         "kubernetes": {
-            "namespace": NAMESPACE,
-            "pod": POD_NAME,
-            "replicas": REPLICA_COUNT,
-            "deployment": "app",
+            "configured": K8S_CONFIGURED,
+            "namespace": NAMESPACE if K8S_CONFIGURED else None,
+            "pod": POD_NAME if K8S_CONFIGURED else None,
+            "replicas": REPLICA_COUNT if K8S_CONFIGURED else None,
+            "deployment": "app" if K8S_CONFIGURED else None,
         },
         "database": database,
         "redis": redis_status,
@@ -800,9 +809,11 @@ const express = require('express');
 
 const APP_NAME = process.env.ENVIRONMENT_NAME || 'launchpad-app';
 const APP_VERSION = process.env.APP_VERSION || '1.0.0';
+const POD_NAME_ENV = process.env.POD_NAME || null;
 const NAMESPACE = process.env.POD_NAMESPACE || 'default';
-const POD_NAME = process.env.POD_NAME || require('os').hostname();
+const POD_NAME = POD_NAME_ENV || require('os').hostname();
 const REPLICA_COUNT = process.env.REPLICA_COUNT || '1';
+const K8S_CONFIGURED = Boolean(POD_NAME_ENV);
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL =
   process.env.DATABASE_URL || process.env.MYSQL_URL || process.env.MONGODB_URI || null;
@@ -885,7 +896,13 @@ async function buildStatus() {
       status: 'healthy',
       uptimeSeconds: Math.round((Date.now() - STARTED_AT) / 100) / 10,
     },
-    kubernetes: { namespace: NAMESPACE, pod: POD_NAME, replicas: REPLICA_COUNT, deployment: 'app' },
+    kubernetes: {
+      configured: K8S_CONFIGURED,
+      namespace: K8S_CONFIGURED ? NAMESPACE : null,
+      pod: K8S_CONFIGURED ? POD_NAME : null,
+      replicas: K8S_CONFIGURED ? REPLICA_COUNT : null,
+      deployment: K8S_CONFIGURED ? 'app' : null,
+    },
     database,
     redis: redisStatus,
     timestamp: nowIso(),
@@ -1103,6 +1120,7 @@ export default function App() {
             <span className="card-link">VIEW LOGS</span>
           </div>
         </div>
+        {c.pod && c.pod !== 'unknown' && c.pod !== '' && (
         <div className="card">
           <div className="card-header">
             <div className="card-header-left">
@@ -1131,6 +1149,7 @@ export default function App() {
             <span className="card-link">INSPECT POD</span>
           </div>
         </div>
+        )}
         {c.hasDatabase && (
           <div className="card">
             <div className="card-header">
@@ -1274,14 +1293,16 @@ server {
 _REACT_ENTRYPOINT = """\
 #!/bin/sh
 # Render runtime deployment metadata into config.json served alongside the SPA.
+# Leave pod empty off-cluster so the SPA hides Kubernetes Deployment Metadata.
 set -e
+POD_VALUE="${POD_NAME:-}"
 cat > /usr/share/nginx/html/config.json <<EOF
 {
   "name": "${ENVIRONMENT_NAME:-launchpad-app}",
   "version": "${APP_VERSION:-1.0.0}",
-  "namespace": "${POD_NAMESPACE:-default}",
-  "pod": "${POD_NAME:-unknown}",
-  "replicas": "${REPLICA_COUNT:-1}",
+  "namespace": "${POD_NAMESPACE:-}",
+  "pod": "${POD_VALUE}",
+  "replicas": "${REPLICA_COUNT:-}",
   "hasDatabase": ${HAS_DATABASE:-false},
   "hasRedis": ${HAS_REDIS:-false},
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -3055,9 +3076,11 @@ export class AppController {
 _NEST_STATUS = r"""/* Shared health + dependency checks for the NestJS service. */
 const APP_NAME = process.env.ENVIRONMENT_NAME || 'launchpad-app';
 const APP_VERSION = process.env.APP_VERSION || '1.0.0';
+const POD_NAME_ENV = process.env.POD_NAME || null;
 const NAMESPACE = process.env.POD_NAMESPACE || 'default';
-const POD_NAME = process.env.POD_NAME || require('os').hostname();
+const POD_NAME = POD_NAME_ENV || require('os').hostname();
 const REPLICA_COUNT = process.env.REPLICA_COUNT || '1';
+const K8S_CONFIGURED = Boolean(POD_NAME_ENV);
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL =
   process.env.DATABASE_URL || process.env.MYSQL_URL || process.env.MARIADB_URL || process.env.MONGODB_URI || null;
@@ -3124,7 +3147,13 @@ export async function buildStatus(): Promise<any> {
   const [database, redisStatus] = await Promise.all([checkDatabase(), checkRedis()]);
   return {
     app: { name: APP_NAME, version: APP_VERSION, status: 'healthy', uptimeSeconds: Math.round((Date.now() - STARTED_AT) / 100) / 10 },
-    kubernetes: { namespace: NAMESPACE, pod: POD_NAME, replicas: REPLICA_COUNT, deployment: 'app' },
+    kubernetes: {
+      configured: K8S_CONFIGURED,
+      namespace: K8S_CONFIGURED ? NAMESPACE : null,
+      pod: K8S_CONFIGURED ? POD_NAME : null,
+      replicas: K8S_CONFIGURED ? REPLICA_COUNT : null,
+      deployment: K8S_CONFIGURED ? 'app' : null,
+    },
     database,
     redis: redisStatus,
     timestamp: nowIso(),

@@ -11,6 +11,7 @@ from app.models.domain import OrgRole
 from app.schemas.orgs import (
     OrganizationCreate,
     OrganizationRead,
+    OrganizationUpdate,
     OrgCostSummary,
     OrgInviteAccept,
     OrgInviteCreate,
@@ -37,7 +38,14 @@ def get_environment_service(
     return EnvironmentService(session)
 
 
-def _invite_read(*, invite, org_name: str | None = None, invite_url: str | None = None, email_sent: bool = False) -> OrgInviteRead:
+def _invite_read(
+    *,
+    invite,
+    org_name: str | None = None,
+    invite_url: str | None = None,
+    email_sent: bool = False,
+    email_error: str | None = None,
+) -> OrgInviteRead:
     return OrgInviteRead(
         id=invite.id,
         org_id=invite.org_id,
@@ -50,6 +58,7 @@ def _invite_read(*, invite, org_name: str | None = None, invite_url: str | None 
         created_at=invite.created_at,
         invite_url=invite_url,
         email_sent=email_sent,
+        email_error=email_error,
     )
 
 
@@ -67,6 +76,7 @@ async def list_orgs(
             slug=org.slug,
             name=org.name,
             role=role,
+            plan=getattr(org, "plan", None) or "free",
             created_at=org.created_at,
         )
         for org, role in rows
@@ -87,6 +97,7 @@ async def create_org(
         slug=org.slug,
         name=org.name,
         role=OrgRole.OWNER,
+        plan=getattr(org, "plan", None) or "free",
         created_at=org.created_at,
     )
 
@@ -100,12 +111,14 @@ async def accept_invite(
 ) -> OrgMemberRead:
     membership = await service.accept_invite(user=user, token=payload.token)
     await session.commit()
-    await session.refresh(membership, attribute_names=["user"])
+    await session.refresh(membership, attribute_names=["user", "organization"])
     return OrgMemberRead(
         user_id=membership.user_id,
         email=membership.user.email,
         display_name=membership.user.display_name,
         role=membership.role,
+        org_id=membership.org_id,
+        org_name=membership.organization.name if membership.organization else None,
     )
 
 
@@ -248,6 +261,28 @@ async def create_invite(
         org_name=ctx.organization.name,
         invite_url=created.invite_url,
         email_sent=created.email_sent,
+        email_error=created.email_error,
+    )
+
+
+@router.patch("/{org_id}", response_model=OrganizationRead)
+async def rename_org(
+    org_id: UUID,
+    payload: OrganizationUpdate,
+    user: CurrentUser,
+    service: OrganizationService = Depends(get_org_service),
+    session: AsyncSession = Depends(get_db_session),
+) -> OrganizationRead:
+    ctx = await service.resolve_context(user=user, org_id=org_id)
+    org = await service.rename_org(org_id=org_id, actor=ctx, name=payload.name)
+    await session.commit()
+    return OrganizationRead(
+        id=org.id,
+        slug=org.slug,
+        name=org.name,
+        role=ctx.role,
+        plan=getattr(org, "plan", None) or "free",
+        created_at=org.created_at,
     )
 
 

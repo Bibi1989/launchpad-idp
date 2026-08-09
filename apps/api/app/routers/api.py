@@ -411,6 +411,10 @@ async def stream_environment_events(
             "commit_sha": environment.latest_commit_sha,
             "message": "stream connected",
             "environment_id": str(environment_id),
+            "preview_url": environment.preview_url,
+            "node_port": environment.node_port,
+            "app_ready": bool(environment.app_ready),
+            "error_message": environment.error_message,
         }
         yield f"event: message\ndata: {json.dumps(snapshot)}\n\n"
 
@@ -450,7 +454,10 @@ async def stream_environment_events(
     )
 
 
-def _serialize_env_event(event: EnvChannelEvent, environment_id: UUID) -> dict[str, str | None]:
+def _serialize_env_event(
+    event: EnvChannelEvent,
+    environment_id: UUID,
+) -> dict[str, str | int | bool | None]:
     return {
         "type": event.type,
         "status": event.status,
@@ -460,6 +467,11 @@ def _serialize_env_event(event: EnvChannelEvent, environment_id: UUID) -> dict[s
         "stage": event.stage.value if event.stage else None,
         "timestamp": event.timestamp,
         "environment_id": event.environment_id or str(environment_id),
+        "preview_url": event.preview_url,
+        "node_port": event.node_port,
+        "app_ready": event.app_ready,
+        "notice": event.notice,
+        "error_message": event.error_message,
     }
 
 

@@ -78,6 +78,7 @@ class ProvisioningService:
         *,
         owner: User,
         org_id: UUID | None = None,
+        project_id: UUID | None = None,
     ) -> IaCBundleSummary:
         if isinstance(request.cloud, LocalCloudConfig):
             if request.runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
@@ -96,13 +97,38 @@ class ProvisioningService:
         request = self._with_gcp_project_from_sa(request)
         bundle = self._iac.generate(request)
         encrypted = encrypt_secret(request.credentials.model_dump_json())
+        from app.models.domain import Organization
         from app.services.orgs import OrganizationService
+        from app.services.plans import assert_can_create_workspace
+        from app.services.projects import ProjectService
 
-        personal = await OrganizationService(self._session).ensure_personal_org(owner)
+        orgs = OrganizationService(self._session)
+        if org_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "needs_org_setup",
+                    "message": "Create an organization before provisioning workspaces",
+                },
+            )
+        resolved_org_id = org_id
+        org = await self._session.get(Organization, resolved_org_id)
+        if org is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "org_not_found", "message": "Organization not found"},
+            )
+        await assert_can_create_workspace(self._session, org)
+        org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
+        project = await ProjectService(self._session).resolve_project_for_workspace(
+            org=org_ctx,
+            project_id=project_id,
+        )
         row = ProvisioningWorkspace(
             id=UUID(bundle.workspace_id),
             owner_id=owner.id,
-            org_id=org_id or personal.id,
+            org_id=resolved_org_id,
+            project_id=project.id,
             name=request.name,
             engine=bundle.engine.value,
             provider=bundle.provider.value,
@@ -158,7 +184,10 @@ class ProvisioningService:
             result = await self._session.execute(stmt)
             rows = list(result.scalars().all())
         else:
-            org = await orgs.ensure_personal_org(owner)
+            memberships = await orgs.list_for_user(owner)
+            if not memberships:
+                return []
+            org = memberships[0][0]
             stmt = (
                 select(ProvisioningWorkspace)
                 .where(ProvisioningWorkspace.org_id == org.id)
@@ -947,6 +976,7 @@ class ProvisioningService:
             "cost_optimization": request.cost_optimization.model_dump(mode="json"),
             "container_scaffold": request.container_scaffold.model_dump(mode="json"),
             "dependencies": request.dependencies.model_dump(mode="json"),
+            "ansible": request.ansible.model_dump(mode="json"),
         }
         return json.dumps(payload)
 
@@ -1079,6 +1109,7 @@ class ProvisioningService:
             cost_optimization=config.cost_optimization,
             container_scaffold=config.container_scaffold,
             dependencies=config.dependencies,
+            ansible=config.ansible,
         )
 
     async def restore_workspace_files(
@@ -1446,7 +1477,7 @@ class ProvisioningService:
                 detail={"code": "github_push_failed", "message": str(exc)},
             ) from exc
 
-    async def _gitlab_credentials(self, owner: User) -> tuple[str, str]:
+    async def _gitlab_credentials(self, owner: User) -> tuple[str, str, str]:
         from app.services.gitlab_service import GitLabAuthError, GitLabAuthService
 
         auth = GitLabAuthService(self._session)
@@ -1460,7 +1491,10 @@ class ProvisioningService:
                 },
             )
         try:
-            return row.base_url, auth.decrypt_token(row)
+            token = await auth.ensure_fresh_token(row)
+            return row.base_url, token, row.token_type or "pat"
+        except GitLabAuthError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise GitLabAuthError("Stored GitLab token could not be decrypted") from exc
 
@@ -1472,13 +1506,14 @@ class ProvisioningService:
             http_error_from_gitlab,
         )
 
-        base_url, token = await self._gitlab_credentials(owner)
+        base_url, token, token_type = await self._gitlab_credentials(owner)
         try:
             rows = await asyncio.to_thread(
                 GitLabProvisioningService(self._iac).list_projects,
                 base_url=base_url,
                 token=token,
                 search=search,
+                token_type=token_type,
             )
         except GitLabAuthError as exc:
             raise http_error_from_gitlab(exc) from exc
@@ -1492,7 +1527,7 @@ class ProvisioningService:
             http_error_from_gitlab,
         )
 
-        base_url, token = await self._gitlab_credentials(owner)
+        base_url, token, token_type = await self._gitlab_credentials(owner)
         root_dir: str | None = None
         if request.workspace_id:
             row = await self.get_workspace_for_owner(UUID(request.workspace_id), owner)
@@ -1508,6 +1543,7 @@ class ProvisioningService:
                 existing_path=request.existing_path,
                 root_dir=root_dir,
                 include_ci=request.include_ci,
+                token_type=token_type,
             )
         except GitLabAuthError as exc:
             raise http_error_from_gitlab(exc) from exc
@@ -1527,7 +1563,7 @@ class ProvisioningService:
         )
 
         workspace = await self.get_workspace_for_owner(workspace_id, owner)
-        base_url, token = await self._gitlab_credentials(owner)
+        base_url, token, token_type = await self._gitlab_credentials(owner)
         try:
             result = await asyncio.to_thread(
                 GitLabProvisioningService(self._iac).push_workspace_files,
@@ -1536,6 +1572,7 @@ class ProvisioningService:
                 project_path=request.project_path,
                 root_dir=workspace.root_dir,
                 commit_message=request.commit_message,
+                token_type=token_type,
             )
         except GitLabAuthError as exc:
             raise http_error_from_gitlab(exc) from exc

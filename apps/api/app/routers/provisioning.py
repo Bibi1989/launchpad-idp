@@ -117,9 +117,15 @@ async def create_workspace(
     payload: ProvisioningWizardRequest,
     user: CurrentUser,
     org: CurrentOrg,
+    project_id: UUID | None = Query(default=None),
     service: ProvisioningService = Depends(get_provisioning_service),
 ) -> IaCBundleSummary:
-    return await service.generate_bundle(payload, owner=user, org_id=org.org_id)
+    return await service.generate_bundle(
+        payload,
+        owner=user,
+        org_id=org.org_id,
+        project_id=project_id,
+    )
 
 
 @router.get("/workspaces", response_model=list[WorkspaceListItem])
@@ -478,12 +484,16 @@ async def gitlab_oauth_callback(
 ) -> GitlabStatusResponse:
     auth = GitLabAuthService(session)
     try:
-        token, profile = await auth.exchange_code(code=payload.code, state=payload.state)
+        token, profile, refresh_token, expires_at = await auth.exchange_code(
+            code=payload.code, state=payload.state
+        )
         await auth.upsert_connection(
             owner=user,
             token=token,
             token_type="oauth",
             username=str(profile.get("username") or profile.get("name") or "gitlab"),
+            refresh_token=refresh_token,
+            expires_at=expires_at,
         )
     except GitLabAuthError as exc:
         raise http_error_from_gitlab(exc) from exc

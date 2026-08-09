@@ -82,6 +82,7 @@ async def me(
             for org, role in rows
         ],
         active_org_id=active,
+        needs_org_setup=len(rows) == 0,
     )
 
 

@@ -15,6 +15,9 @@ from app.routers.api import router as api_router
 from app.routers.auth import router as auth_router
 from app.routers.dockerfiles import router as dockerfiles_router
 from app.routers.orgs import router as orgs_router
+from app.routers.projects import router as projects_router
+from app.routers.invites import router as invites_router
+from app.routers.billing import router as billing_router
 from app.routers.provisioning import router as provisioning_router
 from app.routers.terminal_ws import router as terminal_ws_router
 from app.routers.webhooks import router as webhooks_router
@@ -89,6 +92,9 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(orgs_router, prefix="/api/v1")
+    app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(invites_router, prefix="/api/v1")
+    app.include_router(billing_router, prefix="/api/v1")
     app.include_router(api_router, prefix="/api/v1")
     app.include_router(provisioning_router, prefix="/api/v1")
     app.include_router(dockerfiles_router, prefix="/api/v1")

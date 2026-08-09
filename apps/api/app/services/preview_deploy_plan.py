@@ -81,6 +81,8 @@ def resolve_preview_deploy_plan(
         kind = instance.kind
         if has_serverless_runtime(config.cloud) and kind == RunningInstanceKind.LOCAL_MACHINE:
             kind = RunningInstanceKind.SERVERLESS
+        # Instance previews always attach to the compute target (local Docker / SSH VM /
+        # serverless). Do not silently rewrite to Compose - that is a separate runtime.
         return PreviewDeployPlan(
             deploy_mode=DeployMode.ATTACH,
             runtime_mode=runtime,

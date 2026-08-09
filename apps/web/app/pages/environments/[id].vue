@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { AuditLogEntry, Environment, PreviewLaunchPayload } from '~/types/environment'
+import { applyEnvStreamPatch } from '~/utils/envStreamPatch'
 
 type CloudProvider = Exclude<PreviewLaunchPayload['provider'], 'local'>
 
@@ -10,6 +11,7 @@ const environmentId = computed(() => id.value || null)
 const { getById, destroy, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
 const { reconcileEnvironment } = useNotifications()
 const toast = useToast()
+const seenNotices = new Set<string>()
 const {
   open: analyzerOpen,
   loading: analyzing,
@@ -67,6 +69,25 @@ const promoteForm = reactive({
 })
 
 const { lines, connected, done, connect } = useEnvironmentLogStream(environmentId)
+
+useEnvironmentLiveStream(environmentId, {
+  onEvent: (event) => {
+    if (!environment.value) return
+    applyEnvStreamPatch(environment.value, event)
+    reconcileEnvironment(environment.value)
+    if (event.notice && !seenNotices.has(event.notice)) {
+      seenNotices.add(event.notice)
+      toast.info(t('environments.toasts.portRemap'), event.notice)
+    }
+    // Soft REST refresh for cost / audits once provision settles.
+    if (
+      event.type === 'STATUS_CHANGE'
+      && (event.status === 'RUNNING' || event.status === 'FAILED' || event.status === 'DESTROYED')
+    ) {
+      void load({ softAudits: true })
+    }
+  },
+})
 
 const remainingLabel = computed(() => {
   tick.value
@@ -308,22 +329,24 @@ watch(
   },
 )
 
+function onDocClick() {
+  if (actionsMenuOpen.value) closeActionsMenu()
+}
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   void load()
-  const onDocClick = () => {
-    if (actionsMenuOpen.value) closeActionsMenu()
-  }
   document.addEventListener('click', onDocClick)
-  const timer = setInterval(() => {
+  // TTL clock only - lifecycle status/URL arrive via Redis SSE.
+  pollTimer = setInterval(() => {
     tick.value += 1
-    if (environment.value?.status === 'PROVISIONING') {
-      void load({ softAudits: true })
-    }
-  }, 4_000)
-  onUnmounted(() => {
-    clearInterval(timer)
-    document.removeEventListener('click', onDocClick)
-  })
+  }, 1_000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  document.removeEventListener('click', onDocClick)
 })
 </script>
 
@@ -411,16 +434,6 @@ onMounted(() => {
                 {{ t('environments.detail.provisioning') }}
               </button>
               <button
-                v-if="environment.status === 'RUNNING'"
-                type="button"
-                class="lp-btn-ghost whitespace-nowrap text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
-                :disabled="pauseAction.pending"
-                @click="pauseAction.run()"
-              >
-                <span class="material-symbols-outlined text-base">pause</span>
-                {{ pauseAction.pending ? t('environments.actions.pausing') : t('environments.actions.pause') }}
-              </button>
-              <button
                 v-if="canResume"
                 type="button"
                 class="lp-btn-primary whitespace-nowrap bg-emerald-600 hover:bg-emerald-500 text-white"
@@ -448,16 +461,6 @@ onMounted(() => {
                 <span class="material-symbols-outlined text-base">replay</span>
                 {{ retryAction.pending ? t('environments.actions.retrying') : t('environments.actions.retry') }}
               </button>
-              <button
-                v-if="environment.status !== 'DESTROYED' && environment.status !== 'TEARDOWN_PENDING' && environment.status !== 'PROVISIONING'"
-                type="button"
-                class="lp-btn-danger whitespace-nowrap"
-                :disabled="destroyAction.pending"
-                @click="requestDestroy"
-              >
-                <span class="material-symbols-outlined text-base">delete</span>
-                {{ destroyAction.pending ? t('environments.actions.queuingTeardown') : t('environments.actions.destroy') }}
-              </button>
             </div>
 
             <!-- Secondary tools: overflow menu -->
@@ -477,6 +480,17 @@ onMounted(() => {
                 role="menu"
                 class="absolute right-0 top-full z-30 mt-1.5 min-w-[200px] overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] py-1 shadow-xl"
               >
+                <button
+                  v-if="environment.status === 'RUNNING'"
+                  type="button"
+                  role="menuitem"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-amber-300 transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+                  :disabled="pauseAction.pending"
+                  @click="pauseAction.run(); closeActionsMenu()"
+                >
+                  <span class="material-symbols-outlined text-base">pause</span>
+                  {{ pauseAction.pending ? t('environments.actions.pausing') : t('environments.actions.pause') }}
+                </button>
                 <button
                   v-if="canOpenApp"
                   type="button"
@@ -541,6 +555,17 @@ onMounted(() => {
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">monitoring</span>
                   {{ t('common.status') }}
                 </a>
+                <button
+                  v-if="environment.status !== 'DESTROYED' && environment.status !== 'TEARDOWN_PENDING' && environment.status !== 'PROVISIONING'"
+                  type="button"
+                  role="menuitem"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-danger)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+                  :disabled="destroyAction.pending"
+                  @click="requestDestroy(); closeActionsMenu()"
+                >
+                  <span class="material-symbols-outlined text-base">delete</span>
+                  {{ destroyAction.pending ? t('environments.actions.queuingTeardown') : t('environments.actions.destroy') }}
+                </button>
               </div>
             </div>
           </div>

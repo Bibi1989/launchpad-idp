@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { Environment, EnvironmentStatus } from '~/types/environment'
+import { envStreamToPatch } from '~/utils/envStreamPatch'
 
 const { t } = useI18n()
+const toast = useToast()
 
 const props = defineProps<{
   environment: Environment
@@ -18,23 +20,45 @@ const emit = defineEmits<{
 
 const CIRCUMFERENCE = 175.9
 const logsOpen = ref(false)
+const actionsMenuOpen = ref(false)
 const liveStatus = ref<EnvironmentStatus>(props.environment.status)
 const liveCommit = ref<string | null>(props.environment.latest_commit_sha)
+const seenNotices = new Set<string>()
 
 const environmentId = computed(() => props.environment.id)
+
+function closeActionsMenu() {
+  actionsMenuOpen.value = false
+}
+
+function toggleActionsMenu() {
+  actionsMenuOpen.value = !actionsMenuOpen.value
+}
+
+function onDocClick() {
+  if (actionsMenuOpen.value) closeActionsMenu()
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
+})
 
 const { logLines, connected } = useEnvironmentLiveStream(environmentId, {
   onEvent: (event) => {
     if (event.status) {
       liveStatus.value = event.status as EnvironmentStatus
-      emit('update', { id: props.environment.id, status: liveStatus.value })
     }
     if (event.commit_sha) {
       liveCommit.value = event.commit_sha
-      emit('update', {
-        id: props.environment.id,
-        latest_commit_sha: event.commit_sha,
-      })
+    }
+    emit('update', envStreamToPatch(props.environment.id, event))
+    if (event.notice && !seenNotices.has(event.notice)) {
+      seenNotices.add(event.notice)
+      toast.info(t('environments.toasts.portRemap'), event.notice)
     }
   },
 })
@@ -294,7 +318,7 @@ function onCardKeydown(event: KeyboardEvent) {
       >{{ logLines.length ? logLines.join('\n') : t('common.loadingEllipsis') }}</pre>
     </div>
 
-    <div class="flex gap-2 border-t border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 px-4 py-3" @click.stop>
+    <div class="flex items-center gap-2 border-t border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 px-4 py-3" @click.stop>
       <a
         v-if="canOpenApp && previewHref"
         :href="previewHref"
@@ -316,57 +340,85 @@ function onCardKeydown(event: KeyboardEvent) {
       >
         {{ t('environments.card.details') }}
       </NuxtLink>
-      <button
-        v-if="liveStatus === 'RUNNING'"
-        type="button"
-        class="lp-btn-ghost inline-flex items-center gap-1 px-3 py-1.5 text-xs uppercase tracking-wide text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
-        @click="emit('pause', environment.id)"
-      >
-        <span class="material-symbols-outlined text-sm">pause</span>
-        {{ t('environments.card.pause') }}
-      </button>
-      <button
-        v-if="canResume"
-        type="button"
-        class="lp-btn-primary inline-flex items-center gap-1 px-3 py-1.5 text-xs uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 text-white"
-        @click="emit('resume', environment.id)"
-      >
-        <span class="material-symbols-outlined text-sm">play_arrow</span>
-        {{ t('environments.card.resume') }}
-      </button>
-      <span
-        v-else-if="displayStatus === 'EXPIRED'"
-        class="inline-flex items-center gap-1 px-3 py-1.5 text-xs uppercase tracking-wide text-[var(--lp-muted)]"
-      >
-        <span class="material-symbols-outlined text-sm">timer_off</span>
-        {{ t('environments.actions.expired') }}
-      </span>
-      <button
-        v-if="canRetry"
-        type="button"
-        class="lp-btn-primary inline-flex items-center gap-1 px-4 py-1.5 text-xs uppercase tracking-wide"
-        :disabled="retrying"
-        @click="onRetry"
-      >
-        <span class="material-symbols-outlined text-sm">replay</span>
-        {{ retrying ? t('environments.actions.retrying') : t('common.retry') }}
-      </button>
-      <a
-        :href="portalHref"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="lp-btn-ghost px-3 py-1.5 text-xs uppercase tracking-wide"
-      >
-        {{ t('common.status') }}
-      </a>
-      <button
-        v-if="canDestroy"
-        type="button"
-        class="lp-btn-danger px-4 py-1.5 text-xs uppercase tracking-wide"
-        @click="emit('destroy', environment.id)"
-      >
-        {{ t('environments.card.destroy') }}
-      </button>
+
+      <div class="relative shrink-0">
+        <button
+          type="button"
+          class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/25 text-[var(--lp-muted)] transition hover:bg-[var(--lp-panel-2)] hover:text-[var(--lp-text)]"
+          :aria-expanded="actionsMenuOpen"
+          aria-haspopup="menu"
+          :aria-label="t('common.actions')"
+          @click="toggleActionsMenu"
+        >
+          <span class="material-symbols-outlined text-xl">more_vert</span>
+        </button>
+        <div
+          v-if="actionsMenuOpen"
+          role="menu"
+          class="absolute right-0 bottom-full z-30 mb-1.5 min-w-[180px] overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] py-1 shadow-xl"
+        >
+          <button
+            v-if="liveStatus === 'RUNNING'"
+            type="button"
+            role="menuitem"
+            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-amber-300 transition hover:bg-[var(--lp-panel-2)]"
+            @click="emit('pause', environment.id); closeActionsMenu()"
+          >
+            <span class="material-symbols-outlined text-base">pause</span>
+            {{ t('environments.card.pause') }}
+          </button>
+          <button
+            v-if="canResume"
+            type="button"
+            role="menuitem"
+            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-emerald-300 transition hover:bg-[var(--lp-panel-2)]"
+            @click="emit('resume', environment.id); closeActionsMenu()"
+          >
+            <span class="material-symbols-outlined text-base">play_arrow</span>
+            {{ t('environments.card.resume') }}
+          </button>
+          <span
+            v-else-if="displayStatus === 'EXPIRED'"
+            role="menuitem"
+            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-[var(--lp-muted)]"
+          >
+            <span class="material-symbols-outlined text-base">timer_off</span>
+            {{ t('environments.actions.expired') }}
+          </span>
+          <button
+            v-if="canRetry"
+            type="button"
+            role="menuitem"
+            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+            :disabled="retrying"
+            @click="onRetry(); closeActionsMenu()"
+          >
+            <span class="material-symbols-outlined text-base text-[var(--lp-accent)]">replay</span>
+            {{ retrying ? t('environments.actions.retrying') : t('common.retry') }}
+          </button>
+          <a
+            :href="portalHref"
+            target="_blank"
+            rel="noopener noreferrer"
+            role="menuitem"
+            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)]"
+            @click="closeActionsMenu()"
+          >
+            <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">open_in_new</span>
+            {{ t('common.status') }}
+          </a>
+          <button
+            v-if="canDestroy"
+            type="button"
+            role="menuitem"
+            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-danger)] transition hover:bg-[var(--lp-panel-2)]"
+            @click="emit('destroy', environment.id); closeActionsMenu()"
+          >
+            <span class="material-symbols-outlined text-base">delete</span>
+            {{ t('environments.card.destroy') }}
+          </button>
+        </div>
+      </div>
     </div>
   </article>
 </template>

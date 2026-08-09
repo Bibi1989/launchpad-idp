@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ContainerScaffoldConfig, ContainerServiceItem, ProjectStackOption } from '~/types/provisioning'
+import { defaultContainerServices } from '~/utils/cloudValidation'
 
 const props = withDefaults(
   defineProps<{
@@ -41,24 +42,14 @@ const stacks: Array<{ id: ProjectStackOption; label: string; icon: string; categ
   { id: 'generic', label: 'Generic (Alpine)', icon: 'data_object', category: 'backend' },
 ]
 
-const servicesList = ref<ContainerServiceItem[]>(
-  props.modelValue.services && props.modelValue.services.length > 0
-    ? props.modelValue.services.map(s => ({ app_kind: s.app_kind || 'backend', ...s }))
-    : [
-        {
-          name: props.modelValue.app_name || 'web-ui',
-          app_kind: 'frontend',
-          stack: 'nextjs',
-          listen_port: 3000,
-        },
-        {
-          name: 'api-server',
-          app_kind: 'backend',
-          stack: 'node',
-          listen_port: 8080,
-        },
-      ],
-)
+function initialServices(): ContainerServiceItem[] {
+  if (props.modelValue.services && props.modelValue.services.length > 0) {
+    return props.modelValue.services.map(s => ({ app_kind: s.app_kind || 'backend', ...s }))
+  }
+  return defaultContainerServices().map(s => ({ ...s }))
+}
+
+const servicesList = ref<ContainerServiceItem[]>(initialServices())
 
 watch(
   () => props.modelValue.services,
@@ -70,16 +61,10 @@ watch(
   { deep: true },
 )
 
-function updateField<K extends keyof ContainerScaffoldConfig>(key: K, val: ContainerScaffoldConfig[K]) {
+function emitServices(overrides: Partial<ContainerScaffoldConfig> = {}) {
   emit('update:modelValue', {
     ...props.modelValue,
-    [key]: val,
-  })
-}
-
-function emitServices() {
-  emit('update:modelValue', {
-    ...props.modelValue,
+    ...overrides,
     services: servicesList.value,
     app_name: servicesList.value[0]?.name || props.modelValue.app_name,
     stack: servicesList.value[0]?.stack || props.modelValue.stack,
@@ -87,16 +72,38 @@ function emitServices() {
   })
 }
 
+function updateField<K extends keyof ContainerScaffoldConfig>(key: K, val: ContainerScaffoldConfig[K]) {
+  if (key === 'enabled' && val === true && !(props.modelValue.services?.length)) {
+    emitServices({ enabled: true })
+    return
+  }
+  emit('update:modelValue', {
+    ...props.modelValue,
+    [key]: val,
+  })
+}
+
+onMounted(() => {
+  // UI defaults to frontend + backend, but modelValue.services stayed [] until
+  // the user edited a row. Sync once so compose provision creates both services.
+  if (!(props.modelValue.services && props.modelValue.services.length > 0)) {
+    emitServices()
+  }
+})
+
+
 function onAppKindChange(svc: ContainerServiceItem) {
   if (svc.app_kind === 'frontend') {
     svc.stack = 'nextjs'
     svc.listen_port = 3000
+    svc.expose_preview = true
     if (!svc.name || svc.name === 'api-server' || svc.name === 'app') {
       svc.name = 'web-ui'
     }
   } else {
     svc.stack = 'node'
     svc.listen_port = 8080
+    if (svc.expose_preview == null) svc.expose_preview = false
     if (!svc.name || svc.name === 'web-ui' || svc.name === 'app') {
       svc.name = 'api-server'
     }
@@ -114,6 +121,7 @@ function addService() {
     app_kind: appKind,
     stack: appKind === 'frontend' ? 'nextjs' : 'node',
     listen_port: appKind === 'frontend' ? 3000 + nextNum : 8080 + nextNum,
+    expose_preview: appKind === 'frontend',
   })
   emitServices()
 }
@@ -242,7 +250,6 @@ const previewDockerCompose = computed(() => {
       context: .
       dockerfile: dockers/${sName}/Dockerfile
     image: \${APP_IMAGE:-${sName}:latest}
-    container_name: ${sName}
     ports:
       - "${sPort}:${sPort}"
     environment:
@@ -390,6 +397,17 @@ function downloadFile() {
                 @input="emitServices"
               >
             </div>
+
+            <label class="flex items-center gap-1.5 self-end pb-1 text-[11px] text-[var(--lp-muted)]">
+              <input
+                type="checkbox"
+                class="accent-[var(--lp-accent)]"
+                :checked="svc.expose_preview !== false && (svc.expose_preview === true || svc.app_kind === 'frontend')"
+                :disabled="disabled"
+                @change="svc.expose_preview = ($event.target as HTMLInputElement).checked; emitServices()"
+              >
+              {{ t('scaffold.containerCard.exposePreview') }}
+            </label>
 
             <button
               type="button"

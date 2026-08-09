@@ -1,7 +1,14 @@
 import type { Environment } from '~/types/environment'
 import type { ToastType } from '~/composables/useToast'
 
-export type NotificationKind = 'ready' | 'failed' | 'ttl' | 'cost' | 'paused' | 'info'
+export type NotificationKind =
+  | 'ready'
+  | 'failed'
+  | 'ttl'
+  | 'cost'
+  | 'paused'
+  | 'info'
+  | 'invite'
 
 export interface AppNotification {
   id: string
@@ -10,6 +17,8 @@ export interface AppNotification {
   body?: string
   envId?: string
   envName?: string
+  /** In-app deep link (invite accept pages, etc.). */
+  href?: string
   ts: number
   read: boolean
 }
@@ -47,6 +56,7 @@ const ICON_FOR: Record<NotificationKind, string> = {
   cost: 'payments',
   paused: 'pause_circle',
   info: 'info',
+  invite: 'mail',
 }
 
 export function notificationIcon(kind: NotificationKind): string {
@@ -83,16 +93,50 @@ export function useNotifications() {
 
   const unreadCount = computed(() => items.value.filter((n) => !n.read).length)
 
-  function add(entry: Omit<AppNotification, 'id' | 'ts' | 'read'>): AppNotification {
+  function add(
+    entry: Omit<AppNotification, 'id' | 'ts' | 'read'> & { id?: string },
+  ): AppNotification {
     const notification: AppNotification = {
       ...entry,
-      id: `n-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      id: entry.id ?? `n-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
       ts: Date.now(),
       read: false,
     }
-    items.value = [notification, ...items.value].slice(0, MAX_STORED)
+    items.value = [notification, ...items.value.filter((n) => n.id !== notification.id)].slice(
+      0,
+      MAX_STORED,
+    )
     persist()
     return notification
+  }
+
+  /** Insert or refresh a stable notification id without resetting read state. */
+  function upsert(
+    entry: Omit<AppNotification, 'ts' | 'read'> & { id: string },
+  ): AppNotification {
+    const existing = items.value.find((n) => n.id === entry.id)
+    if (existing) {
+      const updated: AppNotification = {
+        ...existing,
+        kind: entry.kind,
+        title: entry.title,
+        body: entry.body,
+        envId: entry.envId,
+        envName: entry.envName,
+        href: entry.href,
+      }
+      items.value = items.value.map((n) => (n.id === entry.id ? updated : n))
+      persist()
+      return updated
+    }
+    return add(entry)
+  }
+
+  function removeWhere(predicate: (n: AppNotification) => boolean) {
+    const next = items.value.filter((n) => !predicate(n))
+    if (next.length === items.value.length) return
+    items.value = next
+    persist()
   }
 
   function markAllRead() {
@@ -165,6 +209,8 @@ export function useNotifications() {
     unreadCount,
     hydrate,
     add,
+    upsert,
+    removeWhere,
     markAllRead,
     markRead,
     remove,

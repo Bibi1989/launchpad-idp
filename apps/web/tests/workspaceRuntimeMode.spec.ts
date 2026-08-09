@@ -6,7 +6,11 @@ import {
 } from '~/utils/workspaceRuntimeMode'
 import { resolvePreviewDeployPlan } from '~/utils/previewDeployPlan'
 import type { WorkspaceWizardConfig } from '~/types/provisioning'
-import { defaultContainerScaffold, defaultWorkloadDependencies } from '~/utils/cloudValidation'
+import {
+  defaultAnsibleConfig,
+  defaultContainerScaffold,
+  defaultWorkloadDependencies,
+} from '~/utils/cloudValidation'
 import { defaultRunningInstanceConfig } from '~/utils/workspaceRuntimeMode'
 import { defaultCostOptimizationConfig } from '~/utils/costOptimization'
 import { defaultKubernetesWorkloadOptions } from '~/utils/cloudValidation'
@@ -30,6 +34,56 @@ describe('workspaceRuntimeMode', () => {
     expect(result.kubernetesPackaging).toBe('none')
     expect(result.artifactMode).toBe('iac_only')
     expect(result.containerScaffold.enabled).toBe(true)
+    expect(result.containerScaffold.services).toHaveLength(2)
+    expect(result.containerScaffold.services?.map((s) => s.name)).toEqual(['web-ui', 'api-server'])
+  })
+
+  it('keeps explicit compose services when already set', () => {
+    const result = normalizeArtifactsForRuntimeMode({
+      provider: 'local',
+      runtimeMode: 'docker_compose',
+      artifactMode: 'iac_only',
+      kubernetesPackaging: 'none',
+      containerScaffold: {
+        ...defaultContainerScaffold(),
+        enabled: true,
+        services: [{ name: 'api', app_kind: 'backend', stack: 'fastapi', listen_port: 8000 }],
+      },
+      runningInstance: defaultRunningInstanceConfig(),
+    })
+    expect(result.containerScaffold.services).toHaveLength(1)
+    expect(result.containerScaffold.services?.[0]?.name).toBe('api')
+  })
+
+  it('syncs instance listen_port from preview frontend service', () => {
+    const result = normalizeArtifactsForRuntimeMode({
+      provider: 'local',
+      runtimeMode: 'running_instance',
+      artifactMode: 'iac_only',
+      kubernetesPackaging: 'none',
+      containerScaffold: {
+        ...defaultContainerScaffold(),
+        enabled: true,
+        generate_docker_compose: false,
+        services: [
+          {
+            name: 'web-ui',
+            app_kind: 'frontend',
+            stack: 'nextjs',
+            listen_port: 3000,
+            expose_preview: true,
+          },
+          {
+            name: 'api-server',
+            app_kind: 'backend',
+            stack: 'node',
+            listen_port: 8080,
+          },
+        ],
+      },
+      runningInstance: defaultRunningInstanceConfig('local'),
+    })
+    expect(result.runningInstance.listen_port).toBe(3000)
   })
 })
 
@@ -48,6 +102,7 @@ describe('resolvePreviewDeployPlan', () => {
       cost_optimization: defaultCostOptimizationConfig(),
       container_scaffold: defaultContainerScaffold(),
       dependencies: defaultWorkloadDependencies(),
+      ansible: defaultAnsibleConfig(),
       has_credentials: false,
       ...overrides,
     }

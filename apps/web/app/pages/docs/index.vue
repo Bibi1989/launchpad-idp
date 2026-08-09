@@ -33,7 +33,7 @@ const sections = computed(() => [
       </nav>
     </aside>
 
-    <article class="space-y-12 max-w-3xl">
+    <article class="min-w-0 space-y-12">
       <header class="space-y-3">
         <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">{{ t('docs.title') }}</p>
         <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">{{ t('docs.pageTitle') }}</h1>

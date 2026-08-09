@@ -50,7 +50,10 @@ export function useProvisioning() {
       },
       credentials: input.credentials,
     }
-    return apiFetch<IaCBundleSummary>('/provisioning/workspaces', {
+    const projectQuery = input.launchpad_project_id
+      ? `?project_id=${encodeURIComponent(input.launchpad_project_id)}`
+      : ''
+    return apiFetch<IaCBundleSummary>(`/provisioning/workspaces${projectQuery}`, {
       method: 'POST',
       body: JSON.stringify(payload),
       timeoutMs: PROVISION_TIMEOUT_MS,

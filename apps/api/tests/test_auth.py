@@ -51,6 +51,8 @@ async def test_register_login_and_me(client: AsyncClient) -> None:
     assert register.status_code == 201
     token = register.json()["access_token"]
     assert register.json()["user"]["email"] == "alice@example.com"
+    assert register.json()["needs_org_setup"] is True
+    assert register.json()["orgs"] == []
 
     me = await client.get(
         "/api/v1/auth/me",
@@ -58,7 +60,23 @@ async def test_register_login_and_me(client: AsyncClient) -> None:
     )
     assert me.status_code == 200
     assert me.json()["user"]["display_name"] == "Alice"
-    assert me.json()["orgs"]
+    assert me.json()["needs_org_setup"] is True
+    assert me.json()["orgs"] == []
+
+    org = await client.post(
+        "/api/v1/orgs",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Alice Org"},
+    )
+    assert org.status_code == 201
+
+    me_after = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert me_after.status_code == 200
+    assert me_after.json()["needs_org_setup"] is False
+    assert me_after.json()["orgs"]
 
     login = await client.post(
         "/api/v1/auth/login",
@@ -66,6 +84,7 @@ async def test_register_login_and_me(client: AsyncClient) -> None:
     )
     assert login.status_code == 200
     assert login.json()["access_token"]
+    assert login.json()["needs_org_setup"] is False
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,21 @@ def _normalize_base_url(url: str) -> str:
     return cleaned
 
 
+def auth_headers(token: str, token_type: str = "pat") -> dict[str, str]:
+    """Build GitLab API auth headers for PAT vs OAuth tokens.
+
+    OAuth access tokens must use ``Authorization: Bearer``. Sending them as
+    ``PRIVATE-TOKEN`` (PAT style) yields 401 from GitLab.com.
+    """
+    headers = {"Content-Type": "application/json"}
+    cleaned = token.strip()
+    if (token_type or "pat").lower() == "oauth":
+        headers["Authorization"] = f"Bearer {cleaned}"
+    else:
+        headers["PRIVATE-TOKEN"] = cleaned
+    return headers
+
+
 class GitLabAuthService:
     def __init__(self, session: AsyncSession, settings: Settings | None = None) -> None:
         self._session = session
@@ -91,7 +106,7 @@ class GitLabAuthService:
         if payload.get("typ") != "gitlab_oauth_state":
             raise GitLabAuthError("Invalid OAuth state type")
 
-    async def exchange_code(self, *, code: str, state: str) -> tuple[str, dict[str, Any]]:
+    async def exchange_code(self, *, code: str, state: str) -> tuple[str, dict[str, Any], str | None, datetime | None]:
         self._verify_state(state)
         if not self.oauth_configured():
             raise GitLabAuthError("GitLab OAuth is not configured")
@@ -115,8 +130,60 @@ class GitLabAuthService:
             access_token = token_body.get("access_token")
             if not isinstance(access_token, str) or not access_token.strip():
                 raise GitLabAuthError("GitLab token response missing access_token")
-            user = await self._fetch_user(client, base, access_token)
-        return access_token, user
+            refresh_raw = token_body.get("refresh_token")
+            refresh_token = (
+                refresh_raw.strip()
+                if isinstance(refresh_raw, str) and refresh_raw.strip()
+                else None
+            )
+            expires_at: datetime | None = None
+            expires_in = token_body.get("expires_in")
+            if isinstance(expires_in, (int, float)) and expires_in > 0:
+                expires_at = datetime.now(UTC) + timedelta(seconds=int(expires_in))
+            user = await self._fetch_user(client, base, access_token, token_type="oauth")
+        return access_token, user, refresh_token, expires_at
+
+    async def refresh_access_token(
+        self,
+        *,
+        refresh_token: str,
+        base_url: str | None = None,
+    ) -> tuple[str, str | None, datetime | None]:
+        """Exchange a refresh token for a new access token."""
+        if not self.oauth_configured():
+            raise GitLabAuthError("GitLab OAuth is not configured")
+        base = _normalize_base_url(base_url or self._settings.gitlab_base_url)
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            token_resp = await client.post(
+                f"{base}/oauth/token",
+                data={
+                    "client_id": self._settings.gitlab_oauth_client_id,
+                    "client_secret": self._settings.gitlab_oauth_client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                    "redirect_uri": self._settings.gitlab_oauth_redirect_uri,
+                },
+            )
+            if token_resp.status_code >= 400:
+                raise GitLabAuthError(
+                    f"GitLab token refresh failed ({token_resp.status_code}) - "
+                    "reconnect GitLab under Integrations"
+                )
+            token_body = token_resp.json()
+            access_token = token_body.get("access_token")
+            if not isinstance(access_token, str) or not access_token.strip():
+                raise GitLabAuthError("GitLab refresh response missing access_token")
+            refresh_raw = token_body.get("refresh_token")
+            new_refresh = (
+                refresh_raw.strip()
+                if isinstance(refresh_raw, str) and refresh_raw.strip()
+                else refresh_token
+            )
+            expires_at: datetime | None = None
+            expires_in = token_body.get("expires_in")
+            if isinstance(expires_in, (int, float)) and expires_in > 0:
+                expires_at = datetime.now(UTC) + timedelta(seconds=int(expires_in))
+        return access_token.strip(), new_refresh, expires_at
 
     async def validate_pat(
         self,
@@ -126,20 +193,22 @@ class GitLabAuthService:
     ) -> dict[str, Any]:
         base = _normalize_base_url(base_url or self._settings.gitlab_base_url)
         async with httpx.AsyncClient(timeout=15.0) as client:
-            return await self._fetch_user(client, base, token.strip())
+            return await self._fetch_user(client, base, token.strip(), token_type="pat")
 
     @staticmethod
     async def _fetch_user(
         client: httpx.AsyncClient,
         base: str,
         token: str,
+        *,
+        token_type: str = "pat",
     ) -> dict[str, Any]:
         resp = await client.get(
             f"{base}/api/v4/user",
-            headers={"PRIVATE-TOKEN": token, "Authorization": f"Bearer {token}"},
+            headers=auth_headers(token, token_type),
         )
-        if resp.status_code == 401:
-            # Retry with Bearer-only (OAuth tokens)
+        if resp.status_code == 401 and token_type == "oauth":
+            # Legacy connections may have been validated with mixed headers.
             resp = await client.get(
                 f"{base}/api/v4/user",
                 headers={"Authorization": f"Bearer {token}"},
@@ -159,10 +228,17 @@ class GitLabAuthService:
         token_type: str,
         base_url: str | None = None,
         username: str,
+        refresh_token: str | None = None,
+        expires_at: datetime | None = None,
     ) -> GitlabConnection:
         base = _normalize_base_url(base_url or self._settings.gitlab_base_url)
         existing = await self.get_connection(owner.id)
         encrypted = encrypt_secret(token.strip())
+        encrypted_refresh = (
+            encrypt_secret(refresh_token.strip())
+            if isinstance(refresh_token, str) and refresh_token.strip()
+            else None
+        )
         if existing is None:
             row = GitlabConnection(
                 user_id=owner.id,
@@ -170,6 +246,8 @@ class GitLabAuthService:
                 username=username,
                 encrypted_token=encrypted,
                 token_type=token_type,
+                encrypted_refresh_token=encrypted_refresh,
+                token_expires_at=expires_at,
             )
             self._session.add(row)
         else:
@@ -177,6 +255,11 @@ class GitLabAuthService:
             existing.username = username
             existing.encrypted_token = encrypted
             existing.token_type = token_type
+            if encrypted_refresh is not None:
+                existing.encrypted_refresh_token = encrypted_refresh
+            elif token_type == "pat":
+                existing.encrypted_refresh_token = None
+            existing.token_expires_at = expires_at
             row = existing
         await self._session.commit()
         await self._session.refresh(row)
@@ -203,6 +286,45 @@ class GitLabAuthService:
     def decrypt_token(self, row: GitlabConnection) -> str:
         return decrypt_secret(row.encrypted_token)
 
+    def decrypt_refresh_token(self, row: GitlabConnection) -> str | None:
+        raw = row.encrypted_refresh_token
+        if not raw:
+            return None
+        try:
+            return decrypt_secret(raw)
+        except Exception:  # noqa: BLE001
+            logger.warning("gitlab_refresh_token_decrypt_failed", connection_id=str(row.id))
+            return None
+
+    async def ensure_fresh_token(self, row: GitlabConnection) -> str:
+        """Return a usable access token, refreshing OAuth when expired or near expiry."""
+        token = self.decrypt_token(row)
+        if row.token_type != "oauth":
+            return token
+        expires = row.token_expires_at
+        if expires is not None:
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=UTC)
+            # Refresh 2 minutes before expiry.
+            if expires > datetime.now(UTC) + timedelta(minutes=2):
+                return token
+        refresh = self.decrypt_refresh_token(row)
+        if not refresh:
+            # No refresh token - caller may still succeed if access token is valid.
+            return token
+        access, new_refresh, expires_at = await self.refresh_access_token(
+            refresh_token=refresh,
+            base_url=row.base_url,
+        )
+        row.encrypted_token = encrypt_secret(access)
+        if new_refresh:
+            row.encrypted_refresh_token = encrypt_secret(new_refresh)
+        row.token_expires_at = expires_at
+        await self._session.commit()
+        await self._session.refresh(row)
+        logger.info("gitlab_oauth_token_refreshed", username=row.username)
+        return access
+
 
 class GitLabProvisioningService:
     """Creates GitLab projects and commits workspace files with mirrored paths."""
@@ -218,6 +340,7 @@ class GitLabProvisioningService:
         search: str | None = None,
         per_page: int = 100,
         max_pages: int = 3,
+        token_type: str = "pat",
     ) -> list[dict[str, Any]]:
         """List membership projects, optionally filtered by GitLab ``search``."""
         base = _normalize_base_url(base_url)
@@ -238,9 +361,14 @@ class GitLabProvisioningService:
                     params["search"] = query
                 resp = client.get(
                     f"{base}/api/v4/projects",
-                    headers=self._headers(token),
+                    headers=auth_headers(token, token_type),
                     params=params,
                 )
+                if resp.status_code == 401:
+                    raise GitLabAuthError(
+                        "Failed to list GitLab projects (401) - token expired or invalid. "
+                        "Reconnect GitLab under Integrations."
+                    )
                 if resp.status_code >= 400:
                     raise GitLabAuthError(
                         f"Failed to list GitLab projects ({resp.status_code})"
@@ -277,11 +405,14 @@ class GitLabProvisioningService:
         existing_path: str | None = None,
         root_dir: str | None = None,
         include_ci: bool = False,
+        token_type: str = "pat",
     ) -> dict[str, Any]:
         base = _normalize_base_url(base_url)
         with httpx.Client(timeout=45.0) as client:
             if existing_path:
-                project = self._get_project(client, base, token, existing_path)
+                project = self._get_project(
+                    client, base, token, existing_path, token_type=token_type
+                )
                 created = False
             else:
                 project, created = self._create_project(
@@ -291,6 +422,7 @@ class GitLabProvisioningService:
                     name=name,
                     description=description,
                     private=private,
+                    token_type=token_type,
                 )
 
             files = self._iac.read_bundle_files(root_dir) if root_dir else {}
@@ -309,6 +441,7 @@ class GitLabProvisioningService:
                     branch=str(project.get("default_branch") or "main"),
                     files=commit_payload,
                     message="chore: sync Launchpad workspace files",
+                    token_type=token_type,
                 )
 
         logger.info(
@@ -336,13 +469,16 @@ class GitLabProvisioningService:
         project_path: str,
         root_dir: str,
         commit_message: str,
+        token_type: str = "pat",
     ) -> dict[str, Any]:
         base = _normalize_base_url(base_url)
         files = self._iac.read_bundle_files(root_dir)
         if not files:
             raise GitLabAuthError("Workspace has no files to push")
         with httpx.Client(timeout=45.0) as client:
-            project = self._get_project(client, base, token, project_path)
+            project = self._get_project(
+                client, base, token, project_path, token_type=token_type
+            )
             self._commit_files(
                 client,
                 base,
@@ -351,6 +487,7 @@ class GitLabProvisioningService:
                 branch=str(project.get("default_branch") or "main"),
                 files=files,
                 message=commit_message,
+                token_type=token_type,
             )
         return {
             "id": int(project["id"]),
@@ -363,25 +500,19 @@ class GitLabProvisioningService:
             "files_committed": len(files),
         }
 
-    @staticmethod
-    def _headers(token: str) -> dict[str, str]:
-        return {
-            "PRIVATE-TOKEN": token,
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-
     def _get_project(
         self,
         client: httpx.Client,
         base: str,
         token: str,
         path_with_namespace: str,
+        *,
+        token_type: str = "pat",
     ) -> dict[str, Any]:
         encoded = path_with_namespace.strip().strip("/").replace("/", "%2F")
         resp = client.get(
             f"{base}/api/v4/projects/{encoded}",
-            headers=self._headers(token),
+            headers=auth_headers(token, token_type),
         )
         if resp.status_code == 404:
             raise GitLabAuthError(f"GitLab project '{path_with_namespace}' not found")
@@ -401,10 +532,11 @@ class GitLabProvisioningService:
         name: str,
         description: str,
         private: bool,
+        token_type: str = "pat",
     ) -> tuple[dict[str, Any], bool]:
         resp = client.post(
             f"{base}/api/v4/projects",
-            headers=self._headers(token),
+            headers=auth_headers(token, token_type),
             json={
                 "name": name,
                 "path": name.lower().replace(" ", "-"),
@@ -415,10 +547,15 @@ class GitLabProvisioningService:
         )
         if resp.status_code == 400 and "has already been taken" in resp.text.lower():
             # Open existing project under the current user namespace.
-            user = client.get(f"{base}/api/v4/user", headers=self._headers(token))
+            user = client.get(
+                f"{base}/api/v4/user",
+                headers=auth_headers(token, token_type),
+            )
             user.raise_for_status()
             username = str(user.json().get("username") or "")
-            existing = self._get_project(client, base, token, f"{username}/{name}")
+            existing = self._get_project(
+                client, base, token, f"{username}/{name}", token_type=token_type
+            )
             return existing, False
         if resp.status_code >= 400:
             raise GitLabAuthError(f"Failed to create GitLab project ({resp.status_code}): {resp.text[:200]}")
@@ -437,13 +574,22 @@ class GitLabProvisioningService:
         branch: str,
         files: dict[str, str],
         message: str,
+        token_type: str = "pat",
     ) -> None:
         # Ensure branch exists (empty projects may have no default branch yet).
-        self._ensure_branch(client, base, token, project_id=project_id, branch=branch)
+        self._ensure_branch(
+            client, base, token, project_id=project_id, branch=branch, token_type=token_type
+        )
 
         actions: list[dict[str, str]] = []
         for path, content in sorted(files.items()):
-            action = "update" if self._file_exists(client, base, token, project_id, branch, path) else "create"
+            action = (
+                "update"
+                if self._file_exists(
+                    client, base, token, project_id, branch, path, token_type=token_type
+                )
+                else "create"
+            )
             actions.append(
                 {
                     "action": action,
@@ -457,7 +603,7 @@ class GitLabProvisioningService:
             chunk = actions[offset : offset + 80]
             resp = client.post(
                 f"{base}/api/v4/projects/{project_id}/repository/commits",
-                headers=self._headers(token),
+                headers=auth_headers(token, token_type),
                 json={
                     "branch": branch,
                     "commit_message": message if offset == 0 else f"{message} (part {offset // 80 + 1})",
@@ -477,17 +623,18 @@ class GitLabProvisioningService:
         *,
         project_id: int,
         branch: str,
+        token_type: str = "pat",
     ) -> None:
         resp = client.get(
             f"{base}/api/v4/projects/{project_id}/repository/branches/{branch}",
-            headers=self._headers(token),
+            headers=auth_headers(token, token_type),
         )
         if resp.status_code == 200:
             return
         # Create initial commit via README if repo is empty.
         create = client.post(
             f"{base}/api/v4/projects/{project_id}/repository/files/README.md",
-            headers=self._headers(token),
+            headers=auth_headers(token, token_type),
             json={
                 "branch": branch,
                 "content": base64.b64encode(b"# Launchpad workspace\n").decode("ascii"),
@@ -511,11 +658,13 @@ class GitLabProvisioningService:
         project_id: int,
         branch: str,
         path: str,
+        *,
+        token_type: str = "pat",
     ) -> bool:
         encoded = path.replace("/", "%2F")
         resp = client.get(
             f"{base}/api/v4/projects/{project_id}/repository/files/{encoded}",
-            headers=self._headers(token),
+            headers=auth_headers(token, token_type),
             params={"ref": branch},
         )
         return resp.status_code == 200

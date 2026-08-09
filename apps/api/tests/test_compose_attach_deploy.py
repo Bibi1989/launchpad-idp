@@ -30,6 +30,44 @@ def test_find_compose_file(tmp_path: Path) -> None:
     assert find_compose_file(tmp_path) == target
 
 
+def test_repair_compose_rewrites_broken_client_scaffold(tmp_path: Path) -> None:
+    from app.services.compose_deploy import repair_compose_for_scaffolded_apps
+
+    app_dir = tmp_path / "apps" / "app"
+    app_dir.mkdir(parents=True)
+    (app_dir / "package.json").write_text('{"name":"app"}\n', encoding="utf-8")
+    (app_dir / "Dockerfile").write_text(
+        "FROM node:22-alpine\nEXPOSE 8080\n"
+        'HEALTHCHECK CMD wget -qO- http://127.0.0.1:8080/health || exit 1\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "dockers").mkdir()
+    (tmp_path / "dockers" / "Dockerfile.app").write_text(
+        "FROM node:22-alpine\nCOPY package.json ./\n",
+        encoding="utf-8",
+    )
+    broken = tmp_path / "docker-compose.yml"
+    broken.write_text(
+        "services:\n"
+        "  app:\n"
+        "    build:\n"
+        "      context: .\n"
+        "      dockerfile: dockers/Dockerfile.app\n"
+        "    image: app:latest\n"
+        "    ports:\n"
+        '      - "8080:8080"\n',
+        encoding="utf-8",
+    )
+
+    repaired = repair_compose_for_scaffolded_apps(tmp_path)
+    assert repaired == broken
+    text = broken.read_text(encoding="utf-8")
+    assert "context: apps/app" in text
+    assert "dockerfile: Dockerfile" in text
+    assert "context: ." not in text
+    assert "dockers/Dockerfile.app" not in text
+
+
 def test_compose_project_name_sanitizes() -> None:
     name = compose_project_name(
         namespace="launchpad-env-abc123",
@@ -68,14 +106,123 @@ def test_deploy_compose_simulates_without_docker(tmp_path: Path) -> None:
     assert resources.preview_url == "http://127.0.0.1:9090"
 
 
+def test_prepare_preview_compose_remaps_busy_ports(tmp_path: Path) -> None:
+    from app.services.compose_deploy import PREVIEW_COMPOSE_FILENAME, prepare_preview_compose
+
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n"
+        "  app:\n"
+        "    image: nginx\n"
+        "    container_name: app\n"
+        "    ports:\n"
+        '      - "8080:8080"\n'
+        "  db:\n"
+        "    image: postgres:16-alpine\n"
+        "    ports:\n"
+        '      - "5432:5432"\n',
+        encoding="utf-8",
+    )
+    with (
+        patch(
+            "app.services.compose_deploy.list_docker_published_host_ports",
+            return_value={8080, 5432},
+        ),
+        patch(
+            "app.services.compose_deploy.is_host_port_available",
+            side_effect=lambda port, docker_ports=None: port not in {8080, 5432},
+        ),
+    ):
+        preview, notes = prepare_preview_compose(compose)
+    assert preview.name == PREVIEW_COMPOSE_FILENAME
+    text = preview.read_text(encoding="utf-8")
+    assert "container_name" not in text
+    assert "8080:8080" not in text
+    assert "5432:5432" not in text
+    assert "8081:8080" in text
+    assert "5433:5432" in text
+    assert any("8080" in note and "8081" in note for note in notes)
+    assert any("5432" in note and "5433" in note for note in notes)
+
+
+def test_first_published_port_prefers_frontend_service(tmp_path: Path) -> None:
+    from app.services.compose_deploy import _first_published_port
+
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n"
+        "  api-server:\n"
+        "    image: api\n"
+        "    labels:\n"
+        "      - launchpad.io/app-kind=backend\n"
+        "      - launchpad.io/preview-target=false\n"
+        "    x-launchpad:\n"
+        "      app_kind: backend\n"
+        "      preview_target: false\n"
+        "    ports:\n"
+        '      - "8080:8080"\n'
+        "  web-ui:\n"
+        "    image: web\n"
+        "    labels:\n"
+        "      - launchpad.io/app-kind=frontend\n"
+        "      - launchpad.io/preview-target=true\n"
+        "    x-launchpad:\n"
+        "      app_kind: frontend\n"
+        "      preview_target: true\n"
+        "    ports:\n"
+        '      - "3000:3000"\n'
+        "  postgres:\n"
+        "    image: postgres:16-alpine\n"
+        "    ports:\n"
+        '      - "5432:5432"\n',
+        encoding="utf-8",
+    )
+    ps = MagicMock(
+        returncode=0,
+        stdout=(
+            '{"Service":"api-server","Publishers":[{"PublishedPort":8080,"TargetPort":8080}]}\n'
+            '{"Service":"web-ui","Publishers":[{"PublishedPort":3000,"TargetPort":3000}]}\n'
+            '{"Service":"postgres","Publishers":[{"PublishedPort":5432,"TargetPort":5432}]}\n'
+        ),
+        stderr="",
+    )
+    with patch("app.services.compose_deploy._run_compose", return_value=ps):
+        port = _first_published_port(
+            project="demo",
+            compose_file=compose,
+            cwd=tmp_path,
+        )
+    assert port == 3000
+
+
+def test_attach_prefers_frontend_dockerfile(tmp_path: Path) -> None:
+    from app.services.attach_deploy import _find_workspace_dockerfile
+
+    api = tmp_path / "apps" / "api-server"
+    web = tmp_path / "apps" / "web-ui"
+    api.mkdir(parents=True)
+    web.mkdir(parents=True)
+    (api / "Dockerfile").write_text("FROM node:22-alpine\n", encoding="utf-8")
+    (web / "Dockerfile").write_text("FROM node:22-alpine\n", encoding="utf-8")
+    found = _find_workspace_dockerfile(tmp_path)
+    assert found is not None
+    _df, context = found
+    assert context.name == "web-ui"
+
+
 def test_deploy_compose_up_success(tmp_path: Path) -> None:
     compose = tmp_path / "docker-compose.yml"
-    compose.write_text("services:\n  app:\n    image: nginx\n", encoding="utf-8")
+    compose.write_text(
+        'services:\n  app:\n    image: nginx\n    ports:\n      - "8080:8080"\n',
+        encoding="utf-8",
+    )
 
+    down_preview = MagicMock(returncode=0, stdout="", stderr="")
+    down_project = MagicMock(returncode=0, stdout="", stderr="")
     up = MagicMock(returncode=0, stdout="", stderr="")
     ps = MagicMock(
         returncode=0,
-        stdout='{"Publishers":[{"PublishedPort":8080,"TargetPort":8080}]}\n',
+        stdout='{"Publishers":[{"PublishedPort":8081,"TargetPort":8080}]}\n',
         stderr="",
     )
     settings = Settings.model_construct(
@@ -85,7 +232,18 @@ def test_deploy_compose_up_success(tmp_path: Path) -> None:
 
     with (
         patch("app.services.compose_deploy.docker_compose_available", return_value=True),
-        patch("app.services.compose_deploy._run_compose", side_effect=[up, ps]) as run,
+        patch(
+            "app.services.compose_deploy.list_docker_published_host_ports",
+            return_value={8080},
+        ),
+        patch(
+            "app.services.compose_deploy.is_host_port_available",
+            side_effect=lambda port, docker_ports=None: port != 8080,
+        ),
+        patch(
+            "app.services.compose_deploy._run_compose",
+            side_effect=[down_preview, down_project, up, ps],
+        ) as run,
     ):
         resources = deploy_compose(
             workspace_root=tmp_path,
@@ -96,9 +254,15 @@ def test_deploy_compose_up_success(tmp_path: Path) -> None:
         )
 
     assert resources.simulated is False
-    assert resources.node_port == 8080
-    assert resources.preview_url == "http://127.0.0.1:8080"
-    assert run.call_count == 2
+    assert resources.node_port == 8081
+    assert resources.preview_url == "http://127.0.0.1:8081"
+    assert resources.notice is not None
+    assert "8080" in resources.notice and "8081" in resources.notice
+    assert run.call_count == 4
+    preview_path = tmp_path / "docker-compose.launchpad-preview.yml"
+    assert preview_path.is_file()
+    up_args = run.call_args_list[2].args[0]
+    assert str(preview_path) in up_args
 
 
 def test_teardown_compose_without_docker(tmp_path: Path) -> None:
@@ -209,6 +373,64 @@ def test_attach_local_machine_simulates_without_docker() -> None:
     assert resources.simulated is True
     assert resources.node_port == 9090
     assert resources.preview_url == "http://127.0.0.1:9090"
+
+
+def test_attach_local_machine_remaps_busy_host_port() -> None:
+    settings = Settings.model_construct(
+        default_workload_image="nginx:alpine",
+        preview_node_host="127.0.0.1",
+    )
+    inspect_ok = MagicMock(returncode=0, stdout="[]", stderr="")
+    rm_ok = MagicMock(returncode=0, stdout="", stderr="")
+    run_ok = MagicMock(returncode=0, stdout="cid\n", stderr="")
+
+    def fake_run(cmd: list[str], *, timeout: float, check: bool = True):
+        _ = timeout
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return inspect_ok
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return rm_ok
+        if cmd[:2] == ["docker", "run"]:
+            assert "-p" in cmd
+            publish = cmd[cmd.index("-p") + 1]
+            assert publish == "8081:8080"
+            assert f"PORT=8080" in cmd
+            return run_ok
+        if check:
+            raise AttachDeployError(f"unexpected cmd: {cmd}")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch("app.services.attach_deploy._docker_available", return_value=True),
+        patch(
+            "app.services.attach_deploy.list_docker_published_host_ports",
+            return_value={8080},
+        ),
+        patch(
+            "app.services.compose_deploy.is_host_port_available",
+            side_effect=lambda port, docker_ports=None: port != 8080,
+        ),
+        patch("app.services.attach_deploy._run", side_effect=fake_run),
+    ):
+        resources = deploy_attach(
+            namespace="ns",
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            name="demo",
+            git_branch="main",
+            git_repo_url="https://example.com/repo.git",
+            ttl_expires_at="2099-01-01T00:00:00+00:00",
+            running_instance=RunningInstanceConfig(
+                kind=RunningInstanceKind.LOCAL_MACHINE,
+                listen_port=8080,
+            ),
+            settings=settings,
+        )
+
+    assert resources.simulated is False
+    assert resources.node_port == 8081
+    assert resources.preview_url == "http://127.0.0.1:8081"
+    assert resources.notice is not None
+    assert "8080" in resources.notice and "8081" in resources.notice
 
 
 def test_resolve_instance_image_from_workspace_dockerfile(tmp_path: Path) -> None:

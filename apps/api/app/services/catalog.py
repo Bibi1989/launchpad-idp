@@ -165,13 +165,26 @@ class CatalogServiceManager:
 
         # Scaffold workspace files without requiring a live kind cluster.
         bundle = self._iac.generate(wizard)
-        personal = await OrganizationService(self._session).ensure_personal_org(owner)
+        from app.models.domain import Organization
+        from app.services.plans import assert_can_create_workspace
+        from app.services.projects import ProjectService
+
+        orgs = OrganizationService(self._session)
+        personal = await orgs.ensure_personal_org(owner)
         resolved_org = org_id or personal.id
+        org = await self._session.get(Organization, resolved_org)
+        if org is not None:
+            await assert_can_create_workspace(self._session, org)
+        org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org)
+        project = await ProjectService(self._session).ensure_default_project(
+            org=org_ctx.organization, actor=owner
+        )
         encrypted = encrypt_secret(wizard.credentials.model_dump_json())
         workspace = ProvisioningWorkspace(
             id=UUID(bundle.workspace_id),
             owner_id=owner.id,
             org_id=resolved_org,
+            project_id=project.id,
             name=payload.name,
             engine=bundle.engine.value,
             provider=bundle.provider.value,

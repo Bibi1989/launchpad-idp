@@ -1,5 +1,38 @@
 export type CloudProvider = 'local' | 'gcp' | 'aws' | 'azure' | 'cloudflare'
-export type IaCEngine = 'terraform' | 'opentofu' | 'pulumi'
+export type IaCEngine = 'terraform' | 'opentofu' | 'pulumi' | 'ansible'
+
+export type AnsibleAppDeployMode = 'docker_run' | 'docker_compose' | 'systemd' | 'none'
+
+export interface AnsibleConfig {
+  enabled: boolean
+  hosts: string
+  inventory_group: string
+  ssh_user: string
+  ssh_port: number
+  ssh_private_key_path?: string | null
+  become: boolean
+  become_user: string
+  python_interpreter: string
+  set_hostname: boolean
+  hostname?: string | null
+  timezone: string
+  packages: string[]
+  install_docker: boolean
+  install_compose_plugin: boolean
+  enable_ufw: boolean
+  ufw_allow_ports: number[]
+  enable_fail2ban: boolean
+  enable_unattended_upgrades: boolean
+  create_deploy_user: boolean
+  deploy_user: string
+  deploy_user_groups: string[]
+  app_deploy_mode: AnsibleAppDeployMode
+  app_dir: string
+  app_listen_port: number
+  sync_workspace: boolean
+  use_vault: boolean
+  vault_password_file?: string | null
+}
 export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm' | 'kustomize'
 export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
 export type WorkspaceRuntimeMode = 'kubernetes' | 'docker_compose' | 'running_instance'
@@ -231,6 +264,7 @@ export interface WorkspaceWizardConfig {
   cost_optimization: CostOptimizationConfig
   container_scaffold: ContainerScaffoldConfig
   dependencies: WorkloadDependenciesConfig
+  ansible: AnsibleConfig
   has_credentials: boolean
   /** Safe display name for the stored cloud key (never the secret). */
   credential_label?: string | null
@@ -404,6 +438,8 @@ export interface ContainerServiceItem {
   app_kind?: 'frontend' | 'backend'
   listen_port: number
   dockerfile_path?: string | null
+  /** When true, publish host port and treat as Open-app / browser target. */
+  expose_preview?: boolean | null
 }
 
 export interface ContainerScaffoldConfig {

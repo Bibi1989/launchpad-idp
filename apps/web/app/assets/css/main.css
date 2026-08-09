@@ -16,6 +16,13 @@
   --lp-ok: #34d399;
   --lp-sidebar-w: 240px;
   --lp-header-h: 64px;
+  /*
+   * Dashboard page column (AppShell). Keep clearly narrower than the main
+   * pane so cards do not look full-bleed on laptop / ultrawide screens.
+   */
+  --lp-content-max: 72rem; /* 1152px - matches Tailwind max-w-6xl */
+  /* Compact horizontal forms (invite, filters, SSO mapping). */
+  --lp-form-row-max: 36rem;
   --lp-page-top: #0a1017;
   --lp-page-bottom: #0a0f14;
   --lp-grid: rgba(39, 52, 71, 0.35);
@@ -147,7 +154,69 @@ html:not(.fonts-icons-ready) .material-symbols-outlined {
   font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
 }
 
+/*
+ * Unlayered shell layout (must beat Tailwind @layer utilities).
+ * Main column offset for the fixed sidebar lives here - do not rely only on
+ * Tailwind arbitrary margin classes, which can lose to layer order.
+ */
+[data-shell='app'] {
+  margin-left: 0;
+}
+
+@media (min-width: 1024px) {
+  [data-shell='app'] {
+    margin-left: var(--lp-sidebar-w);
+  }
+}
+
+[data-shell='bare'] {
+  margin-left: 0;
+}
+
+[data-shell='app'] .lp-dashboard-main {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--lp-content-max);
+  margin-left: auto;
+  margin-right: auto;
+}
+
 @layer components {
+  /**
+   * Horizontal action forms inside dashboard cards.
+   * Use this instead of full-bleed 1fr grids so Role / Submit stay next to the field.
+   */
+  .lp-form-row {
+    display: flex;
+    width: 100%;
+    max-width: min(100%, var(--lp-form-row-max));
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.75rem;
+  }
+
+  @media (min-width: 640px) {
+    .lp-form-row {
+      flex-direction: row;
+      align-items: flex-end;
+    }
+
+    .lp-form-row > label:first-child {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .lp-form-row > label:not(:first-child) {
+      flex: 0 0 9rem;
+      width: 9rem;
+    }
+
+    .lp-form-row > button {
+      flex: 0 0 auto;
+      height: 2.5rem;
+    }
+  }
+
   .lp-glass {
     border: 1px solid var(--lp-line);
     background: var(--lp-glass-bg);
@@ -161,13 +230,16 @@ html:not(.fonts-icons-ready) .material-symbols-outlined {
   }
 
   .lp-input {
+    /* Default to full width in stacked forms; flex/grid rows can override with w-auto. */
     width: 100%;
+    max-width: 100%;
     border-radius: 0.5rem;
     border: 1px solid var(--lp-line);
     background: var(--lp-input-bg);
     padding: 0.625rem 0.75rem;
     font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.875rem;
+    line-height: 1.25rem;
     color: var(--lp-text);
     outline: none;
     transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -180,6 +252,15 @@ html:not(.fonts-icons-ready) .material-symbols-outlined {
 
   select.lp-input {
     color: var(--lp-text);
+    /* Native selects need an explicit height so text is not clipped. */
+    min-height: 2.5rem;
+  }
+
+  /* Inline controls inside horizontal flex/grid toolbars (not full-bleed). */
+  .lp-input-inline {
+    width: auto;
+    min-width: 9rem;
+    flex: 0 0 auto;
   }
 
   select.lp-input option {

@@ -18,6 +18,7 @@ export function useEnvironments() {
   const error = useState<string | null>('environments-error', () => null)
 
   async function refresh() {
+    // Re-entrant safe: concurrent callers share one in-flight flag via finally.
     loading.value = true
     error.value = null
     try {

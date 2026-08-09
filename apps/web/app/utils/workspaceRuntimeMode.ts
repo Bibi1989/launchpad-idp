@@ -7,6 +7,7 @@ import type {
   WorkspaceArtifactsMode,
   WorkspaceRuntimeMode,
 } from '~/types/provisioning'
+import { defaultContainerServices } from '~/utils/cloudValidation'
 
 export type RuntimeModeOption = {
   id: WorkspaceRuntimeMode
@@ -127,6 +128,9 @@ export function normalizeArtifactsForRuntimeMode(input: {
   }
 
   if (runtimeMode === 'docker_compose') {
+    const existing = input.containerScaffold.services ?? []
+    const services = existing.length > 0 ? existing : defaultContainerServices()
+    const primary = services[0]
     return {
       artifactMode: 'iac_only',
       kubernetesPackaging: 'none',
@@ -135,6 +139,10 @@ export function normalizeArtifactsForRuntimeMode(input: {
         enabled: true,
         generate_dockerfile: true,
         generate_docker_compose: true,
+        services,
+        app_name: primary?.name || input.containerScaffold.app_name || 'web-ui',
+        stack: primary?.stack || input.containerScaffold.stack || 'nextjs',
+        listen_port: primary?.listen_port || input.containerScaffold.listen_port || 3000,
       },
       runningInstance,
     }
@@ -158,6 +166,20 @@ export function normalizeArtifactsForRuntimeMode(input: {
           generate_dockerfile: true,
           generate_docker_compose: false,
         }
+    const services = scaffold.services ?? []
+    const previewSvc
+      = services.find(
+        (s) =>
+          s.expose_preview === true
+          || (s.expose_preview == null && s.app_kind === 'frontend'),
+      )
+      || services[0]
+    if (previewSvc?.listen_port) {
+      runningInstance = {
+        ...runningInstance,
+        listen_port: previewSvc.listen_port,
+      }
+    }
     return {
       artifactMode:
         input.artifactMode === 'manifest_only' ? 'iac_only' : input.artifactMode,

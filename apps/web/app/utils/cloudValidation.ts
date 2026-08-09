@@ -1,7 +1,69 @@
 import { z } from 'zod'
 
 export const cloudProviderSchema = z.enum(['local', 'gcp', 'aws', 'azure', 'cloudflare'])
-export const iacEngineSchema = z.enum(['terraform', 'opentofu', 'pulumi'])
+export const iacEngineSchema = z.enum(['terraform', 'opentofu', 'pulumi', 'ansible'])
+
+export const ansibleConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  hosts: z.string().trim().min(1).max(2048).default('127.0.0.1'),
+  inventory_group: z.string().trim().min(1).max(64).default('app_servers'),
+  ssh_user: z.string().trim().min(1).max(64).default('ubuntu'),
+  ssh_port: z.number().int().min(1).max(65535).default(22),
+  ssh_private_key_path: z.string().trim().max(512).nullable().optional(),
+  become: z.boolean().default(true),
+  become_user: z.string().trim().min(1).max(64).default('root'),
+  python_interpreter: z.string().trim().min(1).max(128).default('auto'),
+  set_hostname: z.boolean().default(true),
+  hostname: z.string().trim().max(253).nullable().optional(),
+  timezone: z.string().trim().min(1).max(64).default('UTC'),
+  packages: z.array(z.string().trim().min(1)).default(['curl', 'ca-certificates', 'gnupg', 'jq', 'htop']),
+  install_docker: z.boolean().default(true),
+  install_compose_plugin: z.boolean().default(true),
+  enable_ufw: z.boolean().default(true),
+  ufw_allow_ports: z.array(z.number().int().min(1).max(65535)).default([22, 80, 443]),
+  enable_fail2ban: z.boolean().default(true),
+  enable_unattended_upgrades: z.boolean().default(true),
+  create_deploy_user: z.boolean().default(true),
+  deploy_user: z.string().trim().min(1).max(64).default('deploy'),
+  deploy_user_groups: z.array(z.string().trim().min(1)).default(['docker']),
+  app_deploy_mode: z.enum(['docker_run', 'docker_compose', 'systemd', 'none']).default('docker_run'),
+  app_dir: z.string().trim().min(1).max(512).default('/opt/launchpad/app'),
+  app_listen_port: z.number().int().min(1).max(65535).default(8080),
+  sync_workspace: z.boolean().default(true),
+  use_vault: z.boolean().default(false),
+  vault_password_file: z.string().trim().max(512).nullable().optional(),
+})
+
+export const defaultAnsibleConfig = (): z.infer<typeof ansibleConfigSchema> => ({
+  enabled: false,
+  hosts: '127.0.0.1',
+  inventory_group: 'app_servers',
+  ssh_user: 'ubuntu',
+  ssh_port: 22,
+  ssh_private_key_path: '~/.ssh/id_ed25519',
+  become: true,
+  become_user: 'root',
+  python_interpreter: 'auto',
+  set_hostname: true,
+  hostname: null,
+  timezone: 'UTC',
+  packages: ['curl', 'ca-certificates', 'gnupg', 'jq', 'htop'],
+  install_docker: true,
+  install_compose_plugin: true,
+  enable_ufw: true,
+  ufw_allow_ports: [22, 80, 443],
+  enable_fail2ban: true,
+  enable_unattended_upgrades: true,
+  create_deploy_user: true,
+  deploy_user: 'deploy',
+  deploy_user_groups: ['docker'],
+  app_deploy_mode: 'docker_run',
+  app_dir: '/opt/launchpad/app',
+  app_listen_port: 8080,
+  sync_workspace: true,
+  use_vault: false,
+  vault_password_file: null,
+})
 export const secretBackendSchema = z.enum(['secret_manager', 'native_k8s'])
 export const kubernetesPackagingSchema = z.enum(['none', 'raw_manifests', 'helm', 'kustomize'])
 export const workspaceArtifactsModeSchema = z.enum(['iac_only', 'manifest_only', 'both'])
@@ -438,6 +500,8 @@ export const containerServiceSpecSchema = z.object({
   app_kind: z.enum(['frontend', 'backend']).default('backend'),
   listen_port: z.number().int().min(1).max(65535).default(8080),
   dockerfile_path: z.string().nullable().optional(),
+  /** Open-app / browser target. Defaults: frontend true, backend false. */
+  expose_preview: z.boolean().nullable().optional(),
 })
 
 export const containerScaffoldSchema = z.object({
@@ -451,14 +515,32 @@ export const containerScaffoldSchema = z.object({
   services: z.array(containerServiceSpecSchema).default([]),
 })
 
+/** Default frontend + backend pair shown in ContainerScaffoldCard. */
+export const defaultContainerServices = (): z.infer<typeof containerServiceSpecSchema>[] => [
+  {
+    name: 'web-ui',
+    app_kind: 'frontend',
+    stack: 'nextjs',
+    listen_port: 3000,
+    expose_preview: true,
+  },
+  {
+    name: 'api-server',
+    app_kind: 'backend',
+    stack: 'node',
+    listen_port: 8080,
+    expose_preview: false,
+  },
+]
+
 export const defaultContainerScaffold = (): z.infer<typeof containerScaffoldSchema> => ({
   enabled: false,
   generate_dockerfile: true,
   generate_docker_compose: true,
-  stack: 'node',
+  stack: 'nextjs',
   frameworks: [],
-  app_name: 'app',
-  listen_port: 8080,
+  app_name: 'web-ui',
+  listen_port: 3000,
   services: [],
 })
 
@@ -472,6 +554,7 @@ const wizardNameSchema = z
 
 const wizardCommonFields = {
   name: wizardNameSchema,
+  launchpad_project_id: z.string().uuid().optional().nullable(),
   iac_engine: iacEngineSchema.default('terraform'),
   credentials: cloudCredentialsSchema.default({}),
   run_init: z.boolean().default(true),
@@ -493,6 +576,7 @@ const wizardCommonFields = {
   cost_optimization: costOptimizationSchema.default(defaultCostOptimization()),
   container_scaffold: containerScaffoldSchema.default(defaultContainerScaffold()),
   dependencies: workloadDependenciesSchema.default(defaultWorkloadDependencies()),
+  ansible: ansibleConfigSchema.default(defaultAnsibleConfig()),
 }
 
 export const provisioningWizardSchema = z.discriminatedUnion('provider', [

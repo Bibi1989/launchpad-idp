@@ -179,6 +179,24 @@ describe('workspaceInfraScaffold', () => {
     expect(multi[3]?.content).toContain('dockerfile: dockers/Dockerfile.demo-fastapi')
   })
 
+  it('skips client docker scaffold when multi-service specs are present', () => {
+    expect(
+      buildDockerScaffold({
+        enabled: true,
+        generate_dockerfile: true,
+        generate_docker_compose: true,
+        stack: 'nextjs',
+        frameworks: [],
+        app_name: 'web-ui',
+        listen_port: 3000,
+        services: [
+          { name: 'web-ui', app_kind: 'frontend', stack: 'nextjs', listen_port: 3000 },
+          { name: 'api-server', app_kind: 'backend', stack: 'node', listen_port: 8080 },
+        ],
+      } as never),
+    ).toEqual([])
+  })
+
   it('returns separate run commands per area', () => {
     expect(provisionRunCommands('terraform')).toHaveLength(2)
     expect(provisionRunCommands('terraform')[0]).toContain('terraform init')

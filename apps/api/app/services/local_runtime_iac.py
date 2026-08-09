@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.schemas.cloud import IaCEngine, WorkspaceRuntimeMode
+from app.schemas.cloud import AnsibleConfig, IaCEngine, WorkspaceRuntimeMode
 
 TF_ROOT = Path("infra") / "terraform"
 
@@ -22,12 +22,27 @@ def write_local_runtime_iac(
     name: str,
     engine: IaCEngine,
     runtime_mode: WorkspaceRuntimeMode,
+    ansible: AnsibleConfig | None = None,
+    listen_port: int | None = None,
 ) -> list[str]:
-    """Write Terraform/OpenTofu or Pulumi stubs for local non-Kubernetes runtimes."""
+    """Write Terraform/OpenTofu, Pulumi, or Ansible stubs for local non-K8s runtimes."""
     if engine in {IaCEngine.TERRAFORM, IaCEngine.OPENTOFU}:
         return _write_local_terraform(workspace_dir, name=name, runtime_mode=runtime_mode)
     if engine == IaCEngine.PULUMI:
         return _write_local_pulumi(workspace_dir, name=name, runtime_mode=runtime_mode)
+    if engine == IaCEngine.ANSIBLE:
+        from app.services.ansible_scaffold import write_ansible_scaffold
+
+        cfg = ansible or AnsibleConfig(enabled=True)
+        if not cfg.enabled:
+            cfg = cfg.model_copy(update={"enabled": True})
+        return write_ansible_scaffold(
+            workspace_dir,
+            name=name,
+            config=cfg,
+            runtime_mode=runtime_mode,
+            listen_port=listen_port,
+        )
     raise ValueError(f"Unsupported IaC engine for local runtime: {engine!r}")
 
 

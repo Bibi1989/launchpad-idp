@@ -51,12 +51,14 @@ class TokenResponse(BaseModel):
     user: UserRead
     orgs: list[OrgSummary] = Field(default_factory=list)
     active_org_id: str | None = None
+    needs_org_setup: bool = False
 
 
 class MeResponse(BaseModel):
     user: UserRead
     orgs: list[OrgSummary] = Field(default_factory=list)
     active_org_id: str | None = None
+    needs_org_setup: bool = False
 
 
 class OidcStartResponse(BaseModel):

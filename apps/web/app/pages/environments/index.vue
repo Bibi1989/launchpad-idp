@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { OrgCostSummary } from '~/types/auth'
+import type { Environment } from '~/types/environment'
 
 const { t } = useI18n()
 const { environments, loading, error, refresh, destroy, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
@@ -104,25 +105,28 @@ async function loadOrgCosts() {
   }
 }
 
-onMounted(async () => {
-  try {
-    await refresh()
-    await loadOrgCosts()
-  } catch {
-    // surfaced via error state
-  }
+onMounted(() => {
+  // Do not await in a way that can block route transitions; fire-and-forget load.
+  void (async () => {
+    try {
+      await refresh()
+      await loadOrgCosts()
+    } catch {
+      // surfaced via error state
+    }
+
+    recentLogLines.value = [
+      `[${new Date().toLocaleTimeString()}] INFO: Dashboard synced with control plane`,
+      ...activeEnvs.value.slice(0, 4).map(
+        (e) =>
+          `[${new Date(e.updated_at).toLocaleTimeString()}] ${e.status}: ${e.name} · ${e.namespace_name}`,
+      ),
+    ]
+  })()
 
   if (linkedWorkspaceId.value) {
     void navigateTo(`/launch?workspace=${encodeURIComponent(linkedWorkspaceId.value)}`)
   }
-
-  recentLogLines.value = [
-    `[${new Date().toLocaleTimeString()}] INFO: Dashboard synced with control plane`,
-    ...activeEnvs.value.slice(0, 4).map(
-      (e) =>
-        `[${new Date(e.updated_at).toLocaleTimeString()}] ${e.status}: ${e.name} · ${e.namespace_name}`,
-    ),
-  ]
 })
 
 watch(environments, (list) => {
@@ -180,16 +184,16 @@ async function onRetry(id: string) {
   }
 }
 
-function onCardUpdate(patch: { id?: string; status?: string; latest_commit_sha?: string | null }) {
+function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
   if (!patch.id) return
   const target = environments.value.find((env) => env.id === patch.id)
   if (!target) return
-  if (patch.status) {
-    target.status = patch.status as typeof target.status
-  }
-  if (patch.latest_commit_sha !== undefined) {
-    target.latest_commit_sha = patch.latest_commit_sha
-  }
+  if (patch.status) target.status = patch.status
+  if (patch.latest_commit_sha !== undefined) target.latest_commit_sha = patch.latest_commit_sha
+  if (patch.preview_url !== undefined) target.preview_url = patch.preview_url
+  if (patch.node_port !== undefined) target.node_port = patch.node_port
+  if (patch.app_ready !== undefined) target.app_ready = patch.app_ready
+  if (patch.error_message !== undefined) target.error_message = patch.error_message
 }
 </script>
 

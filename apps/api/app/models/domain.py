@@ -82,6 +82,15 @@ class OrgRole(str, enum.Enum):
     VIEWER = "viewer"
 
 
+class OrgPlan(str, enum.Enum):
+    FREE = "free"
+    PRO = "pro"
+
+
+# Project roles mirror org roles for invite/RBAC consistency.
+ProjectRole = OrgRole
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -117,6 +126,20 @@ class Organization(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan: Mapped[OrgPlan] = mapped_column(
+        Enum(
+            OrgPlan,
+            name="org_plan",
+            native_enum=False,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+        default=OrgPlan.FREE,
+        server_default="free",
+    )
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    plan_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -130,6 +153,10 @@ class Organization(Base):
         cascade="all, delete-orphan",
     )
     sso_mappings: Mapped[list[OrgSsoRoleMapping]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    projects: Mapped[list[Project]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
     )
@@ -243,6 +270,127 @@ class OrgSsoRoleMapping(Base):
     )
 
     organization: Mapped[Organization] = relationship(back_populates="sso_mappings")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    __table_args__ = (
+        Index("ix_projects_org_id", "org_id"),
+        Index("ix_projects_org_slug", "org_id", "slug", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    organization: Mapped[Organization] = relationship(back_populates="projects")
+    created_by: Mapped[User | None] = relationship()
+    memberships: Mapped[list[ProjectMembership]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    invites: Mapped[list[ProjectInvite]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    workspaces: Mapped[list[ProvisioningWorkspace]] = relationship(back_populates="project")
+
+
+class ProjectMembership(Base):
+    __tablename__ = "project_memberships"
+    __table_args__ = (
+        Index("ix_project_memberships_project_user", "project_id", "user_id", unique=True),
+        Index("ix_project_memberships_user_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[OrgRole] = mapped_column(
+        Enum(
+            OrgRole,
+            name="project_role",
+            native_enum=False,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+        default=OrgRole.MEMBER,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    project: Mapped[Project] = relationship(back_populates="memberships")
+    user: Mapped[User] = relationship()
+
+
+class ProjectInvite(Base):
+    __tablename__ = "project_invites"
+    __table_args__ = (
+        Index("ix_project_invites_project_id", "project_id"),
+        Index("ix_project_invites_email", "email"),
+        Index("ix_project_invites_token_hash", "token_hash", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[OrgRole] = mapped_column(
+        Enum(
+            OrgRole,
+            name="project_invite_role",
+            native_enum=False,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+        default=OrgRole.MEMBER,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    invited_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    project: Mapped[Project] = relationship(back_populates="invites")
+    invited_by: Mapped[User] = relationship()
 
 
 class Environment(Base):
@@ -429,6 +577,7 @@ class ProvisioningWorkspace(Base):
         Index("ix_provisioning_workspaces_status", "status"),
         Index("ix_provisioning_workspaces_owner_id", "owner_id"),
         Index("ix_provisioning_workspaces_org_id", "org_id"),
+        Index("ix_provisioning_workspaces_project_id", "project_id"),
         Index("ix_provisioning_workspaces_starred_at", "starred_at"),
     )
 
@@ -441,6 +590,11 @@ class ProvisioningWorkspace(Base):
     org_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("projects.id", ondelete="SET NULL"),
         nullable=True,
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -459,6 +613,7 @@ class ProvisioningWorkspace(Base):
 
     owner: Mapped[User] = relationship(back_populates="workspaces")
     organization: Mapped[Organization | None] = relationship()
+    project: Mapped[Project | None] = relationship(back_populates="workspaces")
     environments: Mapped[list[Environment]] = relationship(
         back_populates="workspace",
         foreign_keys="Environment.workspace_id",
@@ -557,6 +712,10 @@ class GitlabConnection(Base):
     username: Mapped[str] = mapped_column(String(128), nullable=False)
     encrypted_token: Mapped[str] = mapped_column(Text, nullable=False)
     token_type: Mapped[str] = mapped_column(String(32), nullable=False, default="pat")
+    encrypted_refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

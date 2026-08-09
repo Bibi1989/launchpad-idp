@@ -88,7 +88,7 @@ const providers = computed(() => [
 </script>
 
 <template>
-  <div class="mx-auto max-w-3xl animate-fade-up space-y-8">
+  <div class="w-full animate-fade-up space-y-8">
     <header class="space-y-2">
       <p class="font-mono text-xs uppercase tracking-[0.22em] text-[var(--lp-accent)]">{{ t('settings.preferences') }}</p>
       <h1 class="text-3xl font-semibold tracking-tight">{{ t('settings.title') }}</h1>

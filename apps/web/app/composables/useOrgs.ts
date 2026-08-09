@@ -30,7 +30,13 @@ export function useOrgs() {
     orgs?: OrgSummary[]
     active_org_id?: string | null
   }) {
-    if (payload.orgs) orgs.value = payload.orgs
+    if (payload.orgs) {
+      orgs.value = payload.orgs
+      if (payload.orgs.length === 0) {
+        setActiveOrg(null)
+        return
+      }
+    }
     if (payload.active_org_id) setActiveOrg(payload.active_org_id)
     else if (!activeOrgId.value && payload.orgs?.[0]) setActiveOrg(payload.orgs[0].id)
 
@@ -49,8 +55,38 @@ export function useOrgs() {
     return apiFetch<OrgCostSummary>(`/orgs/${id}/costs`)
   }
 
+  async function createOrg(payload: { name: string; slug?: string }): Promise<OrgSummary> {
+    const created = await apiFetch<OrgSummary>('/orgs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    orgs.value = [...orgs.value, created]
+    setActiveOrg(created.id)
+    return created
+  }
+
+  async function renameOrg(orgId: string, name: string): Promise<OrgSummary> {
+    const updated = await apiFetch<OrgSummary>(`/orgs/${orgId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    })
+    orgs.value = orgs.value.map((org) => (org.id === orgId ? { ...org, ...updated } : org))
+    return updated
+  }
+
   async function listMembers(orgId: string): Promise<OrgMember[]> {
     return apiFetch<OrgMember[]>(`/orgs/${orgId}/members`)
+  }
+
+  async function updateMember(
+    orgId: string,
+    userId: string,
+    role: string,
+  ): Promise<OrgMember> {
+    return apiFetch<OrgMember>(`/orgs/${orgId}/members/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+    })
   }
 
   async function listInvites(orgId: string): Promise<OrgInvite[]> {
@@ -102,8 +138,11 @@ export function useOrgs() {
     loadActiveOrgFromStorage,
     setActiveOrg,
     applyFromTokenResponse,
+    createOrg,
+    renameOrg,
     fetchOrgCosts,
     listMembers,
+    updateMember,
     listInvites,
     createInvite,
     revokeInvite,

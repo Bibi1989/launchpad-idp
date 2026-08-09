@@ -39,7 +39,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-2xl animate-fade-up space-y-6 pb-12">
+  <div class="w-full animate-fade-up space-y-6 pb-12">
     <header>
       <p class="lp-label mb-1">{{ t('preview.prPreview') }}</p>
       <h1 class="text-2xl font-semibold">

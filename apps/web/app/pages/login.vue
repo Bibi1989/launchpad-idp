@@ -8,13 +8,30 @@ definePageMeta({
 const { t } = useI18n()
 const { login, register, devLogin, startOidcLogin, authConfig, token } = useAuth()
 const route = useRoute()
-const mode = ref<'login' | 'register'>('login')
+const mode = ref<'login' | 'register'>(
+  route.query.mode === 'register' ? 'register' : 'login',
+)
 const submitting = ref(false)
 const error = ref<string | null>(null)
 
-function postAuthPath(): string {
+function postAuthPath(needsOrgSetup?: boolean): string {
   const next = route.query.next
-  if (typeof next === 'string' && next.startsWith('/') && next !== '/') return next
+  // Invite links always win so register → accept UI works before org onboarding.
+  if (
+    typeof next === 'string'
+    && next.startsWith('/invite/')
+  ) {
+    return next
+  }
+  if (needsOrgSetup) return '/onboarding/org'
+  if (
+    typeof next === 'string'
+    && next.startsWith('/')
+    && next !== '/'
+    && !next.startsWith('/onboarding/')
+  ) {
+    return next
+  }
   return '/home'
 }
 
@@ -33,7 +50,8 @@ watch(
   token,
   (value) => {
     if (value) {
-      void navigateTo(postAuthPath())
+      const { orgs } = useOrgs()
+      void navigateTo(postAuthPath(orgs.value.length === 0))
     }
   },
   { immediate: true },
@@ -48,8 +66,8 @@ async function onLogin() {
   }
   submitting.value = true
   try {
-    await login(parsed.data)
-    await navigateTo(postAuthPath())
+    const body = await login(parsed.data)
+    await navigateTo(postAuthPath(Boolean(body.needs_org_setup)))
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('auth.loginFailed')
   } finally {
@@ -66,8 +84,8 @@ async function onRegister() {
   }
   submitting.value = true
   try {
-    await register(parsed.data)
-    await navigateTo(postAuthPath())
+    const body = await register(parsed.data)
+    await navigateTo(postAuthPath(Boolean(body.needs_org_setup)))
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('auth.registerFailed')
   } finally {
@@ -79,8 +97,8 @@ async function onDevLogin() {
   error.value = null
   submitting.value = true
   try {
-    await devLogin()
-    await navigateTo(postAuthPath())
+    const body = await devLogin()
+    await navigateTo(postAuthPath(Boolean(body.needs_org_setup)))
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('auth.devLoginFailed')
   } finally {
@@ -144,16 +162,12 @@ async function onOidcLogin() {
               required
             >
           </label>
-          <label class="block space-y-2">
-            <span class="lp-label">{{ t('auth.password') }}</span>
-            <input
-              v-model="loginForm.password"
-              type="password"
-              autocomplete="current-password"
-              class="lp-input"
-              required
-            >
-          </label>
+          <PasswordInput
+            v-model="loginForm.password"
+            :label="t('auth.password')"
+            autocomplete="current-password"
+            required
+          />
           <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
           <button type="submit" class="lp-btn-primary w-full" :disabled="submitting">
             {{ t('auth.submitLogin') }}
@@ -180,16 +194,12 @@ async function onOidcLogin() {
               required
             >
           </label>
-          <label class="block space-y-2">
-            <span class="lp-label">{{ t('auth.password') }}</span>
-            <input
-              v-model="registerForm.password"
-              type="password"
-              autocomplete="new-password"
-              class="lp-input"
-              required
-            >
-          </label>
+          <PasswordInput
+            v-model="registerForm.password"
+            :label="t('auth.password')"
+            autocomplete="new-password"
+            required
+          />
           <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
           <button type="submit" class="lp-btn-primary w-full" :disabled="submitting">
             {{ t('auth.submitRegister') }}

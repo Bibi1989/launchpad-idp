@@ -126,16 +126,45 @@ def scaffold_docker_compose(
     )
 
 
+def _service_is_frontend(service: dict[str, object]) -> bool:
+    kind = str(service.get("app_kind") or "").strip().lower()
+    if kind == "frontend":
+        return True
+    if kind == "backend":
+        return False
+    name = str(service.get("name") or "").strip().lower()
+    return any(token in name for token in ("web", "ui", "frontend", "spa", "next", "nuxt"))
+
+
+def _service_expose_preview(service: dict[str, object]) -> bool:
+    explicit = service.get("expose_preview")
+    if explicit is not None:
+        return bool(explicit)
+    return _service_is_frontend(service)
+
+
 def scaffold_docker_compose_services(
     services: list[dict[str, object]],
     dependency_blocks: list[str] | None = None,
 ) -> str:
-    """Return a docker-compose.yml covering one or more scaffolded services."""
+    """Return a docker-compose.yml covering one or more scaffolded services.
+
+    Frontend services are the default Open-app / browser targets
+    (``x-launchpad.preview_target`` + host publish). Backends stay on the
+    compose network unless ``expose_preview`` is true. Optional ``extra_env``
+    and ``depends_on`` wire frontend→backend and backend→datastore links.
+    """
     if not services:
         return scaffold_docker_compose()
 
+    # Ensure at least one preview target when multiple services are present.
+    normalized = [dict(s) for s in services]
+    if normalized and not any(_service_expose_preview(s) for s in normalized):
+        frontends = [s for s in normalized if _service_is_frontend(s)]
+        (frontends[0] if frontends else normalized[0])["expose_preview"] = True
+
     lines: list[str] = ["services:"]
-    for service in services:
+    for service in normalized:
         raw_name = str(service.get("name") or "app")
         safe_name = _sanitize_name(raw_name)
         port = int(service.get("listen_port") or 8080)
@@ -143,6 +172,12 @@ def scaffold_docker_compose_services(
         context = str(service.get("context") or ".")
         health_path = str(service.get("health_path") or "/health")
         image_env = f"APP_IMAGE_{safe_name.upper().replace('-', '_').replace('.', '_')}"
+        is_frontend = _service_is_frontend(service)
+        app_kind = "frontend" if is_frontend else str(service.get("app_kind") or "backend")
+        expose_preview = _service_expose_preview(service)
+        extra_env = service.get("extra_env") if isinstance(service.get("extra_env"), dict) else {}
+        depends_on = service.get("depends_on") if isinstance(service.get("depends_on"), list) else []
+
         lines.extend(
             [
                 f"  {safe_name}:",
@@ -150,12 +185,50 @@ def scaffold_docker_compose_services(
                 f"      context: {context}",
                 f"      dockerfile: {dockerfile_path}",
                 f"    image: ${{{image_env}:-{safe_name}:latest}}",
-                f"    container_name: {safe_name}",
-                "    ports:",
-                f'      - "{port}:{port}"',
+                "    labels:",
+                f"      - launchpad.io/app-kind={app_kind}",
+                f"      - launchpad.io/preview-target={'true' if expose_preview else 'false'}",
+                "    x-launchpad:",
+                f"      app_kind: {app_kind}",
+                f"      preview_target: {'true' if expose_preview else 'false'}",
+            ]
+        )
+        if expose_preview:
+            lines.extend(
+                [
+                    "    ports:",
+                    # Preferred host port; compose deploy remaps if busy.
+                    f'      - "{port}:{port}"',
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "    expose:",
+                    f'      - "{port}"',
+                ]
+            )
+        lines.extend(
+            [
                 "    environment:",
                 f"      - PORT={port}",
                 "      - NODE_ENV=production",
+                "      - LAUNCHPAD_RUNTIME=compose",
+            ]
+        )
+        for key, value in extra_env.items():
+            env_key = str(key).strip()
+            if not env_key:
+                continue
+            lines.append(f"      - {env_key}={value}")
+        if depends_on:
+            lines.append("    depends_on:")
+            for dep in depends_on:
+                dep_name = _sanitize_name(str(dep))
+                if dep_name:
+                    lines.append(f"      - {dep_name}")
+        lines.extend(
+            [
                 "    restart: unless-stopped",
                 "    healthcheck:",
                 f'      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:{port}{health_path}"]',
@@ -192,8 +265,9 @@ def scaffold_dependency_compose_blocks(
                 "      POSTGRES_USER: launchpad",
                 "      POSTGRES_PASSWORD: changeme",
                 "      POSTGRES_DB: app",
-                "    ports:",
-                "      - \"5432:5432\"",
+                # Internal-only: backends connect via service DNS, not host publish.
+                "    expose:",
+                '      - "5432"',
                 "",
             ]
         )
@@ -210,8 +284,8 @@ def scaffold_dependency_compose_blocks(
                 "      MYSQL_DATABASE: app",
                 "      MYSQL_USER: launchpad",
                 "      MYSQL_PASSWORD: changeme",
-                "    ports:",
-                "      - \"3306:3306\"",
+                "    expose:",
+                '      - "3306"',
                 "",
             ]
         )
@@ -228,8 +302,8 @@ def scaffold_dependency_compose_blocks(
                 "      MARIADB_DATABASE: app",
                 "      MARIADB_USER: launchpad",
                 "      MARIADB_PASSWORD: changeme",
-                "    ports:",
-                "      - \"3307:3306\"",
+                "    expose:",
+                '      - "3306"',
                 "",
             ]
         )
@@ -244,8 +318,8 @@ def scaffold_dependency_compose_blocks(
                 "    environment:",
                 "      MONGO_INITDB_ROOT_USERNAME: launchpad",
                 "      MONGO_INITDB_ROOT_PASSWORD: changeme",
-                "    ports:",
-                "      - \"27017:27017\"",
+                "    expose:",
+                '      - "27017"',
                 "",
             ]
         )
@@ -257,12 +331,105 @@ def scaffold_dependency_compose_blocks(
             [
                 "  redis:",
                 "    image: redis:7-alpine",
-                "    ports:",
-                "      - \"6379:6379\"",
+                "    expose:",
+                '      - "6379"',
                 "",
             ]
         )
     return lines
+
+
+def compose_dependency_env_and_depends(
+    dependencies: object,
+) -> tuple[dict[str, str], list[str]]:
+    """Env vars + depends_on names for backends talking to compose datastores."""
+    from app.schemas.cloud import DependencyPlacement, WorkloadDependenciesConfig
+
+    if not isinstance(dependencies, WorkloadDependenciesConfig):
+        return {}, []
+    env: dict[str, str] = {}
+    depends: list[str] = []
+    if (
+        dependencies.postgres.enabled
+        and dependencies.postgres.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        env["DATABASE_URL"] = "postgresql://launchpad:changeme@postgres:5432/app"
+        depends.append("postgres")
+    elif (
+        dependencies.mysql.enabled
+        and dependencies.mysql.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        env["DATABASE_URL"] = "mysql://launchpad:changeme@mysql:3306/app"
+        env["MYSQL_URL"] = env["DATABASE_URL"]
+        depends.append("mysql")
+    elif (
+        dependencies.mariadb.enabled
+        and dependencies.mariadb.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        env["DATABASE_URL"] = "mysql://launchpad:changeme@mariadb:3306/app"
+        env["MYSQL_URL"] = env["DATABASE_URL"]
+        depends.append("mariadb")
+    elif (
+        dependencies.mongodb.enabled
+        and dependencies.mongodb.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        env["DATABASE_URL"] = "mongodb://launchpad:changeme@mongodb:27017"
+        env["MONGODB_URI"] = env["DATABASE_URL"]
+        depends.append("mongodb")
+    if (
+        dependencies.redis.enabled
+        and dependencies.redis.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        env["REDIS_URL"] = "redis://redis:6379/0"
+        depends.append("redis")
+    return env, depends
+
+
+def wire_compose_service_links(
+    services: list[dict[str, object]],
+    *,
+    dependencies: object | None = None,
+) -> list[dict[str, object]]:
+    """Attach frontend→backend and backend→datastore links for compose."""
+    if not services:
+        return services
+    wired = [dict(s) for s in services]
+    backends = [s for s in wired if not _service_is_frontend(s)]
+    frontends = [s for s in wired if _service_is_frontend(s)]
+    primary_backend = backends[0] if backends else None
+    dep_env, dep_depends = compose_dependency_env_and_depends(dependencies)
+
+    if primary_backend is not None:
+        be_name = _sanitize_name(str(primary_backend.get("name") or "api"))
+        be_port = int(primary_backend.get("listen_port") or 8080)
+        api_url = f"http://{be_name}:{be_port}"
+        for fe in frontends:
+            extra = dict(fe.get("extra_env") or {})
+            extra.update(
+                {
+                    "API_URL": api_url,
+                    "BACKEND_URL": api_url,
+                    "NEXT_PUBLIC_API_URL": api_url,
+                    "NUXT_PUBLIC_API_URL": api_url,
+                }
+            )
+            fe["extra_env"] = extra
+            deps = list(fe.get("depends_on") or [])
+            if be_name not in deps:
+                deps.append(be_name)
+            fe["depends_on"] = deps
+
+    for be in backends:
+        extra = dict(be.get("extra_env") or {})
+        extra.update(dep_env)
+        be["extra_env"] = extra
+        deps = list(be.get("depends_on") or [])
+        for dep in dep_depends:
+            if dep not in deps:
+                deps.append(dep)
+        be["depends_on"] = deps
+
+    return wired
 
 
 _DEFAULT_LISTEN_PORTS: Final[dict[ProjectStack, int]] = {
