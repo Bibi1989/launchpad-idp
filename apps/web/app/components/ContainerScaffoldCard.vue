@@ -19,6 +19,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const activeTab = ref<'dockerfile' | 'compose'>('dockerfile')
+const previewOpen = ref(false)
 const copiedState = ref(false)
 
 const config = computed({
@@ -61,13 +62,27 @@ watch(
   { deep: true },
 )
 
+function frameworksFromServices(services: ContainerServiceItem[]): ContainerScaffoldConfig['frameworks'] {
+  const out: NonNullable<ContainerScaffoldConfig['frameworks']> = []
+  const seen = new Set<string>()
+  for (const svc of services) {
+    const stack = (svc.stack || '').trim()
+    if (!stack || seen.has(stack)) continue
+    seen.add(stack)
+    out.push(stack as NonNullable<ContainerScaffoldConfig['frameworks']>[number])
+  }
+  return out
+}
+
 function emitServices(overrides: Partial<ContainerScaffoldConfig> = {}) {
+  const frameworks = frameworksFromServices(servicesList.value)
   emit('update:modelValue', {
     ...props.modelValue,
     ...overrides,
     services: servicesList.value,
+    frameworks,
     app_name: servicesList.value[0]?.name || props.modelValue.app_name,
-    stack: servicesList.value[0]?.stack || props.modelValue.stack,
+    stack: servicesList.value[0]?.stack || frameworks[0] || props.modelValue.stack,
     listen_port: servicesList.value[0]?.listen_port || props.modelValue.listen_port,
   })
 }
@@ -427,86 +442,111 @@ function downloadFile() {
       <p class="text-[11px] leading-relaxed text-[var(--lp-muted)]">
         {{ t('scaffold.containerCard.exposePreviewHint') }}
       </p>
+      <p class="text-[11px] leading-relaxed text-[var(--lp-accent)]/90">
+        {{ t('scaffold.containerCard.syncedToCicd') }}
+      </p>
 
-      <div class="flex flex-wrap gap-4 pt-1">
-        <label class="flex items-center gap-2 text-xs text-[var(--lp-text)]">
-          <input
-            type="checkbox"
-            class="accent-[var(--lp-accent)]"
-            :checked="config.generate_dockerfile"
-            :disabled="disabled"
-            @change="updateField('generate_dockerfile', ($event.target as HTMLInputElement).checked)"
+      <div class="overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/50">
+        <button
+          type="button"
+          class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition hover:bg-[var(--lp-panel-2)]/60"
+          @click="previewOpen = !previewOpen"
+        >
+          <div>
+            <p class="text-xs font-semibold text-[var(--lp-text)]">
+              {{ t('scaffold.containerCard.previewToggle') }}
+            </p>
+            <p class="text-[11px] text-[var(--lp-muted)]">
+              {{ t('scaffold.containerCard.previewHint') }}
+            </p>
+          </div>
+          <span
+            class="material-symbols-outlined text-[var(--lp-muted)] transition-transform"
+            :class="previewOpen ? 'rotate-180' : ''"
           >
-          {{ t('scaffold.containerCard.generateDockerfile') }}
-        </label>
-        <label class="flex items-center gap-2 text-xs text-[var(--lp-text)]">
-          <input
-            type="checkbox"
-            class="accent-[var(--lp-accent)]"
-            :checked="config.generate_docker_compose"
-            :disabled="disabled"
-            @change="updateField('generate_docker_compose', ($event.target as HTMLInputElement).checked)"
-          >
-          {{ t('scaffold.containerCard.generateCompose') }}
-        </label>
-      </div>
+            expand_more
+          </span>
+        </button>
 
-      <!-- Preview + Copy & Download toolbar -->
-      <div class="overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/70">
-        <!-- Tabs & Actions -->
-        <div class="flex flex-wrap items-center justify-between border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/80 px-3 py-2">
-          <div class="flex items-center gap-1 font-mono text-xs">
-            <button
-              type="button"
-              class="rounded px-2.5 py-1 transition"
-              :class="
-                activeTab === 'dockerfile'
-                  ? 'bg-[var(--lp-accent)]/20 text-[var(--lp-accent)] font-semibold'
-                  : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'
-              "
-              @click="activeTab = 'dockerfile'"
-            >
-              Dockerfile
-            </button>
-            <button
-              type="button"
-              class="rounded px-2.5 py-1 transition"
-              :class="
-                activeTab === 'compose'
-                  ? 'bg-[var(--lp-accent)]/20 text-[var(--lp-accent)] font-semibold'
-                  : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'
-              "
-              @click="activeTab = 'compose'"
-            >
-              {{ t('scaffold.containerCard.dockerCompose') }}
-            </button>
+        <div v-show="previewOpen" class="space-y-3 border-t border-[var(--lp-line)] px-3 pb-3 pt-3">
+          <div class="flex flex-wrap gap-4">
+            <label class="flex items-center gap-2 text-xs text-[var(--lp-text)]">
+              <input
+                type="checkbox"
+                class="accent-[var(--lp-accent)]"
+                :checked="config.generate_dockerfile"
+                :disabled="disabled"
+                @change="updateField('generate_dockerfile', ($event.target as HTMLInputElement).checked)"
+              >
+              {{ t('scaffold.containerCard.generateDockerfile') }}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[var(--lp-text)]">
+              <input
+                type="checkbox"
+                class="accent-[var(--lp-accent)]"
+                :checked="config.generate_docker_compose"
+                :disabled="disabled"
+                @change="updateField('generate_docker_compose', ($event.target as HTMLInputElement).checked)"
+              >
+              {{ t('scaffold.containerCard.generateCompose') }}
+            </label>
           </div>
 
-          <div class="flex items-center gap-2">
-            <button
-              type="button"
-              class="inline-flex items-center gap-1.5 rounded border border-[var(--lp-line)] bg-[var(--lp-panel)] px-2.5 py-1 text-xs text-[var(--lp-text)] transition hover:border-[var(--lp-accent)]/50 active:scale-[0.98]"
-              @click="copyToClipboard"
-            >
-              <span class="material-symbols-outlined !text-sm">
-                {{ copiedState ? 'check' : 'content_copy' }}
-              </span>
-              <span>{{ copiedState ? t('common.copied') : t('common.copy') }}</span>
-            </button>
+          <div class="overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/70">
+            <div class="flex flex-wrap items-center justify-between border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/80 px-3 py-2">
+              <div class="flex items-center gap-1 font-mono text-xs">
+                <button
+                  type="button"
+                  class="rounded px-2.5 py-1 transition"
+                  :class="
+                    activeTab === 'dockerfile'
+                      ? 'bg-[var(--lp-accent)]/20 text-[var(--lp-accent)] font-semibold'
+                      : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'
+                  "
+                  @click="activeTab = 'dockerfile'"
+                >
+                  Dockerfile
+                </button>
+                <button
+                  type="button"
+                  class="rounded px-2.5 py-1 transition"
+                  :class="
+                    activeTab === 'compose'
+                      ? 'bg-[var(--lp-accent)]/20 text-[var(--lp-accent)] font-semibold'
+                      : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'
+                  "
+                  @click="activeTab = 'compose'"
+                >
+                  {{ t('scaffold.containerCard.dockerCompose') }}
+                </button>
+              </div>
 
-            <button
-              type="button"
-              class="inline-flex items-center gap-1.5 rounded bg-[var(--lp-accent)] px-2.5 py-1 text-xs font-medium text-[var(--lp-ink)] transition hover:opacity-90 active:scale-[0.98]"
-              @click="downloadFile"
-            >
-              <span class="material-symbols-outlined !text-sm">download</span>
-              <span>{{ t('common.download') }}</span>
-            </button>
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded border border-[var(--lp-line)] bg-[var(--lp-panel)] px-2.5 py-1 text-xs text-[var(--lp-text)] transition hover:border-[var(--lp-accent)]/50 active:scale-[0.98]"
+                  @click="copyToClipboard"
+                >
+                  <span class="material-symbols-outlined !text-sm">
+                    {{ copiedState ? 'check' : 'content_copy' }}
+                  </span>
+                  <span>{{ copiedState ? t('common.copied') : t('common.copy') }}</span>
+                </button>
+
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded bg-[var(--lp-accent)] px-2.5 py-1 text-xs font-medium text-[var(--lp-ink)] transition hover:opacity-90 active:scale-[0.98]"
+                  @click="downloadFile"
+                >
+                  <span class="material-symbols-outlined !text-sm">download</span>
+                  <span>{{ t('common.download') }}</span>
+                </button>
+              </div>
+            </div>
+
+            <pre class="max-h-64 overflow-auto p-4 font-mono text-xs leading-relaxed text-[var(--lp-text)]"><code>{{ activeContent }}</code></pre>
           </div>
         </div>
-
-        <!-- Code Content -->
-        <pre class="max-h-64 overflow-auto p-4 font-mono text-xs leading-relaxed text-[var(--lp-text)]"><code>{{ activeContent }}</code></pre>
       </div>
     </div>
   </div>

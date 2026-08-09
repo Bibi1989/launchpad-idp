@@ -23,6 +23,7 @@ import {
 } from '~/utils/cicdSecurityTools'
 import { copyTextToClipboard, downloadTextFile } from '~/utils/clipboardFile'
 import { dockerfileContentForStack } from '~/utils/workspaceInfraScaffold'
+import { frameworksFromContainerServices } from '~/utils/ansibleScaffold'
 
 const { t } = useI18n()
 
@@ -107,6 +108,49 @@ const selectedCicdFrameworks = computed({
     }
   },
 })
+
+const servicesFrameworks = computed(() =>
+  frameworksFromContainerServices(containerScaffold.value.services),
+)
+
+const frameworksSyncedFromServices = computed(() => servicesFrameworks.value.length > 0)
+
+watch(
+  servicesFrameworks,
+  (frameworks) => {
+    if (!frameworks.length) return
+    const primary = frameworks[0] ?? 'node'
+    const sameDocker =
+      JSON.stringify(selectedDockerFrameworks.value) === JSON.stringify(frameworks)
+    const sameCicd =
+      JSON.stringify(selectedCicdFrameworks.value) === JSON.stringify(frameworks)
+    if (
+      !sameDocker
+      || containerScaffold.value.stack !== primary
+      || !containerScaffold.value.enabled
+    ) {
+      containerScaffold.value = {
+        ...containerScaffold.value,
+        enabled: true,
+        generate_dockerfile: containerScaffold.value.generate_dockerfile ?? true,
+        generate_docker_compose: containerScaffold.value.generate_docker_compose ?? true,
+        frameworks,
+        stack: primary,
+      }
+    }
+    if (!sameCicd || !config.value.cicd.enabled) {
+      config.value = {
+        ...config.value,
+        cicd: {
+          ...ensureCicd(),
+          enabled: true,
+          frameworks,
+        },
+      }
+    }
+  },
+  { immediate: true },
+)
 
 const copiedDockerfile = ref(false)
 let copiedDockerfileTimer: ReturnType<typeof setTimeout> | null = null
@@ -549,10 +593,16 @@ function downloadWorkflowYaml() {
 
         <div class="mt-4 space-y-3 pt-3 border-t border-[var(--lp-line)]/50">
           <div class="grid gap-2">
-            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">{{ t('scaffold.infra.cicd.frameworks') }}</label>
+            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">
+              {{
+                frameworksSyncedFromServices
+                  ? t('scaffold.infra.cicd.frameworksSynced')
+                  : t('scaffold.infra.cicd.frameworks')
+              }}
+            </label>
             <FrameworkMultiSelectDropdown
               v-model="selectedCicdFrameworks"
-              :disabled="disabled || (mode === 'selection' && !cicd.enabled)"
+              :disabled="disabled || frameworksSyncedFromServices || (mode === 'selection' && !cicd.enabled)"
               :placeholder="t('scaffold.infra.cicd.frameworksPlaceholder')"
             />
           </div>
@@ -649,10 +699,16 @@ function downloadWorkflowYaml() {
 
         <div class="mt-4 space-y-3 pt-3 border-t border-[var(--lp-line)]/50">
           <div class="grid gap-2">
-            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">{{ t('scaffold.infra.docker.frameworks') }}</label>
+            <label class="block text-[11px] font-medium text-[var(--lp-muted)]">
+              {{
+                frameworksSyncedFromServices
+                  ? t('scaffold.infra.docker.frameworksSynced')
+                  : t('scaffold.infra.docker.frameworks')
+              }}
+            </label>
             <FrameworkMultiSelectDropdown
               v-model="selectedDockerFrameworks"
-              :disabled="disabled || (mode === 'selection' && !containerScaffold.enabled)"
+              :disabled="disabled || frameworksSyncedFromServices || (mode === 'selection' && !containerScaffold.enabled)"
               :placeholder="t('scaffold.infra.docker.frameworksPlaceholder')"
             />
           </div>

@@ -32,6 +32,7 @@ import {
   infraConfigToArtifactMode,
   infraConfigToKubernetesPackaging,
 } from '~/utils/workspaceInfraScaffold'
+import { buildAnsibleScaffold, frameworksFromContainerServices } from '~/utils/ansibleScaffold'
 import { inferCicdSecurityFromContent } from '~/utils/cicdWorkflowGenerator'
 import { syncWorkspaceCicdToPlatform } from '~/utils/syncWorkspaceCicd'
 import { AWS_INSTANCE_TYPES, AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
@@ -189,6 +190,9 @@ const form = reactive({
 const infraGeneration = ref<InfraGenerationConfig>(
   artifactModeToInfraConfig('iac_only', 'terraform', 'none'),
 )
+const ansibleConfiguratorRef = ref<{
+  buildWritableFiles: () => Array<{ path: string; content: string }>
+} | null>(null)
 
 const progressPct = computed(() => (currentStep.value / TOTAL_STEPS) * 100)
 const isLocalProvider = computed(() => provider.value === 'local')
@@ -527,10 +531,13 @@ async function onSave() {
       }
     }
     if (infraGeneration.value.cicd.enabled) {
+      const fromServices = frameworksFromContainerServices(form.container_scaffold.services)
       const frameworks =
-        infraGeneration.value.cicd.frameworks.length > 0
-          ? infraGeneration.value.cicd.frameworks
-          : (form.container_scaffold.frameworks ?? [])
+        fromServices.length > 0
+          ? fromServices
+          : infraGeneration.value.cicd.frameworks.length > 0
+            ? infraGeneration.value.cicd.frameworks
+            : (form.container_scaffold.frameworks ?? [])
       await syncWorkspaceCicdToPlatform(
         {
           listWorkspaceFiles,
@@ -546,6 +553,17 @@ async function onSave() {
           security: infraGeneration.value.cicd.security,
         },
       )
+    }
+    if (form.ansible.enabled || form.iac_engine === 'ansible') {
+      const targets =
+        ansibleConfiguratorRef.value?.buildWritableFiles()
+        ?? buildAnsibleScaffold(workspaceName.value || 'launchpad-workspace', {
+          ...form.ansible,
+          enabled: true,
+        })
+      for (const target of targets) {
+        await writeWorkspaceFile(props.workspaceId, target.path, target.content)
+      }
     }
     hasStoredCredentials.value = true
     clearCredentials()
@@ -651,7 +669,11 @@ onMounted(async () => {
           />
           <AnsibleConfigurator
             v-if="form.runtime_mode === 'running_instance' || form.runtime_mode === 'docker_compose'"
+            ref="ansibleConfiguratorRef"
             v-model="form.ansible"
+            :cloud-provider="provider"
+            :running-instance="form.running_instance"
+            :workspace-name="workspaceName || 'launchpad-workspace'"
             :disabled="saving"
           />
           <CostOptimizationCard

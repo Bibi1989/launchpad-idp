@@ -9,18 +9,22 @@ import type {
   WorkspaceArtifactsMode,
 } from '~/types/provisioning'
 import { FRAMEWORK_OPTIONS } from '~/types/provisioning'
+import { buildAnsibleScaffold } from '~/utils/ansibleScaffold'
 import {
   defaultCicdSecurityConfig,
   renderCicdWorkflow,
   type CicdSecurityConfig,
 } from '~/utils/cicdWorkflowGenerator'
+import { defaultAnsibleConfig } from '~/utils/cloudValidation'
 
-const FRAMEWORK_IDS_BY_LENGTH: FrameworkOption[] = [
-  ...FRAMEWORK_OPTIONS.map((item) => item.id),
-  'node',
-  'python',
-  'java',
-].sort((a, b) => b.length - a.length)
+const FRAMEWORK_IDS_BY_LENGTH = (
+  [
+    ...FRAMEWORK_OPTIONS.map((item) => item.id),
+    'node',
+    'python',
+    'java',
+  ] as FrameworkOption[]
+).sort((a, b) => b.length - a.length)
 
 const DEFAULT_LISTEN_PORTS: Partial<Record<FrameworkOption, number>> = {
   react_vite: 80,
@@ -145,20 +149,10 @@ export function buildProvisionScaffold(
     ]
   }
   if (engine === 'ansible') {
-    return [
-      {
-        path: 'infra/ansible/README.md',
-        content: [
-          `# Ansible - ${workspaceName || 'launchpad-workspace'}`,
-          '',
-          'Host configuration scaffold. Full inventory and roles are written by the',
-          'control plane when you save the workspace with Ansible enabled.',
-          '',
-          `Workspace id: ${workspaceId}`,
-          '',
-        ].join('\n'),
-      },
-    ]
+    return buildAnsibleScaffold(workspaceName || 'launchpad-workspace', {
+      ...defaultAnsibleConfig(),
+      enabled: true,
+    })
   }
   return [
     {

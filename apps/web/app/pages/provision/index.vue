@@ -42,6 +42,7 @@ import {
   infraConfigToArtifactMode,
   infraConfigToKubernetesPackaging,
 } from '~/utils/workspaceInfraScaffold'
+import { buildAnsibleScaffold, frameworksFromContainerServices } from '~/utils/ansibleScaffold'
 import {
   defaultRunningInstanceConfig,
   defaultRuntimeModeForProvider,
@@ -95,6 +96,9 @@ const hasStoredCredentials = ref(false)
 const loadingConfig = ref(false)
 
 const infraGeneration = ref<InfraGenerationConfig>(defaultInfraGenerationConfig({ isLocal: true }))
+const ansibleConfiguratorRef = ref<{
+  buildWritableFiles: () => Array<{ path: string; content: string }>
+} | null>(null)
 
 const { listProjects, projects: launchpadProjects } = useProjects()
 const launchpadProjectId = ref<string>('')
@@ -914,10 +918,13 @@ function prevStep() {
 
 async function scaffoldCiCdFiles(workspaceId: string) {
   if (!infraGeneration.value.cicd.enabled) return
+  const fromServices = frameworksFromContainerServices(form.container_scaffold.services)
   const frameworks =
-    infraGeneration.value.cicd.frameworks.length > 0
-      ? infraGeneration.value.cicd.frameworks
-      : (form.container_scaffold.frameworks ?? [])
+    fromServices.length > 0
+      ? fromServices
+      : infraGeneration.value.cicd.frameworks.length > 0
+        ? infraGeneration.value.cicd.frameworks
+        : (form.container_scaffold.frameworks ?? [])
   const { syncWorkspaceCicdToPlatform } = await import('~/utils/syncWorkspaceCicd')
   await syncWorkspaceCicdToPlatform(
     {
@@ -934,6 +941,19 @@ async function scaffoldCiCdFiles(workspaceId: string) {
       security: infraGeneration.value.cicd.security,
     },
   )
+}
+
+async function scaffoldAnsibleFiles(workspaceId: string) {
+  if (!form.ansible.enabled && form.iac_engine !== 'ansible') return
+  const targets =
+    ansibleConfiguratorRef.value?.buildWritableFiles()
+    ?? buildAnsibleScaffold(form.name || 'launchpad-workspace', {
+      ...form.ansible,
+      enabled: true,
+    })
+  for (const target of targets) {
+    await writeWorkspaceFile(workspaceId, target.path, target.content)
+  }
 }
 
 async function scaffoldDockerFiles(
@@ -1028,6 +1048,7 @@ async function onGenerate() {
       bundle.value = await updateWorkspace(workspaceId, parsed.data)
       await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
+      await scaffoldAnsibleFiles(workspaceId)
       await refreshBundle(workspaceId)
       creationStep.value = 3
       const terminal = await openTerminal(workspaceId, {
@@ -1047,6 +1068,7 @@ async function onGenerate() {
       creationStep.value = 3
       await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
+      await scaffoldAnsibleFiles(workspaceId)
       await refreshBundle(workspaceId)
       if (!form.github.name.trim()) {
         form.github.name = `launchpad-${parsed.data.name}`
@@ -1605,8 +1627,12 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
               <AnsibleConfigurator
+                ref="ansibleConfiguratorRef"
                 v-model="form.ansible"
                 class="mt-4"
+                :cloud-provider="form.provider"
+                :running-instance="form.running_instance"
+                :workspace-name="form.name || 'launchpad-workspace'"
                 :disabled="loadingConfig"
               />
               <WorkloadDependenciesPicker
@@ -1637,8 +1663,12 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
               <AnsibleConfigurator
+                ref="ansibleConfiguratorRef"
                 v-model="form.ansible"
                 class="mt-4"
+                :cloud-provider="form.provider"
+                :running-instance="form.running_instance"
+                :workspace-name="form.name || 'launchpad-workspace'"
                 :disabled="loadingConfig"
               />
               <WorkloadDependenciesPicker

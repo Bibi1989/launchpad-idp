@@ -606,23 +606,28 @@ class IaCGenerator:
             else:  # pragma: no cover
                 raise ValueError(f"Unsupported IaC engine: {request.iac_engine!r}")
 
-            # Optional Ansible host tree alongside Terraform/Pulumi for VM targets.
-            if (
-                request.iac_engine != IaCEngine.ANSIBLE
-                and request.ansible.enabled
-            ):
-                from app.services.local_runtime_iac import write_local_runtime_iac
+        # Ansible under infra/ansible whenever the checkbox/engine asks for it,
+        # including manifest-only workspaces (not gated on Terraform/Pulumi mode).
+        ansible_already = any(path.startswith("infra/ansible/") for path in files)
+        ansible_wanted = (
+            request.iac_engine == IaCEngine.ANSIBLE or request.ansible.enabled
+        )
+        if ansible_wanted and not ansible_already:
+            from app.services.local_runtime_iac import write_local_runtime_iac
 
-                files.extend(
-                    write_local_runtime_iac(
-                        workspace_dir,
-                        name=request.name,
-                        engine=IaCEngine.ANSIBLE,
-                        runtime_mode=request.runtime_mode,
-                        ansible=request.ansible,
-                        listen_port=request.running_instance.listen_port,
-                    )
+            ansible_cfg = request.ansible
+            if not ansible_cfg.enabled:
+                ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+            files.extend(
+                write_local_runtime_iac(
+                    workspace_dir,
+                    name=request.name,
+                    engine=IaCEngine.ANSIBLE,
+                    runtime_mode=request.runtime_mode,
+                    ansible=ansible_cfg,
+                    listen_port=request.running_instance.listen_port,
                 )
+            )
 
         if request.artifact_mode in {
             WorkspaceArtifactsMode.MANIFEST_ONLY,
@@ -1192,55 +1197,56 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
         files.extend(self._write_container_scaffold(workspace_dir, request))
 
         # Optional IaC stubs (Terraform / OpenTofu / Pulumi / Ansible).
+        from app.services.local_runtime_iac import write_local_runtime_iac
+
+        ansible_cfg = request.ansible
+        # Auto-enable Ansible artifacts when engine is ansible or VM-targeted instance.
+        if request.iac_engine == IaCEngine.ANSIBLE and not ansible_cfg.enabled:
+            ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+        if (
+            mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
+            and request.running_instance.kind.value == "vm"
+            and request.running_instance.host
+        ):
+            ansible_cfg = ansible_cfg.model_copy(
+                update={
+                    "enabled": True,
+                    "hosts": request.running_instance.host or ansible_cfg.hosts,
+                    "ssh_user": request.running_instance.ssh_user
+                    or ansible_cfg.ssh_user,
+                    "ssh_port": request.running_instance.ssh_port,
+                    "ssh_private_key_path": request.running_instance.ssh_key_path
+                    or ansible_cfg.ssh_private_key_path,
+                    "app_listen_port": request.running_instance.listen_port,
+                }
+            )
+
+        # Always write infra/ansible when Ansible is enabled (independent of
+        # artifact_mode so compose / attach workspaces still get the tree).
+        if request.iac_engine == IaCEngine.ANSIBLE or ansible_cfg.enabled:
+            files.extend(
+                write_local_runtime_iac(
+                    workspace_dir,
+                    name=request.name,
+                    engine=IaCEngine.ANSIBLE,
+                    runtime_mode=mode,
+                    ansible=ansible_cfg,
+                    listen_port=request.running_instance.listen_port,
+                )
+            )
+
         if request.artifact_mode in {
             WorkspaceArtifactsMode.IAC_ONLY,
             WorkspaceArtifactsMode.BOTH,
-        }:
-            from app.services.local_runtime_iac import write_local_runtime_iac
-
-            ansible_cfg = request.ansible
-            # Auto-enable Ansible artifacts when engine is ansible or VM-targeted instance.
-            if request.iac_engine == IaCEngine.ANSIBLE and not ansible_cfg.enabled:
-                ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
-            if (
-                mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
-                and request.running_instance.kind.value == "vm"
-                and request.running_instance.host
-            ):
-                ansible_cfg = ansible_cfg.model_copy(
-                    update={
-                        "enabled": True,
-                        "hosts": request.running_instance.host
-                        or ansible_cfg.hosts,
-                        "ssh_user": request.running_instance.ssh_user
-                        or ansible_cfg.ssh_user,
-                        "ssh_port": request.running_instance.ssh_port,
-                        "ssh_private_key_path": request.running_instance.ssh_key_path
-                        or ansible_cfg.ssh_private_key_path,
-                        "app_listen_port": request.running_instance.listen_port,
-                    }
+        } and request.iac_engine != IaCEngine.ANSIBLE:
+            files.extend(
+                write_local_runtime_iac(
+                    workspace_dir,
+                    name=request.name,
+                    engine=request.iac_engine,
+                    runtime_mode=mode,
                 )
-
-            if request.iac_engine == IaCEngine.ANSIBLE or ansible_cfg.enabled:
-                files.extend(
-                    write_local_runtime_iac(
-                        workspace_dir,
-                        name=request.name,
-                        engine=IaCEngine.ANSIBLE,
-                        runtime_mode=mode,
-                        ansible=ansible_cfg,
-                        listen_port=request.running_instance.listen_port,
-                    )
-                )
-            if request.iac_engine != IaCEngine.ANSIBLE:
-                files.extend(
-                    write_local_runtime_iac(
-                        workspace_dir,
-                        name=request.name,
-                        engine=request.iac_engine,
-                        runtime_mode=mode,
-                    )
-                )
+            )
         return files
 
     @staticmethod
