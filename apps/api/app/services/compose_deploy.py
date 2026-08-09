@@ -697,7 +697,7 @@ def deploy_compose(
         resources.preview_url = _preview_url_for_port(cfg, port)
         return resources
 
-    up_timeout = max(120.0, float(cfg.kubernetes_ready_timeout_seconds or 180))
+    up_timeout = max(300.0, float(cfg.preview_build_timeout_seconds or 900))
     extra_busy: set[int] = set()
     all_notes: list[str] = []
     preview_compose: Path | None = None

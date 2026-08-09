@@ -1235,12 +1235,12 @@ class KubernetesProvisioner:
             ),
         )
         try:
-            self._networking.read_namespaced_ingress("app", namespace)
-            self._networking.replace_namespaced_ingress("app", namespace, ingress)
+            self._networking.read_namespaced_ingress("app", namespace, _request_timeout=10)
+            self._networking.replace_namespaced_ingress("app", namespace, ingress, _request_timeout=10)
         except ApiException as exc:
             if exc.status != 404:
                 raise
-            self._networking.create_namespaced_ingress(namespace, ingress)
+            self._networking.create_namespaced_ingress(namespace, ingress, _request_timeout=10)
         logger.info(
             "kubernetes_ingress_applied",
             namespace=namespace,
@@ -1255,14 +1255,32 @@ class KubernetesProvisioner:
         import re
         import socket
 
+        def _resolve_name(name: str) -> str | None:
+            raw = (name or "").strip()
+            if not raw:
+                return None
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", raw):
+                return raw
+            try:
+                infos = socket.getaddrinfo(raw, None, socket.AF_INET)
+                if infos:
+                    return infos[0][4][0]
+            except OSError:
+                return None
+            return None
+
         explicit = (self._settings.preview_docker_host_ip or "").strip()
         if explicit:
-            return explicit
+            resolved = _resolve_name(explicit)
+            if resolved:
+                return resolved
 
         alias = (self._settings.preview_docker_host_alias or "host.k3d.internal").strip()
         if self._core is not None:
             try:
-                cm = self._core.read_namespaced_config_map("coredns", "kube-system")
+                cm = self._core.read_namespaced_config_map(
+                    "coredns", "kube-system", _request_timeout=10
+                )
                 raw = ""
                 if cm.data:
                     raw = cm.data.get("NodeHosts") or cm.data.get("Corefile") or ""
@@ -1276,12 +1294,9 @@ class KubernetesProvisioner:
                 logger.info("docker_host_coredns_lookup_failed", alias=alias, error=str(exc))
 
         for name in (alias, "host.docker.internal"):
-            try:
-                infos = socket.getaddrinfo(name, None, socket.AF_INET)
-                if infos:
-                    return infos[0][4][0]
-            except OSError:
-                continue
+            resolved = _resolve_name(name)
+            if resolved:
+                return resolved
         return None
 
     def apply_docker_host_preview_ingress(
@@ -1301,16 +1316,39 @@ class KubernetesProvisioner:
         the bridge cannot be created (caller keeps host-port / trycloudflare).
         """
         if not self._settings.kubernetes_enabled or self._core is None or self._networking is None:
+            logger.info(
+                "docker_host_preview_ingress_skipped",
+                reason="kubernetes_unavailable",
+                environment_id=environment_id,
+            )
             return None
         if not self._settings.preview_tunnel_active or not self._settings.preview_base_domain:
+            logger.info(
+                "docker_host_preview_ingress_skipped",
+                reason="preview_domain_inactive",
+                environment_id=environment_id,
+                tunnel_active=self._settings.preview_tunnel_active,
+                base_domain=bool(self._settings.preview_base_domain),
+            )
             return None
         if host_port <= 0:
+            logger.info(
+                "docker_host_preview_ingress_skipped",
+                reason="invalid_host_port",
+                environment_id=environment_id,
+                host_port=host_port,
+            )
             return None
 
         host = self.workspace_preview_host(
             name=name, environment_id=environment_id, namespace=namespace
         )
         if not host:
+            logger.info(
+                "docker_host_preview_ingress_skipped",
+                reason="no_preview_host",
+                environment_id=environment_id,
+            )
             return None
 
         gateway_ip = self.resolve_docker_host_gateway_ip()
@@ -1360,12 +1398,12 @@ class KubernetesProvisioner:
             ),
         )
         try:
-            self._core.read_namespaced_service("app", namespace)
-            self._core.replace_namespaced_service("app", namespace, service)
+            self._core.read_namespaced_service("app", namespace, _request_timeout=10)
+            self._core.replace_namespaced_service("app", namespace, service, _request_timeout=10)
         except ApiException as exc:
-            if exc.status != 404:
+            if getattr(exc, "status", None) != 404:
                 raise
-            self._core.create_namespaced_service(namespace, service)
+            self._core.create_namespaced_service(namespace, service, _request_timeout=10)
 
         endpoints = client.V1Endpoints(
             metadata=client.V1ObjectMeta(name="app", namespace=namespace, labels=meta_labels),
@@ -1379,12 +1417,12 @@ class KubernetesProvisioner:
             ],
         )
         try:
-            self._core.read_namespaced_endpoints("app", namespace)
-            self._core.replace_namespaced_endpoints("app", namespace, endpoints)
+            self._core.read_namespaced_endpoints("app", namespace, _request_timeout=10)
+            self._core.replace_namespaced_endpoints("app", namespace, endpoints, _request_timeout=10)
         except ApiException as exc:
-            if exc.status != 404:
+            if getattr(exc, "status", None) != 404:
                 raise
-            self._core.create_namespaced_endpoints(namespace, endpoints)
+            self._core.create_namespaced_endpoints(namespace, endpoints, _request_timeout=10)
 
         self.apply_ingress(
             namespace=namespace,
@@ -2012,13 +2050,31 @@ class KubernetesProvisioner:
         from kubernetes.client.rest import ApiException
 
         try:
-            self._core.delete_namespace(namespace)
+            # Bound the HTTP wait: a blackholed apiserver must not leave the
+            # environment stuck in TEARDOWN_PENDING forever.
+            self._core.delete_namespace(
+                namespace,
+                grace_period_seconds=0,
+                propagation_policy="Background",
+                _request_timeout=(5, 15),
+            )
             logger.info("kubernetes_namespace_deleted", namespace=namespace)
         except ApiException as exc:
             if exc.status == 404:
                 logger.info("kubernetes_namespace_already_gone", namespace=namespace)
                 return
-            raise
+            logger.warning(
+                "kubernetes_teardown_api_error",
+                namespace=namespace,
+                status=exc.status,
+                error=str(exc),
+            )
+        except Exception as exc:
+            logger.warning(
+                "kubernetes_teardown_failed",
+                namespace=namespace,
+                error=str(exc),
+            )
 
     def rollback(self, resources: ProvisionedResources) -> None:
         """Keep the preview namespace after a failed first provision / Ready timeout.

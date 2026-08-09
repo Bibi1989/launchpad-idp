@@ -229,7 +229,9 @@ function toggleActionsMenu() {
 
 const destroyAction = define(
   () => destroy(environment.value!.id, {
-    force: environment.value?.status === 'PROVISIONING',
+    force:
+      environment.value?.status === 'PROVISIONING'
+      || environment.value?.status === 'TEARDOWN_PENDING',
   }),
   {
   success: () => ({ title: t('environments.toasts.destroyed'), message: `${environment.value?.name ?? 'Environment'} is being destroyed.` }),
@@ -572,7 +574,7 @@ onUnmounted(() => {
                   {{ t('common.status') }}
                 </a>
                 <button
-                  v-if="environment.status !== 'DESTROYED' && environment.status !== 'TEARDOWN_PENDING'"
+                  v-if="environment.status !== 'DESTROYED'"
                   type="button"
                   role="menuitem"
                   class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-danger)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"

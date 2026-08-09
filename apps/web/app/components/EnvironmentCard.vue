@@ -104,7 +104,7 @@ const canResume = computed(
 
 const canDestroy = computed(() => {
   const s = liveStatus.value
-  return s !== 'DESTROYED' && s !== 'TEARDOWN_PENDING'
+  return s !== 'DESTROYED'
 })
 
 const canRetry = computed(() => {

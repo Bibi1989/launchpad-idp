@@ -165,7 +165,9 @@ async function onDestroy() {
   const name = envName(id)
   const env = environments.value.find((item) => item.id === id)
   try {
-    await destroy(id, { force: env?.status === 'PROVISIONING' })
+    await destroy(id, {
+      force: env?.status === 'PROVISIONING' || env?.status === 'TEARDOWN_PENDING',
+    })
     await refresh()
     await loadOrgCosts()
     toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)

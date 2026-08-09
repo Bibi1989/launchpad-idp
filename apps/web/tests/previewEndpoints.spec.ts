@@ -90,7 +90,7 @@ describe('localizePreviewUrl', () => {
         environmentId: 'e8f9cf54-60c2-4556-8e45-2b654ea4e976',
         viewerHost: 'launchpad-idp.online',
       }),
-    ).toBe('http://127.0.0.1:8090')
+    ).toBe('https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online')
   })
 
   it('keeps existing workspace ingress urls', () => {

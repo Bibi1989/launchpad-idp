@@ -64,14 +64,13 @@ def repair_stored_preview_url(
 ) -> str | None:
     """Replace apex:port / loopback NodePort with workspace ingress when configured.
 
-    Only applies to Kubernetes modes (``preview`` / ``manifest``). Attach and
-    compose publish host ports (and optional trycloudflare tunnels); inventing a
-    ``ws-*`` host for them causes Cloudflare 404 because no Ingress exists.
+    Applies whenever the named Cloudflare Tunnel + ``PREVIEW_BASE_DOMAIN`` are
+    active. Kubernetes, attach, and compose all publish via ``ws-{id}.{domain}``
+    (attach/compose through the Docker-host Ingress bridge).
     """
     if not url:
         return url
-    if not deploy_mode_uses_workspace_ingress(deploy_mode):
-        return url
+    _ = deploy_mode  # retained for call-site compatibility
     cfg = settings or get_settings()
     base = (cfg.preview_base_domain or "").strip().strip(".")
     if not base or not cfg.preview_tunnel_active:

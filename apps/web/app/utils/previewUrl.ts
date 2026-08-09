@@ -1,5 +1,4 @@
 const LOCAL_HOSTS = ['127.0.0.1', 'localhost', '::1', 'localtest.me']
-const K8S_DEPLOY_MODES = new Set(['preview', 'manifest'])
 
 function extractPort(url: string): number | null {
   try {
@@ -16,10 +15,6 @@ function extractPort(url: string): number | null {
 
 function isLoopbackHost(hostname: string): boolean {
   return LOCAL_HOSTS.includes(hostname)
-}
-
-function usesWorkspaceIngress(deployMode?: string | null): boolean {
-  return K8S_DEPLOY_MODES.has((deployMode || '').toLowerCase())
 }
 
 /**
@@ -108,12 +103,11 @@ export function localizePreviewUrl(input: LocalizePreviewUrlInput): string {
     return `http://${viewerHost}:${port}`
   }
 
-  // Repair mistaken apex:port / loopback NodePort URLs for remote k8s viewers only.
-  // Attach/compose must not invent ws-* hosts (no Ingress → Cloudflare 404).
+  // Repair mistaken apex:port / loopback NodePort URLs for remote prod viewers.
+  // Attach/compose use the same ws-* Ingress bridge as Kubernetes in production.
   if (
     !isLocalViewer
     && input.environmentId
-    && usesWorkspaceIngress(input.deployMode)
     && looksLikeBrokenApexNodePort(url, viewerHost)
   ) {
     return workspaceIngressUrl(input.environmentId, viewerHost)
@@ -171,13 +165,8 @@ export function resolvePreviewUrl(
     })
   }
 
-  // Remote k8s viewers: prefer workspace ingress over inventing apex:node_port.
-  if (
-    source.node_port
-    && source.id
-    && !isLocalViewer
-    && usesWorkspaceIngress(source.deploy_mode)
-  ) {
+  // Remote viewers: prefer workspace ingress over inventing apex:node_port.
+  if (source.node_port && source.id && !isLocalViewer) {
     return workspaceIngressUrl(source.id, host)
   }
 

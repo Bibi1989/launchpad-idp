@@ -59,7 +59,7 @@ def test_repair_stored_preview_url_k8s_only() -> None:
         )
         == "https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online"
     )
-    # Attach/compose must not invent ws-* (no Ingress → Cloudflare 404).
+    # Attach/compose must invent ws-* when named tunnel is active (Docker-host bridge).
     assert (
         repair_stored_preview_url(
             "http://127.0.0.1:8090",
@@ -67,7 +67,7 @@ def test_repair_stored_preview_url_k8s_only() -> None:
             deploy_mode="attach",
             settings=cfg,
         )
-        == "http://127.0.0.1:8090"
+        == "https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online"
     )
     assert (
         repair_stored_preview_url(
@@ -76,7 +76,7 @@ def test_repair_stored_preview_url_k8s_only() -> None:
             deploy_mode="compose",
             settings=cfg,
         )
-        == "http://127.0.0.1:8090"
+        == "https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online"
     )
     good = "https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online"
     assert (

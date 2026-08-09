@@ -1046,10 +1046,19 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     )
                 except PreviewCancelled:
                     # Force-delete during provisioning. Leave status TEARDOWN_PENDING
-                    # and let the enqueued teardown task reclaim the namespace + kind
-                    # images once this task releases the state lock. Do not mark FAILED.
+                    # and re-enqueue teardown after this task releases the state lock.
                     logger.info("provision_cancelled_by_delete", environment_id=environment_id)
                     await session.rollback()
+                    try:
+                        enqueue_teardown_environment(
+                            environment_id=str(env_uuid),
+                            correlation_id=f"post-cancel:{env_uuid}",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "post_cancel_teardown_enqueue_failed",
+                            environment_id=environment_id,
+                        )
                     return
                 except Exception as exc:
                     logger.exception("provision_failed", environment_id=environment_id)
@@ -1642,7 +1651,12 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                             )
                             # Drop the ws-* Ingress bridge namespace (Docker host backend).
                             try:
-                                provisioner.teardown(environment.namespace_name)
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        provisioner.teardown, environment.namespace_name
+                                    ),
+                                    timeout=30.0,
+                                )
                             except Exception as bridge_exc:
                                 logger.warning(
                                     "compose_preview_ingress_teardown_failed",
@@ -1681,7 +1695,12 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                 settings=settings,
                             )
                             try:
-                                provisioner.teardown(environment.namespace_name)
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        provisioner.teardown, environment.namespace_name
+                                    ),
+                                    timeout=30.0,
+                                )
                             except Exception as bridge_exc:
                                 logger.warning(
                                     "attach_preview_ingress_teardown_failed",
@@ -1689,7 +1708,12 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                     error=str(bridge_exc),
                                 )
                         else:
-                            provisioner.teardown(environment.namespace_name)
+                            await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    provisioner.teardown, environment.namespace_name
+                                ),
+                                timeout=30.0,
+                            )
                     except Exception as cleanup_exc:
                         logger.warning(
                             "teardown_namespace_cleanup_failed",
@@ -1815,6 +1839,21 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                 detail=PROVISIONING_IN_PROGRESS_MESSAGE,
             )
             await session.commit()
+        # Provision (or another teardown) holds the lock. Retry shortly so a
+        # force-destroy during PROVISIONING does not leave TEARDOWN_PENDING forever.
+        try:
+            teardown_environment_task.apply_async(
+                kwargs={
+                    "environment_id": str(env_uuid),
+                    "correlation_id": f"teardown-retry:{env_uuid}",
+                },
+                countdown=15,
+            )
+        except Exception:
+            logger.exception(
+                "teardown_retry_enqueue_failed",
+                environment_id=environment_id,
+            )
 
 
 async def pause_expired_environment(
@@ -1979,7 +2018,13 @@ def rebuild_environment_task(
     asyncio.run(_run_rebuild(environment_id, commit_sha, correlation_id))
 
 
-@celery_app.task(name="launchpad.teardown_environment", bind=True, max_retries=0)
+@celery_app.task(
+    name="launchpad.teardown_environment",
+    bind=True,
+    max_retries=0,
+    soft_time_limit=150,
+    time_limit=180,
+)
 def teardown_environment_task(self, environment_id: str, correlation_id: str) -> None:
     asyncio.run(_run_teardown(environment_id, correlation_id))
 
@@ -2278,6 +2323,11 @@ async def _attach_docker_host_preview_ingress(
     """
     try:
         if resources is None:
+            logger.info(
+                "docker_host_preview_ingress_attach_skipped",
+                reason="no_resources",
+                environment_id=str(env_uuid),
+            )
             return
         deploy_mode = getattr(environment, "deploy_mode", None)
         deploy_mode_s = (
@@ -2285,23 +2335,63 @@ async def _attach_docker_host_preview_ingress(
         ).lower()
         if deploy_mode_s not in {"attach", "compose"}:
             return
-        if (getattr(environment, "provider", None) or "").lower() != "local":
+        # Treat missing provider as local (matches create defaults / rest of control plane).
+        provider = (getattr(environment, "provider", None) or "local").lower()
+        if provider != "local":
+            logger.info(
+                "docker_host_preview_ingress_attach_skipped",
+                reason="non_local_provider",
+                environment_id=str(env_uuid),
+                provider=provider,
+            )
             return
         node_port = getattr(resources, "node_port", None)
         if node_port is None:
+            logger.info(
+                "docker_host_preview_ingress_attach_skipped",
+                reason="no_node_port",
+                environment_id=str(env_uuid),
+            )
             return
+
+        # Attach/compose VALIDATE skips cluster ensure; reload clients so the bridge
+        # can talk to k3d after Docker publish succeeds.
+        reload = getattr(provisioner, "reload_clients", None) or getattr(
+            provisioner, "_load_clients", None
+        )
+        if callable(reload):
+            try:
+                await asyncio.to_thread(reload)
+            except Exception as exc:
+                logger.warning(
+                    "docker_host_preview_ingress_reload_failed",
+                    environment_id=str(env_uuid),
+                    error=str(exc),
+                )
+
         apply = getattr(provisioner, "apply_docker_host_preview_ingress", None)
         if apply is None:
             return
-        url = await asyncio.to_thread(
-            apply,
-            namespace=str(getattr(resources, "namespace", None) or getattr(environment, "namespace_name", "")),
-            environment_id=str(env_uuid),
-            name=str(getattr(environment, "name", None) or "preview"),
-            host_port=int(node_port),
-            labels=dict(getattr(resources, "labels", None) or {}),
+        url = await asyncio.wait_for(
+            asyncio.to_thread(
+                apply,
+                namespace=str(
+                    getattr(resources, "namespace", None)
+                    or getattr(environment, "namespace_name", "")
+                ),
+                environment_id=str(env_uuid),
+                name=str(getattr(environment, "name", None) or "preview"),
+                host_port=int(node_port),
+                labels=dict(getattr(resources, "labels", None) or {}),
+            ),
+            timeout=45.0,
         )
         if not url:
+            logger.warning(
+                "docker_host_preview_ingress_attach_no_url",
+                environment_id=str(env_uuid),
+                node_port=node_port,
+            )
             return
         resources.preview_url = url
         endpoints = list(getattr(resources, "preview_endpoints", None) or [])
@@ -2318,6 +2408,16 @@ async def _attach_docker_host_preview_ingress(
         if not frontend_updated and updated:
             updated[0]["url"] = url
         resources.preview_endpoints = updated
+        logger.info(
+            "docker_host_preview_ingress_attach_ok",
+            environment_id=str(env_uuid),
+            preview_url=url,
+        )
+    except TimeoutError:
+        logger.warning(
+            "docker_host_preview_ingress_attach_timeout",
+            environment_id=str(env_uuid),
+        )
     except Exception:
         logger.exception(
             "docker_host_preview_ingress_attach_failed",
