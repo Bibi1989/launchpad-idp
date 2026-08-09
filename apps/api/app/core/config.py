@@ -238,6 +238,11 @@ class Settings(BaseSettings):
     # Upstream host for quick tunnels. Inside Docker workers use host.docker.internal
     # so published host ports / NodePorts on the Docker host are reachable.
     preview_tunnel_upstream_host: str | None = None
+    # Host alias / IP that in-cluster Ingress uses to reach Docker-published ports
+    # (attach/compose → ws-* on the named Cloudflare Tunnel). k3d injects
+    # host.k3d.internal; override with an IP when DNS is unavailable.
+    preview_docker_host_alias: str = "host.k3d.internal"
+    preview_docker_host_ip: str | None = None
 
     # Cloud/production previews: how long to wait for a LoadBalancer/Ingress to get a
     # public address before falling back to the default preview URL.

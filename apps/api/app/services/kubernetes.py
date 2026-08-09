@@ -1250,6 +1250,161 @@ class KubernetesProvisioner:
             backend_port=port_number,
         )
 
+    def resolve_docker_host_gateway_ip(self) -> str | None:
+        """IP of the Docker host as seen from inside the local cluster (k3d/kind)."""
+        import re
+        import socket
+
+        explicit = (self._settings.preview_docker_host_ip or "").strip()
+        if explicit:
+            return explicit
+
+        alias = (self._settings.preview_docker_host_alias or "host.k3d.internal").strip()
+        if self._core is not None:
+            try:
+                cm = self._core.read_namespaced_config_map("coredns", "kube-system")
+                raw = ""
+                if cm.data:
+                    raw = cm.data.get("NodeHosts") or cm.data.get("Corefile") or ""
+                for line in raw.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and alias in parts[1:]:
+                        candidate = parts[0].strip()
+                        if re.match(r"^\d+\.\d+\.\d+\.\d+$", candidate):
+                            return candidate
+            except Exception as exc:
+                logger.info("docker_host_coredns_lookup_failed", alias=alias, error=str(exc))
+
+        for name in (alias, "host.docker.internal"):
+            try:
+                infos = socket.getaddrinfo(name, None, socket.AF_INET)
+                if infos:
+                    return infos[0][4][0]
+            except OSError:
+                continue
+        return None
+
+    def apply_docker_host_preview_ingress(
+        self,
+        *,
+        namespace: str,
+        environment_id: str,
+        name: str,
+        host_port: int,
+        labels: dict[str, str] | None = None,
+    ) -> str | None:
+        """Expose a Docker-published host port at ``https://ws-{id}.{base_domain}``.
+
+        Creates a selector-less Service + Endpoints pointing at the Docker host
+        gateway IP (``host.k3d.internal``) and an Ingress host matching the named
+        Cloudflare Tunnel wildcard. Returns the public preview URL, or None when
+        the bridge cannot be created (caller keeps host-port / trycloudflare).
+        """
+        if not self._settings.kubernetes_enabled or self._core is None or self._networking is None:
+            return None
+        if not self._settings.preview_tunnel_active or not self._settings.preview_base_domain:
+            return None
+        if host_port <= 0:
+            return None
+
+        host = self.workspace_preview_host(
+            name=name, environment_id=environment_id, namespace=namespace
+        )
+        if not host:
+            return None
+
+        gateway_ip = self.resolve_docker_host_gateway_ip()
+        if not gateway_ip:
+            logger.warning(
+                "docker_host_preview_ingress_no_gateway",
+                environment_id=environment_id,
+                host_port=host_port,
+            )
+            return None
+
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        meta_labels = {
+            "app.kubernetes.io/managed-by": "launchpad",
+            "launchpad.io/managed-by": "launchpad-idp",
+            "launchpad.io/environment-id": environment_id,
+            "launchpad.io/preview-bridge": "docker-host",
+            **(labels or {}),
+        }
+
+        try:
+            self._core.read_namespace(namespace, _request_timeout=10)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._core.create_namespace(
+                client.V1Namespace(
+                    metadata=client.V1ObjectMeta(name=namespace, labels=meta_labels)
+                ),
+                _request_timeout=10,
+            )
+            logger.info("kubernetes_namespace_created", namespace=namespace, purpose="docker-host-preview")
+
+        service = client.V1Service(
+            metadata=client.V1ObjectMeta(name="app", namespace=namespace, labels=meta_labels),
+            spec=client.V1ServiceSpec(
+                ports=[
+                    client.V1ServicePort(
+                        name="http",
+                        port=80,
+                        target_port=host_port,
+                        protocol="TCP",
+                    )
+                ],
+            ),
+        )
+        try:
+            self._core.read_namespaced_service("app", namespace)
+            self._core.replace_namespaced_service("app", namespace, service)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._core.create_namespaced_service(namespace, service)
+
+        endpoints = client.V1Endpoints(
+            metadata=client.V1ObjectMeta(name="app", namespace=namespace, labels=meta_labels),
+            subsets=[
+                client.V1EndpointSubset(
+                    addresses=[client.V1EndpointAddress(ip=gateway_ip)],
+                    ports=[
+                        client.CoreV1EndpointPort(name="http", port=host_port, protocol="TCP")
+                    ],
+                )
+            ],
+        )
+        try:
+            self._core.read_namespaced_endpoints("app", namespace)
+            self._core.replace_namespaced_endpoints("app", namespace, endpoints)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._core.create_namespaced_endpoints(namespace, endpoints)
+
+        self.apply_ingress(
+            namespace=namespace,
+            labels=meta_labels,
+            host=host,
+            backend_service="app",
+            backend_port=80,
+        )
+        url = self.ingress_preview_url(host=host)
+        logger.info(
+            "docker_host_preview_ingress_applied",
+            namespace=namespace,
+            environment_id=environment_id,
+            host=host,
+            host_port=host_port,
+            gateway_ip=gateway_ip,
+            preview_url=url,
+        )
+        return url
+
     def list_allocated_node_ports(self, *, exclude_namespace: str | None = None) -> set[int]:
         """Return NodePorts already claimed by Services cluster-wide."""
         if not self._settings.kubernetes_enabled or self._core is None:

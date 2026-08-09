@@ -935,9 +935,13 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         raise PreviewCancelled(f"provision cancelled for {environment_id}")
 
                     # Resolve the Open-app URL by target:
-                    #  • local + tunnel on → cloudflared quick-tunnel URL
+                    #  • attach/compose + CF named tunnel → ws-* Ingress → Docker host port
+                    #  • local + tunnel on → cloudflared quick-tunnel URL (fallback)
                     #  • local + tunnel off → localhost NodePort URL (provisioner default)
-                    #  • cloud/production → LoadBalancer/Ingress public URL
+                    #  • cloud/production k8s → LoadBalancer/Ingress public URL
+                    await _attach_docker_host_preview_ingress(
+                        env_uuid, environment, resources, provisioner
+                    )
                     await _attach_preview_tunnel(env_uuid, environment, resources)
                     await _attach_cloud_preview_url(env_uuid, environment, resources, provisioner)
 
@@ -1070,6 +1074,9 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             )
                             environment = await env_repo.get_by_id(env_uuid)
                             if environment is not None:
+                                await _attach_docker_host_preview_ingress(
+                                    env_uuid, environment, resources, provisioner
+                                )
                                 await _attach_preview_tunnel(env_uuid, environment, resources)
                                 await _attach_cloud_preview_url(env_uuid, environment, resources, provisioner)
                                 await env_repo.update_status(
@@ -1325,6 +1332,9 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         except ComposeDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
                         if resources.preview_url or resources.node_port:
+                            await _attach_docker_host_preview_ingress(
+                                env_uuid, environment, resources, provisioner
+                            )
                             await env_repo.update_status(
                                 environment,
                                 EnvironmentStatus.PROVISIONING,
@@ -1400,6 +1410,9 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                             )
                             from app.schemas.environment import dump_preview_endpoints
 
+                            await _attach_docker_host_preview_ingress(
+                                env_uuid, environment, rebuild_resources, provisioner
+                            )
                             rebuild_endpoints = list(
                                 getattr(rebuild_resources, "preview_endpoints", None) or []
                             )
@@ -1627,6 +1640,15 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                 namespace=environment.namespace_name,
                                 environment_id=str(environment.id),
                             )
+                            # Drop the ws-* Ingress bridge namespace (Docker host backend).
+                            try:
+                                provisioner.teardown(environment.namespace_name)
+                            except Exception as bridge_exc:
+                                logger.warning(
+                                    "compose_preview_ingress_teardown_failed",
+                                    environment_id=environment_id,
+                                    error=str(bridge_exc),
+                                )
                         elif deploy_mode == DeployMode.ATTACH.value:
                             from app.schemas.cloud import (
                                 RunningInstanceConfig,
@@ -1658,6 +1680,14 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                 environment_id=str(environment.id),
                                 settings=settings,
                             )
+                            try:
+                                provisioner.teardown(environment.namespace_name)
+                            except Exception as bridge_exc:
+                                logger.warning(
+                                    "attach_preview_ingress_teardown_failed",
+                                    environment_id=environment_id,
+                                    error=str(bridge_exc),
+                                )
                         else:
                             provisioner.teardown(environment.namespace_name)
                     except Exception as cleanup_exc:
@@ -2230,6 +2260,68 @@ def _run_dockerfile_build(job_id: str, request_payload: dict) -> None:
             job_id,
             status=DockerfileBuildJobStatus.FAILED,
             error=sanitize_log_message(str(exc))[:800],
+        )
+
+
+async def _attach_docker_host_preview_ingress(
+    env_uuid: object,
+    environment: object,
+    resources: object,
+    provisioner: object,
+) -> None:
+    """Point attach/compose Open-app at ``ws-{id}.{PREVIEW_BASE_DOMAIN}``.
+
+    Bridges the Docker-published host port through in-cluster Ingress so the named
+    Cloudflare Tunnel (``*.domain`` → ingress :3080) serves the same URL shape as
+    Kubernetes previews. No-op when k8s/tunnel/base domain are unavailable, or when
+    deploy mode is already a native k8s Ingress workload.
+    """
+    try:
+        if resources is None:
+            return
+        deploy_mode = getattr(environment, "deploy_mode", None)
+        deploy_mode_s = (
+            deploy_mode.value if hasattr(deploy_mode, "value") else str(deploy_mode or "")
+        ).lower()
+        if deploy_mode_s not in {"attach", "compose"}:
+            return
+        if (getattr(environment, "provider", None) or "").lower() != "local":
+            return
+        node_port = getattr(resources, "node_port", None)
+        if node_port is None:
+            return
+        apply = getattr(provisioner, "apply_docker_host_preview_ingress", None)
+        if apply is None:
+            return
+        url = await asyncio.to_thread(
+            apply,
+            namespace=str(getattr(resources, "namespace", None) or getattr(environment, "namespace_name", "")),
+            environment_id=str(env_uuid),
+            name=str(getattr(environment, "name", None) or "preview"),
+            host_port=int(node_port),
+            labels=dict(getattr(resources, "labels", None) or {}),
+        )
+        if not url:
+            return
+        resources.preview_url = url
+        endpoints = list(getattr(resources, "preview_endpoints", None) or [])
+        if not endpoints:
+            return
+        updated: list[dict[str, object]] = []
+        frontend_updated = False
+        for ep in endpoints:
+            item = dict(ep)
+            if not frontend_updated and item.get("app_kind") == "frontend":
+                item["url"] = url
+                frontend_updated = True
+            updated.append(item)
+        if not frontend_updated and updated:
+            updated[0]["url"] = url
+        resources.preview_endpoints = updated
+    except Exception:
+        logger.exception(
+            "docker_host_preview_ingress_attach_failed",
+            environment_id=str(env_uuid),
         )
 
 
