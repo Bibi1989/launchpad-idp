@@ -1,27 +1,39 @@
 const LOCAL_HOSTS = ['127.0.0.1', 'localhost', '::1', 'localtest.me']
 
+function extractPort(url: string): number | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.port) {
+      const n = Number.parseInt(parsed.port, 10)
+      return Number.isFinite(n) ? n : null
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return LOCAL_HOSTS.includes(hostname)
+}
+
 /**
  * Rewrite a loopback (or missing) host in a URL to the current browser host,
- * keeping the port. A stored URL with an empty host (e.g. "http://:30087",
- * produced when the backend has no preview host configured) is repaired to the
- * host the user is currently reaching Launchpad on. When we take over the host
- * we also adopt the page's scheme, so an http:// preview served to an https://
- * Launchpad becomes https:// - otherwise the browser blocks it as mixed content.
+ * keeping the port. Only valid when the viewer is on the same machine as the
+ * NodePort (localhost). Never rewrite onto a remote Launchpad UI host.
  */
-function rewriteLoopbackHost(url: string): string | null {
-  if (!url) return null
-  if (typeof window === 'undefined') return url
-  const pageScheme = window.location.protocol // "http:" | "https:"
-  // Repair a hostless URL like "http://:30087" up front: new URL() throws on an
-  // empty host for special schemes, so inject the current host before parsing.
+function rewriteLoopbackHost(url: string, viewerHost: string): string | null {
+  if (!url || !viewerHost || !isLoopbackHost(viewerHost)) return url
+  const pageScheme =
+    typeof window !== 'undefined' ? window.location.protocol : 'http:'
   const hostless = url.match(/^([a-z][a-z0-9+.-]*:\/\/):(\d+)(.*)$/i)
   if (hostless) {
-    url = `${pageScheme}//${window.location.hostname}:${hostless[2]}${hostless[3]}`
+    url = `${pageScheme}//${viewerHost}:${hostless[2]}${hostless[3]}`
   }
   try {
     const parsed = new URL(url)
-    if (!parsed.hostname || LOCAL_HOSTS.includes(parsed.hostname)) {
-      parsed.hostname = window.location.hostname
+    if (!parsed.hostname || isLoopbackHost(parsed.hostname)) {
+      parsed.hostname = viewerHost
       parsed.protocol = pageScheme
     }
     return parsed.toString().replace(/\/$/, '')
@@ -30,45 +42,142 @@ function rewriteLoopbackHost(url: string): string | null {
   }
 }
 
+/**
+ * Production Cloudflare ingress: ``https://ws-{envId}.{apex}``.
+ * Stored NodePort mistakes look like ``http://launchpad-idp.online:2001``.
+ */
+function workspaceIngressUrl(envId: string, apexHost: string): string {
+  return `https://ws-${envId}.${apexHost}`
+}
+
+function looksLikeBrokenApexNodePort(url: string, viewerHost: string): boolean {
+  if (!url || !viewerHost || isLoopbackHost(viewerHost)) return false
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname.endsWith('.trycloudflare.com')) return false
+    if (parsed.hostname.startsWith('ws-') && parsed.hostname.endsWith(`.${viewerHost}`)) {
+      return false
+    }
+    // Apex + published port (unreachable via Cloudflare host routing).
+    if (parsed.hostname === viewerHost && parsed.port) return true
+    // Loopback NodePort stored while the operator is on the public IDP host.
+    if (isLoopbackHost(parsed.hostname) && parsed.port) return true
+    // Hostless ``http://:2001``.
+    if (!parsed.hostname && parsed.port) return true
+    return false
+  } catch {
+    return /:\/\/:\d+/.test(url)
+  }
+}
+
 export interface PreviewUrlSource {
+  id?: string | null
   preview_url?: string | null
   node_port?: number | null
   provider?: string | null
 }
 
+export interface LocalizePreviewUrlInput {
+  url: string
+  port?: number | null
+  provider?: string | null
+  environmentId?: string | null
+  /** Override browser hostname (for tests). */
+  viewerHost?: string
+}
+
+/**
+ * When the operator is on localhost viewing a local preview, prefer
+ * ``http://localhost:<port>`` over a stored public tunnel URL
+ * (``*.trycloudflare.com``). Remote viewers keep / repair the public URL.
+ */
+export function localizePreviewUrl(input: LocalizePreviewUrlInput): string {
+  const url = (input.url || '').trim()
+  if (!url) return url
+  const viewerHost = input.viewerHost
+    ?? (typeof window !== 'undefined' ? window.location.hostname : '')
+  const isLocalViewer = isLoopbackHost(viewerHost)
+  const provider = (input.provider || '').toLowerCase()
+  const port = input.port ?? extractPort(url)
+
+  if ((provider === 'local' || !provider) && isLocalViewer && port) {
+    return `http://${viewerHost}:${port}`
+  }
+
+  // Repair mistaken apex:port / loopback NodePort URLs for remote prod viewers.
+  if (
+    !isLocalViewer
+    && input.environmentId
+    && looksLikeBrokenApexNodePort(url, viewerHost)
+  ) {
+    return workspaceIngressUrl(input.environmentId, viewerHost)
+  }
+
+  // Public quick tunnels must not keep a host:port suffix (broken links).
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname.endsWith('.trycloudflare.com') && parsed.port) {
+      parsed.port = ''
+      parsed.protocol = 'https:'
+      return parsed.toString().replace(/\/$/, '')
+    }
+  } catch {
+    /* fall through */
+  }
+
+  // Only rewrite loopback onto the viewer host when the viewer is local.
+  if (isLocalViewer) {
+    return rewriteLoopbackHost(url, viewerHost) ?? url
+  }
+  return url
+}
+
 /**
  * Resolve the "Open app" URL for how the user is *currently* reaching Launchpad:
  *
- *  - Local preview, viewed from localhost  → http://localhost:<node_port> (direct NodePort).
- *  - Local preview, viewed via a tunnel/remote host → the stored public URL
- *    (e.g. a cloudflared *.trycloudflare.com tunnel), since 127.0.0.1 won't reach it.
- *  - Cloud/production preview → the stored public URL (LoadBalancer / Ingress).
- *
- * Accepts an environment-like object (preferred) or a bare URL string (back-compat).
+ *  - Local preview, viewed from localhost  → http://localhost:<node_port>
+ *  - Local preview, viewed via a tunnel/remote host → stored public URL
+ *    (``*.trycloudflare.com`` or ``https://ws-{id}.{domain}``)
+ *  - Cloud/production preview → stored public URL (never ``apex:node_port``)
  */
 export function resolvePreviewUrl(
   source: PreviewUrlSource | string | null | undefined,
 ): string | null {
   if (source == null) return null
-  if (typeof source === 'string') return rewriteLoopbackHost(source)
-  if (typeof window === 'undefined') return source.preview_url ?? null
+  if (typeof source === 'string') {
+    return localizePreviewUrl({ url: source, provider: 'local' })
+  }
+
+  // SSR / no browser: trust the API-stored public URL.
+  if (typeof window === 'undefined') {
+    return source.preview_url ?? null
+  }
 
   const host = window.location.hostname
-  const isLocalViewer = LOCAL_HOSTS.includes(host)
+  const isLocalViewer = isLoopbackHost(host)
   const provider = (source.provider || '').toLowerCase()
 
-  // Viewing a local preview from the same machine: hit the NodePort directly on the
-  // browser's own host rather than routing a dev out through a public tunnel URL.
   if (provider === 'local' && isLocalViewer && source.node_port) {
     return `http://${host}:${source.node_port}`
   }
 
-  // Otherwise prefer the stored public URL (cloudflared tunnel / cloud LB / ingress),
-  // rewriting a loopback host to the current one when the preview is still a NodePort.
-  if (source.preview_url) return rewriteLoopbackHost(source.preview_url)
+  if (source.preview_url) {
+    return localizePreviewUrl({
+      url: source.preview_url,
+      port: source.node_port,
+      provider: source.provider,
+      environmentId: source.id,
+      viewerHost: host,
+    })
+  }
 
-  // Last resort: build a NodePort URL on the current host, following the page
-  // scheme so an https Launchpad doesn't hand out a mixed-content http link.
-  if (source.node_port) return `${window.location.protocol}//${host}:${source.node_port}`
+  // Remote viewers: prefer workspace ingress over inventing apex:node_port.
+  if (source.node_port && source.id && !isLocalViewer) {
+    return workspaceIngressUrl(source.id, host)
+  }
+
+  if (source.node_port && isLocalViewer) {
+    return `${window.location.protocol}//${host}:${source.node_port}`
+  }
   return null
 }

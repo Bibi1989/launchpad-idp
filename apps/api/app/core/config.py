@@ -394,15 +394,22 @@ class Settings(BaseSettings):
         if self.preview_node_host is not None:
             self.preview_node_host = self.preview_node_host.strip()
         if not self.preview_node_host:
-            from urllib.parse import urlparse
-            try:
-                parsed = urlparse(self.preview_public_base_url)
-                if parsed.hostname:
-                    self.preview_node_host = parsed.hostname
-                else:
-                    self.preview_node_host = "127.0.0.1"
-            except Exception:
+            # In Cloudflare Tunnel / production, public previews are host-only
+            # (ws-*.domain). Never backfill the public apex as the NodePort host
+            # or callers emit unreachable ``https://apex:2001`` links.
+            if self.use_cloudflare_tunnel or self.environment.strip().lower() == "production":
                 self.preview_node_host = "127.0.0.1"
+            else:
+                from urllib.parse import urlparse
+
+                try:
+                    parsed = urlparse(self.preview_public_base_url)
+                    if parsed.hostname:
+                        self.preview_node_host = parsed.hostname
+                    else:
+                        self.preview_node_host = "127.0.0.1"
+                except Exception:
+                    self.preview_node_host = "127.0.0.1"
         return self
 
     @property

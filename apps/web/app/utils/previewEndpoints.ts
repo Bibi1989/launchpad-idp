@@ -1,7 +1,7 @@
 import type { Environment, PreviewEndpoint } from '~/types/environment'
+import { localizePreviewUrl } from '~/utils/previewUrl'
 
-/** Normalize API / SSE preview endpoint lists for Open-app UI. */
-export function resolvePreviewEndpoints(env: Environment): PreviewEndpoint[] {
+function rawPreviewEndpoints(env: Environment): PreviewEndpoint[] {
   const fromApi = env.preview_endpoints
   if (Array.isArray(fromApi) && fromApi.length > 0) {
     return fromApi.filter((e) => Boolean(e?.url))
@@ -33,14 +33,31 @@ export function resolvePreviewEndpoints(env: Environment): PreviewEndpoint[] {
   return []
 }
 
+/** Normalize API / SSE preview endpoint lists for Open-app UI. */
+export function resolvePreviewEndpoints(env: Environment): PreviewEndpoint[] {
+  return rawPreviewEndpoints(env).map((endpoint) => {
+    const port = endpoint.port
+      ?? (endpoint.app_kind === 'frontend' ? env.node_port : null)
+      ?? null
+    return {
+      ...endpoint,
+      url: localizePreviewUrl({
+        url: endpoint.url,
+        port,
+        provider: env.provider ?? 'local',
+        environmentId: env.id,
+      }),
+      port,
+    }
+  })
+}
+
 /** Secondary exposed URLs (API, etc.). Open app stays on the frontend. */
 export function secondaryPreviewEndpoints(env: Environment): PreviewEndpoint[] {
   const all = resolvePreviewEndpoints(env)
-  const frontendUrl = env.preview_url
   return all.filter((e) => {
     if (!e.exposed && e.exposed !== undefined) return false
     if (e.app_kind === 'frontend') return false
-    if (frontendUrl && e.url === frontendUrl) return false
     return true
   })
 }

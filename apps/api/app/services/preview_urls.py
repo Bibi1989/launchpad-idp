@@ -2,9 +2,68 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
 from uuid import UUID
 
 from app.core.config import Settings, get_settings
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "localtest.me"})
+
+
+def workspace_ingress_preview_url(
+    environment_id: UUID | str, *, settings: Settings | None = None
+) -> str | None:
+    """Host-only https preview URL: ``https://ws-{id}.{preview_base_domain}``."""
+    cfg = settings or get_settings()
+    base = (cfg.preview_base_domain or "").strip().strip(".")
+    if not base:
+        return None
+    scheme = "https" if cfg.preview_tunnel_active else "http"
+    return f"{scheme}://ws-{environment_id}.{base}"
+
+
+def looks_like_broken_apex_node_port(url: str, *, apex: str) -> bool:
+    """True for ``http://apex:2001`` / loopback NodePort URLs (not ws-* ingress)."""
+    raw = (url or "").strip()
+    apex = (apex or "").strip().strip(".").lower()
+    if not raw or not apex:
+        return False
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    if host.endswith(".trycloudflare.com"):
+        return False
+    if host.startswith("ws-") and host.endswith(f".{apex}"):
+        return False
+    if host == apex and port:
+        return True
+    if host in _LOOPBACK_HOSTS and port:
+        return True
+    if not host and port:
+        return True
+    return False
+
+
+def repair_stored_preview_url(
+    url: str | None,
+    *,
+    environment_id: UUID | str,
+    settings: Settings | None = None,
+) -> str | None:
+    """Replace apex:port / loopback NodePort with workspace ingress when configured."""
+    if not url:
+        return url
+    cfg = settings or get_settings()
+    base = (cfg.preview_base_domain or "").strip().strip(".")
+    if not base or not cfg.preview_tunnel_active:
+        return url
+    if not looks_like_broken_apex_node_port(url, apex=base):
+        return url
+    repaired = workspace_ingress_preview_url(environment_id, settings=cfg)
+    return repaired or url
 
 
 def portal_status_url(environment_id: UUID | str, *, settings: Settings | None = None) -> str:

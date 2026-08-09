@@ -203,8 +203,26 @@ class EnvironmentRead(BaseModel):
             now=now,
         )
         self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
+        from app.services.preview_urls import repair_stored_preview_url
+
+        if self.preview_url:
+            self.preview_url = repair_stored_preview_url(
+                self.preview_url, environment_id=self.id
+            )
         if not self.preview_endpoints:
             self.preview_endpoints = parse_preview_endpoints_json(self.preview_endpoints_json)
+        if self.preview_endpoints:
+            repaired_eps: list[PreviewEndpoint] = []
+            for ep in self.preview_endpoints:
+                repaired_eps.append(
+                    ep.model_copy(
+                        update={
+                            "url": repair_stored_preview_url(ep.url, environment_id=self.id)
+                            or ep.url
+                        }
+                    )
+                )
+            self.preview_endpoints = repaired_eps
         if (
             not self.preview_endpoints
             and self.preview_url
