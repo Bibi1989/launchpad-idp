@@ -5,11 +5,17 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, sanitize_log_message
-from app.schemas.cloud import RunningInstanceConfig, RunningInstanceKind
+from app.schemas.cloud import (
+    ContainerServiceSpec,
+    RunningInstanceConfig,
+    RunningInstanceKind,
+)
+from app.services.service_kind import is_frontend_app_kind, is_frontend_service_name
 from app.services.compose_deploy import (
     ComposeDeployError,
     list_docker_published_host_ports,
@@ -31,9 +37,64 @@ class AttachDeployError(RuntimeError):
     """Running-instance compute deploy failed."""
 
 
+@dataclass(frozen=True)
+class _AttachServicePlan:
+    name: str
+    app_kind: str
+    listen_port: int
+    expose_preview: bool
+    dockerfile: Path
+    context: Path
+
+
+def _env_slug(environment_id: str) -> str:
+    return environment_id.replace("-", "")[:12]
+
+
 def _container_name(environment_id: str) -> str:
-    slug = environment_id.replace("-", "")[:12]
-    return f"lp-inst-{slug}"
+    return f"lp-inst-{_env_slug(environment_id)}"
+
+
+def _service_container_name(environment_id: str, service_name: str) -> str:
+    svc = _SAFE_NAME.sub("-", service_name.strip().lower()).strip("-") or "app"
+    return f"lp-inst-{_env_slug(environment_id)}-{svc}"[:63]
+
+
+def _network_name(environment_id: str) -> str:
+    return f"lp-net-{_env_slug(environment_id)}"
+
+
+def _sanitize_svc(name: str) -> str:
+    cleaned = _SAFE_NAME.sub("-", (name or "app").strip().lower()).strip("-")
+    return cleaned or "app"
+
+
+def _find_service_dockerfile(
+    workspace_root: Path,
+    service_name: str,
+    dockerfile_path: str | None = None,
+) -> tuple[Path, Path] | None:
+    slug = _sanitize_svc(service_name)
+    candidates: list[Path] = []
+    if dockerfile_path:
+        candidates.append(workspace_root / dockerfile_path)
+    candidates.extend(
+        [
+            workspace_root / "apps" / slug / "Dockerfile",
+            workspace_root / "dockers" / slug / "Dockerfile",
+            workspace_root / "dockers" / f"Dockerfile.{slug}",
+            workspace_root / slug / "Dockerfile",
+        ]
+    )
+    for df in candidates:
+        if df.is_file():
+            # dockers/Dockerfile.foo uses workspace root as context when no sibling dir
+            context = df.parent if df.parent.name != "dockers" or (df.parent / "package.json").exists() else workspace_root
+            if df.name.startswith("Dockerfile.") and df.parent.name == "dockers":
+                app_ctx = workspace_root / "apps" / slug
+                context = app_ctx if app_ctx.is_dir() else workspace_root
+            return df, context
+    return None
 
 
 def _preview_host(settings: Settings) -> str:
@@ -77,8 +138,22 @@ def _run(
 
 
 def _is_frontend_app_dir(name: str) -> bool:
-    lowered = name.strip().lower()
-    return any(token in lowered for token in ("web", "ui", "frontend", "spa", "next", "nuxt"))
+    return is_frontend_service_name(name)
+
+
+def _service_is_frontend(spec: ContainerServiceSpec | _AttachServicePlan) -> bool:
+    return is_frontend_app_kind(
+        str(getattr(spec, "app_kind", "") or ""),
+        name=str(getattr(spec, "name", "") or ""),
+    )
+
+
+def _service_expose_preview(spec: ContainerServiceSpec) -> bool:
+    if spec.expose_preview is True:
+        return True
+    if spec.expose_preview is False:
+        return False
+    return _service_is_frontend(spec)
 
 
 def _find_workspace_dockerfile(workspace_root: Path) -> tuple[Path, Path] | None:
@@ -235,6 +310,331 @@ def _container_listen_port(
     return port if 1 <= port <= 65535 else fallback
 
 
+def _build_attach_service_plans(
+    workspace_root: Path | None,
+    services: list[ContainerServiceSpec] | None,
+) -> list[_AttachServicePlan]:
+    if workspace_root is None or not services:
+        return []
+    plans: list[_AttachServicePlan] = []
+    for spec in services:
+        found = _find_service_dockerfile(
+            workspace_root,
+            spec.name,
+            dockerfile_path=spec.dockerfile_path,
+        )
+        if found is None:
+            logger.warning(
+                "attach_service_dockerfile_missing",
+                service=spec.name,
+                workspace=str(workspace_root),
+            )
+            continue
+        dockerfile, context = found
+        plans.append(
+            _AttachServicePlan(
+                name=_sanitize_svc(spec.name),
+                app_kind="frontend" if _service_is_frontend(spec) else "backend",
+                listen_port=int(spec.listen_port),
+                expose_preview=_service_expose_preview(spec),
+                dockerfile=dockerfile,
+                context=context,
+            )
+        )
+    # Always expose at least one preview target (prefer frontend).
+    if plans and not any(p.expose_preview for p in plans):
+        front = next((p for p in plans if p.app_kind == "frontend"), plans[0])
+        plans = [
+            _AttachServicePlan(
+                name=p.name,
+                app_kind=p.app_kind,
+                listen_port=p.listen_port,
+                expose_preview=p.name == front.name,
+                dockerfile=p.dockerfile,
+                context=p.context,
+            )
+            for p in plans
+        ]
+    return plans
+
+
+def _endpoint_dict(
+    *,
+    name: str,
+    app_kind: str,
+    url: str,
+    port: int | None,
+    exposed: bool = True,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "app_kind": app_kind,
+        "url": url,
+        "port": port,
+        "exposed": exposed,
+    }
+
+
+def _set_primary_preview(
+    resources: ProvisionedResources,
+    endpoints: list[dict[str, object]],
+) -> None:
+    resources.preview_endpoints = endpoints
+    primary = next(
+        (e for e in endpoints if e.get("app_kind") == "frontend" and e.get("exposed")),
+        None,
+    )
+    if primary is None:
+        primary = next((e for e in endpoints if e.get("exposed")), None)
+    if primary is None and endpoints:
+        primary = endpoints[0]
+    if primary is not None:
+        resources.preview_url = str(primary.get("url") or "") or None
+        port = primary.get("port")
+        resources.node_port = int(port) if isinstance(port, int) else None
+
+
+def _teardown_local_containers(environment_id: str) -> None:
+    if not _docker_available():
+        return
+    slug = _env_slug(environment_id)
+    # Legacy single-container name + per-service names.
+    _run(["docker", "rm", "-f", _container_name(environment_id)], timeout=60, check=False)
+    listed = _run(
+        ["docker", "ps", "-aq", "--filter", f"name=lp-inst-{slug}"],
+        timeout=30,
+        check=False,
+    )
+    ids = [line.strip() for line in (listed.stdout or "").splitlines() if line.strip()]
+    if ids:
+        _run(["docker", "rm", "-f", *ids], timeout=120, check=False)
+    _run(["docker", "network", "rm", _network_name(environment_id)], timeout=30, check=False)
+
+
+def _build_service_image(plan: _AttachServicePlan, environment_id: str) -> str:
+    tag = f"lp-ws-{_env_slug(environment_id)}-{plan.name}:local"
+    if not _docker_available():
+        return tag
+    _run(
+        [
+            "docker",
+            "build",
+            "-t",
+            tag,
+            "-f",
+            str(plan.dockerfile),
+            str(plan.context),
+        ],
+        timeout=600,
+    )
+    return tag
+
+
+def _run_service_container(
+    *,
+    environment_id: str,
+    plan: _AttachServicePlan,
+    image: str,
+    network: str,
+    preferred_host: int,
+    container_port: int,
+    env_vars: dict[str, str],
+    publish: bool,
+    extra_busy: set[int],
+) -> tuple[int | None, str | None]:
+    """Start one service container. Returns (host_port|None, notice|None)."""
+    container = _service_container_name(environment_id, plan.name)
+    _run(["docker", "rm", "-f", container], timeout=60, check=False)
+
+    if not publish:
+        cmd = [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container,
+            "--restart",
+            "unless-stopped",
+            "--network",
+            network,
+            "--network-alias",
+            plan.name,
+            "-e",
+            f"PORT={container_port}",
+        ]
+        for key, value in env_vars.items():
+            cmd.extend(["-e", f"{key}={value}"])
+        cmd.append(image)
+        _run(cmd, timeout=180)
+        return None, None
+
+    host_port = preferred_host
+    notice: str | None = None
+    last_error: AttachDeployError | None = None
+    for attempt in range(1, _ATTACH_PORT_RETRY_ATTEMPTS + 1):
+        host_port = _resolve_local_host_port(preferred_host, extra_busy=extra_busy)
+        if host_port != preferred_host or container_port != preferred_host:
+            notice = (
+                f"{plan.name}: host {host_port} → container {container_port}"
+                + (f" (preferred {preferred_host} busy)" if host_port != preferred_host else "")
+            )
+        else:
+            notice = None
+        cmd = [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container,
+            "--restart",
+            "unless-stopped",
+            "--network",
+            network,
+            "--network-alias",
+            plan.name,
+            "-p",
+            f"{host_port}:{container_port}",
+            "-e",
+            f"PORT={container_port}",
+        ]
+        for key, value in env_vars.items():
+            cmd.extend(["-e", f"{key}={value}"])
+        cmd.append(image)
+        try:
+            _run(cmd, timeout=180)
+            return host_port, notice
+        except AttachDeployError as exc:
+            last_error = exc
+            conflicted = _parse_allocated_bind_ports(str(exc))
+            if not conflicted or attempt >= _ATTACH_PORT_RETRY_ATTEMPTS:
+                raise
+            extra_busy |= conflicted
+            _run(["docker", "rm", "-f", container], timeout=60, check=False)
+    if last_error is not None:
+        raise last_error
+    raise AttachDeployError(f"docker run failed for {plan.name}")
+
+
+def _deploy_local_machine_multi(
+    *,
+    environment_id: str,
+    name: str,
+    running_instance: RunningInstanceConfig,
+    settings: Settings,
+    plans: list[_AttachServicePlan],
+) -> ProvisionedResources:
+    resources = ProvisionedResources(
+        namespace=f"instance-{environment_id[:8]}",
+        labels={
+            "launchpad.io/environment-id": environment_id,
+            "launchpad.io/deploy-mode": "attach",
+            "launchpad.io/attach-kind": RunningInstanceKind.LOCAL_MACHINE.value,
+            "launchpad.io/name": name,
+        },
+    )
+    host_preferred_frontend = int(running_instance.listen_port)
+    backends = [p for p in plans if p.app_kind == "backend"]
+    frontends = [p for p in plans if p.app_kind == "frontend"]
+    primary_backend = backends[0] if backends else None
+
+    if not _docker_available():
+        resources.simulated = True
+        resources.created_workload = True
+        endpoints: list[dict[str, object]] = []
+        for plan in plans:
+            if not plan.expose_preview:
+                continue
+            preferred = (
+                host_preferred_frontend
+                if plan.app_kind == "frontend"
+                else int(plan.listen_port)
+            )
+            endpoints.append(
+                _endpoint_dict(
+                    name=plan.name,
+                    app_kind=plan.app_kind,
+                    url=_url_for_port(settings, preferred),
+                    port=preferred,
+                )
+            )
+        _set_primary_preview(resources, endpoints)
+        resources.image = f"lp-ws-{_env_slug(environment_id)}-multi:local"
+        return _apply_override(resources, running_instance)
+
+    network = _network_name(environment_id)
+    _teardown_local_containers(environment_id)
+    _run(["docker", "network", "create", network], timeout=30, check=False)
+
+    # Start backends first so frontends can resolve API aliases.
+    ordered = [*backends, *frontends] if frontends or backends else list(plans)
+    extra_busy: set[int] = set()
+    notices: list[str] = []
+    endpoints = []
+    primary_image: str | None = None
+
+    backend_ports: dict[str, int] = {}
+    for plan in ordered:
+        image = _build_service_image(plan, environment_id)
+        if plan.app_kind == "frontend" or primary_image is None:
+            primary_image = image
+        container_port = _container_listen_port(
+            workspace_root=plan.context if plan.context.is_dir() else None,
+            fallback=plan.listen_port,
+        )
+        if plan.app_kind == "backend":
+            backend_ports[plan.name] = container_port
+        env_vars: dict[str, str] = {}
+        if plan.app_kind == "frontend" and primary_backend is not None:
+            be_port = backend_ports.get(
+                primary_backend.name,
+                primary_backend.listen_port,
+            )
+            api_url = f"http://{primary_backend.name}:{be_port}"
+            env_vars.update(
+                {
+                    "API_URL": api_url,
+                    "BACKEND_URL": api_url,
+                    "NEXT_PUBLIC_API_URL": api_url,
+                    "NUXT_PUBLIC_API_URL": api_url,
+                }
+            )
+        preferred_host = (
+            host_preferred_frontend
+            if plan.app_kind == "frontend"
+            else int(plan.listen_port)
+        )
+        host_port, notice = _run_service_container(
+            environment_id=environment_id,
+            plan=plan,
+            image=image,
+            network=network,
+            preferred_host=preferred_host,
+            container_port=container_port,
+            env_vars=env_vars,
+            publish=plan.expose_preview,
+            extra_busy=extra_busy,
+        )
+        if notice:
+            notices.append(notice)
+        if host_port is not None:
+            extra_busy.add(host_port)
+            endpoints.append(
+                _endpoint_dict(
+                    name=plan.name,
+                    app_kind=plan.app_kind,
+                    url=_url_for_port(settings, host_port),
+                    port=host_port,
+                )
+            )
+
+    resources.created_workload = True
+    resources.image = primary_image
+    if notices:
+        resources.notice = "; ".join(notices)
+    _set_primary_preview(resources, endpoints)
+    return _apply_override(resources, running_instance)
+
+
 def _deploy_local_machine(
     *,
     environment_id: str,
@@ -243,9 +643,54 @@ def _deploy_local_machine(
     running_instance: RunningInstanceConfig,
     settings: Settings,
     workspace_root: Path | None = None,
+    services: list[ContainerServiceSpec] | None = None,
 ) -> ProvisionedResources:
+    plans = _build_attach_service_plans(workspace_root, services)
+    # Multi-service instance: always run FE+BE on a shared network when the wizard
+    # listed 2+ services (or we discovered 2+ Dockerfiles).
+    if len(plans) >= 2 or (services is not None and len(services) >= 2 and len(plans) >= 1):
+        if len(plans) < 2 and services is not None and len(services) >= 2:
+            missing = [
+                s.name
+                for s in services
+                if _sanitize_svc(s.name) not in {p.name for p in plans}
+            ]
+            logger.warning(
+                "attach_multi_partial_plans",
+                environment_id=environment_id,
+                found=[p.name for p in plans],
+                missing=missing,
+            )
+        if len(plans) >= 2:
+            return _deploy_local_machine_multi(
+                environment_id=environment_id,
+                name=name,
+                running_instance=running_instance,
+                settings=settings,
+                plans=plans,
+            )
+
     preferred = int(running_instance.listen_port)
-    container_port = _container_listen_port(workspace_root=workspace_root, fallback=preferred)
+    if len(plans) == 1:
+        plan = plans[0]
+        built = _build_service_image(plan, environment_id) if _docker_available() else image
+        image = built
+        container_port = plan.listen_port
+        if plan.context.is_dir():
+            container_port = _container_listen_port(
+                workspace_root=plan.context,
+                fallback=plan.listen_port,
+            )
+        app_kind = plan.app_kind
+        service_name = plan.name
+    else:
+        container_port = _container_listen_port(
+            workspace_root=workspace_root,
+            fallback=preferred,
+        )
+        app_kind = "frontend"
+        service_name = "app"
+
     container = _container_name(environment_id)
     resources = ProvisionedResources(
         namespace=f"instance-{environment_id[:8]}",
@@ -262,8 +707,19 @@ def _deploy_local_machine(
         logger.warning("instance_local_docker_unavailable_simulate", environment_id=environment_id)
         resources.simulated = True
         resources.created_workload = True
-        resources.node_port = container_port
-        resources.preview_url = _url_for_port(settings, container_port)
+        resources.node_port = preferred
+        resources.preview_url = _url_for_port(settings, preferred)
+        _set_primary_preview(
+            resources,
+            [
+                _endpoint_dict(
+                    name=service_name,
+                    app_kind=app_kind,
+                    url=resources.preview_url or "",
+                    port=preferred,
+                )
+            ],
+        )
         return _apply_override(resources, running_instance)
 
     inspect = _run(
@@ -279,12 +735,22 @@ def _deploy_local_machine(
         )
         resources.simulated = True
         resources.created_workload = True
-        resources.node_port = container_port
-        resources.preview_url = _url_for_port(settings, container_port)
+        resources.node_port = preferred
+        resources.preview_url = _url_for_port(settings, preferred)
+        _set_primary_preview(
+            resources,
+            [
+                _endpoint_dict(
+                    name=service_name,
+                    app_kind=app_kind,
+                    url=resources.preview_url or "",
+                    port=preferred,
+                )
+            ],
+        )
         return _apply_override(resources, running_instance)
 
-    # Replace any prior container for this environment.
-    _run(["docker", "rm", "-f", container], timeout=60, check=False)
+    _teardown_local_containers(environment_id)
 
     extra_busy: set[int] = set()
     host_port = container_port
@@ -347,13 +813,25 @@ def _deploy_local_machine(
         logger.warning(
             "instance_local_host_port_remapped",
             environment_id=environment_id,
-            preferred=container_port,
+            preferred_host=preferred,
+            container_port=container_port,
             host_port=host_port,
         )
 
     resources.created_workload = True
     resources.node_port = host_port
     resources.preview_url = _url_for_port(settings, host_port)
+    _set_primary_preview(
+        resources,
+        [
+            _endpoint_dict(
+                name=service_name,
+                app_kind=app_kind,
+                url=resources.preview_url or "",
+                port=host_port,
+            )
+        ],
+    )
     return _apply_override(resources, running_instance)
 
 
@@ -531,6 +1009,7 @@ def deploy_attach(
     workspace_root: Path | None = None,
     packaging: object | None = None,
     settings: Settings | None = None,
+    services: list[ContainerServiceSpec] | None = None,
 ) -> ProvisionedResources:
     """Deploy (or link) a preview onto serverless / VM / local-machine compute."""
     _ = (namespace, git_branch, git_repo_url, ttl_expires_at, owner_label, enable_postgres, enable_redis, packaging)
@@ -551,6 +1030,7 @@ def deploy_attach(
             running_instance=running_instance,
             settings=cfg,
             workspace_root=workspace_root,
+            services=services,
         )
     if kind == RunningInstanceKind.VM:
         return _deploy_vm(
@@ -587,8 +1067,7 @@ def teardown_attach(
     container = _container_name(env_id)
 
     if kind == RunningInstanceKind.LOCAL_MACHINE:
-        if _docker_available():
-            _run(["docker", "rm", "-f", container], timeout=60, check=False)
+        _teardown_local_containers(env_id)
         return
 
     if kind == RunningInstanceKind.VM:

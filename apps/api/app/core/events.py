@@ -34,6 +34,7 @@ class EnvChannelEvent(BaseModel):
     app_ready: bool | None = None
     notice: str | None = None
     error_message: str | None = None
+    preview_endpoints: list[dict[str, object]] | None = None
 
 
 def env_channel(environment_id: UUID | str) -> str:
@@ -115,6 +116,7 @@ async def publish_env_event(
     app_ready: bool | None = None,
     notice: str | None = None,
     error_message: str | None = None,
+    preview_endpoints: list[dict[str, object]] | None = None,
 ) -> None:
     ts = timestamp or datetime.now(UTC)
     payload = EnvChannelEvent(
@@ -131,6 +133,7 @@ async def publish_env_event(
         app_ready=app_ready,
         notice=notice,
         error_message=error_message,
+        preview_endpoints=preview_endpoints,
     )
     channel = env_channel(environment_id)
     # Short-lived client: safe across Celery asyncio.run() per-task loops.

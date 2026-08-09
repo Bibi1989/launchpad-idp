@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Environment, EnvironmentStatus } from '~/types/environment'
 import { envStreamToPatch } from '~/utils/envStreamPatch'
+import { secondaryPreviewEndpoints } from '~/utils/previewEndpoints'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -103,7 +104,7 @@ const canResume = computed(
 
 const canDestroy = computed(() => {
   const s = liveStatus.value
-  return s !== 'DESTROYED' && s !== 'TEARDOWN_PENDING' && s !== 'PROVISIONING'
+  return s !== 'DESTROYED' && s !== 'TEARDOWN_PENDING'
 })
 
 const canRetry = computed(() => {
@@ -127,6 +128,7 @@ const isLocal = computed(() => Boolean(props.environment.is_local))
 
 const hasPostgres = computed(() => Boolean(props.environment.enable_postgres))
 const hasRedis = computed(() => Boolean(props.environment.enable_redis))
+const alsoExposed = computed(() => secondaryPreviewEndpoints(props.environment))
 
 const previewHref = computed(() => {
   if (props.environment.app_ready && props.environment.preview_url) {
@@ -318,6 +320,15 @@ function onCardKeydown(event: KeyboardEvent) {
       >{{ logLines.length ? logLines.join('\n') : t('common.loadingEllipsis') }}</pre>
     </div>
 
+    <div
+      v-if="alsoExposed.length"
+      class="border-t border-[var(--lp-line)] bg-[var(--lp-ink)]/40 px-4 py-2.5"
+      @click.stop
+    >
+      <p class="lp-label mb-1.5">{{ t('environments.preview.alsoExposed') }}</p>
+      <PreviewEndpointsList :endpoints="alsoExposed" dense />
+    </div>
+
     <div class="flex items-center gap-2 border-t border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 px-4 py-3" @click.stop>
       <a
         v-if="canOpenApp && previewHref"
@@ -326,6 +337,7 @@ function onCardKeydown(event: KeyboardEvent) {
         rel="noopener noreferrer"
         class="lp-btn-primary flex-1 py-1.5 text-center text-xs uppercase tracking-wide"
       >
+        <span class="material-symbols-outlined mr-1 align-middle text-sm">open_in_new</span>
         {{ t('environments.card.openApp') }}
       </a>
       <span
@@ -415,7 +427,11 @@ function onCardKeydown(event: KeyboardEvent) {
             @click="emit('destroy', environment.id); closeActionsMenu()"
           >
             <span class="material-symbols-outlined text-base">delete</span>
-            {{ t('environments.card.destroy') }}
+            {{
+              liveStatus === 'PROVISIONING'
+                ? t('environments.actions.stopProvision')
+                : t('environments.card.destroy')
+            }}
           </button>
         </div>
       </div>

@@ -831,11 +831,12 @@ class EnvironmentService:
                 },
             )
 
+        prior_status = environment.status
         await self._environments.update_status(environment, EnvironmentStatus.TEARDOWN_PENDING)
         await self._logs.create(
             environment_id=environment.id,
             message=(
-                f"Force teardown requested during {environment.status.value} "
+                f"Force teardown requested during {prior_status.value} "
                 f"(correlation_id={correlation_id})"
                 if force
                 else f"Teardown requested (correlation_id={correlation_id})"

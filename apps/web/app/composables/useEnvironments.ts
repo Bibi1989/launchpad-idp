@@ -92,8 +92,12 @@ export function useEnvironments() {
     return apiFetch<Environment>(`/environments/${id}`)
   }
 
-  async function destroy(id: string): Promise<Environment> {
-    const environment = await apiFetch<Environment>(`/environments/${id}`, {
+  async function destroy(
+    id: string,
+    opts: { force?: boolean } = {},
+  ): Promise<Environment> {
+    const query = opts.force ? '?force=true' : ''
+    const environment = await apiFetch<Environment>(`/environments/${id}${query}`, {
       method: 'DELETE',
     })
     await refresh()

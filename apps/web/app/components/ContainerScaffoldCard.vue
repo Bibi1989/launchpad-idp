@@ -398,7 +398,10 @@ function downloadFile() {
               >
             </div>
 
-            <label class="flex items-center gap-1.5 self-end pb-1 text-[11px] text-[var(--lp-muted)]">
+            <label
+              class="flex items-center gap-1.5 self-end pb-1 text-[11px] text-[var(--lp-muted)]"
+              :title="t('scaffold.containerCard.exposePreviewHint')"
+            >
               <input
                 type="checkbox"
                 class="accent-[var(--lp-accent)]"
@@ -420,6 +423,10 @@ function downloadFile() {
           </div>
         </div>
       </div>
+
+      <p class="text-[11px] leading-relaxed text-[var(--lp-muted)]">
+        {{ t('scaffold.containerCard.exposePreviewHint') }}
+      </p>
 
       <div class="flex flex-wrap gap-4 pt-1">
         <label class="flex items-center gap-2 text-xs text-[var(--lp-text)]">

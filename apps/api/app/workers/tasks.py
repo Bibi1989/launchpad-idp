@@ -188,6 +188,7 @@ async def _publish_status(
     app_ready: bool | None = None,
     notice: str | None = None,
     error_message: str | None = None,
+    preview_endpoints: list[dict[str, object]] | None = None,
 ) -> None:
     await publish_env_event(
         environment_id,
@@ -201,6 +202,7 @@ async def _publish_status(
         app_ready=app_ready,
         notice=notice,
         error_message=error_message,
+        preview_endpoints=preview_endpoints,
     )
 
 
@@ -778,6 +780,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         from app.services.provisioning import ProvisioningService
 
                         running_instance = RunningInstanceConfig()
+                        attach_services = None
                         packaging: KubernetesPackaging | None = None
                         if workspace_id is not None:
                             provisioning = ProvisioningService(session)
@@ -795,6 +798,9 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                             {**snapshot, "has_credentials": False}
                                         )
                                         running_instance = wizard.running_instance
+                                        attach_services = list(
+                                            wizard.container_scaffold.services or []
+                                        )
                                     except Exception:
                                         logger.warning(
                                             "attach_wizard_snapshot_invalid",
@@ -829,6 +835,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 workspace_root=workspace_root,
                                 packaging=packaging,
                                 settings=settings,
+                                services=attach_services,
                             )
                         except AttachDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -934,18 +941,28 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     await _attach_preview_tunnel(env_uuid, environment, resources)
                     await _attach_cloud_preview_url(env_uuid, environment, resources, provisioner)
 
+                    from app.schemas.environment import dump_preview_endpoints
+
+                    endpoints = list(getattr(resources, "preview_endpoints", None) or [])
+                    endpoints_json = dump_preview_endpoints(endpoints) if endpoints else None
                     await env_repo.update_status(
                         environment,
                         EnvironmentStatus.RUNNING,
                         preview_url=resources.preview_url,
                         node_port=resources.node_port,
                         workload_image=resources.image,
+                        preview_endpoints_json=endpoints_json,
                     )
-                    preview_note = (
-                        f" Open app: {resources.preview_url}"
-                        if resources.preview_url
-                        else ""
-                    )
+                    if endpoints:
+                        preview_note = " Previews: " + ", ".join(
+                            f"{e.get('name')}={e.get('url')}" for e in endpoints
+                        )
+                    else:
+                        preview_note = (
+                            f" Open app: {resources.preview_url}"
+                            if resources.preview_url
+                            else ""
+                        )
                     remap_note = (
                         f" {resources.notice}."
                         if getattr(resources, "notice", None)
@@ -1021,6 +1038,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         node_port=resources.node_port,
                         app_ready=bool(resources.preview_url),
                         notice=getattr(resources, "notice", None),
+                        preview_endpoints=endpoints or None,
                     )
                 except PreviewCancelled:
                     # Force-delete during provisioning. Leave status TEARDOWN_PENDING
@@ -1324,6 +1342,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         from app.services.provisioning import ProvisioningService
 
                         running_instance = RunningInstanceConfig()
+                        attach_services = None
                         packaging: KubernetesPackaging | None = None
                         if workspace_id is not None:
                             provisioning = ProvisioningService(session)
@@ -1341,6 +1360,9 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                             {**snapshot, "has_credentials": False}
                                         )
                                         running_instance = wizard.running_instance
+                                        attach_services = list(
+                                            wizard.container_scaffold.services or []
+                                        )
                                     except Exception:
                                         pass
 
@@ -1356,7 +1378,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                             commit_sha=short_sha,
                         )
                         try:
-                            await asyncio.to_thread(
+                            rebuild_resources = await asyncio.to_thread(
                                 deploy_attach,
                                 namespace=environment.namespace_name,
                                 environment_id=str(environment.id),
@@ -1374,6 +1396,24 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                 workspace_root=workspace_root,
                                 packaging=packaging,
                                 settings=settings,
+                                services=attach_services,
+                            )
+                            from app.schemas.environment import dump_preview_endpoints
+
+                            rebuild_endpoints = list(
+                                getattr(rebuild_resources, "preview_endpoints", None) or []
+                            )
+                            await env_repo.update_status(
+                                environment,
+                                EnvironmentStatus.PROVISIONING,
+                                preview_url=rebuild_resources.preview_url,
+                                node_port=rebuild_resources.node_port,
+                                workload_image=rebuild_resources.image or rebuild_image,
+                                preview_endpoints_json=(
+                                    dump_preview_endpoints(rebuild_endpoints)
+                                    if rebuild_endpoints
+                                    else None
+                                ),
                             )
                         except AttachDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -2214,8 +2254,23 @@ async def _attach_preview_tunnel(env_uuid: object, environment: object, resource
         url = await asyncio.to_thread(
             start_preview_tunnel, environment_id=str(env_uuid), node_port=node_port
         )
-        if url:
-            resources.preview_url = url
+        if not url:
+            return
+        resources.preview_url = url
+        endpoints = list(getattr(resources, "preview_endpoints", None) or [])
+        if not endpoints:
+            return
+        updated: list[dict[str, object]] = []
+        frontend_updated = False
+        for ep in endpoints:
+            item = dict(ep)
+            if not frontend_updated and item.get("app_kind") == "frontend":
+                item["url"] = url
+                frontend_updated = True
+            updated.append(item)
+        if not frontend_updated and updated:
+            updated[0]["url"] = url
+        resources.preview_endpoints = updated
     except Exception:
         logger.exception("preview_tunnel_attach_failed", environment_id=str(env_uuid))
 

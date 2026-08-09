@@ -53,10 +53,9 @@ def find_compose_file(workspace_root: Path) -> Path | None:
 
 
 def _infer_app_kind_from_name(name: str) -> str:
-    lowered = name.strip().lower()
-    if any(token in lowered for token in ("web", "ui", "frontend", "spa", "next", "nuxt")):
-        return "frontend"
-    return "backend"
+    from app.services.service_kind import is_frontend_service_name
+
+    return "frontend" if is_frontend_service_name(name) else "backend"
 
 
 def discover_scaffolded_app_services(workspace_root: Path) -> list[dict[str, object]]:

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import type { AuditLogEntry, Environment, PreviewLaunchPayload } from '~/types/environment'
 import { applyEnvStreamPatch } from '~/utils/envStreamPatch'
+import {
+  resolvePreviewEndpoints,
+  secondaryPreviewEndpoints,
+} from '~/utils/previewEndpoints'
 
 type CloudProvider = Exclude<PreviewLaunchPayload['provider'], 'local'>
 
@@ -125,6 +129,13 @@ const canResume = computed(
 
 const appHref = computed(() => resolvePreviewUrl(environment.value ?? undefined))
 
+const previewEndpoints = computed(() =>
+  environment.value ? resolvePreviewEndpoints(environment.value) : [],
+)
+const alsoExposedEndpoints = computed(() =>
+  environment.value ? secondaryPreviewEndpoints(environment.value) : [],
+)
+
 const portalHref = computed(() => {
   if (!environment.value) return '#'
   return environment.value.portal_url || `/p/${environment.value.id}`
@@ -216,7 +227,11 @@ function toggleActionsMenu() {
   actionsMenuOpen.value = !actionsMenuOpen.value
 }
 
-const destroyAction = define(() => destroy(environment.value!.id), {
+const destroyAction = define(
+  () => destroy(environment.value!.id, {
+    force: environment.value?.status === 'PROVISIONING',
+  }),
+  {
   success: () => ({ title: t('environments.toasts.destroyed'), message: `${environment.value?.name ?? 'Environment'} is being destroyed.` }),
   error: (err) => ({ title: t('environments.toasts.destroyFailed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; connect(env.id) },
@@ -556,7 +571,7 @@ onUnmounted(() => {
                   {{ t('common.status') }}
                 </a>
                 <button
-                  v-if="environment.status !== 'DESTROYED' && environment.status !== 'TEARDOWN_PENDING' && environment.status !== 'PROVISIONING'"
+                  v-if="environment.status !== 'DESTROYED' && environment.status !== 'TEARDOWN_PENDING'"
                   type="button"
                   role="menuitem"
                   class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-danger)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
@@ -564,7 +579,13 @@ onUnmounted(() => {
                   @click="requestDestroy(); closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base">delete</span>
-                  {{ destroyAction.pending ? t('environments.actions.queuingTeardown') : t('environments.actions.destroy') }}
+                  {{
+                    destroyAction.pending
+                      ? t('environments.actions.queuingTeardown')
+                      : (environment.status === 'PROVISIONING'
+                        ? t('environments.actions.stopProvision')
+                        : t('environments.actions.destroy'))
+                  }}
                 </button>
               </div>
             </div>
@@ -609,21 +630,34 @@ onUnmounted(() => {
         </div>
 
         <div class="grid gap-6 p-5 sm:grid-cols-2 lg:grid-cols-3">
-          <div>
-            <p class="lp-label">{{ t('environments.detail.appUrl') }}</p>
-            <a
-              v-if="canOpenApp && appHref"
-              :href="appHref"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="mt-1 block break-all font-mono text-xs text-[var(--lp-accent)] hover:underline"
-            >
-              {{ appHref }}
-            </a>
-            <p v-else-if="isProvisioning" class="mt-1 text-sm text-[var(--lp-muted)]">
-              {{ t('environments.detail.appUrlWhenRunning') }}
-            </p>
-            <p v-else class="mt-1 text-sm text-[var(--lp-muted)]">{{ t('common.notSet') }}</p>
+          <div class="sm:col-span-2 lg:col-span-2">
+            <p class="lp-label">{{ t('environments.preview.allUrls') }}</p>
+            <div v-if="previewEndpoints.length" class="mt-2 space-y-3">
+              <PreviewEndpointsList :endpoints="previewEndpoints" />
+              <p
+                v-if="alsoExposedEndpoints.length"
+                class="text-[11px] text-[var(--lp-muted)]"
+              >
+                {{ t('environments.detail.openApp') }}
+                → {{ t('environments.preview.frontend') }}
+              </p>
+            </div>
+            <template v-else>
+              <a
+                v-if="canOpenApp && appHref"
+                :href="appHref"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="mt-1 inline-flex items-center gap-2 break-all font-mono text-xs text-[var(--lp-accent)] hover:underline"
+              >
+                {{ appHref }}
+                <span class="material-symbols-outlined text-sm">open_in_new</span>
+              </a>
+              <p v-else-if="isProvisioning" class="mt-1 text-sm text-[var(--lp-muted)]">
+                {{ t('environments.detail.appUrlWhenRunning') }}
+              </p>
+              <p v-else class="mt-1 text-sm text-[var(--lp-muted)]">{{ t('common.notSet') }}</p>
+            </template>
           </div>
           <div>
             <p class="lp-label">{{ t('environments.detail.ttlRemaining') }}</p>
@@ -801,9 +835,11 @@ onUnmounted(() => {
 
       <ConfirmDialog
         v-model:open="confirmDestroyOpen"
-        :title="t('environments.destroy.title')"
-        :message="t('environments.destroy.message', { name: environment.name })"
-        :confirm-label="t('environments.destroy.confirm')"
+        :title="environment.status === 'PROVISIONING' ? t('environments.destroy.titleStop') : t('environments.destroy.title')"
+        :message="environment.status === 'PROVISIONING'
+          ? t('environments.destroy.messageProvisioning', { name: environment.name })
+          : t('environments.destroy.message', { name: environment.name })"
+        :confirm-label="environment.status === 'PROVISIONING' ? t('environments.destroy.confirmStop') : t('environments.destroy.confirm')"
         :cancel-label="t('environments.destroy.cancel')"
         :busy="destroyAction.pending"
         @confirm="onDestroy"

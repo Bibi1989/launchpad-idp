@@ -11,6 +11,14 @@ export type LogLevel = 'INFO' | 'WARN' | 'ERROR'
 
 export type EnvStreamEventType = 'STATUS_CHANGE' | 'LOG' | 'EXECUTION_FAILED'
 
+export interface PreviewEndpoint {
+  name: string
+  app_kind: 'frontend' | 'backend' | string
+  url: string
+  port?: number | null
+  exposed?: boolean
+}
+
 export interface EnvStreamEvent {
   type: EnvStreamEventType
   status?: string | null
@@ -25,6 +33,7 @@ export interface EnvStreamEvent {
   app_ready?: boolean | null
   notice?: string | null
   error_message?: string | null
+  preview_endpoints?: PreviewEndpoint[] | null
 }
 
 export interface Environment {
@@ -38,6 +47,8 @@ export interface Environment {
   status: EnvironmentStatus
   namespace_name: string
   preview_url: string | null
+  preview_endpoints_json?: string | null
+  preview_endpoints?: PreviewEndpoint[]
   template_id: string | null
   provider?: string | null
   workload_image?: string | null

@@ -476,6 +476,13 @@ export default {
       "namespaceGroup": "namespace group",
       "namespaceGroups": "namespace groups"
     },
+    "preview": {
+      "frontend": "frontend",
+      "backend": "API",
+      "openTab": "Open in new tab",
+      "allUrls": "Preview URLs",
+      "alsoExposed": "Also exposed"
+    },
     "detail": {
       "crumb": "Environments",
       "openApp": "Open app",
@@ -530,6 +537,7 @@ export default {
       "retry": "Retry provision",
       "retrying": "Retrying…",
       "destroy": "Destroy",
+      "stopProvision": "Stop provisioning",
       "queuingTeardown": "Queuing teardown…",
       "copyUrl": "Copy URL",
       "copied": "Copied",
@@ -542,8 +550,11 @@ export default {
     },
     "destroy": {
       "title": "Destroy environment?",
+      "titleStop": "Stop provisioning?",
       "message": "Destroy preview \"{name}\"? Kubernetes resources for this environment will be torn down. This cannot be undone.",
+      "messageProvisioning": "Stop provisioning \"{name}\"? In-flight work will be cancelled and any started resources will be torn down.",
       "confirm": "Yes, destroy",
+      "confirmStop": "Yes, stop",
       "cancel": "No"
     },
     "card": {
@@ -774,7 +785,7 @@ export default {
         "sshUser": "SSH user",
         "sshPort": "SSH port",
         "sshKeyPath": "SSH private key path (on control plane)",
-        "listenPort": "App listen port",
+        "listenPort": "Host publish port",
         "endpointUrl": "Preview URL override (optional)",
         "kinds": {
           "serverless": "Cloud Run / Container Apps",
@@ -1667,7 +1678,8 @@ export default {
       "serviceName": "Service Name",
       "frameworkStack": "Framework Stack",
       "port": "Port",
-      "exposePreview": "Open in browser",
+      "exposePreview": "Preview URL",
+      "exposePreviewHint": "Checked services get a host preview URL. Unchecked backends stay private on the instance network; the frontend still connects via API_URL.",
       "generateDockerfile": "Generate Multi-Stage Dockerfiles (USER 10001)",
       "generateCompose": "Generate docker-compose.yml",
       "dockerCompose": "docker-compose.yml"

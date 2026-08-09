@@ -375,6 +375,145 @@ def test_attach_local_machine_simulates_without_docker() -> None:
     assert resources.preview_url == "http://127.0.0.1:9090"
 
 
+def test_attach_multi_service_exposes_frontend_and_optional_backend(tmp_path: Path) -> None:
+    from app.schemas.cloud import ContainerServiceSpec
+
+    web = tmp_path / "apps" / "web-ui"
+    api = tmp_path / "apps" / "api-server"
+    web.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (web / "Dockerfile").write_text("FROM node:20-alpine\nEXPOSE 3000\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM node:20-alpine\nEXPOSE 8080\n", encoding="utf-8")
+
+    settings = Settings.model_construct(
+        default_workload_image="node:20-alpine",
+        preview_node_host="127.0.0.1",
+    )
+    run_calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *, timeout: float, check: bool = True):
+        _ = timeout
+        run_calls.append(cmd)
+        if cmd[:2] == ["docker", "build"]:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        if cmd[:2] == ["docker", "run"]:
+            return MagicMock(returncode=0, stdout="cid\n", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch("app.services.attach_deploy._docker_available", return_value=True),
+        patch(
+            "app.services.attach_deploy.list_docker_published_host_ports",
+            return_value=set(),
+        ),
+        patch(
+            "app.services.compose_deploy.is_host_port_available",
+            return_value=True,
+        ),
+        patch("app.services.attach_deploy._run", side_effect=fake_run),
+    ):
+        resources = deploy_attach(
+            namespace="ns",
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            name="demo",
+            git_branch="main",
+            git_repo_url="https://example.com/repo.git",
+            ttl_expires_at="2099-01-01T00:00:00+00:00",
+            running_instance=RunningInstanceConfig(
+                kind=RunningInstanceKind.LOCAL_MACHINE,
+                listen_port=8090,
+            ),
+            settings=settings,
+            workspace_root=tmp_path,
+            services=[
+                ContainerServiceSpec(
+                    name="web-ui",
+                    app_kind="frontend",
+                    listen_port=3000,
+                    expose_preview=True,
+                ),
+                ContainerServiceSpec(
+                    name="api-server",
+                    app_kind="backend",
+                    listen_port=8080,
+                    expose_preview=True,
+                ),
+            ],
+        )
+
+    assert resources.preview_url == "http://127.0.0.1:8090"
+    assert resources.node_port == 8090
+    assert len(resources.preview_endpoints) == 2
+    names = {e["name"] for e in resources.preview_endpoints}
+    assert names == {"web-ui", "api-server"}
+    run_cmds = [" ".join(c) for c in run_calls if c[:2] == ["docker", "run"]]
+    assert any("NEXT_PUBLIC_API_URL=http://api-server:8080" in c for c in run_cmds)
+    assert any("-p 8090:3000" in c for c in run_cmds)
+    assert any("-p 8080:8080" in c for c in run_cmds)
+
+
+def test_attach_local_machine_publishes_user_host_port_to_expose(tmp_path: Path) -> None:
+    """User listen_port is host publish; Dockerfile EXPOSE is container port."""
+    (tmp_path / "Dockerfile").write_text(
+        "FROM node:20-alpine\nEXPOSE 3000\n",
+        encoding="utf-8",
+    )
+    settings = Settings.model_construct(
+        default_workload_image="node:20-alpine",
+        preview_node_host="127.0.0.1",
+    )
+    inspect_ok = MagicMock(returncode=0, stdout="[]", stderr="")
+    rm_ok = MagicMock(returncode=0, stdout="", stderr="")
+    run_ok = MagicMock(returncode=0, stdout="cid\n", stderr="")
+
+    def fake_run(cmd: list[str], *, timeout: float, check: bool = True):
+        _ = timeout
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return inspect_ok
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return rm_ok
+        if cmd[:2] == ["docker", "run"]:
+            publish = cmd[cmd.index("-p") + 1]
+            assert publish == "8090:3000"
+            assert "PORT=3000" in cmd
+            return run_ok
+        if check:
+            raise AttachDeployError(f"unexpected cmd: {cmd}")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch("app.services.attach_deploy._docker_available", return_value=True),
+        patch(
+            "app.services.attach_deploy.list_docker_published_host_ports",
+            return_value=set(),
+        ),
+        patch(
+            "app.services.compose_deploy.is_host_port_available",
+            return_value=True,
+        ),
+        patch("app.services.attach_deploy._run", side_effect=fake_run),
+    ):
+        resources = deploy_attach(
+            namespace="ns",
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            name="demo",
+            git_branch="main",
+            git_repo_url="https://example.com/repo.git",
+            ttl_expires_at="2099-01-01T00:00:00+00:00",
+            running_instance=RunningInstanceConfig(
+                kind=RunningInstanceKind.LOCAL_MACHINE,
+                listen_port=8090,
+            ),
+            settings=settings,
+            workspace_root=tmp_path,
+        )
+
+    assert resources.node_port == 8090
+    assert resources.preview_url == "http://127.0.0.1:8090"
+
+
 def test_attach_local_machine_remaps_busy_host_port() -> None:
     settings = Settings.model_construct(
         default_workload_image="nginx:alpine",
@@ -473,18 +612,36 @@ def test_resolve_instance_image_skips_default_when_workspace_dockerfile(tmp_path
 
 
 
+def test_find_workspace_dockerfile_prefers_web_over_api(tmp_path) -> None:
+    from app.services.attach_deploy import _find_workspace_dockerfile
+
+    web = tmp_path / "apps" / "web"
+    api = tmp_path / "apps" / "api"
+    web.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (web / "Dockerfile").write_text("FROM node\nEXPOSE 3000\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM node\nEXPOSE 8080\n", encoding="utf-8")
+    found = _find_workspace_dockerfile(tmp_path)
+    assert found is not None
+    dockerfile, context = found
+    assert context.name == "web"
+    assert dockerfile.parent.name == "web"
+
+
 def test_teardown_attach_local() -> None:
     with (
         patch("app.services.attach_deploy._docker_available", return_value=True),
         patch("app.services.attach_deploy._run") as run,
     ):
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         teardown_attach(
             running_instance=RunningInstanceConfig(kind=RunningInstanceKind.LOCAL_MACHINE),
             namespace="ns",
             environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         )
-    run.assert_called_once()
-    assert run.call_args.args[0][0] == "docker"
+    cmds = [c.args[0] for c in run.call_args_list]
+    assert ["docker", "rm", "-f", "lp-inst-aaaaaaaabbbb"] in cmds
+    assert ["docker", "network", "rm", "lp-net-aaaaaaaabbbb"] in cmds
 
 
 def test_coerce_wizard_snapshot_defaults_runtime() -> None:

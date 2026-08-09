@@ -424,6 +424,13 @@ export default {
       "namespaceGroup": "Namespace-Gruppe",
       "namespaceGroups": "Namespace-Gruppen"
     },
+    "preview": {
+      "frontend": "Frontend",
+      "backend": "API",
+      "openTab": "In neuem Tab öffnen",
+      "allUrls": "Preview-URLs",
+      "alsoExposed": "Zusätzlich erreichbar"
+    },
     "detail": {
       "crumb": "Umgebungen",
       "openApp": "App öffnen",
@@ -478,6 +485,7 @@ export default {
       "retry": "Provision erneut",
       "retrying": "Erneut versuchen…",
       "destroy": "Zerstören",
+      "stopProvision": "Bereitstellung stoppen",
       "queuingTeardown": "Abbau wird geplant…",
       "copyUrl": "URL kopieren",
       "copied": "Kopiert",
@@ -490,8 +498,11 @@ export default {
     },
     "destroy": {
       "title": "Umgebung zerstören?",
+      "titleStop": "Bereitstellung stoppen?",
       "message": "Preview \"{name}\" zerstören? Kubernetes-Ressourcen für diese Umgebung werden abgebaut. Dies kann nicht rückgängig gemacht werden.",
+      "messageProvisioning": "Bereitstellung von \"{name}\" stoppen? Laufende Arbeit wird abgebrochen und bereits gestartete Ressourcen werden abgebaut.",
       "confirm": "Ja, zerstören",
+      "confirmStop": "Ja, stoppen",
       "cancel": "Nein"
     },
     "card": {
@@ -780,7 +791,7 @@ export default {
         "sshUser": "SSH-Benutzer",
         "sshPort": "SSH-Port",
         "sshKeyPath": "Pfad zum SSH-Privtschlüssel (Control Plane)",
-        "listenPort": "App-Port",
+        "listenPort": "Host-Publish-Port",
         "endpointUrl": "Preview-URL-Override (optional)",
         "kinds": {
           "serverless": "Cloud Run / Container Apps",
@@ -1665,7 +1676,8 @@ export default {
       "serviceName": "Service-Name",
       "frameworkStack": "Framework-Stack",
       "port": "Port",
-      "exposePreview": "Im Browser öffnen",
+      "exposePreview": "Preview-URL",
+      "exposePreviewHint": "Aktivierte Services erhalten eine Host-Preview-URL. Deaktivierte Backends bleiben privat im Instanznetzwerk; das Frontend verbindet sich weiterhin über API_URL.",
       "generateDockerfile": "Multi-Stage-Dockerfiles erzeugen (USER 10001)",
       "generateCompose": "docker-compose.yml erzeugen",
       "dockerCompose": "docker-compose.yml"

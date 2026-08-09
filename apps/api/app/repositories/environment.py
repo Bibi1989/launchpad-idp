@@ -217,6 +217,7 @@ class EnvironmentRepository:
         node_port: int | None = None,
         workload_image: str | None = None,
         github_pr_url: str | None = None,
+        preview_endpoints_json: str | None = None,
     ) -> Environment:
         environment.status = status
         environment.error_message = error_message
@@ -230,6 +231,8 @@ class EnvironmentRepository:
             environment.workload_image = workload_image
         if github_pr_url is not None:
             environment.github_pr_url = github_pr_url
+        if preview_endpoints_json is not None:
+            environment.preview_endpoints_json = preview_endpoints_json
         if status == EnvironmentStatus.DESTROYED:
             self._release_unique_identity(environment)
         await self._session.flush()

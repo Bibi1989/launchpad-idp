@@ -430,6 +430,7 @@ class Environment(Base):
     )
     namespace_name: Mapped[str] = mapped_column(String(253), nullable=False, unique=True)
     preview_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    preview_endpoints_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     template_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
     workload_image: Mapped[str | None] = mapped_column(String(256), nullable=True)

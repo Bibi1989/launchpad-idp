@@ -169,18 +169,8 @@ def normalize_artifacts_for_runtime_mode(
                     "generate_docker_compose": False,
                 }
             )
-        # Open-app must hit the frontend/app listen port, not a stale 8080 default.
-        preview_svc = next(
-            (
-                s
-                for s in scaffold.services
-                if (s.expose_preview is True)
-                or (s.expose_preview is None and str(s.app_kind or "").lower() == "frontend")
-            ),
-            scaffold.services[0] if scaffold.services else None,
-        )
-        if preview_svc is not None and preview_svc.listen_port:
-            instance = instance.model_copy(update={"listen_port": int(preview_svc.listen_port)})
+        # Keep running_instance.listen_port as the user-chosen host publish port.
+        # Container port comes from Dockerfile EXPOSE / service scaffold at attach time.
         return (
             WorkspaceArtifactsMode.IAC_ONLY
             if artifact_mode == WorkspaceArtifactsMode.MANIFEST_ONLY

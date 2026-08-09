@@ -55,7 +55,7 @@ describe('workspaceRuntimeMode', () => {
     expect(result.containerScaffold.services?.[0]?.name).toBe('api')
   })
 
-  it('syncs instance listen_port from preview frontend service', () => {
+  it('preserves user host listen_port over scaffold service ports', () => {
     const result = normalizeArtifactsForRuntimeMode({
       provider: 'local',
       runtimeMode: 'running_instance',
@@ -81,9 +81,12 @@ describe('workspaceRuntimeMode', () => {
           },
         ],
       },
-      runningInstance: defaultRunningInstanceConfig('local'),
+      runningInstance: {
+        ...defaultRunningInstanceConfig('local'),
+        listen_port: 8090,
+      },
     })
-    expect(result.runningInstance.listen_port).toBe(3000)
+    expect(result.runningInstance.listen_port).toBe(8090)
   })
 })
 

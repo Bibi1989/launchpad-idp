@@ -200,6 +200,8 @@ class ProvisionedResources:
     labels: dict[str, str] = field(default_factory=dict)
     # User-facing note (e.g. Compose host port remapped because preferred was busy).
     notice: str | None = None
+    # Exposed preview endpoints (frontend first). Open-app uses preview_url.
+    preview_endpoints: list[dict[str, object]] = field(default_factory=list)
 
 
 class KubernetesProvisioner:

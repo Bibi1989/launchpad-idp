@@ -20,6 +20,9 @@ export function applyEnvStreamPatch(
   if (event.node_port !== undefined && event.node_port !== null) {
     env.node_port = event.node_port
   }
+  if (event.preview_endpoints !== undefined && event.preview_endpoints !== null) {
+    env.preview_endpoints = event.preview_endpoints
+  }
   if (event.app_ready !== undefined && event.app_ready !== null) {
     env.app_ready = event.app_ready
   } else if (event.status === 'RUNNING' && event.preview_url) {
@@ -48,6 +51,9 @@ export function envStreamToPatch(
   }
   if (event.node_port !== undefined && event.node_port !== null) {
     patch.node_port = event.node_port
+  }
+  if (event.preview_endpoints !== undefined && event.preview_endpoints !== null) {
+    patch.preview_endpoints = event.preview_endpoints
   }
   if (event.app_ready !== undefined && event.app_ready !== null) {
     patch.app_ready = event.app_ready

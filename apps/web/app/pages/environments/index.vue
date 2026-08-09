@@ -42,11 +42,17 @@ const resumeAction = define((id: string) => resumeEnvironment(id), {
   error: (err) => ({ title: t('environments.toasts.resumeFailed'), message: toastError(err, t('common.failed')) }),
 })
 
-const pendingDestroyName = computed(() => {
+const pendingDestroyEnv = computed(() => {
   const id = confirmDestroyId.value
-  if (!id) return ''
-  return environments.value.find((env) => env.id === id)?.name ?? 'this environment'
+  if (!id) return null
+  return environments.value.find((env) => env.id === id) ?? null
 })
+
+const pendingDestroyName = computed(() => pendingDestroyEnv.value?.name ?? 'this environment')
+
+const pendingDestroyIsProvisioning = computed(
+  () => pendingDestroyEnv.value?.status === 'PROVISIONING',
+)
 
 const linkedWorkspaceId = computed(() => {
   const raw = route.query.workspace
@@ -157,8 +163,9 @@ async function onDestroy() {
   confirmDestroyId.value = null
   destroyingId.value = id
   const name = envName(id)
+  const env = environments.value.find((item) => item.id === id)
   try {
-    await destroy(id)
+    await destroy(id, { force: env?.status === 'PROVISIONING' })
     await refresh()
     await loadOrgCosts()
     toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)
@@ -315,9 +322,11 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
 
     <ConfirmDialog
       :open="confirmDestroyId !== null"
-      :title="t('environments.destroy.title')"
-      :message="t('environments.destroy.message', { name: pendingDestroyName })"
-      :confirm-label="t('environments.destroy.confirm')"
+      :title="pendingDestroyIsProvisioning ? t('environments.destroy.titleStop') : t('environments.destroy.title')"
+      :message="pendingDestroyIsProvisioning
+        ? t('environments.destroy.messageProvisioning', { name: pendingDestroyName })
+        : t('environments.destroy.message', { name: pendingDestroyName })"
+      :confirm-label="pendingDestroyIsProvisioning ? t('environments.destroy.confirmStop') : t('environments.destroy.confirm')"
       :cancel-label="t('environments.destroy.cancel')"
       :busy="destroyingId !== null"
       @update:open="(value) => { if (!value) confirmDestroyId = null }"

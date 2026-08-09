@@ -166,20 +166,8 @@ export function normalizeArtifactsForRuntimeMode(input: {
           generate_dockerfile: true,
           generate_docker_compose: false,
         }
-    const services = scaffold.services ?? []
-    const previewSvc
-      = services.find(
-        (s) =>
-          s.expose_preview === true
-          || (s.expose_preview == null && s.app_kind === 'frontend'),
-      )
-      || services[0]
-    if (previewSvc?.listen_port) {
-      runningInstance = {
-        ...runningInstance,
-        listen_port: previewSvc.listen_port,
-      }
-    }
+    // Keep runningInstance.listen_port as the user-chosen host publish port.
+    // Container port is resolved from Dockerfile EXPOSE / service scaffold at attach.
     return {
       artifactMode:
         input.artifactMode === 'manifest_only' ? 'iac_only' : input.artifactMode,

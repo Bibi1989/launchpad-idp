@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -10,6 +12,46 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.models.domain import EnvironmentStatus, ExecutionStage, LogLevel
 from app.schemas.k8s import DeployMode
 from app.schemas.cloud import CloudCredentials
+
+
+class PreviewEndpoint(BaseModel):
+    """One browser-reachable service preview (instance / compose multi-URL)."""
+
+    name: str
+    app_kind: str = "backend"
+    url: str
+    port: int | None = None
+    exposed: bool = True
+
+
+def parse_preview_endpoints_json(raw: str | None) -> list[PreviewEndpoint]:
+    if not raw or not str(raw).strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[PreviewEndpoint] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(PreviewEndpoint.model_validate(item))
+        except Exception:
+            continue
+    return out
+
+
+def dump_preview_endpoints(endpoints: list[dict[str, Any]] | list[PreviewEndpoint]) -> str:
+    payload: list[dict[str, Any]] = []
+    for item in endpoints:
+        if isinstance(item, PreviewEndpoint):
+            payload.append(item.model_dump(mode="json"))
+        else:
+            payload.append(dict(item))
+    return json.dumps(payload)
 
 
 class PreviewProvider(str, Enum):
@@ -105,6 +147,7 @@ class EnvironmentRead(BaseModel):
     status: EnvironmentStatus
     namespace_name: str
     preview_url: str | None = None
+    preview_endpoints_json: str | None = None
     template_id: str | None = None
     provider: str | None = None
     workload_image: str | None = None
@@ -137,6 +180,7 @@ class EnvironmentRead(BaseModel):
     runtime_summary: str | None = None
     drift_detected: bool = False
     drift_summary: str | None = None
+    preview_endpoints: list[PreviewEndpoint] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def compute_runtime_fields(self) -> EnvironmentRead:
@@ -159,6 +203,21 @@ class EnvironmentRead(BaseModel):
             now=now,
         )
         self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
+        if not self.preview_endpoints:
+            self.preview_endpoints = parse_preview_endpoints_json(self.preview_endpoints_json)
+        if (
+            not self.preview_endpoints
+            and self.preview_url
+        ):
+            self.preview_endpoints = [
+                PreviewEndpoint(
+                    name="app",
+                    app_kind="frontend",
+                    url=self.preview_url,
+                    port=self.node_port,
+                    exposed=True,
+                )
+            ]
         if not self.app_ready:
             self.app_ready = bool(self.preview_url) and self.status in {
                 EnvironmentStatus.RUNNING,

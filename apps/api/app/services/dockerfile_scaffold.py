@@ -127,13 +127,12 @@ def scaffold_docker_compose(
 
 
 def _service_is_frontend(service: dict[str, object]) -> bool:
-    kind = str(service.get("app_kind") or "").strip().lower()
-    if kind == "frontend":
-        return True
-    if kind == "backend":
-        return False
-    name = str(service.get("name") or "").strip().lower()
-    return any(token in name for token in ("web", "ui", "frontend", "spa", "next", "nuxt"))
+    from app.services.service_kind import is_frontend_app_kind
+
+    return is_frontend_app_kind(
+        str(service.get("app_kind") or ""),
+        name=str(service.get("name") or ""),
+    )
 
 
 def _service_expose_preview(service: dict[str, object]) -> bool:
