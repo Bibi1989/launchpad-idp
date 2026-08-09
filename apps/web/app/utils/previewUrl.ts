@@ -1,4 +1,5 @@
 const LOCAL_HOSTS = ['127.0.0.1', 'localhost', '::1', 'localtest.me']
+const K8S_DEPLOY_MODES = new Set(['preview', 'manifest'])
 
 function extractPort(url: string): number | null {
   try {
@@ -15,6 +16,10 @@ function extractPort(url: string): number | null {
 
 function isLoopbackHost(hostname: string): boolean {
   return LOCAL_HOSTS.includes(hostname)
+}
+
+function usesWorkspaceIngress(deployMode?: string | null): boolean {
+  return K8S_DEPLOY_MODES.has((deployMode || '').toLowerCase())
 }
 
 /**
@@ -58,11 +63,8 @@ function looksLikeBrokenApexNodePort(url: string, viewerHost: string): boolean {
     if (parsed.hostname.startsWith('ws-') && parsed.hostname.endsWith(`.${viewerHost}`)) {
       return false
     }
-    // Apex + published port (unreachable via Cloudflare host routing).
     if (parsed.hostname === viewerHost && parsed.port) return true
-    // Loopback NodePort stored while the operator is on the public IDP host.
     if (isLoopbackHost(parsed.hostname) && parsed.port) return true
-    // Hostless ``http://:2001``.
     if (!parsed.hostname && parsed.port) return true
     return false
   } catch {
@@ -75,12 +77,14 @@ export interface PreviewUrlSource {
   preview_url?: string | null
   node_port?: number | null
   provider?: string | null
+  deploy_mode?: string | null
 }
 
 export interface LocalizePreviewUrlInput {
   url: string
   port?: number | null
   provider?: string | null
+  deployMode?: string | null
   environmentId?: string | null
   /** Override browser hostname (for tests). */
   viewerHost?: string
@@ -104,10 +108,12 @@ export function localizePreviewUrl(input: LocalizePreviewUrlInput): string {
     return `http://${viewerHost}:${port}`
   }
 
-  // Repair mistaken apex:port / loopback NodePort URLs for remote prod viewers.
+  // Repair mistaken apex:port / loopback NodePort URLs for remote k8s viewers only.
+  // Attach/compose must not invent ws-* hosts (no Ingress → Cloudflare 404).
   if (
     !isLocalViewer
     && input.environmentId
+    && usesWorkspaceIngress(input.deployMode)
     && looksLikeBrokenApexNodePort(url, viewerHost)
   ) {
     return workspaceIngressUrl(input.environmentId, viewerHost)
@@ -125,7 +131,6 @@ export function localizePreviewUrl(input: LocalizePreviewUrlInput): string {
     /* fall through */
   }
 
-  // Only rewrite loopback onto the viewer host when the viewer is local.
   if (isLocalViewer) {
     return rewriteLoopbackHost(url, viewerHost) ?? url
   }
@@ -133,12 +138,7 @@ export function localizePreviewUrl(input: LocalizePreviewUrlInput): string {
 }
 
 /**
- * Resolve the "Open app" URL for how the user is *currently* reaching Launchpad:
- *
- *  - Local preview, viewed from localhost  → http://localhost:<node_port>
- *  - Local preview, viewed via a tunnel/remote host → stored public URL
- *    (``*.trycloudflare.com`` or ``https://ws-{id}.{domain}``)
- *  - Cloud/production preview → stored public URL (never ``apex:node_port``)
+ * Resolve the "Open app" URL for how the user is *currently* reaching Launchpad.
  */
 export function resolvePreviewUrl(
   source: PreviewUrlSource | string | null | undefined,
@@ -148,7 +148,6 @@ export function resolvePreviewUrl(
     return localizePreviewUrl({ url: source, provider: 'local' })
   }
 
-  // SSR / no browser: trust the API-stored public URL.
   if (typeof window === 'undefined') {
     return source.preview_url ?? null
   }
@@ -166,13 +165,19 @@ export function resolvePreviewUrl(
       url: source.preview_url,
       port: source.node_port,
       provider: source.provider,
+      deployMode: source.deploy_mode,
       environmentId: source.id,
       viewerHost: host,
     })
   }
 
-  // Remote viewers: prefer workspace ingress over inventing apex:node_port.
-  if (source.node_port && source.id && !isLocalViewer) {
+  // Remote k8s viewers: prefer workspace ingress over inventing apex:node_port.
+  if (
+    source.node_port
+    && source.id
+    && !isLocalViewer
+    && usesWorkspaceIngress(source.deploy_mode)
+  ) {
     return workspaceIngressUrl(source.id, host)
   }
 

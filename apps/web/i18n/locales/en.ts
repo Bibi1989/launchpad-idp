@@ -483,6 +483,18 @@ export default {
       "allUrls": "Preview URLs",
       "alsoExposed": "Also exposed"
     },
+    "deployKind": {
+      "title": "Provision runtime",
+      "kubernetes": "Kubernetes",
+      "docker": "Docker Compose",
+      "instance": "Instance"
+    },
+    "datastoreStatus": {
+      "pending": "starting",
+      "running": "connected",
+      "failed": "failed",
+      "stopped": "stopped"
+    },
     "detail": {
       "crumb": "Environments",
       "openApp": "Open app",

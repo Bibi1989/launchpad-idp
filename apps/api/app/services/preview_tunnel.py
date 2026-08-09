@@ -52,6 +52,47 @@ def tunnel_enabled(settings: Settings | None = None) -> bool:
     return shutil.which(cfg.cloudflared_bin) is not None
 
 
+def tunnel_upstream_host(settings: Settings | None = None) -> str:
+    """Host cloudflared should dial for the local preview port.
+
+    Workers in Docker must target the Docker host (published ports / k3d NodePorts),
+    not the worker container's own loopback.
+    """
+    cfg = _settings(settings)
+    explicit = (cfg.preview_tunnel_upstream_host or "").strip()
+    if explicit:
+        return explicit
+    if Path("/.dockerenv").exists():
+        return "host.docker.internal"
+    return "127.0.0.1"
+
+
+def should_attach_preview_tunnel(
+    *,
+    deploy_mode: str | None,
+    preview_url: str | None,
+    settings: Settings | None = None,
+) -> bool:
+    """Whether to start a quick tunnel for this local preview.
+
+    Skip when the URL is already a workspace Ingress host (``ws-*``) - those are
+    served by the named Cloudflare Tunnel. Attach/compose need a quick tunnel for
+    remote Open-app when mode is cloudflared.
+    """
+    cfg = _settings(settings)
+    if not tunnel_enabled(cfg):
+        return False
+    url = (preview_url or "").strip().lower()
+    base = (cfg.preview_base_domain or "").strip().strip(".").lower()
+    if base and url.startswith("https://ws-") and f".{base}" in url:
+        return False
+    mode = (deploy_mode or "").strip().lower()
+    if mode in {"preview", "manifest"} and base and cfg.preview_tunnel_active:
+        if url.startswith("https://ws-"):
+            return False
+    return True
+
+
 def _state_dir(cfg: Settings) -> Path:
     configured = (cfg.preview_tunnel_state_dir or "").strip()
     base = Path(configured).expanduser() if configured else Path.home() / ".launchpad"
@@ -153,6 +194,7 @@ def _terminate(pid: int) -> None:
 def _spawn_quick_tunnel(cfg: Settings, node_port: int) -> tuple[int, str] | None:
     """Launch a detached cloudflared quick tunnel; return (pid, log_path) or None."""
     log_fd, log_path = tempfile.mkstemp(prefix=f"launchpad-tunnel-{node_port}-", suffix=".log")
+    upstream = f"http://{tunnel_upstream_host(cfg)}:{node_port}"
     try:
         proc = subprocess.Popen(
             [
@@ -160,7 +202,7 @@ def _spawn_quick_tunnel(cfg: Settings, node_port: int) -> tuple[int, str] | None
                 "tunnel",
                 "--no-autoupdate",
                 "--url",
-                f"http://127.0.0.1:{node_port}",
+                upstream,
             ],
             stdout=log_fd,
             stderr=subprocess.STDOUT,
@@ -168,7 +210,12 @@ def _spawn_quick_tunnel(cfg: Settings, node_port: int) -> tuple[int, str] | None
         )
     except (OSError, ValueError) as exc:
         os.close(log_fd)
-        logger.warning("preview_tunnel_spawn_failed", node_port=node_port, error=str(exc))
+        logger.warning(
+            "preview_tunnel_spawn_failed",
+            node_port=node_port,
+            upstream=upstream,
+            error=str(exc),
+        )
         return None
     finally:
         try:

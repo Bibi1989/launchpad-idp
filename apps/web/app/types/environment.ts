@@ -78,6 +78,8 @@ export interface Environment {
   manifest_packaging?: string | null
   enable_postgres?: boolean
   enable_redis?: boolean
+  postgres_status?: 'pending' | 'running' | 'failed' | 'stopped' | string | null
+  redis_status?: 'pending' | 'running' | 'failed' | 'stopped' | string | null
   drift_detected?: boolean
   drift_summary?: string | null
 }

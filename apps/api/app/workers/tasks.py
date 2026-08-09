@@ -2236,10 +2236,12 @@ def _run_dockerfile_build(job_id: str, request_payload: dict) -> None:
 async def _attach_preview_tunnel(env_uuid: object, environment: object, resources: object) -> None:
     """Point a local preview's ``preview_url`` at a per-preview cloudflared tunnel.
 
-    No-op unless ``PREVIEW_TUNNEL_MODE=cloudflared`` and this is a local NodePort
-    preview. On success it rewrites ``resources.preview_url`` in place so the caller
-    persists the public ``*.trycloudflare.com`` URL as the Open-app link. Any failure
-    is swallowed - a missing tunnel just falls back to the NodePort URL.
+    No-op unless ``PREVIEW_TUNNEL_MODE=cloudflared`` and this is a local NodePort /
+    Docker-publish preview. Skips Kubernetes Ingress URLs (``ws-*``) which the named
+    Cloudflare Tunnel already serves. On success it rewrites ``resources.preview_url``
+    in place so the caller persists the public ``*.trycloudflare.com`` URL as the
+    Open-app link. Any failure is swallowed - a missing tunnel just falls back to the
+    NodePort URL.
     """
     try:
         node_port = getattr(resources, "node_port", None)
@@ -2247,9 +2249,19 @@ async def _attach_preview_tunnel(env_uuid: object, environment: object, resource
             return
         if (getattr(environment, "provider", None) or "").lower() != "local":
             return
-        from app.services.preview_tunnel import start_preview_tunnel, tunnel_enabled
+        from app.services.preview_tunnel import (
+            should_attach_preview_tunnel,
+            start_preview_tunnel,
+        )
 
-        if not tunnel_enabled():
+        deploy_mode = getattr(environment, "deploy_mode", None)
+        deploy_mode_s = (
+            deploy_mode.value if hasattr(deploy_mode, "value") else str(deploy_mode or "")
+        )
+        if not should_attach_preview_tunnel(
+            deploy_mode=deploy_mode_s,
+            preview_url=getattr(resources, "preview_url", None),
+        ):
             return
         url = await asyncio.to_thread(
             start_preview_tunnel, environment_id=str(env_uuid), node_port=node_port

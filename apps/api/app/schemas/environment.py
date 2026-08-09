@@ -181,10 +181,15 @@ class EnvironmentRead(BaseModel):
     drift_detected: bool = False
     drift_summary: str | None = None
     preview_endpoints: list[PreviewEndpoint] = Field(default_factory=list)
+    # Derived datastore health for UI (not persisted).
+    postgres_status: str | None = None
+    redis_status: str | None = None
 
     @model_validator(mode="after")
     def compute_runtime_fields(self) -> EnvironmentRead:
         from app.services.cost_metering import display_cost_accrued
+        from app.services.datastore_status import derive_datastore_status
+        from app.services.preview_urls import repair_stored_preview_url
 
         now = datetime.now(UTC)
         created = self.created_at
@@ -203,11 +208,16 @@ class EnvironmentRead(BaseModel):
             now=now,
         )
         self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
-        from app.services.preview_urls import repair_stored_preview_url
-
+        deploy_mode = (
+            self.deploy_mode.value
+            if hasattr(self.deploy_mode, "value")
+            else str(self.deploy_mode or "")
+        )
         if self.preview_url:
             self.preview_url = repair_stored_preview_url(
-                self.preview_url, environment_id=self.id
+                self.preview_url,
+                environment_id=self.id,
+                deploy_mode=deploy_mode,
             )
         if not self.preview_endpoints:
             self.preview_endpoints = parse_preview_endpoints_json(self.preview_endpoints_json)
@@ -217,7 +227,11 @@ class EnvironmentRead(BaseModel):
                 repaired_eps.append(
                     ep.model_copy(
                         update={
-                            "url": repair_stored_preview_url(ep.url, environment_id=self.id)
+                            "url": repair_stored_preview_url(
+                                ep.url,
+                                environment_id=self.id,
+                                deploy_mode=deploy_mode,
+                            )
                             or ep.url
                         }
                     )
@@ -241,6 +255,16 @@ class EnvironmentRead(BaseModel):
                 EnvironmentStatus.RUNNING,
                 EnvironmentStatus.FAILED,
             }
+        self.postgres_status = derive_datastore_status(
+            enabled=self.enable_postgres,
+            env_status=self.status,
+            app_ready=self.app_ready,
+        )
+        self.redis_status = derive_datastore_status(
+            enabled=self.enable_redis,
+            env_status=self.status,
+            app_ready=self.app_ready,
+        )
         return self
 
 

@@ -431,6 +431,18 @@ export default {
       "allUrls": "Preview-URLs",
       "alsoExposed": "Zusätzlich erreichbar"
     },
+    "deployKind": {
+      "title": "Provisionierungs-Laufzeit",
+      "kubernetes": "Kubernetes",
+      "docker": "Docker Compose",
+      "instance": "Instanz"
+    },
+    "datastoreStatus": {
+      "pending": "startet",
+      "running": "verbunden",
+      "failed": "fehlgeschlagen",
+      "stopped": "gestoppt"
+    },
     "detail": {
       "crumb": "Umgebungen",
       "openApp": "App öffnen",

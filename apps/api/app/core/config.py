@@ -235,6 +235,9 @@ class Settings(BaseSettings):
     preview_tunnel_timeout_seconds: float = 30.0
     # Where the tunnel registry (pid/url per preview) is persisted; default ~/.launchpad
     preview_tunnel_state_dir: str | None = None
+    # Upstream host for quick tunnels. Inside Docker workers use host.docker.internal
+    # so published host ports / NodePorts on the Docker host are reachable.
+    preview_tunnel_upstream_host: str | None = None
 
     # Cloud/production previews: how long to wait for a LoadBalancer/Ingress to get a
     # public address before falling back to the default preview URL.

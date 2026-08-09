@@ -39,9 +39,14 @@ RUN set -eux; \
     mv /tmp/docker/docker /usr/local/bin/docker; \
     rm -rf /tmp/docker; \
     curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash; \
+    # cloudflared quick tunnels for attach/compose Open-app on production hosts
+    curl -fsSLo /usr/local/bin/cloudflared \
+      "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${KARCH}"; \
+    chmod +x /usr/local/bin/cloudflared; \
     kubectl version --client=true; \
     docker --version; \
-    k3d version
+    k3d version; \
+    cloudflared --version
 
 COPY apps/api/pyproject.toml ./
 COPY apps/api/app ./app

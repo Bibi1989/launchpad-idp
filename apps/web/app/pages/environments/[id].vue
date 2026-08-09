@@ -411,6 +411,7 @@ onUnmounted(() => {
           <div class="min-w-0 space-y-3">
             <h1 class="text-3xl font-semibold tracking-tight">{{ environment.name }}</h1>
             <div class="flex flex-wrap items-center gap-3">
+              <DeployKindBadge :deploy-mode="environment.deploy_mode" />
               <StatusBadge :status="displayStatus" />
               <EnvironmentHealthDot :status="displayStatus" :app-ready="environment.app_ready" />
               <span class="break-all font-mono text-xs text-[var(--lp-muted)]">{{ environment.namespace_name }}</span>
@@ -704,20 +705,16 @@ onUnmounted(() => {
           <div v-if="environment.enable_postgres || environment.enable_redis">
             <p class="lp-label">{{ t('environments.detail.datastores') }}</p>
             <div class="mt-1 flex flex-wrap gap-2">
-              <span
+              <DatastoreStatusBadge
                 v-if="environment.enable_postgres"
-                class="inline-flex items-center gap-1 rounded border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-300"
-              >
-                <span class="material-symbols-outlined text-sm">database</span>
-                {{ t('environments.detail.postgres') }}
-              </span>
-              <span
+                name="postgres"
+                :status="environment.postgres_status || 'pending'"
+              />
+              <DatastoreStatusBadge
                 v-if="environment.enable_redis"
-                class="inline-flex items-center gap-1 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-300"
-              >
-                <span class="material-symbols-outlined text-sm">memory</span>
-                {{ t('environments.detail.redis') }}
-              </span>
+                name="redis"
+                :status="environment.redis_status || 'pending'"
+              />
             </div>
             <p class="mt-1 text-[10px] text-[var(--lp-muted)]">
               {{ t('environments.detail.datastoresInjected') }}

@@ -130,6 +130,13 @@ const hasPostgres = computed(() => Boolean(props.environment.enable_postgres))
 const hasRedis = computed(() => Boolean(props.environment.enable_redis))
 const alsoExposed = computed(() => secondaryPreviewEndpoints(props.environment))
 
+const postgresStatus = computed(
+  () => props.environment.postgres_status || (hasPostgres.value ? 'pending' : null),
+)
+const redisStatus = computed(
+  () => props.environment.redis_status || (hasRedis.value ? 'pending' : null),
+)
+
 const previewHref = computed(() => {
   if (props.environment.app_ready && props.environment.preview_url) {
     return resolvePreviewUrl(props.environment)
@@ -209,7 +216,10 @@ function onCardKeydown(event: KeyboardEvent) {
         </p>
       </div>
       <div class="flex flex-col items-end gap-1.5">
-        <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
+        <div class="flex flex-wrap items-center justify-end gap-1.5">
+          <DeployKindBadge :deploy-mode="environment.deploy_mode" />
+          <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
+        </div>
         <EnvironmentHealthDot :status="displayStatus" :app-ready="environment.app_ready" />
       </div>
     </div>
@@ -234,22 +244,16 @@ function onCardKeydown(event: KeyboardEvent) {
         </div>
 
         <div class="flex flex-wrap gap-2">
-          <span
+          <DatastoreStatusBadge
             v-if="hasPostgres"
-            class="inline-flex items-center gap-1 rounded border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-300"
-            title="Ephemeral Postgres in this preview namespace"
-          >
-            <span class="material-symbols-outlined text-sm">database</span>
-            Postgres
-          </span>
-          <span
+            name="postgres"
+            :status="postgresStatus"
+          />
+          <DatastoreStatusBadge
             v-if="hasRedis"
-            class="inline-flex items-center gap-1 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-300"
-            title="Ephemeral Redis in this preview namespace"
-          >
-            <span class="material-symbols-outlined text-sm">memory</span>
-            Redis
-          </span>
+            name="redis"
+            :status="redisStatus"
+          />
           <span
             class="inline-flex items-center gap-1.5 rounded border border-[var(--lp-line)] bg-[var(--lp-panel-2)] px-3 py-1.5 text-xs text-[var(--lp-accent)]"
             :title="environment.git_repo_url"

@@ -20,6 +20,7 @@ function env(partial: Partial<Environment>): Environment {
     preview_url: null,
     template_id: null,
     provider: 'local',
+    deploy_mode: 'preview',
     ttl_expires_at: new Date().toISOString(),
     cost_estimate_hourly: '0',
     cost_accrued: '0',
@@ -49,6 +50,7 @@ describe('localizePreviewUrl', () => {
         url: 'https://pike-aspects-tub-baltimore.trycloudflare.com',
         port: 8090,
         provider: 'local',
+        deployMode: 'attach',
         viewerHost: 'preview.example.com',
       }),
     ).toBe('https://pike-aspects-tub-baltimore.trycloudflare.com')
@@ -65,16 +67,30 @@ describe('localizePreviewUrl', () => {
     ).toBe('https://bluetooth-deck-wanting-katie.trycloudflare.com')
   })
 
-  it('repairs apex:port into workspace ingress for remote viewers', () => {
+  it('repairs apex:port into workspace ingress for remote k8s viewers', () => {
     expect(
       localizePreviewUrl({
         url: 'http://launchpad-idp.online:2001',
         port: 2001,
         provider: 'local',
+        deployMode: 'preview',
         environmentId: 'e8f9cf54-60c2-4556-8e45-2b654ea4e976',
         viewerHost: 'launchpad-idp.online',
       }),
     ).toBe('https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online')
+  })
+
+  it('does not invent ws-* hosts for attach/compose on remote viewers', () => {
+    expect(
+      localizePreviewUrl({
+        url: 'http://127.0.0.1:8090',
+        port: 8090,
+        provider: 'local',
+        deployMode: 'attach',
+        environmentId: 'e8f9cf54-60c2-4556-8e45-2b654ea4e976',
+        viewerHost: 'launchpad-idp.online',
+      }),
+    ).toBe('http://127.0.0.1:8090')
   })
 
   it('keeps existing workspace ingress urls', () => {
@@ -83,6 +99,7 @@ describe('localizePreviewUrl', () => {
         url: 'https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online',
         port: 2001,
         provider: 'local',
+        deployMode: 'preview',
         environmentId: 'e8f9cf54-60c2-4556-8e45-2b654ea4e976',
         viewerHost: 'launchpad-idp.online',
       }),
@@ -126,16 +143,31 @@ describe('previewEndpoints', () => {
     expect(secondaryPreviewEndpoints(e).map((x) => x.name)).toEqual(['api-server'])
   })
 
-  it('repairs prod apex:port preview urls to workspace ingress', () => {
+  it('repairs prod apex:port preview urls to workspace ingress for k8s', () => {
     vi.stubGlobal('window', {
       location: { hostname: 'launchpad-idp.online', protocol: 'https:' },
     })
     const e = env({
+      deploy_mode: 'preview',
       preview_url: 'http://launchpad-idp.online:2001',
       node_port: 2001,
     })
     expect(resolvePreviewUrl(e)).toBe(
       'https://ws-e8f9cf54-60c2-4556-8e45-2b654ea4e976.launchpad-idp.online',
+    )
+  })
+
+  it('keeps trycloudflare for remote attach viewers', () => {
+    vi.stubGlobal('window', {
+      location: { hostname: 'launchpad-idp.online', protocol: 'https:' },
+    })
+    const e = env({
+      deploy_mode: 'attach',
+      preview_url: 'https://pike-aspects-tub-baltimore.trycloudflare.com',
+      node_port: 8090,
+    })
+    expect(resolvePreviewUrl(e)).toBe(
+      'https://pike-aspects-tub-baltimore.trycloudflare.com',
     )
   })
 

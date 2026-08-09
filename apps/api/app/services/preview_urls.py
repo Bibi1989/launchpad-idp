@@ -47,14 +47,30 @@ def looks_like_broken_apex_node_port(url: str, *, apex: str) -> bool:
     return False
 
 
+_K8S_DEPLOY_MODES = frozenset({"preview", "manifest"})
+
+
+def deploy_mode_uses_workspace_ingress(deploy_mode: str | None) -> bool:
+    """True when this mode creates ``ws-*`` Ingress (not Docker publish / attach)."""
+    return (deploy_mode or "").strip().lower() in _K8S_DEPLOY_MODES
+
+
 def repair_stored_preview_url(
     url: str | None,
     *,
     environment_id: UUID | str,
+    deploy_mode: str | None = None,
     settings: Settings | None = None,
 ) -> str | None:
-    """Replace apex:port / loopback NodePort with workspace ingress when configured."""
+    """Replace apex:port / loopback NodePort with workspace ingress when configured.
+
+    Only applies to Kubernetes modes (``preview`` / ``manifest``). Attach and
+    compose publish host ports (and optional trycloudflare tunnels); inventing a
+    ``ws-*`` host for them causes Cloudflare 404 because no Ingress exists.
+    """
     if not url:
+        return url
+    if not deploy_mode_uses_workspace_ingress(deploy_mode):
         return url
     cfg = settings or get_settings()
     base = (cfg.preview_base_domain or "").strip().strip(".")

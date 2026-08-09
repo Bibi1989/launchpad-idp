@@ -45,6 +45,7 @@ export function resolvePreviewEndpoints(env: Environment): PreviewEndpoint[] {
         url: endpoint.url,
         port,
         provider: env.provider ?? 'local',
+        deployMode: env.deploy_mode,
         environmentId: env.id,
       }),
       port,
