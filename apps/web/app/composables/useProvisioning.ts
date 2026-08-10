@@ -24,6 +24,8 @@ import type { GitHubRepoInput, ProvisioningWizardInput } from '~/utils/cloudVali
 import { costOptimizationToApi } from '~/utils/costOptimization'
 
 const PROVISION_TIMEOUT_MS = 90_000
+/** Kind/k3d cold start during open_terminal can exceed the IaC timeout. */
+const LOCAL_CLUSTER_TIMEOUT_MS = 300_000
 const GITHUB_TIMEOUT_MS = 60_000
 /** Docker pull + inspect can take several minutes for cold images. */
 const IMAGE_INSPECT_TIMEOUT_MS = 210_000
@@ -89,8 +91,14 @@ export function useProvisioning() {
     })
   }
 
-  async function listWorkspaces(opts?: { starred?: boolean }): Promise<WorkspaceListItem[]> {
-    const query = opts?.starred ? '?starred=true' : ''
+  async function listWorkspaces(opts?: {
+    starred?: boolean
+    projectId?: string | null
+  }): Promise<WorkspaceListItem[]> {
+    const params = new URLSearchParams()
+    if (opts?.starred) params.set('starred', 'true')
+    if (opts?.projectId) params.set('project_id', opts.projectId)
+    const query = params.toString() ? `?${params.toString()}` : ''
     return apiFetch<WorkspaceListItem[]>(`/provisioning/workspaces${query}`)
   }
 
@@ -145,7 +153,8 @@ export function useProvisioning() {
         rows: opts.rows ?? 40,
         run_init: opts.run_init ?? true,
       }),
-      timeoutMs: PROVISION_TIMEOUT_MS,
+      // Local Kubernetes may run ensure_kind_cluster here (cold cluster).
+      timeoutMs: LOCAL_CLUSTER_TIMEOUT_MS,
     })
   }
 

@@ -1236,11 +1236,31 @@ class KubernetesProvisioner:
         )
         try:
             self._networking.read_namespaced_ingress("app", namespace, _request_timeout=10)
-            self._networking.replace_namespaced_ingress("app", namespace, ingress, _request_timeout=10)
+            self._networking.replace_namespaced_ingress(
+                "app", namespace, ingress, _request_timeout=(5, 30)
+            )
         except ApiException as exc:
+            if exc.status in {408, 504}:
+                raise RuntimeError(
+                    "Kubernetes API timed out applying Ingress "
+                    f"(HTTP {exc.status}). Check KUBERNETES_CONTEXT points at your "
+                    "local cluster; gateway timeouts usually mean a remote/unreachable API."
+                ) from exc
             if exc.status != 404:
                 raise
-            self._networking.create_namespaced_ingress(namespace, ingress, _request_timeout=10)
+            try:
+                self._networking.create_namespaced_ingress(
+                    namespace, ingress, _request_timeout=(5, 30)
+                )
+            except ApiException as create_exc:
+                if create_exc.status in {408, 504}:
+                    raise RuntimeError(
+                        "Kubernetes API timed out creating Ingress "
+                        f"(HTTP {create_exc.status}). Check KUBERNETES_CONTEXT points at "
+                        "your local cluster; gateway timeouts usually mean a remote/"
+                        "unreachable API."
+                    ) from create_exc
+                raise
         logger.info(
             "kubernetes_ingress_applied",
             namespace=namespace,

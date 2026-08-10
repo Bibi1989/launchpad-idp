@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -300,9 +300,14 @@ async def test_ttl_reaper_queues_teardown(
 
     monkeypatch.setattr("app.workers.tasks._session_factory", lambda: session_factory)
 
-    with patch("app.workers.tasks.KubernetesProvisioner.scale_deployment") as mock_scale:
+    with (
+        patch("app.workers.tasks.KubernetesProvisioner") as mock_prov_cls,
+        patch("app.workers.tasks._reclaim_environment_runtime", new_callable=AsyncMock) as mock_reclaim,
+    ):
+        mock_prov_cls.return_value = MagicMock()
+        mock_reclaim.return_value = "kubernetes namespace removed; removed 1 image(s)"
         reaped = await _run_ttl_reaper()
-        mock_scale.assert_called_once_with(namespace="launchpad-env-expired", replicas=0)
+        mock_reclaim.assert_called_once()
         assert reaped == 1
 
     async with session_factory() as session:

@@ -154,6 +154,8 @@ class EnvironmentRead(BaseModel):
     node_port: int | None = None
     github_pr_number: int | None = None
     github_pr_url: str | None = None
+    jira_issue_key: str | None = None
+    jira_issue_url: str | None = None
     stable_pr_url: str | None = None
     deploy_mode: DeployMode = DeployMode.PREVIEW
     manifest_packaging: str | None = None

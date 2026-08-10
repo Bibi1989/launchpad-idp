@@ -38,6 +38,8 @@ export interface DetectionResult {
   root_markers: string[]
   package_globs: string[]
   summary: string
+  has_kubernetes?: boolean
+  has_compose?: boolean
 }
 
 export interface RepoImportSession {

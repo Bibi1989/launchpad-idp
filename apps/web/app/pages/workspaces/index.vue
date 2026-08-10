@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { WorkspaceListItem } from '~/types/provisioning'
+import type { ProjectSummary } from '~/types/auth'
 import { artifactModeLabel, workspaceStackLabel } from '~/utils/workspaceDisplay'
 
 const { t } = useI18n()
 const route = useRoute()
 const { listWorkspaces, destroyWorkspace, setWorkspaceStarred } = useProvisioning()
+const { getProject } = useProjects()
 const workspaces = ref<WorkspaceListItem[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -18,6 +20,18 @@ const confirmDestroyOpen = computed({
   },
 })
 const importOpen = ref(false)
+const filterProject = ref<ProjectSummary | null>(null)
+
+const projectIdFilter = computed(() => {
+  const raw = route.query.project_id
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+})
+
+const provisionHref = computed(() =>
+  projectIdFilter.value
+    ? `/provision?project_id=${encodeURIComponent(projectIdFilter.value)}`
+    : '/provision',
+)
 
 const pendingDestroyName = computed(() => {
   const id = confirmDestroyId.value
@@ -29,11 +43,23 @@ async function refresh() {
   loading.value = true
   error.value = null
   try {
-    workspaces.value = await listWorkspaces()
+    workspaces.value = await listWorkspaces({
+      projectId: projectIdFilter.value,
+    })
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('workspaces.errors.load')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadFilterProject() {
+  filterProject.value = null
+  if (!projectIdFilter.value) return
+  try {
+    filterProject.value = await getProject(projectIdFilter.value)
+  } catch {
+    filterProject.value = null
   }
 }
 
@@ -82,6 +108,7 @@ async function onImportSaved() {
 }
 
 onMounted(async () => {
+  await loadFilterProject()
   await refresh()
   if (route.query.import === '1' || route.query.import === 'true') {
     importOpen.value = true
@@ -92,6 +119,14 @@ watch(
   () => route.query.import,
   (value) => {
     if (value === '1' || value === 'true') importOpen.value = true
+  },
+)
+
+watch(
+  projectIdFilter,
+  async () => {
+    await loadFilterProject()
+    await refresh()
   },
 )
 </script>
@@ -110,12 +145,36 @@ watch(
           <span class="material-symbols-outlined text-base">download</span>
           {{ t('workspaces.index.import') }}
         </button>
-        <NuxtLink to="/provision" class="lp-btn-primary">
+        <NuxtLink :to="provisionHref" class="lp-btn-primary">
           <span class="material-symbols-outlined text-base">add</span>
           {{ t('workspaces.index.create') }}
         </NuxtLink>
       </div>
     </header>
+
+    <div
+      v-if="projectIdFilter"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 px-4 py-3"
+    >
+      <div class="min-w-0">
+        <p class="lp-label">{{ t('workspaces.index.filteredByProject') }}</p>
+        <p class="truncate text-sm font-medium text-[var(--lp-text)]">
+          {{ filterProject?.name || projectIdFilter }}
+        </p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <NuxtLink
+          v-if="filterProject"
+          :to="`/projects/${filterProject.id}`"
+          class="lp-btn-ghost text-xs"
+        >
+          {{ t('workspaces.index.backToProject') }}
+        </NuxtLink>
+        <NuxtLink to="/workspaces" class="lp-btn-ghost text-xs">
+          {{ t('workspaces.index.clearProjectFilter') }}
+        </NuxtLink>
+      </div>
+    </div>
 
     <p v-if="error" class="text-sm text-[var(--lp-danger)]">{{ error }}</p>
     <AppSplash
@@ -129,12 +188,18 @@ watch(
       class="rounded-xl border border-dashed border-[var(--lp-line)] px-6 py-12 text-center"
     >
       <span class="material-symbols-outlined mb-3 text-4xl text-[var(--lp-muted)]">folder_off</span>
-      <p class="text-sm text-[var(--lp-muted)]">{{ t('workspaces.index.empty') }}</p>
+      <p class="text-sm text-[var(--lp-muted)]">
+        {{
+          projectIdFilter
+            ? t('workspaces.index.emptyForProject')
+            : t('workspaces.index.empty')
+        }}
+      </p>
       <div class="mt-4 flex flex-wrap justify-center gap-2">
         <button type="button" class="lp-btn-ghost inline-flex" @click="openImport">
           {{ t('workspaces.index.importCta') }}
         </button>
-        <NuxtLink to="/provision" class="lp-btn-primary inline-flex">{{ t('workspaces.index.createCta') }}</NuxtLink>
+        <NuxtLink :to="provisionHref" class="lp-btn-primary inline-flex">{{ t('workspaces.index.createCta') }}</NuxtLink>
       </div>
     </div>
 
@@ -157,41 +222,39 @@ watch(
               {{ workspaceStackLabel(ws) }}
             </p>
             <p class="mt-1">
-              <span class="rounded border border-[var(--lp-line)] bg-[var(--lp-panel)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
+              <span class="rounded border border-[var(--lp-line)] px-1.5 py-0.5 font-mono text-[10px] uppercase text-[var(--lp-muted)]">
                 {{ artifactModeLabel(ws.artifact_mode) }}
               </span>
             </p>
           </div>
-          <div class="flex shrink-0 gap-2" @click.stop>
-            <button
-              type="button"
-              class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--lp-line)] transition hover:bg-[var(--lp-panel)]"
-              :class="ws.starred ? 'text-[var(--lp-accent)]' : 'text-[var(--lp-muted)]'"
-              :disabled="starringId === ws.id"
-              :aria-pressed="ws.starred"
-              :aria-label="ws.starred ? t('catalog.index.unstar', { name: ws.name }) : t('catalog.index.yours')"
-              :title="ws.starred ? t('catalog.index.unstarAction') : t('catalog.index.yours')"
-              @click="toggleStar(ws)"
+          <button
+            type="button"
+            class="lp-btn-ghost shrink-0 p-1.5"
+            :disabled="starringId === ws.id"
+            :aria-label="ws.starred ? t('catalog.index.unstarAction') : 'Star'"
+            :title="ws.starred ? t('catalog.index.unstarAction') : 'Star'"
+            @click.stop="toggleStar(ws)"
+          >
+            <span
+              class="material-symbols-outlined text-base"
+              :class="ws.starred ? 'text-[var(--lp-warn)]' : ''"
             >
-              <span
-                class="material-symbols-outlined text-base"
-                :class="ws.starred ? 'filled' : ''"
-              >
-                star
-              </span>
-            </button>
-            <NuxtLink :to="`/workspaces/${ws.id}`" class="lp-btn-ghost px-3 py-1.5 text-xs">
-              {{ t('workspaces.index.open') }}
-            </NuxtLink>
-            <button
-              type="button"
-              class="lp-btn-danger px-3 py-1.5 text-xs"
-              :disabled="destroyingId === ws.id"
-              @click="requestDestroy(ws.id)"
-            >
-              {{ t('workspaces.index.destroy') }}
-            </button>
-          </div>
+              {{ ws.starred ? 'star' : 'star_outline' }}
+            </span>
+          </button>
+        </div>
+        <div class="flex items-center justify-between gap-2 px-4 py-3">
+          <span class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
+            {{ ws.status }}
+          </span>
+          <button
+            type="button"
+            class="lp-btn-ghost text-xs text-[var(--lp-danger)]"
+            :disabled="destroyingId === ws.id"
+            @click.stop="requestDestroy(ws.id)"
+          >
+            {{ t('workspaces.index.destroy') }}
+          </button>
         </div>
       </article>
     </div>
@@ -207,6 +270,7 @@ watch(
 
     <RepoImporterModal
       v-model:open="importOpen"
+      :launchpad-project-id="projectIdFilter"
       @saved="onImportSaved"
     />
   </div>

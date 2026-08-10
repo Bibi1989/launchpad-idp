@@ -222,8 +222,9 @@ class RepoImportService:
         if org is not None:
             await assert_can_create_workspace(self._session, org)
         org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
-        project = await ProjectService(self._session).ensure_default_project(
-            org=org_ctx.organization, actor=owner
+        project = await ProjectService(self._session).resolve_project_for_workspace(
+            org=org_ctx,
+            project_id=request.project_id,
         )
         artifact_mode = (
             "manifest_only"

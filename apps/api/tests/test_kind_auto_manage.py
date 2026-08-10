@@ -112,7 +112,8 @@ async def test_ensure_kind_cluster_times_out(tmp_path: Path, monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_generate_bundle_starts_kind_for_local(tmp_path: Path) -> None:
+async def test_generate_bundle_skips_kind_for_local(tmp_path: Path) -> None:
+    """Workspace create must not block on Kind; cluster starts later (terminal/preview)."""
     request = ProvisioningWizardRequest(
         name="kind-auto",
         iac_engine=IaCEngine.TERRAFORM,
@@ -122,20 +123,16 @@ async def test_generate_bundle_starts_kind_for_local(tmp_path: Path) -> None:
     )
 
     session = AsyncMock()
-    session.add = lambda *_a, **_k: None
-    session.commit = AsyncMock()
-
+    service = ProvisioningService(session)
     with (
         patch("app.services.provisioning.ensure_kind_cluster", new_callable=AsyncMock) as up,
-        patch("app.services.provisioning.IaCGenerator") as gen_cls,
-        patch("app.services.provisioning.encrypt_secret", return_value="enc"),
-        patch("app.services.user_credentials.UserCloudCredentialsService.get_credentials", new_callable=AsyncMock, return_value=CloudCredentials()),
-        patch("app.services.orgs.OrganizationService.ensure_personal_org", new_callable=AsyncMock, return_value=Organization(id=UUID("22222222-2222-2222-2222-222222222222"), name="Personal", slug="personal")),
+        patch.object(service, "_with_account_credentials", new_callable=AsyncMock, return_value=request),
+        patch.object(service, "_with_gcp_project_from_sa", return_value=request),
+        patch.object(service._iac, "generate") as gen,
     ):
-        gen = gen_cls.return_value
         from app.schemas.cloud import IaCBundleSummary
 
-        gen.generate.return_value = IaCBundleSummary(
+        gen.return_value = IaCBundleSummary(
             workspace_id="11111111-1111-1111-1111-111111111111",
             engine=IaCEngine.TERRAFORM,
             provider=CloudProvider.LOCAL,
@@ -143,33 +140,12 @@ async def test_generate_bundle_starts_kind_for_local(tmp_path: Path) -> None:
             files=["README.md"],
             name="kind-auto",
         )
-        service = ProvisioningService(session)
-        service._iac = gen
-        summary = await service.generate_bundle(request, owner=AsyncMock(id="owner"))
-
-    up.assert_awaited_once()
-    assert summary.provider == CloudProvider.LOCAL
-
-
-@pytest.mark.asyncio
-async def test_generate_bundle_surfaces_kind_failure() -> None:
-    request = ProvisioningWizardRequest(
-        name="kind-fail",
-        iac_engine=IaCEngine.TERRAFORM,
-        cloud=LocalCloudConfig(),
-        credentials=CloudCredentials(),
-    )
-    session = AsyncMock()
-    service = ProvisioningService(session)
-    with patch(
-        "app.services.provisioning.ensure_kind_cluster",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("kind missing"),
-    ):
         with pytest.raises(HTTPException) as exc:
             await service.generate_bundle(request, owner=AsyncMock(id="owner"))
-    assert exc.value.status_code == 503
-    assert exc.value.detail["code"] == "kind_cluster_unavailable"
+
+    up.assert_not_awaited()
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "needs_org_setup"
 
 
 @pytest.mark.asyncio

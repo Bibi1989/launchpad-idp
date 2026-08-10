@@ -13,9 +13,11 @@ const route = useRoute()
 const id = computed(() => String(route.params.id))
 const environmentId = computed(() => id.value || null)
 const { getById, destroy, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
+const { createOrLinkJiraIssue } = useOrgIntegrations()
 const { reconcileEnvironment } = useNotifications()
 const toast = useToast()
 const seenNotices = new Set<string>()
+const jiraPending = ref(false)
 const {
   open: analyzerOpen,
   loading: analyzing,
@@ -178,6 +180,35 @@ const canAnalyze = computed(() => {
     || lines.value.some((line) => /error|fail|CrashLoop|OOMKilled|CVE-|trivy|codeql/i.test(line))
   )
 })
+
+const canCreateJira = computed(() => {
+  if (!environment.value) return false
+  return environment.value.status === 'FAILED' && !environment.value.jira_issue_key
+})
+
+async function onCreateJiraIssue() {
+  if (!environment.value || jiraPending.value) return
+  jiraPending.value = true
+  try {
+    const result = await createOrLinkJiraIssue(environment.value.id)
+    environment.value = {
+      ...environment.value,
+      jira_issue_key: result.issue_key,
+      jira_issue_url: result.issue_url,
+    }
+    toast.success(
+      result.created ? t('integrations.jiraIssueCreated') : t('integrations.jiraIssueLinked'),
+      result.issue_key,
+    )
+  } catch (err) {
+    toast.error(
+      t('integrations.jiraIssueFailed'),
+      err instanceof Error ? err.message : t('common.failed'),
+    )
+  } finally {
+    jiraPending.value = false
+  }
+}
 
 async function onAnalyze() {
   if (!environment.value || analyzing.value) return
@@ -553,6 +584,29 @@ onUnmounted(() => {
                   {{ analyzing ? t('environments.actions.analyzing') : t('environments.actions.analyze') }}
                 </button>
                 <button
+                  v-if="canCreateJira"
+                  type="button"
+                  role="menuitem"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+                  :disabled="jiraPending"
+                  @click="onCreateJiraIssue(); closeActionsMenu()"
+                >
+                  <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">bug_report</span>
+                  {{ jiraPending ? t('integrations.linkingJira') : t('integrations.createJiraIssue') }}
+                </button>
+                <a
+                  v-if="environment?.jira_issue_url"
+                  :href="environment.jira_issue_url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  role="menuitem"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)]"
+                  @click="closeActionsMenu()"
+                >
+                  <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">open_in_new</span>
+                  {{ t('integrations.openJiraIssue') }}
+                </a>
+                <button
                   v-if="canPromote"
                   type="button"
                   role="menuitem"
@@ -745,6 +799,19 @@ onUnmounted(() => {
               #{{ environment.github_pr_number }}
             </a>
             <p v-else class="mt-1 font-mono text-sm">#{{ environment.github_pr_number }}</p>
+          </div>
+          <div v-if="environment.jira_issue_key">
+            <p class="lp-label">{{ t('integrations.jiraIssueLabel') }}</p>
+            <a
+              v-if="environment.jira_issue_url"
+              :href="environment.jira_issue_url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="mt-1 inline-block font-mono text-sm text-[var(--lp-accent)] hover:underline"
+            >
+              {{ environment.jira_issue_key }}
+            </a>
+            <p v-else class="mt-1 font-mono text-sm">{{ environment.jira_issue_key }}</p>
           </div>
           <div v-if="environment.template_id">
             <p class="lp-label">{{ t('environments.detail.template') }}</p>

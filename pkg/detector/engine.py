@@ -135,11 +135,14 @@ class ProjectDetectorEngine:
                 "Dockerfile",
                 "docker-compose.yml",
                 "docker-compose.yaml",
+                "compose.yml",
+                "compose.yaml",
                 "go.mod",
                 "pyproject.toml",
                 "requirements.txt",
             }
         )
+        has_compose, has_kubernetes = self._detect_runtime_artifacts(root, root_names)
         return DetectionResult(
             layout=layout,
             monorepo_tools=sorted(tools, key=lambda t: t.value) if tools else [MonorepoTool.NONE],
@@ -147,7 +150,59 @@ class ProjectDetectorEngine:
             datastores=datastores,
             root_markers=markers,
             package_globs=package_globs,
+            has_compose=has_compose,
+            has_kubernetes=has_kubernetes,
         )
+
+    def _detect_runtime_artifacts(self, root: Path, root_names: set[str]) -> tuple[bool, bool]:
+        """Return (has_compose, has_kubernetes) hints for import mode selection."""
+        has_compose = bool(
+            root_names
+            & {
+                "docker-compose.yml",
+                "docker-compose.yaml",
+                "compose.yml",
+                "compose.yaml",
+            }
+        )
+        has_kubernetes = False
+        hint_dirs = {
+            "k8s",
+            "kubernetes",
+            "deploy",
+            "deployment",
+            "deployments",
+            "manifests",
+            "charts",
+            "helm",
+            "infra",
+            ".kubernetes",
+        }
+        kind_re = re.compile(
+            r"(?m)^kind:\s*(Deployment|StatefulSet|DaemonSet|Service|Ingress|CronJob)\s*$"
+        )
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if any(part in _SKIP_DIRS for part in path.parts):
+                continue
+            name = path.name.lower()
+            if name in {"chart.yaml", "kustomization.yaml", "kustomization.yml"}:
+                has_kubernetes = True
+                break
+            if path.suffix.lower() not in {".yaml", ".yml"}:
+                continue
+            # Prefer known infra dirs to keep scans cheap on huge repos.
+            if not any(part.lower() in hint_dirs for part in path.parts):
+                continue
+            try:
+                sample = path.read_text(encoding="utf-8", errors="replace")[:4000]
+            except OSError:
+                continue
+            if kind_re.search(sample):
+                has_kubernetes = True
+                break
+        return has_compose, has_kubernetes
 
     def _detect_monorepo_tools(self, root: Path, root_names: set[str]) -> set[MonorepoTool]:
         tools: set[MonorepoTool] = set()

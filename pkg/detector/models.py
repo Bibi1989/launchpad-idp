@@ -61,12 +61,22 @@ class DetectionResult(BaseModel):
     root_markers: list[str] = Field(default_factory=list)
     package_globs: list[str] = Field(default_factory=list)
     summary: str = ""
+    # Runtime hints for import UX (user may still pick any mode).
+    has_kubernetes: bool = False
+    has_compose: bool = False
 
     def model_post_init(self, __context: Any) -> None:
         if not self.summary:
             n = len(self.services)
             tools = ", ".join(t.value for t in self.monorepo_tools if t != MonorepoTool.NONE) or "none"
+            hints: list[str] = []
+            if self.has_kubernetes:
+                hints.append("kubernetes manifests found")
+            if self.has_compose:
+                hints.append("docker compose found")
+            hint_suffix = f" · {'; '.join(hints)}" if hints else ""
             self.summary = (
                 f"{self.layout.value} · {n} service(s) · monorepo tools: {tools}"
                 + (f" · datastores: {', '.join(self.datastores)}" if self.datastores else "")
+                + hint_suffix
             )

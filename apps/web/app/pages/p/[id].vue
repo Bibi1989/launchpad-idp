@@ -128,6 +128,15 @@ onUnmounted(() => {
           <div class="flex items-center gap-3">
             <p class="font-mono text-xs uppercase tracking-[0.2em] text-[var(--lp-accent)]">{{ t('preview.live') }}</p>
             <EnvironmentHealthDot :environment="environment" />
+            <a
+              v-if="environment.jira_issue_key"
+              :href="environment.jira_issue_url || undefined"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="rounded border border-[var(--lp-line)] px-2 py-0.5 font-mono text-xs text-[var(--lp-accent)] hover:underline"
+            >
+              {{ environment.jira_issue_key }}
+            </a>
           </div>
           <h1 class="text-4xl font-semibold tracking-tight">{{ environment.name }}</h1>
           <p class="text-[var(--lp-muted)]">

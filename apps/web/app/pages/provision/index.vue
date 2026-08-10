@@ -80,6 +80,7 @@ const {
   analyzeWorkspaceFile,
 } = useProvisioning()
 const { t } = useI18n()
+const route = useRoute()
 const { scanRepo } = useDockerfiles()
 const terminalOpen = useState('lp-terminal-open', () => false)
 const activeTerminalWsPath = useState<string | null>('lp-terminal-ws-path', () => null)
@@ -432,6 +433,10 @@ watch(
 )
 
 onMounted(async () => {
+  const queryProjectId = String(route.query.project_id || '').trim()
+  if (queryProjectId) {
+    launchpadProjectId.value = queryProjectId
+  }
   try {
     existingWorkspaces.value = await listWorkspaces()
   } catch {
@@ -439,7 +444,9 @@ onMounted(async () => {
   }
   try {
     const listed = await listProjects()
-    if (!launchpadProjectId.value && listed[0]) {
+    if (queryProjectId && listed.some((p) => p.id === queryProjectId)) {
+      launchpadProjectId.value = queryProjectId
+    } else if (!launchpadProjectId.value && listed[0]) {
       launchpadProjectId.value = listed[0].id
     }
   } catch {

@@ -160,6 +160,51 @@ class Organization(Base):
         back_populates="organization",
         cascade="all, delete-orphan",
     )
+    integrations: Mapped[OrgIntegration | None] = relationship(
+        back_populates="organization",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class OrgIntegration(Base):
+    """Org-scoped Slack webhook and Jira Cloud credentials."""
+
+    __tablename__ = "org_integrations"
+    __table_args__ = (Index("ix_org_integrations_org_id", "org_id", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    encrypted_slack_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    slack_notify_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    slack_notify_failed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    slack_notify_ttl_warning: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    slack_notify_cost_cap: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    slack_project_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    jira_site_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    jira_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    encrypted_jira_api_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    jira_project_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    jira_issue_type: Mapped[str] = mapped_column(String(64), nullable=False, default="Bug")
+    jira_auto_create_on_failure: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    organization: Mapped[Organization] = relationship(back_populates="integrations")
 
 
 class OrgMembership(Base):
@@ -437,6 +482,9 @@ class Environment(Base):
     node_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     github_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     github_pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    jira_issue_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    jira_issue_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    notification_flags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     deploy_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="preview")
     manifest_packaging: Mapped[str | None] = mapped_column(String(32), nullable=True)
     enable_postgres: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

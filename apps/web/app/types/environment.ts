@@ -55,6 +55,8 @@ export interface Environment {
   node_port?: number | null
   github_pr_number?: number | null
   github_pr_url?: string | null
+  jira_issue_key?: string | null
+  jira_issue_url?: string | null
   stable_pr_url?: string | null
   ttl_expires_at: string
   cost_estimate_hourly: string

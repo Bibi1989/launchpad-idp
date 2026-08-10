@@ -67,17 +67,25 @@ const iacEngine = computed<ProvisionEngine>(() => {
   const detected = detectWorkspaceInfraFromPaths(files)
   if (detected.provision.enabled) return detected.provision.engine
   const engine = workspace.value?.engine
-  if (engine === 'opentofu' || engine === 'pulumi' || engine === 'terraform') {
+  if (engine === 'opentofu' || engine === 'pulumi' || engine === 'terraform' || engine === 'ansible') {
     return engine
   }
   return 'terraform'
 })
 
+const hasAnsibleScaffold = computed(() => {
+  if (!workspace.value) return false
+  const files = workspace.value.files ?? []
+  return detectWorkspaceInfraFromPaths(files).ansible.enabled
+})
+
+const modalEngine = ref<ProvisionEngine>('terraform')
+
 const showIacShortcuts = computed(() => {
   if (!workspace.value) return false
   const files = workspace.value.files ?? []
   const detected = detectWorkspaceInfraFromPaths(files)
-  if (detected.provision.enabled) return true
+  if (detected.provision.enabled || detected.ansible.enabled) return true
   return workspace.value.artifact_mode !== 'manifest_only'
 })
 
@@ -182,12 +190,25 @@ async function restartSandboxBackground() {
 }
 
 function openIacProvisionModal() {
+  modalEngine.value = iacEngine.value === 'ansible' ? 'terraform' : iacEngine.value
+  if (iacEngine.value === 'ansible') {
+    openAnsibleModal()
+    return
+  }
+  iacModalMode.value = 'provision'
+  iacInitModalOpen.value = true
+  void ensureSandboxBackground()
+}
+
+function openAnsibleModal() {
+  modalEngine.value = 'ansible'
   iacModalMode.value = 'provision'
   iacInitModalOpen.value = true
   void ensureSandboxBackground()
 }
 
 function openIacDestroyModal() {
+  modalEngine.value = iacEngine.value === 'ansible' ? 'terraform' : iacEngine.value
   iacModalMode.value = 'destroy'
   iacInitModalOpen.value = true
   void ensureSandboxBackground()
@@ -569,8 +590,10 @@ watch(advancedMode, async (enabled) => {
           :status="workspace?.status"
           :busy="openingTerminal"
           :terminal-ready="Boolean(wsPath)"
+          :has-ansible="hasAnsibleScaffold"
           @open-provision="openIacProvisionModal"
           @open-destroy="openIacDestroyModal"
+          @open-ansible="openAnsibleModal"
           @open-terminal="void ensureSandboxBackground()"
         />
         <div class="grid min-h-[78vh] grid-cols-1 gap-0 lg:grid-cols-[280px_minmax(0,1fr)] items-start">
@@ -705,7 +728,7 @@ watch(advancedMode, async (enabled) => {
       <WorkspaceIacInitModal
         :open="iacInitModalOpen"
         :workspace-id="workspace.workspace_id"
-        :engine="iacEngine"
+        :engine="modalEngine"
         :mode="iacModalMode"
         :terminal-ready="Boolean(wsPath)"
         :sandbox-warming="sandboxWarming || openingTerminal"

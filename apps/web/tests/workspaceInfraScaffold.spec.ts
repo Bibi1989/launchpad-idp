@@ -230,9 +230,31 @@ describe('workspaceInfraScaffold', () => {
     )
     expect(iacDestroyWizardSteps('terraform')).toHaveLength(1)
     expect(iacToolbarActions('terraform').provision.label).toBe('Provision stack')
+    expect(iacToolbarActions('ansible').provision.label).toBe('Run Ansible')
     expect(kubernetesRunCommands('helm')).toEqual([
       'helm upgrade --install app-chart infra/helm/app-chart/',
     ])
+  })
+
+  it('detects Ansible under infra/ansible alongside Terraform', () => {
+    const detected = detectWorkspaceInfraFromPaths([
+      'infra/ansible/playbooks/site.yml',
+      'infra/ansible/inventory/hosts.yml',
+      'infra/terraform/main.tf',
+    ])
+    expect(detected.ansible.enabled).toBe(true)
+    expect(detected.provision.enabled).toBe(true)
+    expect(detected.provision.engine).toBe('terraform')
+    expect(detected.summary.some((s) => s.includes('Ansible'))).toBe(true)
+  })
+
+  it('detects ansible-only workspaces', () => {
+    const detected = detectWorkspaceInfraFromPaths([
+      'infra/ansible/ansible.cfg',
+      'infra/ansible/playbooks/site.yml',
+    ])
+    expect(detected.ansible.enabled).toBe(true)
+    expect(detected.provision.engine).toBe('ansible')
   })
 
   it('builds multi-artifact repo scaffold bundle', () => {

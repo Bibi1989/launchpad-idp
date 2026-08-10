@@ -90,14 +90,26 @@ const steps = computed(() =>
 const currentStep = computed(() => steps.value[stepIndex.value] ?? null)
 const engineLabel = computed(() => t(`workspaceIde.engines.${props.engine}`))
 const needsCredentials = computed(() => provider.value !== 'local')
-const modalTitle = computed(() =>
-  isDestroy.value
+const modalTitle = computed(() => {
+  if (props.engine === 'ansible' && !isDestroy.value) {
+    return t('workspaceIde.initModal.ansibleTitle', {
+      cloud: (provider.value || 'local').toUpperCase(),
+    })
+  }
+  return isDestroy.value
     ? t('workspaceIde.initModal.destroyTitle', { engine: engineLabel.value })
-    : t('workspaceIde.initModal.provisionTitle', { engine: engineLabel.value }),
-)
-const modalBlurb = computed(() =>
-  isDestroy.value ? t('workspaceIde.initModal.destroyBlurb') : t('workspaceIde.initModal.provisionBlurb'),
-)
+    : t('workspaceIde.initModal.provisionTitle', { engine: engineLabel.value })
+})
+const modalBlurb = computed(() => {
+  if (props.engine === 'ansible' && !isDestroy.value) {
+    return t('workspaceIde.initModal.ansibleBlurb', {
+      cloud: (provider.value || 'local').toUpperCase(),
+    })
+  }
+  return isDestroy.value
+    ? t('workspaceIde.initModal.destroyBlurb')
+    : t('workspaceIde.initModal.provisionBlurb')
+})
 const credentialKindLabel = computed(() => {
   switch (provider.value) {
     case 'gcp':
@@ -576,7 +588,9 @@ async function applyAiFix(payload: { path: string; content: string }) {
                     ? t('common.saving')
                     : isDestroy
                       ? t('workspaceIde.initModal.continueToDestroy')
-                      : t('workspaceIde.initModal.continueToProvision')
+                      : props.engine === 'ansible'
+                        ? t('workspaceIde.initModal.continueToAnsible')
+                        : t('workspaceIde.initModal.continueToProvision')
                 }}
               </button>
             </div>

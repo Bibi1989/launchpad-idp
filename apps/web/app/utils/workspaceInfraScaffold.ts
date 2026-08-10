@@ -605,6 +605,8 @@ export function oppositeCicdFilePaths(platform: CicdPlatform, paths: string[]): 
 
 export type DetectedWorkspaceInfra = {
   provision: { enabled: boolean; engine: ProvisionEngine }
+  /** True when ``infra/ansible`` (or ansible.cfg) is present. */
+  ansible: { enabled: boolean }
   kubernetes: { enabled: boolean; mode: K8sScaffoldMode }
   cicd: {
     enabled: boolean
@@ -688,10 +690,26 @@ export function detectWorkspaceInfraFromPaths(paths: string[]): DetectedWorkspac
       || p.endsWith('opentofu.tf')
       || p.includes('/.terraform/'),
   )
-  const provisionEnabled = hasPulumi || hasTerraform
-  const provisionEngine: ProvisionEngine = hasPulumi && !hasTerraform ? 'pulumi' : 'terraform'
-  if (provisionEnabled) {
-    summary.push(`Provision (${provisionEngine})`)
+  const hasAnsible = filePaths.some(
+    (p) =>
+      p.startsWith('infra/ansible/')
+      || /(^|\/)ansible\.cfg$/i.test(p)
+      || p.startsWith('ansible/playbooks/')
+      || p.startsWith('ansible/inventory/'),
+  )
+  const provisionEnabled = hasPulumi || hasTerraform || hasAnsible
+  let provisionEngine: ProvisionEngine = 'terraform'
+  if (hasAnsible && !hasPulumi && !hasTerraform) {
+    provisionEngine = 'ansible'
+  } else if (hasPulumi && !hasTerraform) {
+    provisionEngine = 'pulumi'
+  }
+  if (hasPulumi || hasTerraform) {
+    const tfOrPu: ProvisionEngine = hasPulumi && !hasTerraform ? 'pulumi' : 'terraform'
+    summary.push(`Provision (${tfOrPu})`)
+  }
+  if (hasAnsible) {
+    summary.push('Ansible (infra/ansible)')
   }
 
   const hasHelm = filePaths.some(
@@ -761,6 +779,7 @@ export function detectWorkspaceInfraFromPaths(paths: string[]): DetectedWorkspac
 
   return {
     provision: { enabled: provisionEnabled, engine: provisionEngine },
+    ansible: { enabled: hasAnsible },
     kubernetes: { enabled: kubernetesEnabled, mode: kubernetesMode },
     cicd: {
       enabled: cicdEnabled,
@@ -894,6 +913,25 @@ export function iacToolbarActions(engine: ProvisionEngine): {
   provision: IacRunShortcut
   destroy: IacRunShortcut
 } {
+  if (engine === 'ansible') {
+    return {
+      provision: {
+        id: 'ansible-provision',
+        label: 'Run Ansible',
+        command: '',
+        description: 'Install collections, dry-run, then apply playbooks/site.yml for the selected cloud host',
+        opensInitWizard: true,
+      },
+      destroy: {
+        id: 'ansible-destroy',
+        label: 'Destroy',
+        command: iacDestroyCommand(engine),
+        description: 'Ansible does not tear down cloud infra; use Terraform/Pulumi destroy for that',
+        danger: true,
+        opensInitWizard: true,
+      },
+    }
+  }
   return {
     provision: {
       id: `${engine}-provision`,

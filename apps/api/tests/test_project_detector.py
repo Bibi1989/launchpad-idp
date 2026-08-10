@@ -56,6 +56,7 @@ def test_detect_pnpm_monorepo_web_and_api(tmp_path: Path) -> None:
     assert "launch-server" in names
     preview = next(s for s in result.services if s.is_preview_target)
     assert preview.role == ServiceRole.WEB
+    assert result.has_compose is True
 
 
 def test_detect_fastapi_single(tmp_path: Path) -> None:
@@ -70,3 +71,25 @@ def test_detect_fastapi_single(tmp_path: Path) -> None:
     assert svc.framework == "fastapi"
     assert svc.port == 8000
     assert svc.has_dockerfile is True
+
+
+def test_detect_runtime_hints_compose_and_kubernetes(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"name":"web","dependencies":{"next":"14.0.0"}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  web:\n    image: node:22\n",
+        encoding="utf-8",
+    )
+    manifests = tmp_path / "k8s"
+    manifests.mkdir()
+    (manifests / "deploy.yaml").write_text(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+        encoding="utf-8",
+    )
+    result = ProjectDetectorEngine().detect(tmp_path)
+    assert result.has_compose is True
+    assert result.has_kubernetes is True
+    assert "docker compose found" in result.summary
+    assert "kubernetes manifests found" in result.summary

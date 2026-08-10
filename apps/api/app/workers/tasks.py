@@ -206,6 +206,33 @@ async def _publish_status(
     )
 
 
+async def _notify_integrations(
+    session: AsyncSession,
+    environment_id: UUID,
+    *,
+    event: str,
+    message: str | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Best-effort Slack/Jira notify; never raises into provision paths."""
+    try:
+        from app.services.integrations.notifier import IntegrationNotifier
+
+        await IntegrationNotifier(session).notify_environment_event(
+            environment_id,
+            event=event,  # type: ignore[arg-type]
+            message=message,
+            correlation_id=correlation_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "integration_notify_hook_failed",
+            environment_id=str(environment_id),
+            event=event,
+            error=str(exc),
+        )
+
+
 async def _record_audit(
     session: AsyncSession,
     *,
@@ -366,6 +393,14 @@ async def _fail_execution(
             app_ready=False,
             error_message=error_text,
         )
+        async with session_factory() as notify_session:
+            await _notify_integrations(
+                notify_session,
+                environment_id,
+                event="failed",
+                message=error_text,
+            )
+            await notify_session.commit()
 
 
 async def _attempt_rebuild_rollback(
@@ -1044,6 +1079,14 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         notice=getattr(resources, "notice", None),
                         preview_endpoints=endpoints or None,
                     )
+                    await _notify_integrations(
+                        session,
+                        env_uuid,
+                        event="ready",
+                        message=resources.preview_url or "Provision completed",
+                        correlation_id=correlation_id,
+                    )
+                    await session.commit()
                 except PreviewCancelled:
                     # Force-delete during provisioning. Leave status TEARDOWN_PENDING
                     # and re-enqueue teardown after this task releases the state lock.
@@ -1118,6 +1161,14 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                     app_ready=bool(resources.preview_url),
                                     notice=getattr(resources, "notice", None),
                                 )
+                                await _notify_integrations(
+                                    session,
+                                    env_uuid,
+                                    event="ready",
+                                    message=resources.preview_url,
+                                    correlation_id=correlation_id,
+                                )
+                                await session.commit()
                                 return
                         except Exception:
                             logger.info(
@@ -1510,6 +1561,14 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         node_port=environment.node_port,
                         app_ready=bool(environment.preview_url),
                     )
+                    await _notify_integrations(
+                        session,
+                        env_uuid,
+                        event="ready",
+                        message="Rebuild succeeded",
+                        correlation_id=correlation_id,
+                    )
+                    await session.commit()
                 except Exception as exc:
                     logger.exception("rebuild_failed", environment_id=environment_id)
                     await session.rollback()
@@ -1632,17 +1691,17 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     # environment stuck - we still mark it DESTROYED below.
                     deploy_mode = await _effective_deploy_mode(session, environment)
                     await session.commit()
+                    workspace_root: Path | None = None
+                    if environment.workspace_id is not None:
+                        workspace_row = await session.get(
+                            ProvisioningWorkspace, environment.workspace_id
+                        )
+                        if workspace_row is not None and workspace_row.root_dir:
+                            workspace_root = Path(workspace_row.root_dir)
                     try:
                         if deploy_mode == DeployMode.COMPOSE.value:
                             from app.services.compose_deploy import teardown_compose
 
-                            workspace_root: Path | None = None
-                            if environment.workspace_id is not None:
-                                workspace_row = await session.get(
-                                    ProvisioningWorkspace, environment.workspace_id
-                                )
-                                if workspace_row is not None and workspace_row.root_dir:
-                                    workspace_root = Path(workspace_row.root_dir)
                             await asyncio.to_thread(
                                 teardown_compose,
                                 workspace_root=workspace_root,
@@ -1747,6 +1806,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     try:
                         from app.services.image_cleanup import (
                             collect_preview_environment_images,
+                            collect_workspace_destroy_images,
                             remove_local_docker_images,
                             resolve_local_cluster_short_name,
                         )
@@ -1757,13 +1817,24 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                             workload_image=environment.workload_image,
                             commit_sha=environment.latest_commit_sha,
                         )
-                        if preview_images:
+                        workspace_images: list[str] = []
+                        if workspace_root is not None:
+                            workspace_images = collect_workspace_destroy_images(
+                                workspace_root,
+                                workload_images=(
+                                    [environment.workload_image]
+                                    if environment.workload_image
+                                    else None
+                                ),
+                            )
+                        images = list(dict.fromkeys([*preview_images, *workspace_images]))
+                        if images:
                             is_local = environment.provider == "local" or (
                                 (settings.resolved_kubernetes_context or settings.kubernetes_context or "")
                                 .startswith(("kind-", "k3d-"))
                             )
                             remove_local_docker_images(
-                                preview_images,
+                                images,
                                 cluster_name=resolve_local_cluster_short_name(settings),
                                 settings=settings,
                                 remove_from_cluster=is_local,
@@ -1856,6 +1927,175 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
             )
 
 
+async def _reclaim_environment_runtime(
+    session: AsyncSession,
+    environment: Environment,
+    *,
+    settings,
+    provisioner: "KubernetesProvisioner | None" = None,
+) -> str:
+    """Stop runtime by deploy mode and remove local containers/images. Best-effort.
+
+    Used for TTL expiry and to share image reclaim logic with destroy. Never raises.
+    """
+    notes: list[str] = []
+    deploy_mode = DeployMode.PREVIEW.value
+    try:
+        deploy_mode = await _effective_deploy_mode(session, environment)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "reclaim_deploy_mode_failed",
+            environment_id=str(environment.id),
+            error=str(exc),
+        )
+        deploy_mode = normalize_deploy_mode(getattr(environment, "deploy_mode", None))
+
+    workspace_root: Path | None = None
+    if environment.workspace_id is not None:
+        try:
+            workspace_row = await session.get(ProvisioningWorkspace, environment.workspace_id)
+            if workspace_row is not None and workspace_row.root_dir:
+                workspace_root = Path(workspace_row.root_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reclaim_workspace_lookup_failed",
+                environment_id=str(environment.id),
+                error=str(exc),
+            )
+
+    try:
+        if deploy_mode == DeployMode.COMPOSE.value:
+            from app.services.compose_deploy import teardown_compose
+
+            await asyncio.to_thread(
+                teardown_compose,
+                workspace_root=workspace_root,
+                namespace=environment.namespace_name,
+                environment_id=str(environment.id),
+            )
+            notes.append("compose down")
+            if provisioner is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(provisioner.teardown, environment.namespace_name),
+                        timeout=30.0,
+                    )
+                    notes.append("ingress namespace removed")
+                except Exception as bridge_exc:  # noqa: BLE001
+                    logger.warning(
+                        "reclaim_compose_ingress_failed",
+                        environment_id=str(environment.id),
+                        error=str(bridge_exc),
+                    )
+        elif deploy_mode == DeployMode.ATTACH.value:
+            from app.schemas.cloud import RunningInstanceConfig, WorkspaceWizardConfig
+            from app.services.attach_deploy import teardown_attach
+            from app.services.provisioning import ProvisioningService
+
+            running_instance = RunningInstanceConfig()
+            if environment.workspace_id is not None:
+                provisioning = ProvisioningService(session)
+                workspace_row = await session.get(
+                    ProvisioningWorkspace, environment.workspace_id
+                )
+                if workspace_row is not None:
+                    snapshot = provisioning._load_wizard_snapshot(workspace_row)
+                    if snapshot is not None:
+                        try:
+                            wizard = WorkspaceWizardConfig.model_validate(
+                                {**snapshot, "has_credentials": False}
+                            )
+                            running_instance = wizard.running_instance
+                        except Exception:
+                            pass
+            await asyncio.to_thread(
+                teardown_attach,
+                running_instance=running_instance,
+                namespace=environment.namespace_name,
+                environment_id=str(environment.id),
+                settings=settings,
+            )
+            notes.append("attach instance stopped")
+            if provisioner is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(provisioner.teardown, environment.namespace_name),
+                        timeout=30.0,
+                    )
+                    notes.append("ingress namespace removed")
+                except Exception as bridge_exc:  # noqa: BLE001
+                    logger.warning(
+                        "reclaim_attach_ingress_failed",
+                        environment_id=str(environment.id),
+                        error=str(bridge_exc),
+                    )
+        else:
+            k8s = provisioner or KubernetesProvisioner(settings=settings)
+            await asyncio.wait_for(
+                asyncio.to_thread(k8s.teardown, environment.namespace_name),
+                timeout=45.0,
+            )
+            notes.append("kubernetes namespace removed")
+    except Exception as exc:  # noqa: BLE001 - still reclaim images below
+        logger.warning(
+            "reclaim_runtime_stop_failed",
+            environment_id=str(environment.id),
+            deploy_mode=deploy_mode,
+            error=str(exc),
+        )
+        notes.append(f"runtime stop incomplete ({exc})")
+
+    try:
+        from app.services.preview_tunnel import stop_preview_tunnel
+
+        await asyncio.to_thread(stop_preview_tunnel, str(environment.id))
+    except Exception:
+        logger.exception("reclaim_tunnel_stop_failed", environment_id=str(environment.id))
+
+    try:
+        from app.services.image_cleanup import (
+            collect_preview_environment_images,
+            collect_workspace_destroy_images,
+            remove_local_docker_images,
+            resolve_local_cluster_short_name,
+        )
+
+        preview_images = collect_preview_environment_images(
+            settings=settings,
+            environment_id=str(environment.id),
+            workload_image=environment.workload_image,
+            commit_sha=environment.latest_commit_sha,
+        )
+        workspace_images = collect_workspace_destroy_images(
+            workspace_root,
+            workload_images=[environment.workload_image] if environment.workload_image else None,
+        )
+        images = list(dict.fromkeys([*preview_images, *workspace_images]))
+        if images:
+            is_local = environment.provider == "local" or (
+                (settings.resolved_kubernetes_context or settings.kubernetes_context or "")
+                .startswith(("kind-", "k3d-"))
+            )
+            removed = remove_local_docker_images(
+                images,
+                cluster_name=resolve_local_cluster_short_name(settings),
+                settings=settings,
+                remove_from_cluster=is_local,
+            )
+            if removed:
+                notes.append(f"removed {len(removed)} image(s)")
+            else:
+                notes.append("image reclaim attempted")
+    except Exception:
+        logger.exception(
+            "reclaim_image_cleanup_failed",
+            environment_id=str(environment.id),
+        )
+        notes.append("image reclaim failed")
+
+    return "; ".join(notes) if notes else "cleanup attempted"
+
+
 async def pause_expired_environment(
     session,
     environment,
@@ -1863,9 +2103,10 @@ async def pause_expired_environment(
     actor_id: str = "system:ttl-reaper",
     settings=None,
 ) -> bool:
-    """Scale workloads to 0 and mark an expired environment EXPIRED.
+    """Stop runtime + reclaim images/containers, then mark environment EXPIRED.
 
-    Returns True when the environment was expired in this call.
+    TTL expiry is terminal (cannot resume), so compose/attach/k8s workloads are
+    torn down and locally-built images are removed - same reclaim as destroy.
     """
     settings = settings or get_settings()
     if environment.status not in {EnvironmentStatus.RUNNING, EnvironmentStatus.FAILED}:
@@ -1878,23 +2119,29 @@ async def pause_expired_environment(
 
     env_repo = EnvironmentRepository(session)
     log_repo = DeploymentLogRepository(session)
-    scaled_ok = True
+    provisioner = None
     try:
         provisioner = KubernetesProvisioner(settings=settings)
-        scaled_ok = bool(
-            provisioner.scale_deployment(namespace=environment.namespace_name, replicas=0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ttl_reaper_provisioner_init_failed",
+            environment_id=str(environment.id),
+            error=str(exc),
         )
-    except Exception as e:  # noqa: BLE001 - always mark expired; retry scale next cycle
-        scaled_ok = False
-        logger.error("ttl_reaper_scale_failed", environment_id=str(environment.id), error=str(e))
+
+    cleanup_note = await _reclaim_environment_runtime(
+        session,
+        environment,
+        settings=settings,
+        provisioner=provisioner,
+    )
 
     await env_repo.update_status(environment, EnvironmentStatus.EXPIRED)
-    scale_note = "scaled replicas to 0" if scaled_ok else "status expired (scale retry next cycle)"
     await _emit_log(
         log_repo,
         environment_id=environment.id,
         message=(
-            f"TTL expired - environment marked expired ({scale_note}) "
+            f"TTL expired - environment marked expired ({cleanup_note}) "
             f"(expires_at={environment.ttl_expires_at.isoformat()})"
         ),
         log_level=LogLevel.WARN,
@@ -1910,7 +2157,7 @@ async def pause_expired_environment(
         environment_id=environment.id,
         workspace_id=environment.workspace_id,
         commit_sha=environment.latest_commit_sha,
-        detail="TTL expired" if scaled_ok else "TTL expired (scale pending retry)",
+        detail=f"TTL expired ({cleanup_note})",
     )
     return True
 
@@ -1987,6 +2234,12 @@ async def _run_ttl_reaper() -> int:
                 message="TTL expired",
                 stage=ExecutionStage.APPLY,
             )
+            await _notify_integrations(
+                session,
+                environment_id,
+                event="ttl_expired",
+                message="TTL expired",
+            )
         for environment_id, commit_sha in stale_failed:
             reaped += 1
             await _publish_status(
@@ -1998,6 +2251,31 @@ async def _run_ttl_reaper() -> int:
                 app_ready=False,
                 error_message="Provisioning timed out - no active worker",
             )
+            await _notify_integrations(
+                session,
+                environment_id,
+                event="failed",
+                message="Provisioning timed out - no active worker",
+            )
+        await session.commit()
+
+        # Soft TTL warnings for RUNNING previews approaching expiry.
+        warning_hours = max(float(settings.ttl_warning_hours), 0.0)
+        if warning_hours > 0:
+            running = await env_repo.list_running()
+            for environment in running:
+                expires = environment.ttl_expires_at
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=UTC)
+                remaining = (expires - now).total_seconds()
+                if 0 < remaining <= warning_hours * 3600:
+                    await _notify_integrations(
+                        session,
+                        environment.id,
+                        event="ttl_warning",
+                        message=f"TTL expires in {int(remaining // 60)} minutes",
+                    )
+            await session.commit()
 
     logger.info("ttl_reaper_complete", reaped=reaped, interval=settings.ttl_reaper_interval_seconds)
     return reaped
@@ -2126,6 +2404,22 @@ async def _run_cost_metering() -> int:
                 accrued=str(environment.cost_accrued),
                 source=environment.cost_source,
             )
+            is_local = (environment.provider or "local") == "local" or (
+                environment.cost_estimate_hourly == 0 and environment.workspace_id is None
+            )
+            if (
+                not is_local
+                and environment.cost_accrued >= settings.preview_soft_cost_cap
+            ):
+                await _notify_integrations(
+                    session,
+                    environment.id,
+                    event="cost_cap",
+                    message=(
+                        f"Cost accrued ${environment.cost_accrued} meets soft cap "
+                        f"${settings.preview_soft_cost_cap}"
+                    ),
+                )
         await session.commit()
 
     logger.info("cost_metering_complete", sampled=sampled)

@@ -80,18 +80,9 @@ class ProvisioningService:
         org_id: UUID | None = None,
         project_id: UUID | None = None,
     ) -> IaCBundleSummary:
-        if isinstance(request.cloud, LocalCloudConfig):
-            if request.runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
-                try:
-                    await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
-                except RuntimeError as exc:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail={
-                            "code": "kind_cluster_unavailable",
-                            "message": str(exc),
-                        },
-                    ) from exc
+        # Kind/k3d cluster bring-up is deferred to open_terminal / preview deploy.
+        # Blocking create on ensure_kind_cluster made "Generate IaC" hang past the
+        # client timeout when the local cluster was cold or slow to start.
 
         request = await self._with_account_credentials(request, owner)
         request = self._with_gcp_project_from_sa(request)
@@ -166,10 +157,33 @@ class ProvisioningService:
         *,
         org_id: UUID | None = None,
         starred_only: bool = False,
+        project_id: UUID | None = None,
     ) -> list[WorkspaceListItem]:
+        from app.models.domain import OrgRole
         from app.services.orgs import OrganizationService
+        from app.services.projects import ProjectService
 
         orgs = OrganizationService(self._session)
+        if project_id is not None:
+            ctx = await orgs.resolve_context(user=owner, org_id=org_id)
+            await ProjectService(self._session).require_project_access(
+                user=owner, project_id=project_id, minimum=OrgRole.VIEWER
+            )
+            stmt = (
+                select(ProvisioningWorkspace)
+                .where(
+                    ProvisioningWorkspace.org_id == ctx.org_id,
+                    ProvisioningWorkspace.project_id == project_id,
+                )
+                .order_by(ProvisioningWorkspace.created_at.desc())
+                .limit(100)
+            )
+            if starred_only:
+                stmt = stmt.where(ProvisioningWorkspace.starred_at.is_not(None))
+            result = await self._session.execute(stmt)
+            rows = list(result.scalars().all())
+            return [self._to_workspace_list_item(row) for row in rows]
+
         if org_id is not None:
             ctx = await orgs.resolve_context(user=owner, org_id=org_id)
             target_org_id = ctx.org_id
@@ -217,22 +231,21 @@ class ProvisioningService:
                     .limit(100)
                 )
                 rows = list(result.scalars().all())
-        items: list[WorkspaceListItem] = []
-        for row in rows:
-            items.append(
-                WorkspaceListItem(
-                    id=row.id,
-                    name=row.name,
-                    engine=row.engine,
-                    provider=row.provider,
-                    status=row.status,
-                    artifact_mode=self.get_workspace_artifact_mode(row),
-                    created_at=row.created_at,
-                    root_dir=row.root_dir,
-                    starred=row.starred_at is not None,
-                )
-            )
-        return items
+        return [self._to_workspace_list_item(row) for row in rows]
+
+    def _to_workspace_list_item(self, row: ProvisioningWorkspace) -> WorkspaceListItem:
+        return WorkspaceListItem(
+            id=row.id,
+            name=row.name,
+            engine=row.engine,
+            provider=row.provider,
+            status=row.status,
+            artifact_mode=self.get_workspace_artifact_mode(row),
+            created_at=row.created_at,
+            root_dir=row.root_dir,
+            starred=row.starred_at is not None,
+            project_id=row.project_id,
+        )
 
     async def set_workspace_starred(
         self,
@@ -257,6 +270,7 @@ class ProvisioningService:
             created_at=row.created_at,
             root_dir=row.root_dir,
             starred=row.starred_at is not None,
+            project_id=row.project_id,
         )
     async def get_workspace(self, workspace_id: UUID) -> ProvisioningWorkspace:
         row = await self._session.get(ProvisioningWorkspace, workspace_id)
@@ -568,18 +582,8 @@ class ProvisioningService:
         was_local = row.provider == CloudProvider.LOCAL.value
         is_local = isinstance(request.cloud, LocalCloudConfig)
 
-        if is_local:
-            if request.runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
-                try:
-                    await ensure_kind_cluster(cluster_name=request.cloud.resources.cluster_name)
-                except RuntimeError as exc:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail={
-                            "code": "kind_cluster_unavailable",
-                            "message": str(exc),
-                        },
-                    ) from exc
+        # Local cluster ensure stays out of regenerate/update so IaC + container
+        # scaffold writes return quickly; open_terminal / Celery still bring Kind up.
 
         workspace_path = self._workspace_root(row)
         try:
@@ -863,6 +867,25 @@ class ProvisioningService:
         credentials = await self._fill_from_account_vault(credentials, owner.id)
 
         workspace_path = self._iac.get_workspace(workspace.root_dir)
+
+        # Bring up the local cluster when opening the sandbox (progress step 4),
+        # not during IaC generation, so createWorkspace does not time out.
+        if (workspace.provider or "").lower() == CloudProvider.LOCAL.value:
+            config = await self.get_wizard_config(workspace_id, owner)
+            if config.runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
+                cluster_name = None
+                if isinstance(config.cloud, LocalCloudConfig):
+                    cluster_name = config.cloud.resources.cluster_name
+                try:
+                    await ensure_kind_cluster(cluster_name=cluster_name)
+                except RuntimeError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail={
+                            "code": "kind_cluster_unavailable",
+                            "message": str(exc),
+                        },
+                    ) from exc
 
         if run_init:
             bootstrap = build_provision_bootstrap(

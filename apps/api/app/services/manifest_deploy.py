@@ -1731,14 +1731,29 @@ class ManifestDeployer:
                     preview_app_label=preview_app_label,
                     listen_port=listen_port,
                 )
-                self._provisioner.apply_ingress(
-                    namespace=namespace,
-                    labels=labels,
-                    host=host,
-                    backend_service=backend_service,
-                    backend_port=backend_port,
-                )
-            resources.preview_url = self._provisioner.ingress_preview_url(host=host)
+                try:
+                    self._provisioner.apply_ingress(
+                        namespace=namespace,
+                        labels=labels,
+                        host=host,
+                        backend_service=backend_service,
+                        backend_port=backend_port,
+                    )
+                    resources.preview_url = self._provisioner.ingress_preview_url(host=host)
+                except Exception as exc:
+                    # Ingress controllers (or remote GKE gateways) can 504; local
+                    # previews still work via the Kind-mapped NodePort.
+                    logger.warning(
+                        "manifest_ingress_apply_failed_fallback_nodeport",
+                        namespace=namespace,
+                        host=host,
+                        error=str(exc)[:400],
+                    )
+                    resources.preview_url = self._provisioner.node_port_preview_url(
+                        node_port=node_port
+                    )
+            else:
+                resources.preview_url = self._provisioner.ingress_preview_url(host=host)
         else:
             resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
 

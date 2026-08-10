@@ -244,6 +244,7 @@ export interface WorkspaceListItem {
   created_at: string
   root_dir: string
   starred: boolean
+  project_id?: string | null
 }
 
 export interface WorkspaceWizardConfig {

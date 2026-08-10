@@ -60,6 +60,7 @@ class RepoImportSaveRequest(BaseModel):
     enable_iac: bool = True
     enable_cicd: bool = False
     cicd_platform: str = Field(default="github", max_length=16)
+    project_id: UUID | None = None
 
     @field_validator("name")
     @classmethod

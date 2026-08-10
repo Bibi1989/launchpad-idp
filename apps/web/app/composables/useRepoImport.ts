@@ -41,6 +41,7 @@ export function useRepoImport() {
     enable_iac?: boolean
     enable_cicd?: boolean
     cicd_platform?: 'github' | 'gitlab'
+    project_id?: string | null
   }): Promise<RepoImportSaveResult> {
     return apiFetch<RepoImportSaveResult>(`/imports/${input.importId}/save`, {
       method: 'POST',
@@ -53,6 +54,7 @@ export function useRepoImport() {
         enable_iac: input.enable_iac ?? true,
         enable_cicd: input.enable_cicd ?? false,
         cicd_platform: input.cicd_platform ?? 'github',
+        project_id: input.project_id || null,
       }),
       timeoutMs: IMPORT_TIMEOUT_MS,
     })

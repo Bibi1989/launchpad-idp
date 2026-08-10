@@ -69,6 +69,19 @@ export function workspaceStackParts(source: WorkspaceDisplaySource): WorkspaceSt
   return { stack, provider, status }
 }
 
+/** Uppercase meta tokens for project/workspace list rows (TERRAFORM • K8S • LOCAL). */
+export function workspaceMetaTokens(source: WorkspaceDisplaySource): string[] {
+  const { stack, provider, status } = workspaceStackParts(source)
+  const tokens = stack
+    .split(/\s*\+\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.toUpperCase())
+  if (provider) tokens.push(String(provider).toUpperCase())
+  if (status) tokens.push(String(status).toUpperCase())
+  return tokens
+}
+
 /** Human label for the IaC / packaging stack shown in workspace headers. */
 export function workspaceStackLabel(source: WorkspaceDisplaySource): string {
   const { stack, provider, status } = workspaceStackParts(source)

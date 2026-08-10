@@ -942,6 +942,7 @@ class WorkspaceListItem(BaseModel):
     created_at: datetime
     root_dir: str
     starred: bool = False
+    project_id: UUID | None = None
 
 
 class WorkspaceStarRequest(BaseModel):

@@ -27,6 +27,7 @@ from app.routers.well_known import router as well_known_router
 from app.routers.k8s import router as k8s_router
 from app.routers.user_credentials import router as user_credentials_router
 from app.routers.imports import router as imports_router
+from app.routers.integrations import router as integrations_router
 
 configure_logging()
 logger = get_logger(__name__)
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
     app.include_router(k8s_router, prefix="/api/v1")
     app.include_router(user_credentials_router, prefix="/api/v1")
     app.include_router(imports_router, prefix="/api/v1")
+    app.include_router(integrations_router, prefix="/api/v1")
     app.include_router(well_known_router)
     return app
 

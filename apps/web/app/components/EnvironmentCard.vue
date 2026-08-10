@@ -215,10 +215,20 @@ function onCardKeydown(event: KeyboardEvent) {
           </span>
         </p>
       </div>
-      <div class="flex flex-col items-end gap-1.5">
+        <div class="flex flex-col items-end gap-1.5">
         <div class="flex flex-wrap items-center justify-end gap-1.5">
           <DeployKindBadge :deploy-mode="environment.deploy_mode" />
           <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
+          <a
+            v-if="environment.jira_issue_key"
+            :href="environment.jira_issue_url || undefined"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="rounded border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 px-1.5 py-0.5 font-mono text-[10px] text-[var(--lp-accent)] hover:underline"
+            @click.stop
+          >
+            {{ environment.jira_issue_key }}
+          </a>
         </div>
         <EnvironmentHealthDot :status="displayStatus" :app-ready="environment.app_ready" />
       </div>

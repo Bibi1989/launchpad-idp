@@ -133,10 +133,14 @@ async def list_workspaces(
     user: CurrentUser,
     org: CurrentOrg,
     starred: bool = Query(default=False),
+    project_id: UUID | None = Query(default=None),
     service: ProvisioningService = Depends(get_provisioning_service),
 ) -> list[WorkspaceListItem]:
     return await service.list_workspaces(
-        user, org_id=org.org_id, starred_only=starred
+        user,
+        org_id=org.org_id,
+        starred_only=starred,
+        project_id=project_id,
     )
 
 

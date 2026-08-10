@@ -11,6 +11,16 @@ import { githubCloneUrl } from '~/utils/githubAccount'
 
 const open = defineModel<boolean>('open', { default: false })
 
+const props = withDefaults(
+  defineProps<{
+    /** Prefill Launchpad project (from project detail / query). */
+    launchpadProjectId?: string | null
+  }>(),
+  {
+    launchpadProjectId: null,
+  },
+)
+
 const emit = defineEmits<{
   saved: [workspaceId: string]
 }>()
@@ -20,6 +30,7 @@ const {
   listGithubInstallations,
   getGitlabStatus,
 } = useProvisioning()
+const { listProjects, projects: launchpadProjects } = useProjects()
 const { t } = useI18n()
 
 const step = ref<'url' | 'preview'>('url')
@@ -27,6 +38,7 @@ const gitHost = ref<GitHost>('github')
 const repoUrl = ref('')
 const branch = ref('main')
 const workspaceName = ref('')
+const selectedLaunchpadProjectId = ref('')
 const session = ref<RepoImportSession | null>(null)
 const services = ref<DetectedService[]>([])
 const loading = ref(false)
@@ -138,8 +150,31 @@ watch(open, (isOpen) => {
   if (isOpen) {
     error.value = null
     void loadConnectedAccounts()
+    void loadLaunchpadProjects()
   }
 })
+
+watch(
+  () => props.launchpadProjectId,
+  (id) => {
+    if (id) selectedLaunchpadProjectId.value = id
+  },
+  { immediate: true },
+)
+
+async function loadLaunchpadProjects() {
+  try {
+    const listed = await listProjects()
+    const preferred = props.launchpadProjectId?.trim()
+    if (preferred && listed.some((p) => p.id === preferred)) {
+      selectedLaunchpadProjectId.value = preferred
+    } else if (!selectedLaunchpadProjectId.value && listed[0]) {
+      selectedLaunchpadProjectId.value = listed[0].id
+    }
+  } catch {
+    // Projects optional until user creates one
+  }
+}
 
 async function analyze() {
   error.value = null
@@ -167,6 +202,12 @@ async function analyze() {
     })
     session.value = result
     services.value = result.services.map((s) => ({ ...s }))
+    // Suggest a mode from repo artifacts; user can still override.
+    if (result.detection.has_kubernetes) {
+      runtimeMode.value = 'kubernetes'
+    } else if (result.detection.has_compose) {
+      runtimeMode.value = 'docker_compose'
+    }
     step.value = 'preview'
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('import.importFailed')
@@ -201,6 +242,7 @@ async function save() {
       enable_cicd: enableCicd.value,
       cicd_platform: cicdPlatform.value,
       ensure_local_cluster: runtimeMode.value === 'kubernetes',
+      project_id: selectedLaunchpadProjectId.value || null,
     })
     open.value = false
     emit('saved', result.workspace_id)
@@ -328,6 +370,20 @@ async function close() {
             >
           </label>
 
+          <label v-if="launchpadProjects.length" class="block space-y-2">
+            <span class="lp-label">{{ t('provision.launchpadProject') }}</span>
+            <select v-model="selectedLaunchpadProjectId" class="lp-input">
+              <option
+                v-for="proj in launchpadProjects"
+                :key="proj.id"
+                :value="proj.id"
+              >
+                {{ proj.name }}
+              </option>
+            </select>
+            <p class="text-[11px] text-[var(--lp-muted)]">{{ t('provision.launchpadProjectBlurb') }}</p>
+          </label>
+
           <div class="flex justify-end gap-2">
             <button type="button" class="lp-btn-ghost" @click="close">{{ t('common.cancel') }}</button>
             <button
@@ -358,6 +414,19 @@ async function close() {
             <input v-model="workspaceName" class="lp-input" autocomplete="off">
           </label>
 
+          <label v-if="launchpadProjects.length" class="block space-y-2">
+            <span class="lp-label">{{ t('provision.launchpadProject') }}</span>
+            <select v-model="selectedLaunchpadProjectId" class="lp-input">
+              <option
+                v-for="proj in launchpadProjects"
+                :key="proj.id"
+                :value="proj.id"
+              >
+                {{ proj.name }}
+              </option>
+            </select>
+          </label>
+
           <div class="grid gap-3 sm:grid-cols-2">
             <label class="block space-y-2">
               <span class="lp-label">{{ t('import.runtimeMode') }}</span>
@@ -379,6 +448,18 @@ async function close() {
                 <option value="pulumi">Pulumi</option>
               </select>
             </label>
+          </div>
+          <div
+            v-if="session.detection.has_kubernetes || session.detection.has_compose"
+            class="rounded-lg border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/8 px-3 py-2 text-xs text-[var(--lp-text)]"
+          >
+            <p v-if="session.detection.has_kubernetes" class="font-medium">
+              {{ t('import.detectedKubernetes') }}
+            </p>
+            <p v-if="session.detection.has_compose" class="font-medium" :class="session.detection.has_kubernetes ? 'mt-1' : ''">
+              {{ t('import.detectedCompose') }}
+            </p>
+            <p class="mt-1 text-[var(--lp-muted)]">{{ t('import.runtimeModeOverrideHint') }}</p>
           </div>
           <div class="flex flex-wrap gap-4 text-sm">
             <label class="flex items-center gap-2 cursor-pointer">
