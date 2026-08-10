@@ -174,11 +174,9 @@ const canRetry = computed(() => {
 })
 const canAnalyze = computed(() => {
   if (!environment.value) return false
-  return (
-    environment.value.status === 'FAILED'
-    || Boolean(environment.value.error_message)
-    || lines.value.some((line) => /error|fail|CrashLoop|OOMKilled|CVE-|trivy|codeql/i.test(line))
-  )
+  // Always allow analysis once the environment exists; Gemini needs logs/errors
+  // but the drawer can still explain empty telemetry / missing API key.
+  return environment.value.status !== 'DESTROYED'
 })
 
 const canCreateJira = computed(() => {

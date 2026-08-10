@@ -424,9 +424,12 @@ class Settings(BaseSettings):
     def preview_tunnel_active(self) -> bool:
         """True when preview URLs must be host-only https (Cloudflare Tunnel / prod).
 
-        Retains NodePort URLs only for local offline development, where neither the
-        explicit toggle nor ENVIRONMENT=production is set.
+        Requires ``PREVIEW_BASE_DOMAIN`` so we never emit host-only ``ws-*`` URLs that
+        resolve nowhere and show nginx ``404 page not found``. Local offline keeps
+        NodePort URLs.
         """
+        if not (self.preview_base_domain or "").strip():
+            return False
         return self.use_cloudflare_tunnel or self.environment.strip().lower() == "production"
 
 

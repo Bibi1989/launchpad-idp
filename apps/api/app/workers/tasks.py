@@ -602,7 +602,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             await session.commit()
                             await ensure_kind_cluster()
                             provisioner.reload_clients()
-                        provisioner.assert_cluster_ready(timeout_seconds=5.0)
+                        provisioner.assert_cluster_ready(timeout_seconds=20.0)
                         mode_msg = f"VALIDATE - cluster reachable (context={ctx})"
                     else:
                         mode_msg = (
@@ -1806,28 +1806,20 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     try:
                         from app.services.image_cleanup import (
                             collect_preview_environment_images,
-                            collect_workspace_destroy_images,
                             remove_local_docker_images,
                             resolve_local_cluster_short_name,
                         )
 
+                        # Env teardown only reclaims env-scoped preview tags.
+                        # Shared workspace images (launch-web:latest, etc.) stay
+                        # until the workspace itself is destroyed.
                         preview_images = collect_preview_environment_images(
                             settings=settings,
                             environment_id=str(env_uuid),
                             workload_image=environment.workload_image,
                             commit_sha=environment.latest_commit_sha,
                         )
-                        workspace_images: list[str] = []
-                        if workspace_root is not None:
-                            workspace_images = collect_workspace_destroy_images(
-                                workspace_root,
-                                workload_images=(
-                                    [environment.workload_image]
-                                    if environment.workload_image
-                                    else None
-                                ),
-                            )
-                        images = list(dict.fromkeys([*preview_images, *workspace_images]))
+                        images = list(dict.fromkeys(preview_images))
                         if images:
                             is_local = environment.provider == "local" or (
                                 (settings.resolved_kubernetes_context or settings.kubernetes_context or "")
@@ -2055,7 +2047,6 @@ async def _reclaim_environment_runtime(
     try:
         from app.services.image_cleanup import (
             collect_preview_environment_images,
-            collect_workspace_destroy_images,
             remove_local_docker_images,
             resolve_local_cluster_short_name,
         )
@@ -2066,11 +2057,10 @@ async def _reclaim_environment_runtime(
             workload_image=environment.workload_image,
             commit_sha=environment.latest_commit_sha,
         )
-        workspace_images = collect_workspace_destroy_images(
-            workspace_root,
-            workload_images=[environment.workload_image] if environment.workload_image else None,
-        )
-        images = list(dict.fromkeys([*preview_images, *workspace_images]))
+        # Never delete shared workspace tags (e.g. launch-web:latest) on env
+        # expire/destroy - those belong to the workspace and must stay loadable
+        # for the next provision. Workspace destroy reclaims them separately.
+        images = list(dict.fromkeys(preview_images))
         if images:
             is_local = environment.provider == "local" or (
                 (settings.resolved_kubernetes_context or settings.kubernetes_context or "")

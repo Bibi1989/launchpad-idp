@@ -281,7 +281,7 @@ class KubernetesProvisioner:
             self._apps = None
             self._autoscaling = None
 
-    def assert_cluster_ready(self, *, timeout_seconds: float = 5.0) -> None:
+    def assert_cluster_ready(self, *, timeout_seconds: float = 20.0) -> None:
         """Verify the configured kube-context is reachable before APPLY.
 
         Raises ``RuntimeError`` with an actionable message when the local cluster
@@ -298,15 +298,37 @@ class KubernetesProvisioner:
                 f"Start the local cluster with `{up_hint}` and ensure kubectl context "
                 f"'{ctx}' exists. Do not leave kubectl on a remote GKE context for local previews."
             )
-        try:
-            self._core.list_namespace(limit=1, _request_timeout=timeout_seconds)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Cannot reach Kubernetes API for context '{ctx}' "
-                f"(timed out or refused after {timeout_seconds:.0f}s): {exc}. "
-                f"For local previews run `{up_hint}` and set KUBERNETES_CONTEXT={ctx} "
-                f"(or unset a remote KUBERNETES_CONTEXT)."
-            ) from exc
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                self._core.list_namespace(limit=1, _request_timeout=timeout_seconds)
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning(
+                        "kubernetes_assert_ready_retry",
+                        context=ctx,
+                        error=str(exc),
+                    )
+                    try:
+                        from app.services.kind_cluster import refresh_local_cluster_kubeconfig
+
+                        refresh_local_cluster_kubeconfig()
+                    except Exception as refresh_exc:  # noqa: BLE001
+                        logger.warning(
+                            "kubernetes_kubeconfig_refresh_failed",
+                            error=str(refresh_exc),
+                        )
+                    self.reload_clients()
+                    if self._core is None:
+                        break
+        raise RuntimeError(
+            f"Cannot reach Kubernetes API for context '{ctx}' "
+            f"(timed out or refused after {timeout_seconds:.0f}s): {last_exc}. "
+            f"For local previews run `{up_hint}` and set KUBERNETES_CONTEXT={ctx} "
+            f"(or unset a remote KUBERNETES_CONTEXT)."
+        ) from last_exc
 
     def reload_clients(self) -> None:
         """Re-read kubeconfig (e.g. after auto-managing the local cluster)."""

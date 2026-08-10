@@ -16,6 +16,7 @@ import asyncio
 import os
 import signal
 import shutil
+import subprocess
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -173,6 +174,95 @@ async def _rewrite_loopback_kubeconfig_server(context: str) -> None:
             logger.info("local_cluster_kubeconfig_loopback_rewritten", context=context, server=fixed)
     except OSError as exc:
         logger.warning("local_cluster_kubeconfig_rewrite_failed", context=context, error=str(exc))
+
+
+def refresh_local_cluster_kubeconfig(*, cluster_name: str | None = None) -> None:
+    """Re-export kubeconfig from kind/k3d so stale API ports (e.g. after recreate) are fixed.
+
+    Safe to call from sync paths (Kubernetes assert retry). Best-effort; never raises.
+    """
+    settings = get_settings()
+    engine = _engine()
+    name = cluster_name or settings.kind_cluster_name
+    context = _context_for(name)
+    tool = _cluster_tool()
+    tool_bin = shutil.which(tool)
+    kubectl_bin = shutil.which("kubectl")
+    if not tool_bin or not kubectl_bin:
+        return
+    try:
+        if tool == "kind":
+            export = subprocess.run(
+                [tool_bin, "export", "kubeconfig", "--name", name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        else:
+            export = subprocess.run(
+                [tool_bin, "kubeconfig", "merge", name, "--kubeconfig-merge-default"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        if export.returncode != 0:
+            logger.warning(
+                "local_cluster_kubeconfig_export_failed",
+                engine=engine,
+                cluster=name,
+                detail=(export.stderr or export.stdout or "")[-300:],
+            )
+            return
+        # Apply loopback rewrite synchronously for the merged context.
+        view = subprocess.run(
+            [
+                kubectl_bin,
+                "config",
+                "view",
+                "--raw",
+                "-o",
+                f'jsonpath={{.clusters[?(@.name=="{context}")].cluster.server}}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        server = (view.stdout or "").strip()
+        if "0.0.0.0" in server:
+            fixed = server.replace("0.0.0.0", "127.0.0.1")
+            subprocess.run(
+                [kubectl_bin, "config", "set-cluster", context, f"--server={fixed}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        # When api runs in Docker against host Kind, prefer K3D_API_HOST rewrite.
+        api_host = (getattr(settings, "k3d_api_host", None) or "").strip()
+        if api_host and server:
+            from urllib.parse import urlparse, urlunparse
+
+            parsed = urlparse(server)
+            if parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                port = parsed.port or 6443
+                rewritten = urlunparse(
+                    (parsed.scheme, f"{api_host}:{port}", parsed.path, "", "", "")
+                )
+                # Only rewrite when explicitly targeting docker-hosted clients.
+                if api_host not in {"127.0.0.1", "localhost"}:
+                    subprocess.run(
+                        [kubectl_bin, "config", "set-cluster", context, f"--server={rewritten}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+        logger.info("local_cluster_kubeconfig_refreshed", engine=engine, cluster=name, context=context)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("local_cluster_kubeconfig_refresh_error", error=str(exc))
 
 
 async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:

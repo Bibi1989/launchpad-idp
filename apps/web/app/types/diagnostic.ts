@@ -35,6 +35,7 @@ export const diagnosticReportSchema = z.object({
 export const analyzePreviewResponseSchema = z.object({
   report: diagnosticReportSchema,
   telemetrySummary: z.record(z.unknown()).default({}),
+  geminiConfigured: z.boolean().optional().default(false),
 })
 
 export type DiagnosticCategory = z.infer<typeof diagnosticCategorySchema>

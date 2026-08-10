@@ -242,7 +242,16 @@ class WorkspaceFileAnalyzerService:
                     raise WorkspaceFileAnalyzerError("Gemini analysis failed") from None
 
         report = self._heuristic_report(path, text, resolved, err_ctx)
-        return report.model_copy(update={"analysisSource": "heuristic"})
+        if not self.gemini_configured:
+            notice = (
+                "Gemini is not configured (set GEMINI_API_KEY). "
+                "Showing heuristic analysis only."
+            )
+            summary = f"{notice} {report.summary}".strip()
+            return report.model_copy(
+                update={"analysisSource": "heuristic", "summary": summary, "kind": resolved}
+            )
+        return report.model_copy(update={"analysisSource": "heuristic", "kind": resolved})
 
     def _analyze_with_gemini(
         self,

@@ -8,6 +8,7 @@ dist/
 .nuxt/
 .output/
 .venv/
+.pdf-gen-venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -23,3 +24,9 @@ infra/pulumi/Pulumi.*.yaml
 .vscode/
 *.log
 docker-compose.yml
+
+# Local runtime / accidental artifacts
+apps/api/celerybeat-schedule*
+apps/api/launchpad.db
+apps/api/MagicMock/
+**/MagicMock/

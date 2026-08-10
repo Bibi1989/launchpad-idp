@@ -87,6 +87,27 @@ def list_host_images_for_reference(reference: str) -> list[str]:
     return out
 
 
+def is_env_scoped_preview_image(image: str, *, environment_id: str, settings: Settings) -> bool:
+    """True when the tag is tied to this environment (safe to delete on env teardown).
+
+    Shared workspace tags like ``launch-web:latest`` must survive expire/destroy of a
+    single preview so the next provision can still load them into the cluster.
+    """
+    tag = (image or "").strip()
+    if not tag:
+        return False
+    env_slug = environment_id.replace("-", "")[:12]
+    if env_slug and env_slug in tag:
+        return True
+    prefix = (settings.preview_build_image_prefix or "launchpad-preview").strip("/")
+    if prefix and env_slug and tag.startswith(f"{prefix}/{env_slug}"):
+        return True
+    registry = (settings.preview_image_registry or "").rstrip("/")
+    if registry and env_slug and tag.startswith(f"{registry}/{env_slug}"):
+        return True
+    return False
+
+
 def collect_preview_environment_images(
     *,
     settings: Settings,
@@ -113,14 +134,18 @@ def collect_preview_environment_images(
         prefix = settings.preview_build_image_prefix.strip("/") or "launchpad-preview"
         repo = f"{prefix}/{env_slug}"
     images.extend(list_host_images_for_reference(repo))
-    # Dedupe while preserving order.
+    # Dedupe while preserving order; drop shared workspace tags (launch-web:latest).
     seen: set[str] = set()
     unique: list[str] = []
     for image in images:
         if image and image not in seen:
             seen.add(image)
             unique.append(image)
-    return unique
+    return [
+        img
+        for img in unique
+        if is_env_scoped_preview_image(img, environment_id=environment_id, settings=settings)
+    ]
 
 
 def collect_workspace_destroy_images(

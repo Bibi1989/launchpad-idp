@@ -220,7 +220,26 @@ async def analyze_environment_preview(
     return AnalyzePreviewResponse(
         report=report,
         telemetrySummary=bundle.to_summary(),
+        geminiConfigured=analyzer.gemini_configured,
     )
+
+
+@router.get("/preview/analyzer/status")
+async def preview_analyzer_status(user: CurrentUser) -> dict[str, object]:
+    """Whether Gemini AI is configured for preview / workspace analysis."""
+    _ = user
+    analyzer = PreviewAnalyzerService()
+    settings = get_settings()
+    return {
+        "gemini_configured": analyzer.gemini_configured,
+        "gemini_model": settings.gemini_model,
+        "heuristic_fallback": settings.preview_analyzer_heuristic_fallback,
+        "message": (
+            "Gemini is ready."
+            if analyzer.gemini_configured
+            else "Set GEMINI_API_KEY on the API (and in deploy/oci .env for Compose) to enable AI analysis."
+        ),
+    }
 
 
 @router.post(
@@ -257,6 +276,7 @@ async def analyze_preview_telemetry(
     return AnalyzePreviewResponse(
         report=report,
         telemetrySummary=bundle.to_summary(),
+        geminiConfigured=analyzer.gemini_configured,
     )
 
 

@@ -142,69 +142,110 @@ def _load_image_to_local_cluster(image_tag: str, cluster_name: str | None = None
     active_engine = (engine or getattr(settings, "local_k8s_engine", "k3s")).lower()
     real_cluster = resolve_kind_cluster_name(cluster_name)
 
+    def _failed(step: str, proc: subprocess.CompletedProcess[str] | None = None, error: str | None = None) -> None:
+        detail = error or ""
+        if proc is not None:
+            detail = (proc.stderr or proc.stdout or detail or "").strip()[-500:]
+        logger.warning(
+            "local_cluster_image_load_step_failed",
+            image=image_tag,
+            cluster=real_cluster,
+            engine=active_engine,
+            step=step,
+            detail=detail,
+        )
+
     try:
-        # Check host docker image first
         inspect_res = subprocess.run(
             ["docker", "image", "inspect", image_tag],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=15,
         )
         if inspect_res.returncode != 0:
+            _failed("docker_inspect", inspect_res)
             return False
 
-        # 1. Try k3d if available / active
-        k3d_bin = shutil.which("k3d")
-        if active_engine == "k3s" and k3d_bin:
-            load_res = subprocess.run(
-                [k3d_bin, "image", "import", image_tag, "-c", real_cluster],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if load_res.returncode == 0:
-                logger.info("auto_loaded_host_image_into_k3d", image=image_tag, cluster=real_cluster)
-                return True
+        # Prefer the active engine first (kind when LOCAL_K8S_ENGINE=kind).
+        if active_engine == "kind":
+            kind_bin = shutil.which("kind")
+            if kind_bin:
+                load_res = subprocess.run(
+                    [kind_bin, "load", "docker-image", image_tag, "--name", real_cluster],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if load_res.returncode == 0:
+                    logger.info("auto_loaded_host_image_into_kind", image=image_tag, cluster=real_cluster)
+                    return True
+                _failed("kind_load", load_res)
 
-        # 2. Try containerized k3s (ctr import)
         if active_engine == "k3s":
-            for container_name in (f"{real_cluster}-k3s", f"k3d-{real_cluster}-server-0", "launchpad-k3s", "k3s"):
+            k3d_bin = shutil.which("k3d")
+            if k3d_bin:
+                load_res = subprocess.run(
+                    [k3d_bin, "image", "import", image_tag, "-c", real_cluster],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if load_res.returncode == 0:
+                    logger.info("auto_loaded_host_image_into_k3d", image=image_tag, cluster=real_cluster)
+                    return True
+                _failed("k3d_import", load_res)
+
+            for container_name in (
+                f"{real_cluster}-k3s",
+                f"k3d-{real_cluster}-server-0",
+                "launchpad-k3s",
+                "k3s",
+            ):
                 check_res = subprocess.run(
                     ["docker", "exec", container_name, "crictl", "images"],
                     capture_output=True,
                     text=True,
-                    timeout=5,
+                    timeout=10,
                 )
-                if check_res.returncode == 0:
-                    short_tag = image_tag.rsplit("/", 1)[-1]
-                    if short_tag in check_res.stdout or image_tag in check_res.stdout:
-                        return True
-                    save_proc = subprocess.Popen(["docker", "save", image_tag], stdout=subprocess.PIPE)
-                    import_proc = subprocess.run(
-                        ["docker", "exec", "-i", container_name, "ctr", "-n", "k8s.io", "images", "import", "-"],
-                        stdin=save_proc.stdout,
-                        capture_output=True,
-                        text=True,
-                        timeout=180,
+                if check_res.returncode != 0:
+                    continue
+                short_tag = image_tag.rsplit("/", 1)[-1]
+                if short_tag in check_res.stdout or image_tag in check_res.stdout:
+                    return True
+                save_proc = subprocess.Popen(["docker", "save", image_tag], stdout=subprocess.PIPE)
+                import_proc = subprocess.run(
+                    ["docker", "exec", "-i", container_name, "ctr", "-n", "k8s.io", "images", "import", "-"],
+                    stdin=save_proc.stdout,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if save_proc.stdout:
+                    save_proc.stdout.close()
+                save_proc.wait(timeout=180)
+                if import_proc.returncode == 0:
+                    logger.info(
+                        "auto_loaded_host_image_into_k3s_ctr",
+                        image=image_tag,
+                        container=container_name,
                     )
-                    if save_proc.stdout:
-                        save_proc.stdout.close()
-                    if import_proc.returncode == 0:
-                        logger.info("auto_loaded_host_image_into_k3s_ctr", image=image_tag, container=container_name)
-                        return True
+                    return True
+                _failed(f"ctr_import:{container_name}", import_proc)
 
-        # 3. Kind fallback
-        kind_bin = shutil.which("kind")
-        if kind_bin:
-            load_res = subprocess.run(
-                [kind_bin, "load", "docker-image", image_tag, "--name", real_cluster],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if load_res.returncode == 0:
-                logger.info("auto_loaded_host_image_into_kind", image=image_tag, cluster=real_cluster)
-                return True
+        # Cross-engine fallback only when the preferred path failed.
+        if active_engine != "kind":
+            kind_bin = shutil.which("kind")
+            if kind_bin:
+                load_res = subprocess.run(
+                    [kind_bin, "load", "docker-image", image_tag, "--name", real_cluster],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if load_res.returncode == 0:
+                    logger.info("auto_loaded_host_image_into_kind", image=image_tag, cluster=real_cluster)
+                    return True
+                _failed("kind_load_fallback", load_res)
 
         return False
     except Exception as exc:
@@ -212,9 +253,40 @@ def _load_image_to_local_cluster(image_tag: str, cluster_name: str | None = None
         return False
 
 
+def load_image_to_local_cluster_with_retry(
+    image_tag: str,
+    *,
+    cluster_name: str | None = None,
+    engine: str | None = None,
+) -> bool:
+    """Load image; on failure ensure the local cluster then retry once."""
+    if _load_image_to_local_cluster(image_tag, cluster_name=cluster_name, engine=engine):
+        return True
+    try:
+        from app.services.kind_cluster import ensure_kind_cluster
+
+        # Sync caller (manifest deploy) - run ensure in a fresh event loop if needed.
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            asyncio.run(ensure_kind_cluster(cluster_name=cluster_name))
+        else:
+            # Already inside async (unlikely for sync build path). Skip ensure.
+            logger.warning("image_load_retry_skipped_running_loop", image=image_tag)
+            return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("image_load_ensure_cluster_failed", image=image_tag, error=str(exc))
+        return False
+    return _load_image_to_local_cluster(image_tag, cluster_name=cluster_name, engine=engine)
+
+
 def _is_image_in_kind(image_tag: str, cluster_name: str | None = None) -> bool:
     """Return True if image_tag is present in local cluster node or host docker (auto-loading if needed)."""
-    return _load_image_to_local_cluster(image_tag, cluster_name=cluster_name)
+    return load_image_to_local_cluster_with_retry(image_tag, cluster_name=cluster_name)
 
 
 def plan_workspace_image_builds(
@@ -483,7 +555,7 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                     loaded.append(image_tag)
                     continue
                 logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
-                if _load_image_to_local_cluster(image_tag, cluster_name=real_cluster):
+                if load_image_to_local_cluster_with_retry(image_tag, cluster_name=real_cluster):
                     loaded.append(image_tag)
                     if image_id:
                         loaded_ids.add(image_id)

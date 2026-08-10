@@ -76,6 +76,18 @@ class PreviewAnalyzerService:
                     raise PreviewAnalyzerError("Gemini analysis failed") from None
 
         report = self._heuristic_report(bundle, manifest_snippets or {})
+        if not self.gemini_configured:
+            notice = (
+                "Gemini is not configured (set GEMINI_API_KEY on the API). "
+                "Showing heuristic analysis only."
+            )
+            report = report.model_copy(
+                update={
+                    "analysisSource": "heuristic",
+                    "summary": f"{notice} {report.summary}".strip(),
+                }
+            )
+            return report
         return report.model_copy(update={"analysisSource": "heuristic"})
 
     def _analyze_with_gemini(

@@ -91,6 +91,26 @@ def test_collect_preview_environment_images_includes_prefix_tags() -> None:
     assert any(img.startswith(f"{expected_repo}:") for img in images)
 
 
+def test_collect_preview_skips_shared_workspace_tags() -> None:
+    env_id = str(uuid4())
+    settings = Settings(
+        _env_file=None,
+        preview_build_image_prefix="launchpad-preview",
+        preview_image_registry=None,
+    )
+    with patch(
+        "app.services.image_cleanup.list_host_images_for_reference",
+        return_value=[],
+    ):
+        images = collect_preview_environment_images(
+            settings=settings,
+            environment_id=env_id,
+            workload_image="launch-web:latest",
+            commit_sha=None,
+        )
+    assert images == []
+
+
 def test_remove_local_docker_images_skips_denylist_and_calls_rmi(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

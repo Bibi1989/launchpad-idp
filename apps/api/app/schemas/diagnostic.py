@@ -70,6 +70,7 @@ class AnalyzePreviewRequest(BaseModel):
 class AnalyzePreviewResponse(BaseModel):
     report: DiagnosticReport
     telemetrySummary: dict[str, Any] = Field(default_factory=dict)
+    geminiConfigured: bool = False
 
 
 # JSON Schema handed to Gemini (camelCase property names matching UI contract).

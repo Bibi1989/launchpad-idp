@@ -118,6 +118,10 @@ services:
       GITLAB_OAUTH_CLIENT_ID: ${GITLAB_OAUTH_CLIENT_ID:-}
       GITLAB_OAUTH_CLIENT_SECRET: ${GITLAB_OAUTH_CLIENT_SECRET:-}
       GITLAB_OAUTH_REDIRECT_URI: ${GITLAB_OAUTH_REDIRECT_URI:-}
+      # Gemini (preview analyzer, workspace file AI, Dockerfile review)
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      PREVIEW_ANALYZER_HEURISTIC_FALLBACK: ${PREVIEW_ANALYZER_HEURISTIC_FALLBACK:-true}
     volumes: *k8s_volumes
     expose:
       - "8000"
