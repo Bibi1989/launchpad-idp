@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     default_ttl_hours: int = 72
     cost_estimate_hourly: Decimal = Decimal("0.4200")
-    provision_step_delay_seconds: float = 0.75
+    provision_step_delay_seconds: float = 0.0
 
     # Preview governance (Launch / Environments)
     max_concurrent_environments: int = 4
@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     kubernetes_memory_limit: str = "8Gi"
     kubernetes_pod_limit: str = "20"
     kubernetes_ready_timeout_seconds: float = 120.0
-    kubernetes_ready_poll_seconds: float = 2.0
+    kubernetes_ready_poll_seconds: float = 1.0
 
     sse_poll_interval_seconds: float = 0.5
     ttl_reaper_interval_seconds: float = 300.0
@@ -181,6 +181,8 @@ class Settings(BaseSettings):
     preview_image_registry: str | None = None
     preview_build_kind_load: bool = True
     preview_build_timeout_seconds: float = 900.0
+    # When true, docker build re-pulls base images (slower; useful for CI freshness).
+    preview_build_pull_base: bool = False
 
     # Local K8s cluster engine: "k3s" (default, via k3d) or "kind".
     # Override with LOCAL_K8S_ENGINE=kind to use Kubernetes-in-Docker instead.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -15,8 +16,11 @@ from app.services.k8s_spec import APP_NAME, build_preview_labels
 from app.services.kubernetes import (
     KubernetesProvisioner,
     ProvisionedResources,
+    _workload_ready_timeout_seconds,
     resolve_preview_node_port,
 )
+
+BUILD_FINGERPRINT_LABEL = "org.launchpad.build-fingerprint"
 
 logger = get_logger(__name__)
 
@@ -130,9 +134,161 @@ def resolve_kind_cluster_name(requested_name: str | None = None) -> str:
     return resolve_local_cluster_name(requested_name)
 
 
+def _host_docker_image_id(image_tag: str) -> str | None:
+    """Return the host Docker image ID for ``image_tag``, or None if missing."""
+    try:
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image_tag],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if inspect.returncode != 0:
+        return None
+    return (inspect.stdout or "").strip() or None
+
+
+def _host_image_fingerprint(image_tag: str) -> str | None:
+    """Return the Launchpad build fingerprint label on a host image, if any."""
+    try:
+        inspect = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                f'{{{{index .Config.Labels "{BUILD_FINGERPRINT_LABEL}"}}}}',
+                image_tag,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if inspect.returncode != 0:
+        return None
+    value = (inspect.stdout or "").strip()
+    return value or None
+
+
+def workspace_image_fingerprint(*, dockerfile: Path, context: Path) -> str:
+    """Cheap content fingerprint for Dockerfile + build context (paths, size, mtime)."""
+    digest = hashlib.sha256()
+    try:
+        digest.update(dockerfile.read_bytes())
+    except OSError:
+        digest.update(str(dockerfile).encode())
+    if context.is_dir():
+        for path in sorted(context.rglob("*")):
+            if not path.is_file():
+                continue
+            if any(part in {".git", "node_modules", ".venv", "__pycache__"} for part in path.parts):
+                continue
+            try:
+                rel = path.relative_to(context).as_posix()
+                st = path.stat()
+            except OSError:
+                continue
+            digest.update(rel.encode())
+            digest.update(str(st.st_size).encode())
+            digest.update(str(st.st_mtime_ns).encode())
+    return digest.hexdigest()[:32]
+
+
+def _local_node_container_names(cluster_name: str, *, engine: str) -> list[str]:
+    """Candidate docker container names for local cluster nodes."""
+    names: list[str] = []
+    if engine == "kind":
+        import shutil
+
+        kind_bin = shutil.which("kind")
+        if kind_bin:
+            try:
+                nodes = subprocess.run(
+                    [kind_bin, "get", "nodes", "--name", cluster_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if nodes.returncode == 0:
+                    names.extend(line.strip() for line in nodes.stdout.splitlines() if line.strip())
+            except Exception:
+                pass
+        names.append(f"{cluster_name}-control-plane")
+    else:
+        names.extend(
+            (
+                f"k3d-{cluster_name}-server-0",
+                f"{cluster_name}-k3s",
+                "launchpad-k3s",
+                "k3s",
+            )
+        )
+    # Preserve order, drop empties/dupes.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if name and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _image_listed_in_node_output(image_tag: str, listing: str, *, host_id: str | None) -> bool:
+    """True when crictl/ctr image listing mentions the tag and optional host digest."""
+    short_tag = image_tag.rsplit("/", 1)[-1]
+    tag_hit = image_tag in listing or short_tag in listing
+    if not tag_hit:
+        return False
+    if not host_id:
+        return True
+    # Match full sha256:… or the hex suffix without the algorithm prefix.
+    digest = host_id.removeprefix("sha256:")
+    return host_id in listing or (bool(digest) and digest[:12] in listing)
+
+
+def cluster_has_image(
+    image_tag: str,
+    *,
+    cluster_name: str | None = None,
+    engine: str | None = None,
+) -> bool:
+    """Return True when the local cluster already has ``image_tag`` (check only)."""
+    if not image_tag:
+        return False
+    settings = get_settings()
+    active_engine = (engine or getattr(settings, "local_k8s_engine", "k3s")).lower()
+    real_cluster = resolve_kind_cluster_name(cluster_name)
+    host_id = _host_docker_image_id(image_tag)
+
+    for container_name in _local_node_container_names(real_cluster, engine=active_engine):
+        for cmd in (
+            ["docker", "exec", container_name, "crictl", "images"],
+            ["docker", "exec", container_name, "ctr", "-n", "k8s.io", "images", "ls"],
+        ):
+            try:
+                check = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            except Exception:
+                continue
+            if check.returncode != 0:
+                continue
+            listing = check.stdout or ""
+            if _image_listed_in_node_output(image_tag, listing, host_id=host_id):
+                logger.info(
+                    "local_cluster_image_already_present",
+                    image=image_tag,
+                    cluster=real_cluster,
+                    container=container_name,
+                )
+                return True
+    return False
+
+
 def _load_image_to_local_cluster(image_tag: str, cluster_name: str | None = None, engine: str | None = None) -> bool:
     """Load host docker image into local K3s/k3d or Kind cluster so pods pull cleanly without external registry."""
-    import subprocess
     import shutil
     from app.core.config import get_settings
 
@@ -156,6 +312,9 @@ def _load_image_to_local_cluster(image_tag: str, cluster_name: str | None = None
         )
 
     try:
+        if cluster_has_image(image_tag, cluster_name=real_cluster, engine=active_engine):
+            return True
+
         inspect_res = subprocess.run(
             ["docker", "image", "inspect", image_tag],
             capture_output=True,
@@ -195,12 +354,7 @@ def _load_image_to_local_cluster(image_tag: str, cluster_name: str | None = None
                     return True
                 _failed("k3d_import", load_res)
 
-            for container_name in (
-                f"{real_cluster}-k3s",
-                f"k3d-{real_cluster}-server-0",
-                "launchpad-k3s",
-                "k3s",
-            ):
+            for container_name in _local_node_container_names(real_cluster, engine=active_engine):
                 check_res = subprocess.run(
                     ["docker", "exec", container_name, "crictl", "images"],
                     capture_output=True,
@@ -209,8 +363,8 @@ def _load_image_to_local_cluster(image_tag: str, cluster_name: str | None = None
                 )
                 if check_res.returncode != 0:
                     continue
-                short_tag = image_tag.rsplit("/", 1)[-1]
-                if short_tag in check_res.stdout or image_tag in check_res.stdout:
+                host_id = _host_docker_image_id(image_tag)
+                if _image_listed_in_node_output(image_tag, check_res.stdout or "", host_id=host_id):
                     return True
                 save_proc = subprocess.Popen(["docker", "save", image_tag], stdout=subprocess.PIPE)
                 import_proc = subprocess.run(
@@ -285,8 +439,8 @@ def load_image_to_local_cluster_with_retry(
 
 
 def _is_image_in_kind(image_tag: str, cluster_name: str | None = None) -> bool:
-    """Return True if image_tag is present in local cluster node or host docker (auto-loading if needed)."""
-    return load_image_to_local_cluster_with_retry(image_tag, cluster_name=cluster_name)
+    """Return True if ``image_tag`` is already present in the local cluster (check only)."""
+    return cluster_has_image(image_tag, cluster_name=cluster_name)
 
 
 def plan_workspace_image_builds(
@@ -500,26 +654,52 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
         except ValueError:
             rel = df
         primary = next((t for t in tags if t in required_tags), tags[0])
+        fingerprint = workspace_image_fingerprint(dockerfile=df, context=context)
         try:
-            logger.info("building_kind_docker_image", image=primary, dockerfile=str(rel), aliases=len(tags))
-            build_res = subprocess.run(
-                ["docker", "build", "-t", primary, "-f", str(df), str(context)],
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-            if build_res.returncode != 0:
-                detail = (build_res.stderr or build_res.stdout or "").strip()[-800:]
-                logger.warning(
-                    "kind_image_build_failed",
-                    dockerfile=str(rel),
+            existing_fp = _host_image_fingerprint(primary)
+            skip_build = bool(existing_fp and existing_fp == fingerprint and _host_docker_image_id(primary))
+            if skip_build:
+                logger.info(
+                    "skipping_kind_docker_build_fingerprint_match",
                     image=primary,
-                    error=detail,
+                    dockerfile=str(rel),
+                    fingerprint=fingerprint,
                 )
-                for image_tag in tags:
-                    if image_tag in required_tags:
-                        failed_required.append(f"{image_tag} ({rel}): {detail[:200]}")
-                continue
+            else:
+                logger.info(
+                    "building_kind_docker_image",
+                    image=primary,
+                    dockerfile=str(rel),
+                    aliases=len(tags),
+                )
+                build_res = subprocess.run(
+                    [
+                        "docker",
+                        "build",
+                        "-t",
+                        primary,
+                        "-f",
+                        str(df),
+                        "--label",
+                        f"{BUILD_FINGERPRINT_LABEL}={fingerprint}",
+                        str(context),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                if build_res.returncode != 0:
+                    detail = (build_res.stderr or build_res.stdout or "").strip()[-800:]
+                    logger.warning(
+                        "kind_image_build_failed",
+                        dockerfile=str(rel),
+                        image=primary,
+                        error=detail,
+                    )
+                    for image_tag in tags:
+                        if image_tag in required_tags:
+                            failed_required.append(f"{image_tag} ({rel}): {detail[:200]}")
+                    continue
 
             for alias in tags:
                 if alias == primary:
@@ -1524,11 +1704,12 @@ def _patch_deployment(
     if is_kind_cluster and "/" not in target_image and target_image.lower() in generic_placeholders:
         cluster_name = (settings.kubernetes_context or "launchpad").removeprefix("kind-")
         if not _is_image_in_kind(target_image, cluster_name=cluster_name):
-            logger.warning("local_kind_image_not_found", image=target_image)
-            raise FileNotFoundError(
-                f"Local cluster is missing image {target_image}. "
-                "Build/load the workspace image or set an explicit workload_image."
-            )
+            if not load_image_to_local_cluster_with_retry(target_image, cluster_name=cluster_name):
+                logger.warning("local_kind_image_not_found", image=target_image)
+                raise FileNotFoundError(
+                    f"Local cluster is missing image {target_image}. "
+                    "Build/load the workspace image or set an explicit workload_image."
+                )
 
     container["image"] = target_image
     container["imagePullPolicy"] = "IfNotPresent"
@@ -1829,11 +2010,10 @@ class ManifestDeployer:
         else:
             resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
 
-        ready_timeout = self._settings.kubernetes_ready_timeout_seconds
-        # Non-nginx images (pull + cold Node/Vite bind) need more headroom than nginx.
-        # Keep probe windows in sync with the worker's ready timeout.
-        if not _is_nginx_image(workload_image):
-            ready_timeout = max(ready_timeout, 240.0)
+        ready_timeout = _workload_ready_timeout_seconds(
+            image=workload_image,
+            base_timeout_seconds=float(self._settings.kubernetes_ready_timeout_seconds),
+        )
         try:
             self._provisioner.wait_for_workload_ready(
                 namespace=namespace,

@@ -851,7 +851,7 @@ class KubernetesProvisioner:
         last_desired = 1
         last_unavailable = 0
         stable_ready_polls = 0
-        required_stable_polls = 2
+        required_stable_polls = 1
         start_time = time.monotonic()
         while time.monotonic() < deadline:
             if cancel_check is not None and cancel_check():

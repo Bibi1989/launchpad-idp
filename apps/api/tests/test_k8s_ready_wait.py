@@ -58,8 +58,31 @@ def test_all_deployments_ready_marks_ready() -> None:
         ],
         timeout=5,
     )
-    # Does not raise -> all deployments Ready.
+    # Does not raise -> all deployments Ready on the first stable poll.
     prov.wait_for_workload_ready(namespace="lp-shop", timeout_seconds=5)
+
+
+def test_ready_returns_on_first_stable_poll() -> None:
+    """With required_stable_polls=1, Ready on the first observation succeeds."""
+    calls = {"n": 0}
+
+    def _snapshot(**_kwargs):
+        calls["n"] += 1
+        return {
+            "desired": 1,
+            "ready": 1,
+            "updated": 1,
+            "unavailable": 0,
+            "revision_ready": True,
+            "deployment_count": 1,
+            "pending": [],
+        }
+
+    prov = _provisioner(deployments=[_deployment("launch-web")], timeout=5)
+    prov._deployment_ready_snapshot = _snapshot  # type: ignore[method-assign]
+    prov.wait_for_workload_ready(namespace="lp-shop", timeout_seconds=5)
+    assert calls["n"] == 1
+
 
 
 def test_one_deployment_not_ready_times_out_with_pending() -> None:

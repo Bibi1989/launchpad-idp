@@ -208,19 +208,22 @@ def _clone_repository(
 def _docker_build(*, context: Path, dockerfile: str, tag: str) -> None:
     import docker
 
+    from app.core.config import get_settings
+
     client = docker.from_env()
     dockerfile_path = context / dockerfile
     if not dockerfile_path.is_file():
         raise PreviewBuildError(
             f"{dockerfile} not found at repository root - add a Dockerfile to enable preview builds"
         )
+    pull_base = bool(get_settings().preview_build_pull_base)
     try:
         _, build_logs = client.images.build(
             path=str(context),
             tag=tag,
             dockerfile=dockerfile,
             rm=True,
-            pull=True,
+            pull=pull_base,
         )
         for chunk in build_logs:
             if "stream" in chunk:
