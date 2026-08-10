@@ -1,7 +1,7 @@
 export type CloudProvider = 'local' | 'gcp' | 'aws' | 'azure' | 'cloudflare'
 export type IaCEngine = 'terraform' | 'opentofu' | 'pulumi' | 'ansible'
 
-export type AnsibleAppDeployMode = 'docker_run' | 'docker_compose' | 'systemd' | 'none'
+export type AnsibleAppDeployMode = 'docker_run' | 'docker_compose' | 'systemd' | 'pm2' | 'none'
 
 export interface AnsibleConfig {
   enabled: boolean
@@ -29,6 +29,8 @@ export interface AnsibleConfig {
   app_deploy_mode: AnsibleAppDeployMode
   app_dir: string
   app_listen_port: number
+  reverse_proxy?: InstanceReverseProxy
+  app_start_command?: string | null
   sync_workspace: boolean
   use_vault: boolean
   vault_password_file?: string | null
@@ -37,6 +39,8 @@ export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm' | 'kustomize
 export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
 export type WorkspaceRuntimeMode = 'kubernetes' | 'docker_compose' | 'running_instance'
 export type RunningInstanceKind = 'serverless' | 'vm' | 'local_machine'
+export type InstanceProcessStrategy = 'docker' | 'systemd' | 'pm2'
+export type InstanceReverseProxy = 'none' | 'nginx' | 'caddy'
 export type ProvisionEngine = IaCEngine
 export type K8sScaffoldMode = 'k8s' | 'helm' | 'kustomize'
 export type CicdPlatform = 'github' | 'gitlab'
@@ -188,13 +192,14 @@ export interface KubernetesWorkloadOptions {
   limit_range: boolean
 }
 
-export type DependencyPlacement = 'in_cluster' | 'managed'
+export type DependencyPlacement = 'in_cluster' | 'managed' | 'external'
 
 export type DataStoreKind = 'postgres' | 'mysql' | 'mongodb' | 'redis'
 
 export interface DataStoreDependency {
   enabled: boolean
   placement: DependencyPlacement
+  connection_url?: string | null
 }
 
 export interface WorkloadDependenciesConfig {
@@ -213,6 +218,10 @@ export interface RunningInstanceConfig {
   ssh_port?: number
   ssh_key_path?: string | null
   listen_port?: number
+  /** How the app is supervised on VM/local (serverless forces docker). */
+  process_strategy?: InstanceProcessStrategy
+  /** Optional HTTP edge in front of listen_port. */
+  reverse_proxy?: InstanceReverseProxy
   preview_url_override?: string | null
   /** @deprecated coerced from older snapshots */
   kube_context?: string | null

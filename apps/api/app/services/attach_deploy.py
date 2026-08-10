@@ -1014,13 +1014,27 @@ def deploy_attach(
     """Deploy (or link) a preview onto serverless / VM / local-machine compute."""
     _ = (namespace, git_branch, git_repo_url, ttl_expires_at, owner_label, enable_postgres, enable_redis, packaging)
     cfg = settings or get_settings()
+    from app.schemas.cloud import InstanceProcessStrategy
+
+    kind = running_instance.kind
+    strategy = running_instance.process_strategy
+    if (
+        kind in {RunningInstanceKind.LOCAL_MACHINE, RunningInstanceKind.VM}
+        and strategy != InstanceProcessStrategy.DOCKER
+    ):
+        raise AttachDeployError(
+            f"Live Launch attach currently supports Docker only "
+            f"(process_strategy={strategy.value}). "
+            "Apply infra/instance/ scaffolds on the host (systemd/PM2/nginx) "
+            "or set process_strategy=docker for one-click preview."
+        )
+
     workload = resolve_instance_image(
         image=image,
         workspace_root=workspace_root,
         environment_id=environment_id,
         settings=cfg,
     )
-    kind = running_instance.kind
 
     if kind == RunningInstanceKind.LOCAL_MACHINE:
         return _deploy_local_machine(

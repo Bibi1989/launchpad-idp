@@ -1230,11 +1230,15 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
             )
         else:
             title = f"Local running instance ({kind})"
+            strategy = request.running_instance.process_strategy.value
+            proxy = request.running_instance.reverse_proxy.value
             howto = (
                 "## Run on compute target\n\n"
-                f"Runtime mode: `{mode.value}` / kind: `{kind}`.\n\n"
-                "Launchpad deploys a container image to the selected compute target "
-                "(local Docker, SSH VM, or managed container service). "
+                f"Runtime mode: `{mode.value}` / kind: `{kind}`.\n"
+                f"Process strategy: `{strategy}` / reverse proxy: `{proxy}`.\n\n"
+                "Docker strategy: Launchpad attaches a container image to the "
+                "selected compute target (local Docker, SSH VM, or managed container "
+                "service). PM2/systemd: see `infra/instance/` and Ansible.\n"
                 "No Kubernetes manifests are generated for this workspace.\n"
             )
 
@@ -1264,6 +1268,17 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
             )
         files.extend(self._write_container_scaffold(workspace_dir, request))
 
+        if mode == WorkspaceRuntimeMode.RUNNING_INSTANCE:
+            from app.services.instance_process_scaffold import write_instance_process_scaffold
+
+            files.extend(
+                write_instance_process_scaffold(
+                    workspace_dir,
+                    name=request.name,
+                    running_instance=request.running_instance,
+                )
+            )
+
         # Optional IaC stubs (Terraform / OpenTofu / Pulumi / Ansible).
         from app.services.local_runtime_iac import write_local_runtime_iac
 
@@ -1271,6 +1286,20 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
         # Auto-enable Ansible artifacts when engine is ansible or VM-targeted instance.
         if request.iac_engine == IaCEngine.ANSIBLE and not ansible_cfg.enabled:
             ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+        if mode == WorkspaceRuntimeMode.RUNNING_INSTANCE:
+            from app.schemas.cloud import AnsibleAppDeployMode
+            from app.services.instance_process_scaffold import ansible_deploy_mode_for_strategy
+
+            ansible_cfg = ansible_cfg.model_copy(
+                update={
+                    "app_deploy_mode": AnsibleAppDeployMode(
+                        ansible_deploy_mode_for_strategy(
+                            request.running_instance.process_strategy
+                        )
+                    ),
+                    "app_listen_port": request.running_instance.listen_port,
+                }
+            )
         if (
             mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
             and request.running_instance.kind.value == "vm"

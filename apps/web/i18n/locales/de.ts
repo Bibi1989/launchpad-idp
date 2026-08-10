@@ -466,7 +466,21 @@ export default {
     "runtimeModeOverrideHint": "Du kannst weiterhin Kubernetes, Docker Compose oder Running Instance für Scaffold und Provision wählen.",
     "enableIac": "IaC scaffolden (Terraform / Pulumi)",
     "enableCicd": "CI/CD scaffolden",
-    "cicdPlatform": "CI-Plattform"
+    "cicdPlatform": "CI-Plattform",
+    "datastoresTitle": "Datenbanken & Cache",
+    "datastoresBlurb": "In-Cluster für lokale Previews, oder externe URL (Neon, Supabase, RDS, Upstash, Railway, …).",
+    "datastoreInCluster": "In-Cluster (Launchpad)",
+    "datastoreExternal": "Externe URL",
+    "datastoreSkip": "Überspringen",
+    "datastoreInClusterHint": "Launchpad startet Postgres/Redis neben der App und setzt Verbindungsvariablen.",
+    "datastoreExternalHint": "Empfohlen für shared/managed DBs. z.B. Neon/Supabase Postgres, Upstash Redis.",
+    "connectionUrl": "Connection-URL",
+    "useSuggestedUrl": "Vorschlag verwenden",
+    "envTitle": "Umgebungsvariablen",
+    "envBlurb": "Aus .env.example. Secrets bleiben leer. Beim Speichern als .env (gitignored).",
+    "showSecretKeys": "Secret-Keys anzeigen",
+    "secretBadge": "secret",
+    "noEnvExample": "Keine .env.example gefunden. Datastore-URLs können trotzdem gesetzt werden."
   },
   "notifications": {
     "title": "Benachrichtigungen",
@@ -873,13 +887,65 @@ export default {
       "attach": {
         "title": "Compute-Ziel",
         "blurb": "Wähle den Cloud-Dienst, der die App ausführt. Die Preview-URL entsteht nach dem Deploy.",
-        "dockerNote": "Cloud Run, App Runner und Container Apps führen Docker/OCI-Images aus. VMs nutzen Docker per SSH.",
+        "dockerNote": "Serverless nutzt immer Docker/OCI. Auf VMs und lokal: Docker, systemd oder PM2, optional nginx/Caddy davor.",
         "cloudflareNote": "Cloudflare Workers/Pages sind Edge-Runtimes, keine Docker-Hosts. VM per SSH nutzen oder Kubernetes / Workers in den IaC-Diensten.",
         "containerBadge": "Container-Image",
+        "processStrategy": "Prozessstrategie",
+        "reverseProxy": "Reverse Proxy",
+        "reverseProxyHint": "TLS und Routing auf den App-Port. Die App selbst nicht als nginx betreiben.",
+        "strategies": {
+          "docker": "Docker (empfohlen)",
+          "systemd": "systemd-Unit",
+          "pm2": "PM2 (Node)"
+        },
+        "strategyHints": {
+          "docker": "One-Click Launch Preview. Gleiches Image wie Compose/K8s.",
+          "systemd": "Beste native Überwachung auf Linux-VMs. Scaffolds unter infra/instance/.",
+          "pm2": "Node-Prozessmanager. Schreibt ecosystem.config.cjs."
+        },
+        "proxies": {
+          "none": "Keine",
+          "nginx": "nginx",
+          "caddy": "Caddy"
+        },
+        "localByStrategy": {
+          "docker": {
+            "title": "Lokales Docker",
+            "desc": "docker run auf dieser Maschine",
+            "badge": "Container-Image"
+          },
+          "systemd": {
+            "title": "Lokales systemd",
+            "desc": "Nativer Prozess per systemd-Unit auf dieser Maschine",
+            "badge": "systemd-Unit"
+          },
+          "pm2": {
+            "title": "Lokales PM2",
+            "desc": "Node-Prozessmanager (ecosystem.config.cjs) auf dieser Maschine",
+            "badge": "PM2-Prozess"
+          }
+        },
+        "vmByStrategy": {
+          "docker": {
+            "title": "Remote-VM (SSH)",
+            "desc": "Jeder Linux-Host mit Docker",
+            "badge": "Container-Image"
+          },
+          "systemd": {
+            "title": "Remote-VM - systemd",
+            "desc": "SSH-Host mit systemd-Unit (Ansible / infra/instance)",
+            "badge": "systemd-Unit"
+          },
+          "pm2": {
+            "title": "Remote-VM - PM2",
+            "desc": "SSH-Host mit PM2 (ecosystem.config.cjs)",
+            "badge": "PM2-Prozess"
+          }
+        },
         "serverlessHint": "Deployt das Container-Image zum Managed Service (gcloud / AWS wenn verfügbar).",
         "serverlessConfigHint": "Benötigt Container-Image, Cloud-Zugangsdaten und Region. Artifact Registry / ECR empfohlen.",
-        "vmConfigHint": "Benötigt SSH-Erreichbarkeit von der Control Plane, Docker auf der VM und Image-Pull.",
-        "localMachineHint": "Startet den Container mit Docker auf dieser Maschine (ohne Kubernetes).",
+        "vmConfigHint": "SSH von der Control Plane nötig. Docker-Strategie braucht Docker auf der VM; systemd/PM2 nutzen infra/instance.",
+        "localMachineHint": "Docker-Strategie läuft lokal per docker. systemd/PM2-Scaffolds unter infra/instance/.",
         "localBlurb": "Lokales Docker oder Remote-VM per SSH wählen. Optionale IaC- und CI/CD-Scaffolds finden Sie darunter.",
         "kind": "Compute-Art",
         "serviceName": "Service-Name",
@@ -953,6 +1019,7 @@ export default {
     },
     "stepProgress": "SCHRITT {current}/{total}",
     "workspaceSelectBlurb": "Neuen Stack erstellen oder bestehenden mit vorherigen Einstellungen wieder öffnen.",
+    "loadingWorkspaceConfig": "Workspace-Einstellungen werden geladen…",
     "iacEngineLocalHint": "Lokales Kubernetes scaffoldet nur Manifeste - zu Cloud-Anbieter wechseln für Terraform, OpenTofu oder Pulumi.",
     "iacEngineLocalRuntimeHint": "Lokale Compose- und Running-Instance-Workspaces scaffolden Terraform-, OpenTofu- oder Pulumi-Stubs plus optionales CI/CD. Für Managed Modules zu einem Cloud-Anbieter wechseln.",
     "editingExisting": "Bearbeiten",
@@ -1888,8 +1955,18 @@ export default {
       "tabForm": "Formular",
       "tabAdvanced": "Advanced",
       "tabCloud": "Cloud",
+      "tabAi": "Mit KI aktualisieren",
       "advancedHint": "Generierte Ansible-Dateien bearbeiten. Änderungen fließen in das Scaffold unter infra/ansible beim Speichern ein.",
       "cloudHint": "Inventory auf Cloud-VMs ausrichten. SSH-Benutzer/Schlüssel kommen weiterhin aus dem Formular oder der Running-Instance.",
+      "aiBlurb": "Beschreibe, wie der Host laufen soll (PM2, systemd, Docker, nginx/Caddy). Die KI aktualisiert Inventory, Playbook und group_vars unter infra/ansible.",
+      "aiContext": "Aktueller Modus: {mode}. Reverse-Proxy: {proxy}.",
+      "aiPrompt": "Prompt",
+      "aiPromptPlaceholder": "Beispiel: Auf PM2 mit nginx auf Port 80 umstellen, UFW fuer 22/80/443 oeffnen, SSH-Benutzer ubuntu behalten",
+      "aiPromptRequired": "Kurzen Prompt eingeben (mindestens 3 Zeichen).",
+      "aiUpdate": "Ansible-Dateien aktualisieren",
+      "aiUpdating": "Aktualisiere…",
+      "aiUpdated": "Ansible-Dateien aktualisiert.",
+      "aiFailed": "Ansible-Dateien konnten nicht aktualisiert werden.",
       "cloudProvider": "Ziel-Cloud",
       "cloudProviderHint": "Nutzt den Workspace-Cloud-Provider, wenn gesetzt.",
       "hosts": "Inventory-Hosts",
@@ -1919,7 +1996,9 @@ export default {
       "modeDockerRun": "docker run (einzelner Container)",
       "modeCompose": "docker compose",
       "modeSystemd": "systemd-Unit",
+      "modePm2": "PM2 (Node)",
       "modeNone": "Nur Bootstrap (keine App-Rolle)",
+      "reverseProxy": "Reverse-Proxy",
       "appPort": "App-Listen-Port",
       "appDir": "App-Verzeichnis auf dem Host",
       "syncWorkspace": "Workspace-Quellen ins App-Verzeichnis synchronisieren",

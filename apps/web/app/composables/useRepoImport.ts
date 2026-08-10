@@ -1,4 +1,6 @@
 import type {
+  DatastoreImportConfig,
+  EnvVarOverride,
   RepoImportSaveResult,
   RepoImportSession,
   ServiceOverride,
@@ -42,6 +44,10 @@ export function useRepoImport() {
     enable_cicd?: boolean
     cicd_platform?: 'github' | 'gitlab'
     project_id?: string | null
+    env_vars?: EnvVarOverride[]
+    datastores?: DatastoreImportConfig[]
+    process_strategy?: 'docker' | 'systemd' | 'pm2'
+    reverse_proxy?: 'none' | 'nginx' | 'caddy'
   }): Promise<RepoImportSaveResult> {
     return apiFetch<RepoImportSaveResult>(`/imports/${input.importId}/save`, {
       method: 'POST',
@@ -55,6 +61,10 @@ export function useRepoImport() {
         enable_cicd: input.enable_cicd ?? false,
         cicd_platform: input.cicd_platform ?? 'github',
         project_id: input.project_id || null,
+        env_vars: input.env_vars ?? [],
+        datastores: input.datastores ?? [],
+        process_strategy: input.process_strategy ?? 'docker',
+        reverse_proxy: input.reverse_proxy ?? 'none',
       }),
       timeoutMs: IMPORT_TIMEOUT_MS,
     })

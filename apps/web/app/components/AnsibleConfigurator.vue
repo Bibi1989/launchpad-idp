@@ -2,6 +2,10 @@
 import type { AnsibleConfig, CloudProvider, RunningInstanceConfig } from '~/types/provisioning'
 import { defaultAnsibleConfig } from '~/utils/cloudValidation'
 import { buildAnsibleScaffold } from '~/utils/ansibleScaffold'
+import {
+  ansibleDeployModeFromStrategy,
+  resolveProcessStrategy,
+} from '~/utils/instanceComputeTargets'
 
 const props = withDefaults(
   defineProps<{
@@ -24,12 +28,13 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const { apiFetch } = useApi()
 
 const WorkspaceMonacoEditor = defineAsyncComponent(
   () => import('~/components/WorkspaceMonacoEditor.vue'),
 )
 
-type AnsibleTab = 'form' | 'advanced' | 'cloud'
+type AnsibleTab = 'form' | 'advanced' | 'cloud' | 'ai'
 type AdvancedFileKey = 'inventory' | 'playbook' | 'groupVars'
 
 const activeTab = ref<AnsibleTab>('form')
@@ -38,6 +43,10 @@ const advancedDirty = ref(false)
 const inventoryContent = ref('')
 const playbookContent = ref('')
 const groupVarsContent = ref('')
+const aiPrompt = ref('')
+const aiBusy = ref(false)
+const aiSummary = ref<string | null>(null)
+const aiError = ref<string | null>(null)
 
 const config = computed({
   get: () => props.modelValue ?? defaultAnsibleConfig(),
@@ -52,6 +61,100 @@ function patch(partial: Partial<AnsibleConfig>) {
     regenerateAdvancedFromForm()
   }
 }
+
+function enrichPackages(
+  base: string[],
+  mode: AnsibleConfig['app_deploy_mode'],
+  proxy: NonNullable<AnsibleConfig['reverse_proxy']>,
+): string[] {
+  const next = new Set(base.length ? base : ['curl', 'ca-certificates', 'gnupg', 'jq', 'htop'])
+  if (mode === 'pm2') {
+    next.add('nodejs')
+    next.add('npm')
+  }
+  if (proxy === 'nginx') next.add('nginx')
+  if (proxy === 'caddy') next.add('debian-keyring')
+  return Array.from(next)
+}
+
+function syncFromRunningInstance() {
+  const ri = props.runningInstance
+  if (!ri || ri.kind === 'serverless') return
+
+  const strategy = resolveProcessStrategy(ri)
+  const mode = ansibleDeployModeFromStrategy(strategy)
+  const reverse_proxy = ri.reverse_proxy || 'none'
+  const install_docker = mode === 'docker_run' || mode === 'docker_compose'
+  const listen = ri.listen_port || config.value.app_listen_port || 8080
+
+  let groups = [...(config.value.deploy_user_groups || [])]
+  if (install_docker) {
+    if (!groups.includes('docker')) groups.push('docker')
+  } else {
+    groups = groups.filter((g) => g !== 'docker')
+  }
+
+  const ports = new Set<number>(config.value.ufw_allow_ports?.length ? config.value.ufw_allow_ports : [22])
+  ports.add(22)
+  ports.add(listen)
+  if (reverse_proxy !== 'none') {
+    ports.add(80)
+    ports.add(443)
+  }
+  const ufw_allow_ports = Array.from(ports).sort((a, b) => a - b)
+  const packages = enrichPackages(config.value.packages || [], mode, reverse_proxy)
+  const hosts = (ri.host || '').trim() || config.value.hosts || '127.0.0.1'
+  const ssh_user = ri.ssh_user || config.value.ssh_user
+  const ssh_port = ri.ssh_port || config.value.ssh_port
+  const ssh_private_key_path = ri.ssh_key_path || config.value.ssh_private_key_path
+  const app_start_command = config.value.app_start_command || 'npm start'
+
+  const same =
+    config.value.app_deploy_mode === mode
+    && (config.value.reverse_proxy || 'none') === reverse_proxy
+    && config.value.install_docker === install_docker
+    && config.value.app_listen_port === listen
+    && config.value.hosts === hosts
+    && config.value.ssh_user === ssh_user
+    && config.value.ssh_port === ssh_port
+    && (config.value.ssh_private_key_path || null) === (ssh_private_key_path || null)
+    && config.value.enabled === true
+    && JSON.stringify(config.value.ufw_allow_ports || []) === JSON.stringify(ufw_allow_ports)
+    && JSON.stringify(config.value.packages || []) === JSON.stringify(packages)
+  if (same) return
+
+  patch({
+    enabled: true,
+    app_deploy_mode: mode,
+    reverse_proxy,
+    install_docker,
+    install_compose_plugin: install_docker,
+    deploy_user_groups: groups,
+    packages,
+    ufw_allow_ports,
+    hosts,
+    ssh_user,
+    ssh_port,
+    ssh_private_key_path,
+    app_listen_port: listen,
+    app_start_command,
+  })
+}
+
+watch(
+  () => [
+    props.runningInstance?.process_strategy,
+    props.runningInstance?.reverse_proxy,
+    props.runningInstance?.listen_port,
+    props.runningInstance?.host,
+    props.runningInstance?.kind,
+  ],
+  () => {
+    // Defer so parent wizard apply/config settles before we emit ansible patches.
+    nextTick(() => syncFromRunningInstance())
+  },
+  { immediate: true },
+)
 
 const packagesText = computed({
   get: () => (config.value.packages || []).join(', '),
@@ -128,15 +231,68 @@ watch(
 )
 
 function applyCloudFromInstance() {
-  const ri = props.runningInstance
-  if (!ri) return
-  patch({
-    hosts: (ri.host || '').trim() || config.value.hosts,
-    ssh_user: ri.ssh_user || config.value.ssh_user,
-    ssh_port: ri.ssh_port || config.value.ssh_port,
-    ssh_private_key_path: ri.ssh_key_path || config.value.ssh_private_key_path,
-    app_listen_port: ri.listen_port || config.value.app_listen_port,
-  })
+  syncFromRunningInstance()
+}
+
+async function refineWithAi() {
+  aiError.value = null
+  aiSummary.value = null
+  const prompt = aiPrompt.value.trim()
+  if (prompt.length < 3) {
+    aiError.value = t('scaffold.ansible.aiPromptRequired')
+    return
+  }
+  aiBusy.value = true
+  try {
+    const current = buildWritableFiles()
+    const result = await apiFetch<{
+      files: Array<{ path: string; content: string }>
+      summary: string
+      source: string
+    }>('/ai/refine-ansible', {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt,
+        workspace_name: props.workspaceName || 'launchpad-workspace',
+        app_deploy_mode: config.value.app_deploy_mode,
+        reverse_proxy: config.value.reverse_proxy || 'none',
+        files: current.map((f) => ({ path: f.path, content: f.content })),
+      }),
+      timeoutMs: 120_000,
+    })
+    const byPath = new Map(result.files.map((f) => [f.path, f.content]))
+    if (byPath.has(ADVANCED_PATHS.inventory)) {
+      inventoryContent.value = byPath.get(ADVANCED_PATHS.inventory) || ''
+    }
+    if (byPath.has(ADVANCED_PATHS.playbook)) {
+      playbookContent.value = byPath.get(ADVANCED_PATHS.playbook) || ''
+    }
+    if (byPath.has(ADVANCED_PATHS.groupVars)) {
+      groupVarsContent.value = byPath.get(ADVANCED_PATHS.groupVars) || ''
+      const gv = groupVarsContent.value
+      const modeMatch = gv.match(/app_deploy_mode:\s*(\S+)/)
+      const proxyMatch = gv.match(/reverse_proxy:\s*(\S+)/)
+      const dockerMatch = gv.match(/install_docker:\s*(true|false)/i)
+      patch({
+        ...(modeMatch?.[1]
+          ? { app_deploy_mode: modeMatch[1] as AnsibleConfig['app_deploy_mode'] }
+          : {}),
+        ...(proxyMatch?.[1]
+          ? { reverse_proxy: proxyMatch[1] as AnsibleConfig['reverse_proxy'] }
+          : {}),
+        ...(dockerMatch?.[1]
+          ? { install_docker: dockerMatch[1].toLowerCase() === 'true' }
+          : {}),
+      })
+    }
+    advancedDirty.value = true
+    activeTab.value = 'advanced'
+    aiSummary.value = result.summary || t('scaffold.ansible.aiUpdated')
+  } catch (err) {
+    aiError.value = err instanceof Error ? err.message : t('scaffold.ansible.aiFailed')
+  } finally {
+    aiBusy.value = false
+  }
 }
 
 function applyCloudDefaults() {
@@ -210,7 +366,7 @@ defineExpose({ buildWritableFiles, regenerateAdvancedFromForm })
     <div v-if="config.enabled" class="space-y-4">
       <div class="flex flex-wrap gap-1 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-ink)]/40 p-1">
         <button
-          v-for="tab in (['form', 'advanced', 'cloud'] as AnsibleTab[])"
+          v-for="tab in (['form', 'advanced', 'cloud', 'ai'] as AnsibleTab[])"
           :key="tab"
           type="button"
           class="rounded-md px-3 py-1.5 text-xs font-medium transition"
@@ -226,7 +382,9 @@ defineExpose({ buildWritableFiles, regenerateAdvancedFromForm })
               ? t('scaffold.ansible.tabForm')
               : tab === 'advanced'
                 ? t('scaffold.ansible.tabAdvanced')
-                : t('scaffold.ansible.tabCloud')
+                : tab === 'cloud'
+                  ? t('scaffold.ansible.tabCloud')
+                  : t('scaffold.ansible.tabAi')
           }}
         </button>
       </div>
@@ -434,7 +592,21 @@ defineExpose({ buildWritableFiles, regenerateAdvancedFromForm })
                 <option value="docker_run">{{ t('scaffold.ansible.modeDockerRun') }}</option>
                 <option value="docker_compose">{{ t('scaffold.ansible.modeCompose') }}</option>
                 <option value="systemd">{{ t('scaffold.ansible.modeSystemd') }}</option>
+                <option value="pm2">{{ t('scaffold.ansible.modePm2') }}</option>
                 <option value="none">{{ t('scaffold.ansible.modeNone') }}</option>
+              </select>
+            </label>
+            <label class="block space-y-1">
+              <span class="lp-label">{{ t('scaffold.ansible.reverseProxy') }}</span>
+              <select
+                class="lp-input text-xs"
+                :value="config.reverse_proxy || 'none'"
+                :disabled="disabled"
+                @change="patch({ reverse_proxy: ($event.target as HTMLSelectElement).value as AnsibleConfig['reverse_proxy'] })"
+              >
+                <option value="none">{{ t('provision.runtimeMode.attach.proxies.none') }}</option>
+                <option value="nginx">{{ t('provision.runtimeMode.attach.proxies.nginx') }}</option>
+                <option value="caddy">{{ t('provision.runtimeMode.attach.proxies.caddy') }}</option>
               </select>
             </label>
             <label class="block space-y-1">
@@ -587,6 +759,47 @@ defineExpose({ buildWritableFiles, regenerateAdvancedFromForm })
             @input="patch({ hosts: ($event.target as HTMLTextAreaElement).value })"
           />
         </label>
+      </div>
+
+      <div v-show="activeTab === 'ai'" class="space-y-3">
+        <p class="text-xs text-[var(--lp-muted)]">
+          {{ t('scaffold.ansible.aiBlurb') }}
+        </p>
+        <p class="text-[11px] text-[var(--lp-muted)]">
+          {{ t('scaffold.ansible.aiContext', {
+            mode: config.app_deploy_mode,
+            proxy: config.reverse_proxy || 'none',
+          }) }}
+        </p>
+        <label class="block space-y-1">
+          <span class="lp-label">{{ t('scaffold.ansible.aiPrompt') }}</span>
+          <textarea
+            v-model="aiPrompt"
+            class="lp-input min-h-[100px] text-sm"
+            :disabled="disabled || aiBusy"
+            :placeholder="t('scaffold.ansible.aiPromptPlaceholder')"
+          />
+        </label>
+        <div
+          v-if="aiError"
+          class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200"
+        >
+          {{ aiError }}
+        </div>
+        <div
+          v-if="aiSummary"
+          class="rounded-lg border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/10 px-3 py-2 text-xs text-[var(--lp-text)]"
+        >
+          {{ aiSummary }}
+        </div>
+        <button
+          type="button"
+          class="lp-btn-primary text-xs px-3 py-1.5"
+          :disabled="disabled || aiBusy"
+          @click="refineWithAi"
+        >
+          {{ aiBusy ? t('scaffold.ansible.aiUpdating') : t('scaffold.ansible.aiUpdate') }}
+        </button>
       </div>
     </div>
   </section>

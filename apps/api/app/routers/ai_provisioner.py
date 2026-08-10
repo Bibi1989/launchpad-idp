@@ -31,8 +31,10 @@ from app.schemas.ai_provisioner import (
     DeployedServiceLink,
     GuardrailSeverity,
 )
+from app.schemas.ansible_ai import AnsibleRefineRequest, AnsibleRefineResponse
 from app.schemas.nodes import NodeCommandAction
 from app.services.ai_provisioner import AiProvisionerService
+from app.services.ansible_ai import AnsibleAiService
 from app.services.node_registry import NodeRegistryService, get_agent_hub
 from app.services.provisioning import ProvisioningService
 
@@ -49,6 +51,37 @@ async def ai_status(user: CurrentUser) -> AiProvisionerStatus:
         gemini_configured=bool(settings.gemini_api_key),
         model=settings.gemini_model,
         heuristic_fallback=settings.ai_provisioner_heuristic_fallback,
+    )
+
+
+@router.post("/refine-ansible", response_model=AnsibleRefineResponse)
+async def refine_ansible(
+    payload: AnsibleRefineRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+) -> AnsibleRefineResponse:
+    """Update Ansible YAML files from a natural-language prompt."""
+    _ = user, org
+    service = AnsibleAiService()
+    try:
+        files, summary, source = service.refine(
+            prompt=payload.prompt,
+            app_deploy_mode=payload.app_deploy_mode,
+            reverse_proxy=payload.reverse_proxy,
+            workspace_name=payload.workspace_name,
+            current_files=[f.model_dump() for f in payload.files],
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "ansible_refine_invalid", "message": str(exc)},
+        ) from exc
+
+    return AnsibleRefineResponse(
+        files=files,
+        summary=summary,
+        source=source,
+        gemini_configured=service.gemini_configured,
     )
 
 

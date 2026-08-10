@@ -117,6 +117,9 @@ class ProjectDetectorEngine:
 
         services = self._assign_names_and_preview(services)
         datastores = self._detect_datastores(root)
+        from pkg.detector.env_example import collect_env_example_vars
+
+        env_example = collect_env_example_vars(root)
         layout = ProjectLayout.MONOREPO if is_monorepo else ProjectLayout.SINGLE
         markers = sorted(
             n
@@ -140,6 +143,9 @@ class ProjectDetectorEngine:
                 "go.mod",
                 "pyproject.toml",
                 "requirements.txt",
+                ".env.example",
+                ".env.sample",
+                ".env.template",
             }
         )
         has_compose, has_kubernetes = self._detect_runtime_artifacts(root, root_names)
@@ -152,6 +158,7 @@ class ProjectDetectorEngine:
             package_globs=package_globs,
             has_compose=has_compose,
             has_kubernetes=has_kubernetes,
+            env_example=env_example,
         )
 
     def _detect_runtime_artifacts(self, root: Path, root_names: set[str]) -> tuple[bool, bool]:
