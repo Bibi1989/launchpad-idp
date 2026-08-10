@@ -354,11 +354,15 @@ async def _run_lifecycle_script(
     )
 
 
-async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, str]:
+async def ensure_kind_cluster(
+    *,
+    cluster_name: str | None = None,
+    respect_auto_manage: bool = True,
+) -> dict[str, str]:
     """Start the local cluster (idempotent) via the active engine. Raises on failure."""
     settings = get_settings()
     engine = _engine()
-    if not settings.kind_auto_manage:
+    if respect_auto_manage and not settings.kind_auto_manage:
         logger.info("local_cluster_auto_manage_disabled", action="up", engine=engine)
         return {"status": "skipped", "reason": "auto_manage_disabled"}
 
@@ -425,11 +429,15 @@ async def ensure_kind_cluster(*, cluster_name: str | None = None) -> dict[str, s
     }
 
 
-async def delete_kind_cluster(*, cluster_name: str | None = None) -> dict[str, str]:
+async def delete_kind_cluster(
+    *,
+    cluster_name: str | None = None,
+    respect_auto_manage: bool = True,
+) -> dict[str, str]:
     """Delete the local cluster via the active engine. Raises on hard failure."""
     settings = get_settings()
     engine = _engine()
-    if not settings.kind_auto_manage:
+    if respect_auto_manage and not settings.kind_auto_manage:
         logger.info("local_cluster_auto_manage_disabled", action="down", engine=engine)
         return {"status": "skipped", "reason": "auto_manage_disabled"}
 

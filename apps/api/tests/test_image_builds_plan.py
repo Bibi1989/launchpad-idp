@@ -46,6 +46,41 @@ def test_plan_skips_heuristic_aliases_when_image_builds_json_exists(tmp_path: Pa
     assert "launchpad/nestjs:latest" not in tags
 
 
+def test_plan_adds_uncovered_apps_when_image_builds_incomplete(tmp_path: Path) -> None:
+    """Stale root-only plans must not hide apps/api-server Deployments."""
+    (tmp_path / "Dockerfile").write_text("FROM alpine:3.21\n", encoding="utf-8")
+    api = tmp_path / "apps" / "api-server"
+    api.mkdir(parents=True)
+    (api / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    web = tmp_path / "apps" / "web-ui"
+    web.mkdir(parents=True)
+    (web / "Dockerfile").write_text("FROM node:20-alpine\n", encoding="utf-8")
+    plan_dir = tmp_path / ".launchpad"
+    plan_dir.mkdir()
+    (plan_dir / "image-builds.json").write_text(
+        json.dumps(
+            [
+                {
+                    "service": "launch-app",
+                    "image": "launch-app:latest",
+                    "context": ".",
+                    "dockerfile": "Dockerfile",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    builds, required = plan_workspace_image_builds(tmp_path)
+    tags = {tag for _, _, tag in builds}
+    assert "launch-app:latest" in tags
+    assert "api-server:latest" in tags
+    assert "web-ui:latest" in tags
+    assert "api-server:latest" in required
+    assert "web-ui:latest" in required
+    assert "launchpad/api-server:latest" not in tags
+
+
 def test_build_and_load_uses_image_builds_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     web = tmp_path / "apps" / "web"
     web.mkdir(parents=True)

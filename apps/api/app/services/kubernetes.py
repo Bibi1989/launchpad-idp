@@ -147,14 +147,23 @@ def _resolve_listen_port_from_image(image: str) -> int:
 # failed with diagnostics (3 minutes). Real failures (ImagePullBackOff /
 # CrashLoopBackOff) fast-fail well before this; the cap bounds the pathological
 # "spinning forever" case.
-PREVIEW_READY_TIMEOUT_CAP_SECONDS = 180.0
+PREVIEW_READY_TIMEOUT_CAP_SECONDS = 300.0
+
+# Must be >= the app container's startup-probe budget (failure_threshold 48 x
+# period 5s = 240s); otherwise the rollout wait gives up while the pod's own probe
+# is still legitimately starting a cold Node/Vite dev server. Terminal states
+# (ImagePullBackOff / CrashLoopBackOff) fast-fail well before this.
+NON_NGINX_READY_FLOOR_SECONDS = 240.0
 
 
 def _workload_ready_timeout_seconds(*, image: str, base_timeout_seconds: float) -> float:
     # Non-nginx images (pull + cold Node/Vite bind) need more headroom than nginx,
-    # but never exceed the 3-minute preview cap.
+    # but never exceed the preview cap.
     if not _is_nginx_image(image):
-        return min(max(base_timeout_seconds, 120.0), PREVIEW_READY_TIMEOUT_CAP_SECONDS)
+        return min(
+            max(base_timeout_seconds, NON_NGINX_READY_FLOOR_SECONDS),
+            PREVIEW_READY_TIMEOUT_CAP_SECONDS,
+        )
     return min(base_timeout_seconds, PREVIEW_READY_TIMEOUT_CAP_SECONDS)
 
 
@@ -619,21 +628,11 @@ class KubernetesProvisioner:
             return
 
         assert self._core is not None and self._networking is not None
-        from kubernetes import client
-        from kubernetes.client.rest import ApiException
 
-        try:
-            self._core.read_namespace(namespace, _request_timeout=10)
-            logger.info("kubernetes_namespace_exists", namespace=namespace)
-        except ApiException as exc:
-            if exc.status != 404:
-                raise
-            body = client.V1Namespace(
-                metadata=client.V1ObjectMeta(name=namespace, labels=labels),
-            )
-            self._core.create_namespace(body, _request_timeout=10)
-            resources.created_namespace = True
-            logger.info("kubernetes_namespace_created", namespace=namespace)
+        # Read-or-create the namespace with a one-time self-heal: a slow or stale
+        # local API server (e.g. a recreated kind/k3d cluster listening on a new
+        # ephemeral port) is recovered by refreshing kubeconfig and retrying once.
+        self._ensure_namespace_exists(namespace, labels, resources)
 
         quota_spec = build_preview_resource_quota(
             self._settings,
@@ -672,6 +671,63 @@ class KubernetesProvisioner:
 
         for legacy_name in ("deny-cross-namespace-egress", "deny-cross-namespace"):
             _ignore_404(self._networking.delete_namespaced_network_policy, legacy_name, namespace)
+
+    # (connect, read) tuple, NOT a single value. The k8s client turns a scalar
+    # ``_request_timeout`` into a urllib3 *total* budget, so a slow-but-alive
+    # local apiserver shrinks the read deadline (e.g. 10s total minus a ~3s TLS
+    # connect leaves ~7s to read) and times out mid-provision. A tuple sets
+    # connect/read independently and gives a cold cluster room to respond.
+    _NAMESPACE_TIMEOUT = (5, 30)
+
+    def _ensure_namespace_exists(
+        self,
+        namespace: str,
+        labels: dict[str, str],
+        resources: ProvisionedResources,
+    ) -> None:
+        """Read-or-create the namespace, self-healing a stale/slow local API server once."""
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+        from urllib3.exceptions import HTTPError as Urllib3HTTPError
+
+        for attempt in range(2):
+            try:
+                assert self._core is not None
+                try:
+                    self._core.read_namespace(namespace, _request_timeout=self._NAMESPACE_TIMEOUT)
+                    logger.info("kubernetes_namespace_exists", namespace=namespace)
+                except ApiException as exc:
+                    if exc.status != 404:
+                        raise
+                    body = client.V1Namespace(
+                        metadata=client.V1ObjectMeta(name=namespace, labels=labels),
+                    )
+                    self._core.create_namespace(body, _request_timeout=self._NAMESPACE_TIMEOUT)
+                    resources.created_namespace = True
+                    logger.info("kubernetes_namespace_created", namespace=namespace)
+                return
+            except Urllib3HTTPError as exc:
+                # Transport-level failure (timeout / connection refused / max retries):
+                # the local cluster may have been recreated on a new port. Refresh the
+                # kubeconfig, reconnect, and retry once before giving up.
+                if attempt == 1:
+                    raise
+                logger.warning(
+                    "kubernetes_namespace_ensure_retry",
+                    namespace=namespace,
+                    error=str(exc),
+                )
+                self._recover_cluster_connection()
+
+    def _recover_cluster_connection(self) -> None:
+        """Refresh the local cluster kubeconfig (e.g. stale kind/k3d port) and reconnect."""
+        try:
+            from app.services.kind_cluster import refresh_local_cluster_kubeconfig
+
+            refresh_local_cluster_kubeconfig()
+        except Exception as exc:  # noqa: BLE001 - best-effort; reconnect regardless
+            logger.warning("kubernetes_kubeconfig_refresh_failed", error=str(exc))
+        self.reload_clients()
 
     def _apply_namespaced_core_object(
         self,
@@ -932,7 +988,14 @@ class KubernetesProvisioner:
         rollout (``readyReplicas >= specReplicas`` with no lingering old pods).
         """
         assert self._apps is not None
-        deployments = list(self._apps.list_namespaced_deployment(namespace).items or [])
+        # Bound the read: a sluggish local apiserver must not hang the poll loop on
+        # a single status fetch (connect, read) instead of urllib3's default None.
+        deployments = list(
+            self._apps.list_namespaced_deployment(
+                namespace, _request_timeout=(5, 15)
+            ).items
+            or []
+        )
 
         total_desired = total_ready = total_updated = total_unavailable = 0
         pending: list[str] = []
@@ -1107,6 +1170,8 @@ class KubernetesProvisioner:
 
         - CreateContainer*/RunContainerError: config errors that never self-heal
           (e.g. runAsNonRoot without a UID) - fail immediately.
+        - OOMKilled / exit 137: memory limit too low - fail after the first kill
+          instead of waiting the full readiness timeout.
         - CrashLoopBackOff after >= 2 restarts: the container keeps exiting
           (e.g. "postgres: Error", app crash) - fail with the last exit detail.
         """
@@ -1127,6 +1192,12 @@ class KubernetesProvisioner:
             for status in pod.status.container_statuses or []:
                 restarts = status.restart_count or 0
                 waiting = status.state.waiting if status.state else None
+                terminated = getattr(status.state, "terminated", None) if status.state else None
+                last = (
+                    getattr(status.last_state, "terminated", None)
+                    if status.last_state
+                    else None
+                )
                 if waiting and waiting.reason in config_reasons:
                     detail = (waiting.message or "").strip()
                     base = (
@@ -1134,16 +1205,37 @@ class KubernetesProvisioner:
                         f"{waiting.reason}"
                     )
                     return f"{base} - {detail}" if detail else base
+                oom = self._oom_kill_detail(terminated) or self._oom_kill_detail(last)
+                if oom and restarts >= 1:
+                    return (
+                        f"Container {status.name} in pod {pod_name} was OOMKilled "
+                        f"(exit 137 after {restarts} restart(s)): {oom}. "
+                        "Raise the container memory limit (Node/Vite previews need >=768Mi)."
+                    )
                 if waiting and waiting.reason == "CrashLoopBackOff" and restarts >= 2:
-                    last = status.last_state.terminated if status.last_state else None
                     detail = ""
                     if last:
                         detail = (last.message or "").strip() or f"exit code {last.exit_code}"
+                        if last.exit_code == 137 or (last.reason or "") == "OOMKilled":
+                            detail = (
+                                f"OOMKilled (exit {last.exit_code}). "
+                                "Raise the container memory limit (Node/Vite previews need >=768Mi)."
+                            )
                     base = (
                         f"Container {status.name} in pod {pod_name} is crash-looping "
                         f"(CrashLoopBackOff after {restarts} restarts)"
                     )
                     return f"{base} - {detail}" if detail else base
+        return None
+
+    @staticmethod
+    def _oom_kill_detail(terminated: object | None) -> str | None:
+        if terminated is None:
+            return None
+        reason = str(getattr(terminated, "reason", "") or "")
+        exit_code = getattr(terminated, "exit_code", None)
+        if reason == "OOMKilled" or exit_code == 137:
+            return reason or f"exit code {exit_code}"
         return None
 
     def _first_pod_probe_hint(self, *, namespace: str) -> str | None:
@@ -1163,6 +1255,12 @@ class KubernetesProvisioner:
                     return f"Pod {pod_name} waiting: {detail}"
                 last = status.last_state.terminated if status.last_state else None
                 if last and last.reason:
+                    if last.exit_code == 137 or last.reason == "OOMKilled":
+                        return (
+                            f"Pod {pod_name} last exit={last.exit_code} reason={last.reason}. "
+                            "Likely OOMKilled: raise container memory limits "
+                            "(Node/Vite previews need >=768Mi)."
+                        )
                     return (
                         f"Pod {pod_name} last exit={last.exit_code} reason={last.reason}. "
                         "Check that readiness probes target the port your app listens on "

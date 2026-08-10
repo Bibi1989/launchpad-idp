@@ -23,6 +23,8 @@ from app.schemas.environment import (
     EnvironmentPromoteRequest,
     EnvironmentRead,
     HealthResponse,
+    KindClusterActionRequest,
+    KindClusterActionResult,
     KindClusterStatus,
     PreviewAppTemplateRead,
     PreviewBuildStatus,
@@ -30,7 +32,7 @@ from app.schemas.environment import (
 )
 from app.services.audit import AuditService
 from app.services.environment import TERMINAL_STATUSES, EnvironmentService
-from app.services.kind_cluster import probe_kind_cluster
+from app.services.kind_cluster import delete_kind_cluster, ensure_kind_cluster, probe_kind_cluster
 from app.services.preview_analyzer import PreviewAnalyzerError, PreviewAnalyzerService
 from app.services.security_telemetry import collect_telemetry
 
@@ -60,6 +62,81 @@ async def preview_kind_status(user: CurrentUser) -> KindClusterStatus:
     _ = user
     payload = await probe_kind_cluster()
     return KindClusterStatus.model_validate(payload)
+
+
+@router.post("/preview/kind/up", response_model=KindClusterActionResult)
+async def preview_kind_up(
+    user: CurrentUser,
+    payload: KindClusterActionRequest | None = None,
+) -> KindClusterActionResult:
+    """Create or ensure the local k3s/kind cluster (Settings → Local Kubernetes)."""
+    _ = user
+    body = payload or KindClusterActionRequest()
+    try:
+        result = await ensure_kind_cluster(
+            cluster_name=body.cluster_name,
+            respect_auto_manage=False,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "kind_up_failed", "message": str(exc)},
+        ) from exc
+    status_value = str(result.get("status") or "ready")
+    cluster = str(result.get("cluster") or body.cluster_name or "")
+    engine = str(result.get("engine") or "k3s")
+    context = result.get("context")
+    reason = result.get("reason")
+    if status_value == "skipped":
+        message = f"Cluster manage skipped ({reason or 'unknown'})"
+    else:
+        message = f"Local {engine} cluster '{cluster}' is ready"
+    return KindClusterActionResult(
+        status=status_value,
+        cluster=cluster,
+        engine=engine,
+        context=str(context) if context else None,
+        message=message,
+        output=result.get("output"),
+        reason=str(reason) if reason else None,
+    )
+
+
+@router.post("/preview/kind/down", response_model=KindClusterActionResult)
+async def preview_kind_down(
+    user: CurrentUser,
+    payload: KindClusterActionRequest | None = None,
+) -> KindClusterActionResult:
+    """Delete the local k3s/kind cluster (Settings → Local Kubernetes)."""
+    _ = user
+    body = payload or KindClusterActionRequest()
+    try:
+        result = await delete_kind_cluster(
+            cluster_name=body.cluster_name,
+            respect_auto_manage=False,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "kind_down_failed", "message": str(exc)},
+        ) from exc
+    status_value = str(result.get("status") or "deleted")
+    cluster = str(result.get("cluster") or body.cluster_name or "")
+    engine = str(result.get("engine") or "k3s")
+    reason = result.get("reason")
+    if status_value == "skipped":
+        message = f"Cluster delete skipped ({reason or 'unknown'})"
+    else:
+        message = f"Local {engine} cluster '{cluster}' deleted"
+    return KindClusterActionResult(
+        status=status_value,
+        cluster=cluster,
+        engine=engine,
+        context=None,
+        message=message,
+        output=result.get("output"),
+        reason=str(reason) if reason else None,
+    )
 
 
 @router.get("/preview/build/status", response_model=PreviewBuildStatus)

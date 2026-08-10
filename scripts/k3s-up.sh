@@ -247,16 +247,22 @@ run_with_deadline() {
 }
 
 if [[ "${PRELOAD_IMAGE}" != "0" ]]; then
-  IMAGE="${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine}"
-  echo "Importing ${IMAGE} into k3s (best-effort, 60s cap)…"
-  if run_with_deadline 60 docker pull --platform linux/amd64 "${IMAGE}" >/dev/null 2>&1 \
-    || run_with_deadline 60 docker pull "${IMAGE}" >/dev/null 2>&1; then
-    if ! run_with_deadline 60 k3d image import "${IMAGE}" -c "${CLUSTER_NAME}"; then
-      echo "Warning: could not preload ${IMAGE} into k3s (non-fatal)." >&2
+  # Preload the app image PLUS the datastore + init-container images every
+  # datastore-enabled preview needs (busybox is the wait-for-postgres/redis init
+  # container). Without these, cold pulls on a datastore preview blow the readiness
+  # budget and the app stays 0/1 waiting on its init container.
+  PRELOAD_IMAGES="${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine} busybox:1.36 postgres:16-alpine redis:7-alpine"
+  for IMAGE in ${PRELOAD_IMAGES}; do
+    echo "Importing ${IMAGE} into k3s (best-effort, 60s cap)…"
+    if run_with_deadline 60 docker pull --platform linux/amd64 "${IMAGE}" >/dev/null 2>&1 \
+      || run_with_deadline 60 docker pull "${IMAGE}" >/dev/null 2>&1; then
+      if ! run_with_deadline 60 k3d image import "${IMAGE}" -c "${CLUSTER_NAME}"; then
+        echo "Warning: could not preload ${IMAGE} into k3s (non-fatal)." >&2
+      fi
+    else
+      echo "Warning: could not pull ${IMAGE} (non-fatal)." >&2
     fi
-  else
-    echo "Warning: could not pull ${IMAGE} (non-fatal)." >&2
-  fi
+  done
 fi
 
 print_ready_banner

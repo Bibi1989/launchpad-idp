@@ -35,6 +35,7 @@ const navItems = computed(() => [
   { key: 'workspaces', label: t('nav.workspaces'), to: '/workspaces', icon: 'layers', match: (path: string) => path.startsWith('/workspaces') },
   { key: 'projects', label: t('nav.projects'), to: '/projects', icon: 'folder_managed', match: (path: string) => path.startsWith('/projects') },
   { key: 'provision', label: t('nav.provision'), to: '/provision', icon: 'schema', match: (path: string) => path.startsWith('/provision') },
+  { key: 'hybrid', label: t('nav.hybrid'), to: '/fleet', icon: 'dns', match: (path: string) => path.startsWith('/fleet') || path.startsWith('/hybrid') },
   { key: 'integrations', label: t('nav.integrations'), to: '/integrations', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
   { key: 'organization', label: t('nav.organization'), to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
   { key: 'settings', label: t('nav.settings'), to: '/settings', icon: 'settings', match: (path: string) => path.startsWith('/settings') },

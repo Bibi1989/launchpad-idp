@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import type { KindClusterStatus } from '~/types/environment'
 import type { UserCloudCredentialsStatus } from '~/types/userCredentials'
 import { emptyCloudCredentials } from '~/utils/cloudValidation'
 
 const { user } = useAuth()
 const { t } = useI18n()
 const { getStatus, save, clearAll } = useUserCloudCredentials()
+const { getKindStatus, ensureKindCluster, deleteKindCluster } = useEnvironments()
 
 const status = ref<UserCloudCredentialsStatus | null>(null)
 const loading = ref(true)
@@ -14,6 +16,14 @@ const errorMessage = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 const activeProvider = ref<'gcp' | 'aws' | 'azure' | 'cloudflare'>('gcp')
 const credentials = reactive(emptyCloudCredentials())
+
+const kindStatus = ref<KindClusterStatus | null>(null)
+const kindLoading = ref(false)
+const kindCreating = ref(false)
+const kindDeleting = ref(false)
+const kindError = ref<string | null>(null)
+const kindSuccess = ref<string | null>(null)
+const clusterName = ref('launchpad')
 
 async function refresh() {
   loading.value = true
@@ -27,8 +37,24 @@ async function refresh() {
   }
 }
 
+async function refreshKind() {
+  kindLoading.value = true
+  kindError.value = null
+  try {
+    kindStatus.value = await getKindStatus()
+    if (!clusterName.value.trim() || clusterName.value === 'launchpad') {
+      clusterName.value = kindStatus.value.cluster || 'launchpad'
+    }
+  } catch (err) {
+    kindError.value = err instanceof Error ? err.message : t('settings.errors.kindLoad')
+  } finally {
+    kindLoading.value = false
+  }
+}
+
 onMounted(() => {
   void refresh()
+  void refreshKind()
 })
 
 async function onSave() {
@@ -79,12 +105,49 @@ async function onClearAll() {
   }
 }
 
+async function onKindCreate() {
+  const name = clusterName.value.trim()
+  if (!name) return
+  kindCreating.value = true
+  kindError.value = null
+  kindSuccess.value = null
+  try {
+    const result = await ensureKindCluster(name)
+    kindSuccess.value = result.message || t('settings.localKubernetesCreated')
+    await refreshKind()
+  } catch (err) {
+    kindError.value = err instanceof Error ? err.message : t('settings.errors.kindUp')
+  } finally {
+    kindCreating.value = false
+  }
+}
+
+async function onKindDelete() {
+  const name = clusterName.value.trim()
+  if (!name) return
+  if (!window.confirm(t('settings.localKubernetesConfirmDelete', { name }))) return
+  kindDeleting.value = true
+  kindError.value = null
+  kindSuccess.value = null
+  try {
+    const result = await deleteKindCluster(name)
+    kindSuccess.value = result.message || t('settings.localKubernetesDeleted')
+    await refreshKind()
+  } catch (err) {
+    kindError.value = err instanceof Error ? err.message : t('settings.errors.kindDown')
+  } finally {
+    kindDeleting.value = false
+  }
+}
+
 const providers = computed(() => [
   { id: 'gcp' as const, label: t('launch.targets.gcp'), has: () => status.value?.has_gcp, hint: () => status.value?.gcp_label },
   { id: 'aws' as const, label: t('launch.targets.aws'), has: () => status.value?.has_aws, hint: () => status.value?.aws_label },
   { id: 'azure' as const, label: t('launch.targets.azure'), has: () => status.value?.has_azure, hint: () => status.value?.azure_label },
   { id: 'cloudflare' as const, label: t('launch.targets.cloudflare'), has: () => status.value?.has_cloudflare, hint: () => status.value?.cloudflare_label },
 ])
+
+const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kindLoading.value)
 </script>
 
 <template>
@@ -101,6 +164,74 @@ const providers = computed(() => [
       <h2 class="text-lg font-semibold">{{ t('settings.appearance') }}</h2>
       <p class="text-sm text-[var(--lp-muted)]">{{ t('settings.appearanceBlurb') }}</p>
       <PreferenceControls />
+    </section>
+
+    <section class="space-y-4 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-6">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 class="text-lg font-semibold">{{ t('settings.localKubernetes') }}</h2>
+        <button
+          type="button"
+          class="lp-btn-ghost text-xs uppercase tracking-wide"
+          :disabled="kindBusy"
+          @click="refreshKind"
+        >
+          {{ t('settings.localKubernetesRefresh') }}
+        </button>
+      </div>
+      <p class="text-sm text-[var(--lp-muted)]">{{ t('settings.localKubernetesBlurb') }}</p>
+
+      <dl
+        v-if="kindStatus"
+        class="grid gap-2 text-sm sm:grid-cols-2"
+      >
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('settings.localKubernetesStatus') }}</dt>
+          <dd class="font-mono text-[var(--lp-text)]">{{ kindStatus.status }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('settings.localKubernetesEngine') }}</dt>
+          <dd class="font-mono text-[var(--lp-text)]">{{ kindStatus.engine || 'k3s' }} / {{ kindStatus.tool || 'k3d' }}</dd>
+        </div>
+        <div class="sm:col-span-2">
+          <dt class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('settings.localKubernetesContext') }}</dt>
+          <dd class="font-mono text-[var(--lp-text)]">{{ kindStatus.context || '-' }}</dd>
+        </div>
+        <p class="sm:col-span-2 text-xs text-[var(--lp-muted)]">{{ kindStatus.message }}</p>
+      </dl>
+
+      <label class="block max-w-md">
+        <span class="lp-label mb-1 block">{{ t('settings.localKubernetesName') }}</span>
+        <input
+          v-model="clusterName"
+          class="lp-input w-full"
+          autocomplete="off"
+          spellcheck="false"
+          :disabled="kindBusy"
+        >
+        <span class="mt-1 block text-xs text-[var(--lp-muted)]">{{ t('settings.localKubernetesNameHint') }}</span>
+      </label>
+
+      <div class="flex flex-wrap gap-3 pt-1">
+        <button
+          type="button"
+          class="lp-btn-primary"
+          :disabled="kindBusy || !clusterName.trim()"
+          @click="onKindCreate"
+        >
+          {{ kindCreating ? t('settings.localKubernetesCreating') : t('settings.localKubernetesCreate') }}
+        </button>
+        <button
+          type="button"
+          class="lp-btn-ghost text-xs uppercase tracking-wide text-[var(--lp-danger)]"
+          :disabled="kindBusy || !clusterName.trim()"
+          @click="onKindDelete"
+        >
+          {{ kindDeleting ? t('settings.localKubernetesDeleting') : t('settings.localKubernetesDelete') }}
+        </button>
+      </div>
+
+      <p v-if="kindError" class="text-sm text-[var(--lp-danger)]">{{ kindError }}</p>
+      <p v-if="kindSuccess" class="text-sm text-[var(--lp-ok)]">{{ kindSuccess }}</p>
     </section>
 
     <section class="space-y-4 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-6">

@@ -109,6 +109,8 @@ export interface AuditLogEntry {
 export interface KindClusterStatus {
   status: string
   cluster: string
+  engine?: string
+  tool?: string
   context: string
   kind_installed: boolean
   kubectl_installed: boolean
@@ -117,6 +119,16 @@ export interface KindClusterStatus {
   auto_manage: boolean
   message: string
   can_launch: boolean
+}
+
+export interface KindClusterActionResult {
+  status: string
+  cluster: string
+  engine: string
+  context: string | null
+  message: string
+  output: string | null
+  reason: string | null
 }
 
 export interface PreviewBuildStatus {

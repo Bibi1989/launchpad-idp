@@ -588,7 +588,12 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         provider = getattr(environment, "provider", None)
                         is_local = str(provider or "").lower() == "local"
                         ctx = settings.resolved_kubernetes_context or settings.kubernetes_context or "default"
-                        if is_local:
+                        # Auto-start the local cluster for ANY provision whose target
+                        # context is the local kind/k3d cluster (not only provider=local
+                        # workspaces): a preview whose cluster is down should spin it up
+                        # and provision, rather than fail on a connection/read timeout.
+                        targets_local_cluster = is_local or ctx == settings.local_cluster_context
+                        if targets_local_cluster:
                             from app.services.kind_cluster import ensure_kind_cluster
 
                             await _emit_log(

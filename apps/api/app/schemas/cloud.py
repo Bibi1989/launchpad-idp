@@ -311,9 +311,9 @@ class CostVpaConfig(BaseModel):
 class CostResourceConfig(BaseModel):
     preset: ResourceSizingPreset = ResourceSizingPreset.DEVELOPER
     cpu_request: str = Field(default="100m", min_length=1, max_length=32)
-    cpu_limit: str = Field(default="250m", min_length=1, max_length=32)
-    memory_request: str = Field(default="128Mi", min_length=1, max_length=32)
-    memory_limit: str = Field(default="256Mi", min_length=1, max_length=32)
+    cpu_limit: str = Field(default="500m", min_length=1, max_length=32)
+    memory_request: str = Field(default="256Mi", min_length=1, max_length=32)
+    memory_limit: str = Field(default="768Mi", min_length=1, max_length=32)
 
 
 class IdleShutdownConfig(BaseModel):
@@ -372,7 +372,7 @@ class CostOptimizationConfig(BaseModel):
             or self.idle_shutdown.enabled
             or self.resources.preset != ResourceSizingPreset.DEVELOPER
             or self.resources.cpu_request != "100m"
-            or self.resources.memory_request != "128Mi"
+            or self.resources.memory_request != "256Mi"
         )
 
 

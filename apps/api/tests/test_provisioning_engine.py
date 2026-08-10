@@ -371,8 +371,8 @@ def test_iac_generator_writes_selected_workload_options() -> None:
         deployment = (
             Path(bundle.root_dir) / "infra/k8s/manifests/deployment.yaml"
         ).read_text(encoding="utf-8")
-        assert "memory: 128Mi" in deployment
         assert "memory: 256Mi" in deployment
+        assert "memory: 768Mi" in deployment
         assert "livenessProbe:" in deployment
         assert "readinessProbe:" in deployment
         ingress = (Path(bundle.root_dir) / "infra/k8s/manifests/ingress.yaml").read_text(

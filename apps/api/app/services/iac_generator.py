@@ -671,6 +671,56 @@ class IaCGenerator:
         except OSError:  # pragma: no cover - non-POSIX filesystems
             pass
 
+    @staticmethod
+    def _write_image_builds_plan(
+        workspace_dir: Path,
+        compose_services: list[dict[str, object]],
+    ) -> str | None:
+        """Persist Dockerfile → image tag plan so provision builds the right tags.
+
+        Overwrites stale import plans (e.g. only ``launch-app:latest`` from a root
+        Dockerfile) when the wizard scaffolds real ``apps/<name>`` workloads.
+        """
+        import json
+
+        plans: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for svc in compose_services:
+            name = str(svc.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            context = str(svc.get("context") or f"apps/{name}").strip() or f"apps/{name}"
+            df_hint = str(svc.get("dockerfile_path") or "Dockerfile").strip() or "Dockerfile"
+            if df_hint == "Dockerfile" or not df_hint.startswith(context):
+                df_rel = f"{context.rstrip('/')}/Dockerfile" if context not in {".", ""} else "Dockerfile"
+            else:
+                df_rel = df_hint
+            df_path = workspace_dir / df_rel
+            if not df_path.is_file():
+                alt = workspace_dir / context / "Dockerfile"
+                if alt.is_file():
+                    try:
+                        df_rel = str(alt.relative_to(workspace_dir)).replace("\\", "/")
+                    except ValueError:
+                        continue
+                else:
+                    continue
+            seen.add(name)
+            plans.append(
+                {
+                    "service": name,
+                    "image": f"{name}:latest",
+                    "context": context,
+                    "dockerfile": df_rel,
+                }
+            )
+        if not plans:
+            return None
+        out = workspace_dir / ".launchpad" / "image-builds.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(plans, indent=2) + "\n", encoding="utf-8")
+        return ".launchpad/image-builds.json"
+
     def _write_core_app_scaffold(
         self,
         workspace_dir: Path,
@@ -725,6 +775,19 @@ class IaCGenerator:
             )
             (workspace_dir / "docker-compose.yml").write_text(dc_content, encoding="utf-8")
             written.append("docker-compose.yml")
+
+        plan_rel = self._write_image_builds_plan(
+            workspace_dir,
+            [
+                {
+                    "name": scaffold.app_name,  # type: ignore[attr-defined]
+                    "context": scaffold.app_dir,  # type: ignore[attr-defined]
+                    "dockerfile_path": "Dockerfile",
+                }
+            ],
+        )
+        if plan_rel:
+            written.append(plan_rel)
 
         return written
 
@@ -1062,6 +1125,11 @@ class IaCGenerator:
             dc_path = workspace_dir / "docker-compose.yml"
             dc_path.write_text(dc_content, encoding="utf-8")
             written.append("docker-compose.yml")
+
+        if compose_services:
+            plan_rel = self._write_image_builds_plan(workspace_dir, compose_services)
+            if plan_rel:
+                written.append(plan_rel)
 
         return written
 

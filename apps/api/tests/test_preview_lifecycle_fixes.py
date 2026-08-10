@@ -27,7 +27,6 @@ from app.services.kubernetes import (
     _workload_ready_timeout_seconds,
 )
 
-
 # --------------------------------------------------------------------------- #
 # #1 PostgreSQL init fix
 # --------------------------------------------------------------------------- #
@@ -80,12 +79,12 @@ def test_service_and_ingress_ports_match_app_container_port() -> None:
 
 
 def test_nginx_default_service_port_unchanged() -> None:
-    # No workload spec -> legacy nginx defaults (port 80) preserved.
+    # No workload spec -> WorkloadImageSpec default listen port is preserved.
     m = _render(WorkloadDependenciesConfig())
     svc = yaml.safe_load((m / "service.yaml").read_text())
     ing = yaml.safe_load((m / "ingress.yaml").read_text())
-    assert svc["spec"]["ports"][0]["port"] == 80
-    assert ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["port"] == {"number": 80}
+    assert svc["spec"]["ports"][0]["port"] == 8080
+    assert ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["port"] == {"number": 8080}
 
 
 # --------------------------------------------------------------------------- #
@@ -93,13 +92,16 @@ def test_nginx_default_service_port_unchanged() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_ready_timeout_capped_at_three_minutes() -> None:
-    assert PREVIEW_READY_TIMEOUT_CAP_SECONDS == 180.0
-    # Non-nginx app image would otherwise get 240s - now capped at 180.
-    assert _workload_ready_timeout_seconds(image="api:latest", base_timeout_seconds=240.0) == 180.0
+def test_ready_timeout_budget_and_cap() -> None:
+    # Cap raised to 5 min so a healthy-but-slow preview isn't killed before its own
+    # probe passes; non-nginx apps get at least the 240s startup-probe budget.
+    assert PREVIEW_READY_TIMEOUT_CAP_SECONDS == 300.0
+    # Non-nginx floored up to the startup-probe budget even from a smaller base.
+    assert _workload_ready_timeout_seconds(image="api:latest", base_timeout_seconds=120.0) == 240.0
     # A configured base above the cap is still clamped.
-    assert _workload_ready_timeout_seconds(image="nginx:1.27-alpine", base_timeout_seconds=300.0) == 180.0
-    # A small nginx base is respected.
+    assert _workload_ready_timeout_seconds(image="api:latest", base_timeout_seconds=600.0) == 300.0
+    assert _workload_ready_timeout_seconds(image="nginx:1.27-alpine", base_timeout_seconds=600.0) == 300.0
+    # A small nginx base is respected (nginx starts fast; no floor).
     assert _workload_ready_timeout_seconds(image="nginx:1.27-alpine", base_timeout_seconds=120.0) == 120.0
 
 
@@ -134,6 +136,23 @@ def _provisioner_with_pods(pods) -> KubernetesProvisioner:
     prov = KubernetesProvisioner.__new__(KubernetesProvisioner)
     prov._core = _FakeCore(pods)  # type: ignore[attr-defined]
     return prov
+
+
+def test_oom_killed_fails_fast_after_one_restart() -> None:
+    prov = _provisioner_with_pods([
+        _fake_pod(
+            name="launch-app-abc",
+            container="launch-app",
+            reason="CrashLoopBackOff",
+            restarts=1,
+            term_reason="OOMKilled",
+            exit_code=137,
+        ),
+    ])
+    err = prov._first_pod_crash_error(namespace="lp-demo")
+    assert err is not None
+    assert "OOMKilled" in err
+    assert "768Mi" in err
 
 
 def test_crash_loop_backoff_detected_after_restarts() -> None:

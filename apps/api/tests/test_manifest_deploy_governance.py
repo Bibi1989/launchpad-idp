@@ -890,8 +890,16 @@ def test_patch_launch_workload_stamps_pod_managed_by_label() -> None:
     pod_labels = dep["spec"]["template"]["metadata"]["labels"]
     assert pod_labels["app"] == "launch-web"
     assert pod_labels["launchpad.io/managed-by"] == "launchpad-idp"
+    container = dep["spec"]["template"]["spec"]["containers"][0]
     # Must not rewrite the stack image to the env default nginx.
-    assert dep["spec"]["template"]["spec"]["containers"][0]["image"] == "launch-web:latest"
+    assert container["image"] == "launch-web:latest"
+    assert container["resources"]["requests"]["memory"] == "256Mi"
+    assert container["resources"]["limits"]["memory"] == "768Mi"
+    assert container["startupProbe"]["tcpSocket"]["port"] == 8080
+    assert container["readinessProbe"]["tcpSocket"]["port"] == 8080
+    env = {item["name"]: item["value"] for item in container["env"]}
+    assert env["PORT"] == "8080"
+    assert env["HOST"] == "0.0.0.0"
 
 
 def test_resolve_preview_ingress_backend_prefers_launch_service() -> None:

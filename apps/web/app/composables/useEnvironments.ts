@@ -5,6 +5,7 @@ import type {
   EnvironmentExtendPayload,
   EnvironmentPromotePayload,
   KindClusterStatus,
+  KindClusterActionResult,
   PreviewAppTemplate,
   PreviewBuildStatus,
   PreviewLaunchPayload,
@@ -57,6 +58,22 @@ export function useEnvironments() {
 
   async function getKindStatus(): Promise<KindClusterStatus> {
     return apiFetch<KindClusterStatus>('/preview/kind/status')
+  }
+
+  async function ensureKindCluster(clusterName?: string | null): Promise<KindClusterActionResult> {
+    return apiFetch<KindClusterActionResult>('/preview/kind/up', {
+      method: 'POST',
+      body: JSON.stringify(clusterName ? { cluster_name: clusterName } : {}),
+      timeoutMs: 270_000,
+    })
+  }
+
+  async function deleteKindCluster(clusterName?: string | null): Promise<KindClusterActionResult> {
+    return apiFetch<KindClusterActionResult>('/preview/kind/down', {
+      method: 'POST',
+      body: JSON.stringify(clusterName ? { cluster_name: clusterName } : {}),
+      timeoutMs: 150_000,
+    })
   }
 
   async function getPreviewBuildStatus(): Promise<PreviewBuildStatus> {
@@ -160,6 +177,8 @@ export function useEnvironments() {
     create,
     listPreviewTemplates,
     getKindStatus,
+    ensureKindCluster,
+    deleteKindCluster,
     getPreviewBuildStatus,
     listAudits,
     scanDrift,

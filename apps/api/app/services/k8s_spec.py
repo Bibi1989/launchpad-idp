@@ -25,8 +25,8 @@ LIMIT_RANGE_CONTAINER_SPEC: dict[str, dict[str, str]] = {
 }
 
 CONTAINER_RESOURCES: dict[str, dict[str, str]] = {
-    "requests": {"cpu": "100m", "memory": "128Mi"},
-    "limits": {"cpu": "500m", "memory": "512Mi"},
+    "requests": {"cpu": "100m", "memory": "256Mi"},
+    "limits": {"cpu": "500m", "memory": "768Mi"},
 }
 
 

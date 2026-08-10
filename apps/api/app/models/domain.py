@@ -91,6 +91,22 @@ class OrgPlan(str, enum.Enum):
 ProjectRole = OrgRole
 
 
+class AgentNodeStatus(str, enum.Enum):
+    """Lifecycle of a hybrid local/edge agent node."""
+
+    PENDING = "PENDING"
+    """Enrollment created; the agent has not registered from the host yet."""
+
+    ONLINE = "ONLINE"
+    """Agent tunnel is connected with a recent heartbeat."""
+
+    OFFLINE = "OFFLINE"
+    """Registered previously but no live tunnel / heartbeat is stale."""
+
+    REVOKED = "REVOKED"
+    """Disabled by an operator; the agent secret no longer authenticates."""
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -798,3 +814,73 @@ class UserCloudCredentialStore(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class AgentNode(Base):
+    """A registered hybrid local/edge deployment target (homelab / self-hosted host).
+
+    The agent daemon dials an outbound reverse WebSocket tunnel back to the control
+    plane and authenticates with a per-node HMAC secret (never a user JWT). Telemetry
+    is snapshotted here on each heartbeat so nodes remain listable while offline.
+    """
+
+    __tablename__ = "agent_nodes"
+    __table_args__ = (
+        Index("ix_agent_nodes_org_id", "org_id"),
+        Index("ix_agent_nodes_owner_id", "owner_id"),
+        Index("ix_agent_nodes_status", "status"),
+        Index("ix_agent_nodes_enrollment_token_hash", "enrollment_token_hash", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[AgentNodeStatus] = mapped_column(
+        Enum(AgentNodeStatus, name="agent_node_status", native_enum=False),
+        nullable=False,
+        default=AgentNodeStatus.PENDING,
+    )
+    # Enrollment (install) token: sha256 hex of a single-use, short-lived token.
+    enrollment_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enrollment_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Per-node HMAC shared secret (Fernet-encrypted at rest), issued at registration.
+    encrypted_agent_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    labels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Host facts reported at registration.
+    hostname: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cpu_cores: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mem_total_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Rolling telemetry snapshot (updated on each heartbeat).
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cpu_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    mem_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    disk_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    docker_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    containers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    owner: Mapped[User] = relationship()
+    organization: Mapped[Organization | None] = relationship()

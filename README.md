@@ -4,16 +4,44 @@ Internal Developer Portal for governed ephemeral environments and multi-cloud in
 
 ## How it works
 
-Launchpad has two related flows:
+Launchpad has three related flows:
 
 1. **Environments** - time-boxed preview deployments from a git repo and branch. Launchpad provisions an isolated namespace, streams status and logs, rebuilds on matching git pushes, and tears down when the TTL expires or you destroy the environment.
 2. **Provision** - generate a Terraform or Pulumi workspace for GCP, AWS, Azure, or Cloudflare. You attach short-lived cloud credentials per workspace, optionally bootstrap a GitHub repo, then apply the stack from an interactive sandbox terminal.
+3. **Hybrid Cloud** - enroll self-hosted Linux hosts as agent nodes (outbound WSS tunnel) and optionally generate AI infrastructure blueprints for a node or for GCP / AWS / Azure.
 
-Cloud credentials are encrypted at rest and injected into the sandbox for that session. GitHub access uses a GitHub App (no personal tokens in the browser).
+Cloud credentials are encrypted at rest and injected into the sandbox for that session. GitHub access uses a GitHub App (no personal tokens in the browser). Agent nodes authenticate with a per-node HMAC secret, not a user JWT.
 
 ## Using Launchpad
 
-Open the app at **`/`** for the product overview, then sign in (or use **Dev login** when available). You land on **Home** (`/home`); in-product guides live at **/docs**. Store cloud keys under **Settings** (`/settings`). Environments live at `/environments`.
+Open the app at **`/`** for the product overview, then sign in (or use **Dev login** when available). You land on **Home** (`/home`); in-product guides live at **/docs**. Store cloud keys under **Settings** (`/settings`). Environments live at `/environments`. **Hybrid Cloud** (`/hybrid`) manages self-hosted agent nodes and the AI infrastructure provisioner.
+
+### Hybrid Cloud (homelab + cloud)
+
+Enroll a Linux host with Docker as an agent node (outbound WSS tunnel, no inbound ports). From `/hybrid` you can:
+
+1. Create a one-time install token and run the curl installer on the host.
+2. Watch CPU / memory / disk / container telemetry when the node is online.
+3. Describe a stack in natural language; deploy the guardrailed blueprint to an online node or to GCP / AWS / Azure.
+
+Full guide: **[docs/hybrid-cloud.md](docs/hybrid-cloud.md)** · agent details: **[agent/README.md](agent/README.md)**.
+
+### Feature map (what else is in the product)
+
+| Area | Path | Docs |
+| --- | --- | --- |
+| Catalog templates & starred workspaces | `/catalog` | `/docs#catalog` |
+| Projects (org-scoped) | `/projects` | `/docs#projects` |
+| Org members, SSO maps, billing | `/org` | `/docs#organization` |
+| GitHub / GitLab / Slack / Jira | `/integrations` | `/docs#integrations` |
+| Env pause, drift, promote, analyzer | `/environments/[id]` | `/docs#environment-ops` |
+| Share status / PR deep link | `/p/:id`, `/pr/:number` | `/docs#environment-ops` |
+| Ansible, Kustomize, CI scaffolds | `/provision`, workspace IDE | `/docs#provision-extras` |
+| Dockerfile scan / scaffold / build | `/dockerfiles` | `/docs#dockerfiles` |
+| SSO login & invites | `/login`, `/invite/...` | `/docs#auth` |
+| Hybrid agents + AI | `/hybrid` | `/docs#hybrid`, `docs/hybrid-cloud.md` |
+
+Full markdown index: **[docs/product-guide.md](docs/product-guide.md)** · in-app: **`/docs`**.
 
 ### One-click preview (recommended)
 

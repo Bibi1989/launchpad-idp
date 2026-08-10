@@ -672,10 +672,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: "500m"
-              memory: 512Mi
+              memory: 768Mi
           readinessProbe:
             httpGet:
               path: {health_path}
@@ -860,10 +860,10 @@ spec:
       resources:
         requests:
           cpu: 100m
-          memory: 128Mi
+          memory: 256Mi
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 768Mi
       readinessProbe:
         httpGet:
           path: {spec.readiness_path}

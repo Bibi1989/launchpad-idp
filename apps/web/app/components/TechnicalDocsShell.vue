@@ -42,6 +42,11 @@ const items: TechnicalNavItem[] = [
     description: 'kind, preview vs manifest deploy',
   },
   {
+    label: 'Fleet',
+    to: '/bibirinbuluaremieye/technical/hybrid',
+    description: 'Agent nodes, WSS tunnel, AI blueprints',
+  },
+  {
     label: 'Operations',
     to: '/bibirinbuluaremieye/technical/operations',
     description: 'Config, workers, and local runbook',
