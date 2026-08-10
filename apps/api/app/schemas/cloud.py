@@ -107,12 +107,37 @@ class RunningInstanceKind(str, Enum):
     """Operator machine via local Docker (no Kubernetes)."""
 
 
+class InstanceProcessStrategy(str, Enum):
+    """How the app process is supervised on a VM / local host.
+
+    Serverless targets always use container images (``docker``).
+    """
+
+    DOCKER = "docker"
+    """Build/run OCI image (default; matches attach deploy today)."""
+
+    SYSTEMD = "systemd"
+    """Native process under a systemd unit (best for production VMs)."""
+
+    PM2 = "pm2"
+    """Node.js process manager (Node stacks only)."""
+
+
+class InstanceReverseProxy(str, Enum):
+    """Optional TLS/HTTP edge in front of the app listen port."""
+
+    NONE = "none"
+    NGINX = "nginx"
+    CADDY = "caddy"
+
+
 class AnsibleAppDeployMode(str, Enum):
     """How the Ansible app role starts the workload on the target host."""
 
     DOCKER_RUN = "docker_run"
     DOCKER_COMPOSE = "docker_compose"
     SYSTEMD = "systemd"
+    PM2 = "pm2"
     NONE = "none"
 
 
@@ -156,6 +181,8 @@ class AnsibleConfig(BaseModel):
     app_deploy_mode: AnsibleAppDeployMode = AnsibleAppDeployMode.DOCKER_RUN
     app_dir: str = Field(default="/opt/launchpad/app", max_length=512)
     app_listen_port: int = Field(default=8080, ge=1, le=65535)
+    reverse_proxy: InstanceReverseProxy = InstanceReverseProxy.NONE
+    app_start_command: str | None = Field(default=None, max_length=512)
     sync_workspace: bool = True
     # Vault
     use_vault: bool = False
@@ -166,7 +193,7 @@ class AnsibleConfig(BaseModel):
     def strip_required(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("hostname", "ssh_private_key_path", "vault_password_file", "python_interpreter")
+    @field_validator("hostname", "ssh_private_key_path", "vault_password_file", "python_interpreter", "app_start_command")
     @classmethod
     def strip_optional(cls, value: str | None) -> str | None:
         if value is None:
@@ -209,6 +236,10 @@ class RunningInstanceConfig(BaseModel):
     ssh_key_path: str | None = Field(default=None, max_length=512)
     # Local machine
     listen_port: int = Field(default=8080, ge=1, le=65535)
+    # How the app is supervised on VM / local (ignored for serverless → forced docker).
+    process_strategy: InstanceProcessStrategy = InstanceProcessStrategy.DOCKER
+    # Optional HTTP edge in front of listen_port (VM / local only).
+    reverse_proxy: InstanceReverseProxy = InstanceReverseProxy.NONE
     # Optional: force Open-app URL after deploy (advanced)
     preview_url_override: str | None = Field(default=None, max_length=512)
     # Legacy fields (coerced from older wizard snapshots)
@@ -245,6 +276,10 @@ class RunningInstanceConfig(BaseModel):
     def coerce_legacy_and_override(self) -> RunningInstanceConfig:
         if self.preview_url_override is None and self.endpoint_url:
             self.preview_url_override = self.endpoint_url
+        # Serverless runtimes only accept OCI images; no PM2/systemd/nginx on the host.
+        if self.kind == RunningInstanceKind.SERVERLESS:
+            self.process_strategy = InstanceProcessStrategy.DOCKER
+            self.reverse_proxy = InstanceReverseProxy.NONE
         return self
 
 
@@ -311,9 +346,9 @@ class CostVpaConfig(BaseModel):
 class CostResourceConfig(BaseModel):
     preset: ResourceSizingPreset = ResourceSizingPreset.DEVELOPER
     cpu_request: str = Field(default="100m", min_length=1, max_length=32)
-    cpu_limit: str = Field(default="250m", min_length=1, max_length=32)
-    memory_request: str = Field(default="128Mi", min_length=1, max_length=32)
-    memory_limit: str = Field(default="256Mi", min_length=1, max_length=32)
+    cpu_limit: str = Field(default="500m", min_length=1, max_length=32)
+    memory_request: str = Field(default="256Mi", min_length=1, max_length=32)
+    memory_limit: str = Field(default="768Mi", min_length=1, max_length=32)
 
 
 class IdleShutdownConfig(BaseModel):
@@ -324,11 +359,14 @@ class IdleShutdownConfig(BaseModel):
 class DependencyPlacement(str, Enum):
     IN_CLUSTER = "in_cluster"
     MANAGED = "managed"
+    EXTERNAL = "external"
 
 
 class DataStoreDependency(BaseModel):
     enabled: bool = False
     placement: DependencyPlacement = DependencyPlacement.IN_CLUSTER
+    # Used when placement=external (Neon, Railway, Upstash, self-hosted, etc.).
+    connection_url: str | None = Field(default=None, max_length=2048)
 
 
 class WorkloadDependenciesConfig(BaseModel):
@@ -372,7 +410,7 @@ class CostOptimizationConfig(BaseModel):
             or self.idle_shutdown.enabled
             or self.resources.preset != ResourceSizingPreset.DEVELOPER
             or self.resources.cpu_request != "100m"
-            or self.resources.memory_request != "128Mi"
+            or self.resources.memory_request != "256Mi"
         )
 
 

@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import type { DetectedService, RepoImportSession } from '~/types/repoImport'
+import type {
+  DatastoreImportConfig,
+  DetectedService,
+  EnvVarOverride,
+  RepoImportSession,
+} from '~/types/repoImport'
 import type { GitHost } from '~/types/git'
 import type {
   GitHubInstallationItem,
@@ -45,10 +50,14 @@ const loading = ref(false)
 const saving = ref(false)
 const error = ref<string | null>(null)
 const runtimeMode = ref<'kubernetes' | 'docker_compose' | 'running_instance'>('kubernetes')
+const processStrategy = ref<'docker' | 'systemd' | 'pm2'>('docker')
+const reverseProxy = ref<'none' | 'nginx' | 'caddy'>('none')
 const iacEngine = ref<'terraform' | 'opentofu' | 'pulumi'>('terraform')
 const enableIac = ref(true)
 const enableCicd = ref(false)
 const cicdPlatform = ref<'github' | 'gitlab'>('github')
+const envVars = ref<EnvVarOverride[]>([])
+const datastoreConfigs = ref<DatastoreImportConfig[]>([])
 
 const githubInstallations = ref<GitHubInstallationItem[]>([])
 const selectedInstallationId = ref<number | null>(null)
@@ -202,6 +211,21 @@ async function analyze() {
     })
     session.value = result
     services.value = result.services.map((s) => ({ ...s }))
+    envVars.value = (result.detection.env_example || []).map((item) => ({
+      key: item.key,
+      value: item.suggested_value || item.example_value || '',
+    }))
+    const suggestions = result.datastore_suggestions || {}
+    datastoreConfigs.value = (result.detection.datastores || []).map((kind) => {
+      const preferExternal = !(result.detection.has_kubernetes)
+      return {
+        kind,
+        placement: preferExternal ? 'external' as const : 'in_cluster' as const,
+        connection_url: preferExternal
+          ? (suggestions[kind]?.external || '')
+          : (suggestions[kind]?.in_cluster || ''),
+      }
+    })
     // Suggest a mode from repo artifacts; user can still override.
     if (result.detection.has_kubernetes) {
       runtimeMode.value = 'kubernetes'
@@ -237,12 +261,16 @@ async function save() {
         name: s.name,
       })),
       runtime_mode: runtimeMode.value,
+      process_strategy: processStrategy.value,
+      reverse_proxy: reverseProxy.value,
       iac_engine: iacEngine.value,
       enable_iac: enableIac.value,
       enable_cicd: enableCicd.value,
       cicd_platform: cicdPlatform.value,
       ensure_local_cluster: runtimeMode.value === 'kubernetes',
       project_id: selectedLaunchpadProjectId.value || null,
+      env_vars: envVars.value,
+      datastores: datastoreConfigs.value,
     })
     open.value = false
     emit('saved', result.workspace_id)
@@ -264,6 +292,8 @@ async function reset() {
   }
   session.value = null
   services.value = []
+  envVars.value = []
+  datastoreConfigs.value = []
   step.value = 'url'
   error.value = null
 }
@@ -450,6 +480,30 @@ async function close() {
             </label>
           </div>
           <div
+            v-if="runtimeMode === 'running_instance'"
+            class="grid gap-3 sm:grid-cols-2"
+          >
+            <label class="block space-y-2">
+              <span class="lp-label">{{ t('provision.runtimeMode.attach.processStrategy') }}</span>
+              <select v-model="processStrategy" class="lp-input">
+                <option value="docker">{{ t('provision.runtimeMode.attach.strategies.docker') }}</option>
+                <option value="systemd">{{ t('provision.runtimeMode.attach.strategies.systemd') }}</option>
+                <option value="pm2">{{ t('provision.runtimeMode.attach.strategies.pm2') }}</option>
+              </select>
+              <p class="text-[11px] text-[var(--lp-muted)]">
+                {{ t(`provision.runtimeMode.attach.strategyHints.${processStrategy}`) }}
+              </p>
+            </label>
+            <label class="block space-y-2">
+              <span class="lp-label">{{ t('provision.runtimeMode.attach.reverseProxy') }}</span>
+              <select v-model="reverseProxy" class="lp-input">
+                <option value="none">{{ t('provision.runtimeMode.attach.proxies.none') }}</option>
+                <option value="nginx">{{ t('provision.runtimeMode.attach.proxies.nginx') }}</option>
+                <option value="caddy">{{ t('provision.runtimeMode.attach.proxies.caddy') }}</option>
+              </select>
+            </label>
+          </div>
+          <div
             v-if="session.detection.has_kubernetes || session.detection.has_compose"
             class="rounded-lg border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/8 px-3 py-2 text-xs text-[var(--lp-text)]"
           >
@@ -486,6 +540,15 @@ async function close() {
           <p class="text-xs text-[var(--lp-muted)]">
             {{ t('import.runtimeModeHint') }}
           </p>
+
+          <ImportEnvConfigPanel
+            v-model:env-vars="envVars"
+            v-model:datastore-configs="datastoreConfigs"
+            :env-example="session.detection.env_example || []"
+            :detected-datastores="session.detection.datastores || []"
+            :suggestions="session.datastore_suggestions || {}"
+            :runtime-mode="runtimeMode"
+          />
 
           <DetectedStackPreview
             :detection="session.detection"

@@ -51,6 +51,40 @@ class ServiceOverride(BaseModel):
     name: str | None = Field(default=None, max_length=64)
 
 
+class EnvVarOverride(BaseModel):
+    """User-configured value for a key from ``.env.example`` (or injected datastore URL)."""
+
+    key: str = Field(min_length=1, max_length=128)
+    value: str = Field(default="", max_length=4096)
+
+
+class DatastoreImportConfig(BaseModel):
+    """Per-datastore placement chosen during import."""
+
+    kind: str = Field(min_length=2, max_length=32)
+    # in_cluster | external | skip
+    placement: str = Field(default="in_cluster", max_length=32)
+    connection_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("kind")
+    @classmethod
+    def normalize_kind(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        allowed = {"postgres", "mysql", "mariadb", "mongodb", "redis"}
+        if cleaned not in allowed:
+            raise ValueError(f"kind must be one of {sorted(allowed)}")
+        return cleaned
+
+    @field_validator("placement")
+    @classmethod
+    def normalize_placement(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        allowed = {"in_cluster", "external", "skip"}
+        if cleaned not in allowed:
+            raise ValueError(f"placement must be one of {sorted(allowed)}")
+        return cleaned
+
+
 class RepoImportSaveRequest(BaseModel):
     name: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     services: list[ServiceOverride] = Field(default_factory=list)
@@ -61,6 +95,11 @@ class RepoImportSaveRequest(BaseModel):
     enable_cicd: bool = False
     cicd_platform: str = Field(default="github", max_length=16)
     project_id: UUID | None = None
+    env_vars: list[EnvVarOverride] = Field(default_factory=list, max_length=200)
+    datastores: list[DatastoreImportConfig] = Field(default_factory=list, max_length=10)
+    # running_instance process plan (ignored unless runtime_mode=running_instance)
+    process_strategy: str = Field(default="docker", max_length=32)
+    reverse_proxy: str = Field(default="none", max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -93,6 +132,24 @@ class RepoImportSaveRequest(BaseModel):
             raise ValueError("cicd_platform must be github or gitlab")
         return cleaned
 
+    @field_validator("process_strategy")
+    @classmethod
+    def normalize_process_strategy(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        allowed = {"docker", "systemd", "pm2"}
+        if cleaned not in allowed:
+            raise ValueError(f"process_strategy must be one of {sorted(allowed)}")
+        return cleaned
+
+    @field_validator("reverse_proxy")
+    @classmethod
+    def normalize_reverse_proxy(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        allowed = {"none", "nginx", "caddy"}
+        if cleaned not in allowed:
+            raise ValueError(f"reverse_proxy must be one of {sorted(allowed)}")
+        return cleaned
+
 
 class RepoImportSessionRead(BaseModel):
     import_id: str
@@ -103,6 +160,8 @@ class RepoImportSessionRead(BaseModel):
     detection: DetectionResult
     services: list[DetectedService]
     created_at: datetime | None = None
+    # kind → {in_cluster, external} suggested connection strings
+    datastore_suggestions: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class RepoImportSaveResult(BaseModel):

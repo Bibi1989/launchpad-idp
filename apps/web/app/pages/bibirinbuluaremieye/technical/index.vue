@@ -71,12 +71,12 @@ flowchart LR
     />
 
     <section class="space-y-3">
-      <h2 class="text-xl font-semibold">Three product jobs</h2>
+      <h2 class="text-xl font-semibold">Four product jobs</h2>
       <p class="text-sm leading-7 text-[var(--lp-muted)]">
-        The same portal does three related but separate jobs. Mixing them up is the most common
+        The same portal does four related but separate jobs. Mixing them up is the most common
         source of confusion:
       </p>
-      <div class="grid gap-3 md:grid-cols-3">
+      <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <div class="lp-glass rounded-xl p-4 space-y-2">
           <p class="font-mono text-[10px] uppercase tracking-wider text-[var(--lp-accent)]">1</p>
           <h3 class="font-semibold">Environments</h3>
@@ -98,6 +98,14 @@ flowchart LR
             Apply your own K8s YAML from
             <code class="font-mono">infra/k8s/manifests/</code>
             onto a preview namespace.
+          </p>
+        </div>
+        <div class="lp-glass rounded-xl p-4 space-y-2">
+          <p class="font-mono text-[10px] uppercase tracking-wider text-[var(--lp-accent)]">4</p>
+          <h3 class="font-semibold">Fleet</h3>
+          <p class="text-xs leading-6 text-[var(--lp-muted)]">
+            Enroll self-hosted agent nodes (outbound tunnel) and deploy AI blueprints to a node or
+            public cloud.
           </p>
         </div>
       </div>
@@ -155,6 +163,15 @@ flowchart LR
             Operations
           </NuxtLink>
           - how to run it locally day to day.
+        </li>
+        <li>
+          <NuxtLink
+            to="/bibirinbuluaremieye/technical/hybrid"
+            class="text-[var(--lp-accent)] hover:underline"
+          >
+            Fleet
+          </NuxtLink>
+          - agent nodes, outbound WSS, AI blueprints.
         </li>
       </ul>
     </section>

@@ -172,16 +172,21 @@ run_with_deadline() {
 }
 
 if [[ "${PRELOAD_IMAGE}" != "0" ]] && command -v docker >/dev/null 2>&1; then
-  IMAGE="${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine}"
-  echo "Loading ${IMAGE} into kind (best-effort, 60s cap)…"
-  if run_with_deadline 60 docker pull --platform linux/amd64 "${IMAGE}" >/dev/null 2>&1 \
-    || run_with_deadline 60 docker pull "${IMAGE}" >/dev/null 2>&1; then
-    if ! run_with_deadline 60 kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"; then
-      echo "Warning: could not preload ${IMAGE} into kind (non-fatal)." >&2
+  # App image PLUS the datastore + init-container images every datastore-enabled
+  # preview needs (busybox = wait-for-postgres/redis init container). Skipping these
+  # makes datastore previews cold-pull mid-provision and miss the readiness budget.
+  PRELOAD_IMAGES="${DEFAULT_WORKLOAD_IMAGE:-nginx:1.27-alpine} busybox:1.36 postgres:16-alpine redis:7-alpine"
+  for IMAGE in ${PRELOAD_IMAGES}; do
+    echo "Loading ${IMAGE} into kind (best-effort, 60s cap)…"
+    if run_with_deadline 60 docker pull --platform linux/amd64 "${IMAGE}" >/dev/null 2>&1 \
+      || run_with_deadline 60 docker pull "${IMAGE}" >/dev/null 2>&1; then
+      if ! run_with_deadline 60 kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"; then
+        echo "Warning: could not preload ${IMAGE} into kind (non-fatal)." >&2
+      fi
+    else
+      echo "Warning: could not pull ${IMAGE} (non-fatal)." >&2
     fi
-  else
-    echo "Warning: could not pull ${IMAGE} (non-fatal)." >&2
-  fi
+  done
 fi
 
 cat <<EOF

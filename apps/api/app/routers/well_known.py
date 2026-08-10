@@ -3,13 +3,42 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, Response
-from fastapi.responses import JSONResponse
-
-from app.core.config import get_settings
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pkg.auth.oidc.key_manager import get_key_manager
 
+from app.core.config import get_settings
+from app.services.agent_install import build_agent_bundle, render_install_script
+
 router = APIRouter(tags=["well-known"])
+
+
+@router.get("/install.sh", response_class=PlainTextResponse)
+async def agent_install_script(request: Request) -> PlainTextResponse:
+    """Public host installer for the hybrid agent: ``curl ... | TOKEN=lp_x sh``."""
+    return PlainTextResponse(
+        render_install_script(request_base_url=str(request.base_url)),
+        media_type="text/x-shellscript",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/agent/bundle.tar.gz")
+async def agent_source_bundle() -> Response:
+    """Agent Docker build context, so a host can build the image with no registry."""
+    try:
+        data = build_agent_bundle()
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "agent_source_unavailable", "message": str(exc)},
+        ) from exc
+    return Response(
+        content=data,
+        media_type="application/gzip",
+        headers={"Cache-Control": "no-store"},
+    )
+
 
 _jwks_cache: dict[str, Any] | None = None
 _jwks_cache_timestamp: float = 0.0

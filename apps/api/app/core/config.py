@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     default_ttl_hours: int = 72
     cost_estimate_hourly: Decimal = Decimal("0.4200")
-    provision_step_delay_seconds: float = 0.75
+    provision_step_delay_seconds: float = 0.0
 
     # Preview governance (Launch / Environments)
     max_concurrent_environments: int = 4
@@ -69,8 +69,8 @@ class Settings(BaseSettings):
     kubernetes_memory_request: str = "2Gi"
     kubernetes_memory_limit: str = "8Gi"
     kubernetes_pod_limit: str = "20"
-    kubernetes_ready_timeout_seconds: float = 120.0
-    kubernetes_ready_poll_seconds: float = 2.0
+    kubernetes_ready_timeout_seconds: float = 180.0
+    kubernetes_ready_poll_seconds: float = 1.0
 
     sse_poll_interval_seconds: float = 0.5
     ttl_reaper_interval_seconds: float = 300.0
@@ -181,6 +181,8 @@ class Settings(BaseSettings):
     preview_image_registry: str | None = None
     preview_build_kind_load: bool = True
     preview_build_timeout_seconds: float = 900.0
+    # When true, docker build re-pulls base images (slower; useful for CI freshness).
+    preview_build_pull_base: bool = False
 
     # Local K8s cluster engine: "k3s" (default, via k3d) or "kind".
     # Override with LOCAL_K8S_ENGINE=kind to use Kubernetes-in-Docker instead.
@@ -252,6 +254,35 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
     preview_analyzer_heuristic_fallback: bool = True
+
+    # --- Hybrid local/edge agent nodes ---
+    # Cadence the agent daemon uses for telemetry heartbeats over the reverse tunnel.
+    agent_heartbeat_interval_seconds: int = 10
+    # A node with no heartbeat newer than this is reported OFFLINE (a few missed beats).
+    agent_offline_after_seconds: int = 35
+    # How long the control plane waits for a dispatched command result from an agent.
+    agent_command_timeout_seconds: float = 30.0
+    # Enrollment (install) tokens are single-use and short lived.
+    agent_enrollment_ttl_seconds: int = 900
+    # Public origin agents reach the CONTROL PLANE (API) at - used for /install.sh,
+    # the register endpoint, and WS URL derivation. This is the API origin, NOT the
+    # web app: in dev set http://localhost:8000; in prod the tunnel/ingress host that
+    # routes /install.sh and /api to the API. Falls back to the request origin, then
+    # public_app_url. public_app_url (the Nuxt web app) is the wrong target and returns
+    # an HTML 404 for /install.sh.
+    agent_control_plane_url: str | None = None
+    # Public wss:// origin agents dial back to. Defaults to the control-plane URL with ws(s) scheme.
+    agent_ws_public_url: str | None = None
+    # Container image the generated install.sh runs on the homelab host.
+    agent_image: str = "ghcr.io/launchpad/agent:latest"
+    # Guardrails applied to AI blueprints targeting a homelab/local node.
+    agent_local_node_max_vcpu: float = 2.0
+    agent_local_node_max_memory_mb: int = 8192
+
+    # AI Infrastructure Provisioner (Gemini blueprint generation, heuristic fallback)
+    ai_provisioner_heuristic_fallback: bool = True
+    # Hours/month used to project an hourly rate-card estimate to a monthly figure.
+    cost_hours_per_month: int = 730
 
     @property
     def local_cluster_tool(self) -> str:

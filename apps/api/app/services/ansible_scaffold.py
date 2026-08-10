@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from app.schemas.cloud import AnsibleAppDeployMode, AnsibleConfig, WorkspaceRuntimeMode
+from app.schemas.cloud import (
+    AnsibleAppDeployMode,
+    AnsibleConfig,
+    InstanceReverseProxy,
+    WorkspaceRuntimeMode,
+)
 
 ANSIBLE_ROOT = Path("infra") / "ansible"
 
@@ -112,6 +118,8 @@ def write_ansible_scaffold(
         f"app_deploy_mode: {app_mode}\n"
         f"app_dir: {cfg.app_dir}\n"
         f"app_listen_port: {cfg.app_listen_port}\n"
+        f"reverse_proxy: {cfg.reverse_proxy.value}\n"
+        f"app_start_command: {json.dumps(cfg.app_start_command or 'npm start')}\n"
         f"sync_workspace: {str(cfg.sync_workspace).lower()}\n"
         f"set_hostname: {str(cfg.set_hostname).lower()}\n",
     )
@@ -125,11 +133,14 @@ def write_ansible_scaffold(
         roles.append("users")
     if cfg.app_deploy_mode != AnsibleAppDeployMode.NONE:
         roles.append("app")
+    if cfg.reverse_proxy != InstanceReverseProxy.NONE:
+        roles.append("reverse_proxy")
 
     role_lines = "\n".join(f"      - {r}" for r in roles)
     _write(
         ANSIBLE_ROOT / "playbooks" / "site.yml",
         "---\n"
+        f"# app_deploy_mode={app_mode} reverse_proxy={cfg.reverse_proxy.value}\n"
         f"- name: Provision Launchpad host for {name}\n"
         f"  hosts: {group}\n"
         "  become: true\n"
@@ -147,6 +158,8 @@ def write_ansible_scaffold(
         _write_role_users(_write)
     if cfg.app_deploy_mode != AnsibleAppDeployMode.NONE:
         _write_role_app(_write)
+    if cfg.reverse_proxy != InstanceReverseProxy.NONE:
+        _write_role_reverse_proxy(_write)
 
     _write(
         ANSIBLE_ROOT / "requirements.yml",
@@ -406,7 +419,9 @@ def _write_role_app(write) -> None:
         "      User={{ deploy_user | default('root') }}\n"
         "      WorkingDirectory={{ app_dir }}\n"
         "      Environment=PORT={{ app_listen_port }}\n"
-        "      ExecStart=/usr/bin/env bash -lc './start.sh'\n"
+        "      Environment=HOST=0.0.0.0\n"
+        "      EnvironmentFile=-{{ app_dir }}/.env\n"
+        "      ExecStart=/bin/bash -lc '{{ app_start_command | default(\"npm start\") }}'\n"
         "      Restart=on-failure\n"
         "\n"
         "      [Install]\n"
@@ -420,5 +435,76 @@ def _write_role_app(write) -> None:
         "    state: started\n"
         "    daemon_reload: true\n"
         "  when: app_deploy_mode == 'systemd'\n"
+        "  tags: [app]\n\n"
+        "- name: Ensure PM2 is installed globally\n"
+        "  community.general.npm:\n"
+        "    name: pm2\n"
+        "    global: true\n"
+        "    state: present\n"
+        "  when: app_deploy_mode == 'pm2'\n"
+        "  tags: [app]\n\n"
+        "- name: Start app with PM2 ecosystem\n"
+        "  ansible.builtin.command:\n"
+        "    cmd: pm2 start ecosystem.config.cjs\n"
+        "    chdir: \"{{ app_dir }}\"\n"
+        "  when: app_deploy_mode == 'pm2'\n"
+        "  tags: [app]\n\n"
+        "- name: Persist PM2 process list\n"
+        "  ansible.builtin.command:\n"
+        "    cmd: pm2 save\n"
+        "  when: app_deploy_mode == 'pm2'\n"
         "  tags: [app]\n",
+    )
+
+
+def _write_role_reverse_proxy(write) -> None:
+    write(
+        ANSIBLE_ROOT / "roles" / "reverse_proxy" / "tasks" / "main.yml",
+        "---\n"
+        "- name: Install nginx\n"
+        "  ansible.builtin.package:\n"
+        "    name: nginx\n"
+        "    state: present\n"
+        "  when: reverse_proxy == 'nginx'\n"
+        "  tags: [reverse_proxy]\n\n"
+        "- name: Configure nginx reverse proxy\n"
+        "  ansible.builtin.copy:\n"
+        "    dest: /etc/nginx/sites-available/launchpad-app.conf\n"
+        "    mode: '0644'\n"
+        "    content: |\n"
+        "      server {\n"
+        "        listen 80;\n"
+        "        server_name _;\n"
+        "        location / {\n"
+        "          proxy_pass http://127.0.0.1:{{ app_listen_port }};\n"
+        "          proxy_http_version 1.1;\n"
+        "          proxy_set_header Host $host;\n"
+        "          proxy_set_header X-Real-IP $remote_addr;\n"
+        "          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "          proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        }\n"
+        "      }\n"
+        "  when: reverse_proxy == 'nginx'\n"
+        "  tags: [reverse_proxy]\n\n"
+        "- name: Enable nginx site\n"
+        "  ansible.builtin.file:\n"
+        "    src: /etc/nginx/sites-available/launchpad-app.conf\n"
+        "    dest: /etc/nginx/sites-enabled/launchpad-app.conf\n"
+        "    state: link\n"
+        "  when: reverse_proxy == 'nginx'\n"
+        "  tags: [reverse_proxy]\n\n"
+        "- name: Reload nginx\n"
+        "  ansible.builtin.service:\n"
+        "    name: nginx\n"
+        "    state: reloaded\n"
+        "    enabled: true\n"
+        "  when: reverse_proxy == 'nginx'\n"
+        "  tags: [reverse_proxy]\n\n"
+        "- name: Install Caddy package\n"
+        "  ansible.builtin.debug:\n"
+        "    msg: >-\n"
+        "      Install Caddy from official packages, then apply infra/instance/Caddyfile\n"
+        "      proxying to 127.0.0.1:{{ app_listen_port }}\n"
+        "  when: reverse_proxy == 'caddy'\n"
+        "  tags: [reverse_proxy]\n",
     )

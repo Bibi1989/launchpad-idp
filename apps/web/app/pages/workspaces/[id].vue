@@ -520,7 +520,7 @@ watch(advancedMode, async (enabled) => {
 
       <section
         v-if="setupOpen"
-        class="lp-glass overflow-hidden rounded-xl p-5"
+        class="lp-glass overflow-visible rounded-xl p-5"
       >
         <h2 class="mb-4 text-lg font-semibold">Update workspace configuration</h2>
         <ClientOnly>

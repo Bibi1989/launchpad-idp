@@ -26,9 +26,11 @@ export const ansibleConfigSchema = z.object({
   create_deploy_user: z.boolean().default(true),
   deploy_user: z.string().trim().min(1).max(64).default('deploy'),
   deploy_user_groups: z.array(z.string().trim().min(1)).default(['docker']),
-  app_deploy_mode: z.enum(['docker_run', 'docker_compose', 'systemd', 'none']).default('docker_run'),
+  app_deploy_mode: z.enum(['docker_run', 'docker_compose', 'systemd', 'pm2', 'none']).default('docker_run'),
   app_dir: z.string().trim().min(1).max(512).default('/opt/launchpad/app'),
   app_listen_port: z.number().int().min(1).max(65535).default(8080),
+  reverse_proxy: z.enum(['none', 'nginx', 'caddy']).default('none'),
+  app_start_command: z.string().trim().max(512).nullable().optional(),
   sync_workspace: z.boolean().default(true),
   use_vault: z.boolean().default(false),
   vault_password_file: z.string().trim().max(512).nullable().optional(),
@@ -60,6 +62,8 @@ export const defaultAnsibleConfig = (): z.infer<typeof ansibleConfigSchema> => (
   app_deploy_mode: 'docker_run',
   app_dir: '/opt/launchpad/app',
   app_listen_port: 8080,
+  reverse_proxy: 'none',
+  app_start_command: null,
   sync_workspace: true,
   use_vault: false,
   vault_password_file: null,
@@ -86,6 +90,8 @@ export const runningInstanceSchema = z.object({
   ssh_port: z.number().int().min(1).max(65535).default(22),
   ssh_key_path: z.string().max(512).nullable().optional(),
   listen_port: z.number().int().min(1).max(65535).default(8080),
+  process_strategy: z.enum(['docker', 'systemd', 'pm2']).default('docker'),
+  reverse_proxy: z.enum(['none', 'nginx', 'caddy']).default('none'),
   preview_url_override: z.string().max(512).nullable().optional(),
   kube_context: z.string().max(128).nullable().optional(),
   endpoint_url: z.string().max(512).nullable().optional(),
@@ -473,11 +479,12 @@ export const frameworkOptionSchema = z.enum([
   'generic',
 ])
 
-export const dependencyPlacementSchema = z.enum(['in_cluster', 'managed'])
+export const dependencyPlacementSchema = z.enum(['in_cluster', 'managed', 'external'])
 
 export const dataStoreDependencySchema = z.object({
   enabled: z.boolean().default(false),
   placement: dependencyPlacementSchema.default('in_cluster'),
+  connection_url: z.string().max(2048).nullable().optional(),
 })
 
 export const workloadDependenciesSchema = z.object({
@@ -568,6 +575,8 @@ const wizardCommonFields = {
     ssh_port: 22,
     ssh_key_path: null,
     listen_port: 8080,
+    process_strategy: 'docker',
+    reverse_proxy: 'none',
     preview_url_override: null,
     kube_context: null,
     endpoint_url: null,

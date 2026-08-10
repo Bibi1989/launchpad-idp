@@ -671,6 +671,56 @@ class IaCGenerator:
         except OSError:  # pragma: no cover - non-POSIX filesystems
             pass
 
+    @staticmethod
+    def _write_image_builds_plan(
+        workspace_dir: Path,
+        compose_services: list[dict[str, object]],
+    ) -> str | None:
+        """Persist Dockerfile → image tag plan so provision builds the right tags.
+
+        Overwrites stale import plans (e.g. only ``launch-app:latest`` from a root
+        Dockerfile) when the wizard scaffolds real ``apps/<name>`` workloads.
+        """
+        import json
+
+        plans: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for svc in compose_services:
+            name = str(svc.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            context = str(svc.get("context") or f"apps/{name}").strip() or f"apps/{name}"
+            df_hint = str(svc.get("dockerfile_path") or "Dockerfile").strip() or "Dockerfile"
+            if df_hint == "Dockerfile" or not df_hint.startswith(context):
+                df_rel = f"{context.rstrip('/')}/Dockerfile" if context not in {".", ""} else "Dockerfile"
+            else:
+                df_rel = df_hint
+            df_path = workspace_dir / df_rel
+            if not df_path.is_file():
+                alt = workspace_dir / context / "Dockerfile"
+                if alt.is_file():
+                    try:
+                        df_rel = str(alt.relative_to(workspace_dir)).replace("\\", "/")
+                    except ValueError:
+                        continue
+                else:
+                    continue
+            seen.add(name)
+            plans.append(
+                {
+                    "service": name,
+                    "image": f"{name}:latest",
+                    "context": context,
+                    "dockerfile": df_rel,
+                }
+            )
+        if not plans:
+            return None
+        out = workspace_dir / ".launchpad" / "image-builds.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(plans, indent=2) + "\n", encoding="utf-8")
+        return ".launchpad/image-builds.json"
+
     def _write_core_app_scaffold(
         self,
         workspace_dir: Path,
@@ -725,6 +775,19 @@ class IaCGenerator:
             )
             (workspace_dir / "docker-compose.yml").write_text(dc_content, encoding="utf-8")
             written.append("docker-compose.yml")
+
+        plan_rel = self._write_image_builds_plan(
+            workspace_dir,
+            [
+                {
+                    "name": scaffold.app_name,  # type: ignore[attr-defined]
+                    "context": scaffold.app_dir,  # type: ignore[attr-defined]
+                    "dockerfile_path": "Dockerfile",
+                }
+            ],
+        )
+        if plan_rel:
+            written.append(plan_rel)
 
         return written
 
@@ -1063,6 +1126,11 @@ class IaCGenerator:
             dc_path.write_text(dc_content, encoding="utf-8")
             written.append("docker-compose.yml")
 
+        if compose_services:
+            plan_rel = self._write_image_builds_plan(workspace_dir, compose_services)
+            if plan_rel:
+                written.append(plan_rel)
+
         return written
 
     def _write_local_kind(
@@ -1162,11 +1230,15 @@ and regenerate this workspace (or create a new one) with real cloud credentials.
             )
         else:
             title = f"Local running instance ({kind})"
+            strategy = request.running_instance.process_strategy.value
+            proxy = request.running_instance.reverse_proxy.value
             howto = (
                 "## Run on compute target\n\n"
-                f"Runtime mode: `{mode.value}` / kind: `{kind}`.\n\n"
-                "Launchpad deploys a container image to the selected compute target "
-                "(local Docker, SSH VM, or managed container service). "
+                f"Runtime mode: `{mode.value}` / kind: `{kind}`.\n"
+                f"Process strategy: `{strategy}` / reverse proxy: `{proxy}`.\n\n"
+                "Docker strategy: Launchpad attaches a container image to the "
+                "selected compute target (local Docker, SSH VM, or managed container "
+                "service). PM2/systemd: see `infra/instance/` and Ansible.\n"
                 "No Kubernetes manifests are generated for this workspace.\n"
             )
 
@@ -1196,6 +1268,17 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
             )
         files.extend(self._write_container_scaffold(workspace_dir, request))
 
+        if mode == WorkspaceRuntimeMode.RUNNING_INSTANCE:
+            from app.services.instance_process_scaffold import write_instance_process_scaffold
+
+            files.extend(
+                write_instance_process_scaffold(
+                    workspace_dir,
+                    name=request.name,
+                    running_instance=request.running_instance,
+                )
+            )
+
         # Optional IaC stubs (Terraform / OpenTofu / Pulumi / Ansible).
         from app.services.local_runtime_iac import write_local_runtime_iac
 
@@ -1203,6 +1286,20 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
         # Auto-enable Ansible artifacts when engine is ansible or VM-targeted instance.
         if request.iac_engine == IaCEngine.ANSIBLE and not ansible_cfg.enabled:
             ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+        if mode == WorkspaceRuntimeMode.RUNNING_INSTANCE:
+            from app.schemas.cloud import AnsibleAppDeployMode
+            from app.services.instance_process_scaffold import ansible_deploy_mode_for_strategy
+
+            ansible_cfg = ansible_cfg.model_copy(
+                update={
+                    "app_deploy_mode": AnsibleAppDeployMode(
+                        ansible_deploy_mode_for_strategy(
+                            request.running_instance.process_strategy
+                        )
+                    ),
+                    "app_listen_port": request.running_instance.listen_port,
+                }
+            )
         if (
             mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
             and request.running_instance.kind.value == "vm"

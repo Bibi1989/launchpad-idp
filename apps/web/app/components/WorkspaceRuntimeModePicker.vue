@@ -6,7 +6,9 @@ import type {
 } from '~/types/provisioning'
 import {
   applyInstanceComputeTarget,
+  computeTargetDisplay,
   instanceComputeTargetsForProvider,
+  resolveProcessStrategy,
   resolveSelectedInstanceComputeTarget,
 } from '~/utils/instanceComputeTargets'
 import { runtimeModesForProvider } from '~/utils/workspaceRuntimeMode'
@@ -34,6 +36,12 @@ const selectedTargetId = computed(
       props.resources ?? {},
     )?.id ?? null,
 )
+
+const activeStrategy = computed(() => resolveProcessStrategy(runningInstance.value))
+
+function targetCard(target: (typeof computeTargets.value)[number]) {
+  return computeTargetDisplay(target, activeStrategy.value)
+}
 
 function ensureResources(): Record<string, unknown> {
   return props.resources ?? {}
@@ -77,6 +85,39 @@ watch(
 watch(mode, (next) => {
   if (next === 'running_instance') syncDefaultComputeTarget()
 })
+watch(
+  () => runningInstance.value.kind,
+  (kind) => {
+    if (kind === 'serverless') {
+      if (
+        runningInstance.value.process_strategy === 'docker'
+        && (runningInstance.value.reverse_proxy || 'none') === 'none'
+      ) {
+        return
+      }
+      runningInstance.value = {
+        ...runningInstance.value,
+        process_strategy: 'docker',
+        reverse_proxy: 'none',
+      }
+      return
+    }
+    const process_strategy = runningInstance.value.process_strategy || 'docker'
+    const reverse_proxy = runningInstance.value.reverse_proxy || 'none'
+    if (
+      runningInstance.value.process_strategy === process_strategy
+      && (runningInstance.value.reverse_proxy || 'none') === reverse_proxy
+    ) {
+      return
+    }
+    runningInstance.value = {
+      ...runningInstance.value,
+      process_strategy,
+      reverse_proxy,
+    }
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -143,6 +184,42 @@ watch(mode, (next) => {
         {{ t('provision.runtimeMode.attach.dockerNote') }}
       </p>
 
+      <div
+        v-if="runningInstance.kind !== 'serverless'"
+        class="grid gap-3 sm:grid-cols-2"
+      >
+        <label class="block space-y-2">
+          <span class="lp-label">{{ t('provision.runtimeMode.attach.processStrategy') }}</span>
+          <select
+            v-model="runningInstance.process_strategy"
+            class="lp-input"
+            :disabled="disabled"
+          >
+            <option value="docker">{{ t('provision.runtimeMode.attach.strategies.docker') }}</option>
+            <option value="systemd">{{ t('provision.runtimeMode.attach.strategies.systemd') }}</option>
+            <option value="pm2">{{ t('provision.runtimeMode.attach.strategies.pm2') }}</option>
+          </select>
+          <p class="text-[11px] text-[var(--lp-muted)]">
+            {{ t(`provision.runtimeMode.attach.strategyHints.${runningInstance.process_strategy || 'docker'}`) }}
+          </p>
+        </label>
+        <label class="block space-y-2">
+          <span class="lp-label">{{ t('provision.runtimeMode.attach.reverseProxy') }}</span>
+          <select
+            v-model="runningInstance.reverse_proxy"
+            class="lp-input"
+            :disabled="disabled"
+          >
+            <option value="none">{{ t('provision.runtimeMode.attach.proxies.none') }}</option>
+            <option value="nginx">{{ t('provision.runtimeMode.attach.proxies.nginx') }}</option>
+            <option value="caddy">{{ t('provision.runtimeMode.attach.proxies.caddy') }}</option>
+          </select>
+          <p class="text-[11px] text-[var(--lp-muted)]">
+            {{ t('provision.runtimeMode.attach.reverseProxyHint') }}
+          </p>
+        </label>
+      </div>
+
       <div class="grid gap-3 sm:grid-cols-2">
         <button
           v-for="target in computeTargets"
@@ -165,19 +242,18 @@ watch(mode, (next) => {
                 : 'text-[var(--lp-muted)]'
             "
           >
-            {{ target.icon }}
+            {{ targetCard(target).icon }}
           </span>
           <p class="mt-1.5 text-sm font-medium text-[var(--lp-text)]">
-            {{ t(`provision.runtimeMode.attach.targets.${target.id}.title`) }}
+            {{ t(targetCard(target).titleKey) }}
           </p>
           <p class="mt-1 text-xs text-[var(--lp-muted)]">
-            {{ t(`provision.runtimeMode.attach.targets.${target.id}.desc`) }}
+            {{ t(targetCard(target).descKey) }}
           </p>
           <p
-            v-if="target.runsContainerImage"
             class="mt-2 text-[10px] uppercase tracking-wide text-[var(--lp-muted)]"
           >
-            {{ t('provision.runtimeMode.attach.containerBadge') }}
+            {{ t(targetCard(target).badgeKey) }}
           </p>
         </button>
       </div>
@@ -270,7 +346,11 @@ watch(mode, (next) => {
 
       <template v-else>
         <p class="text-xs text-[var(--lp-muted)]">
-          {{ t('provision.runtimeMode.attach.localMachineHint') }}
+          {{
+            t(
+              `provision.runtimeMode.attach.strategyHints.${runningInstance.process_strategy || 'docker'}`,
+            )
+          }}
         </p>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('provision.runtimeMode.attach.listenPort') }}</span>

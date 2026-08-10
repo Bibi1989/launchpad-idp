@@ -166,14 +166,17 @@ def _docker_build(
 ) -> None:
     import docker
 
+    from app.core.config import get_settings
+
     client = docker.from_env()
+    pull_base = bool(get_settings().preview_build_pull_base)
     try:
         _, build_logs = client.images.build(
             path=str(context),
             tag=tag,
             dockerfile=dockerfile,
             rm=True,
-            pull=True,
+            pull=pull_base,
         )
         for chunk in build_logs:
             if "stream" in chunk:

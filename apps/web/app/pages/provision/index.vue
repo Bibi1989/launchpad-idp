@@ -702,32 +702,41 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
   }
 }
 
+let workspaceConfigLoadSeq = 0
+
 watch(selectedWorkspaceId, async (id) => {
   if (id === NEW_WORKSPACE) {
+    workspaceConfigLoadSeq += 1
+    loadingConfig.value = false
     sessionCreatedWorkspaceId.value = null
     hasStoredCredentials.value = false
     clearCredentials()
     return
   }
+  const seq = ++workspaceConfigLoadSeq
   loadingConfig.value = true
   fieldError.value = null
   try {
     const config = await getWizardConfig(id)
+    if (seq !== workspaceConfigLoadSeq) return
     applyWizardConfig(config)
   } catch (err) {
+    if (seq !== workspaceConfigLoadSeq) return
     const ws = existingWorkspaces.value.find((item) => item.id === id)
     if (ws) {
       form.name = ws.name
       if (ws.provider === 'local' || ws.provider === 'gcp' || ws.provider === 'aws' || ws.provider === 'azure' || ws.provider === 'cloudflare') {
         form.provider = ws.provider
       }
-      if (ws.engine === 'terraform' || ws.engine === 'opentofu' || ws.engine === 'pulumi') {
+      if (ws.engine === 'terraform' || ws.engine === 'opentofu' || ws.engine === 'pulumi' || ws.engine === 'ansible') {
         form.iac_engine = ws.engine
       }
     }
     fieldError.value = err instanceof Error ? err.message : t('provision.errors.loadFailed')
   } finally {
-    loadingConfig.value = false
+    if (seq === workspaceConfigLoadSeq) {
+      loadingConfig.value = false
+    }
   }
 })
 
@@ -1266,7 +1275,7 @@ async function onPrimaryAction() {
         </h2>
 
         <!-- Step 1: Cloud + workspace -->
-        <div v-show="currentStep === 1" class="space-y-6">
+        <div v-if="currentStep === 1" class="space-y-6">
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="block space-y-2 sm:col-span-2">
               <span class="lp-label">{{ t('provision.workspace') }}</span>
@@ -1282,6 +1291,9 @@ async function onPrimaryAction() {
               </select>
               <p class="text-xs text-[var(--lp-muted)]">
                 {{ t('provision.workspaceSelectBlurb') }}
+              </p>
+              <p v-if="loadingConfig && !isNewWorkspace" class="text-xs text-[var(--lp-accent)]">
+                {{ t('provision.loadingWorkspaceConfig') }}
               </p>
             </label>
 
@@ -1395,8 +1407,8 @@ async function onPrimaryAction() {
           />
         </div>
 
-        <!-- Step 2: Resources -->
-        <div v-show="currentStep === 2" class="space-y-4">
+        <!-- Step 2: Resources (v-if so Ansible / infra widgets do not mount on step 1) -->
+        <div v-if="currentStep === 2" class="space-y-4">
           <div
             v-if="hasStoredCredentials && !isLocalProvider"
             class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50 p-4 text-sm text-[var(--lp-muted)]"
@@ -1781,7 +1793,7 @@ async function onPrimaryAction() {
         </div>
 
         <!-- Step 3: Source control -->
-        <div v-show="currentStep === 3" class="space-y-6">
+        <div v-if="currentStep === 3" class="space-y-6">
           <GitProviderPicker v-model="gitHost" />
 
           <template v-if="gitHost === 'github'">
@@ -1880,7 +1892,7 @@ async function onPrimaryAction() {
         </div>
 
         <!-- Step 4: Generate -->
-        <div v-show="currentStep === 4" class="space-y-8">
+        <div v-if="currentStep === 4" class="space-y-8">
           <div class="rounded-2xl border border-[var(--lp-accent)]/20 bg-[var(--lp-panel-2)]/60 p-6">
             <h3 class="text-lg font-semibold">{{ t('provision.review.title') }}</h3>
             <dl class="mt-4 grid gap-3 text-sm sm:grid-cols-2">
@@ -2081,7 +2093,7 @@ async function onPrimaryAction() {
           type="button"
           class="lp-btn-primary px-8"
           :class="currentStep === TOTAL_STEPS ? 'bg-[var(--lp-ok)]' : ''"
-          :disabled="submitting || loadingConfig"
+          :disabled="submitting || (loadingConfig && currentStep === 1 && !isNewWorkspace)"
           @click="onPrimaryAction"
         >
           <template v-if="currentStep < TOTAL_STEPS">

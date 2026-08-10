@@ -482,6 +482,27 @@ class KindClusterStatus(BaseModel):
     can_launch: bool
 
 
+class KindClusterActionRequest(BaseModel):
+    """Optional cluster name for Settings → Local Kubernetes create/destroy."""
+
+    cluster_name: str | None = Field(
+        default=None,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        description="DNS-1123 label; omit to use server KIND_CLUSTER_NAME / LOCAL_CLUSTER_NAME.",
+    )
+
+
+class KindClusterActionResult(BaseModel):
+    status: str
+    cluster: str
+    engine: str = "k3s"
+    context: str | None = None
+    message: str
+    output: str | None = None
+    reason: str | None = None
+
+
 class PreviewBuildStatus(BaseModel):
     """Whether Launchpad builds preview images from git repos (Dockerfile)."""
 

@@ -55,7 +55,7 @@ export function useTerminalSession() {
     }
     ws.onerror = () => {
       error.value =
-        'WebSocket connection failed - ensure API is on :8000 and NUXT_PUBLIC_WS_BASE=ws://localhost:8000'
+        'WebSocket connection failed - ensure API is on :8000 and NUXT_PUBLIC_WS_BASE=ws://127.0.0.1:8000'
       connected.value = false
     }
     ws.onmessage = (event: MessageEvent<string>) => {

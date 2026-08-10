@@ -91,6 +91,7 @@ class RepoImportService:
             detection=detection,
             services=detection.services,
             created_at=created_at,
+            datastore_suggestions=self._datastore_suggestions(detection.datastores),
         )
 
     async def get_import(self, import_id: str, *, owner: User) -> RepoImportSessionRead:
@@ -126,6 +127,7 @@ class RepoImportService:
             detection=detection,
             services=detection.services,
             created_at=created_at,
+            datastore_suggestions=self._datastore_suggestions(detection.datastores),
         )
 
     async def save_as_workspace(
@@ -165,12 +167,26 @@ class RepoImportService:
 
         adjusted = detection.model_copy(update={"services": services})
         runtime_mode = WorkspaceRuntimeMode(request.runtime_mode)
+        deps = self._build_dependencies(
+            detection.datastores,
+            request.datastores,
+            workspace_name=request.name,
+        )
+        env_map = self._build_env_map(
+            detection,
+            request.env_vars,
+            deps,
+            workspace_name=request.name,
+        )
+        # External datastore URLs without a matching .env.example key still land in .env
         generated = self._generator.generate(
             durable,
             adjusted,
             workspace_name=request.name,
             services=services,
             runtime_mode=runtime_mode.value,
+            dependencies=deps,
+            env_vars=env_map,
         )
 
         if request.enable_iac and runtime_mode != WorkspaceRuntimeMode.KUBERNETES:
@@ -191,6 +207,30 @@ class RepoImportService:
                 name=request.name,
             )
             generated.files.extend(cicd_files)
+
+        running_instance_cfg = None
+        if runtime_mode == WorkspaceRuntimeMode.RUNNING_INSTANCE:
+            from app.schemas.cloud import (
+                InstanceProcessStrategy,
+                InstanceReverseProxy,
+                RunningInstanceConfig,
+                RunningInstanceKind,
+            )
+            from app.services.instance_process_scaffold import write_instance_process_scaffold
+
+            running_instance_cfg = RunningInstanceConfig(
+                kind=RunningInstanceKind.LOCAL_MACHINE,
+                listen_port=8088,
+                process_strategy=InstanceProcessStrategy(request.process_strategy),
+                reverse_proxy=InstanceReverseProxy(request.reverse_proxy),
+            )
+            generated.files.extend(
+                write_instance_process_scaffold(
+                    durable,
+                    name=request.name,
+                    running_instance=running_instance_cfg,
+                )
+            )
 
         cluster_ready = False
         wants_cluster = (
@@ -252,13 +292,21 @@ class RepoImportService:
                 "resources": {"cluster_name": "launchpad", "context": "k3d-launchpad"},
             },
             "runtime_mode": runtime_mode.value,
-            "running_instance": {
-                "kind": "local_machine",
-                "listen_port": 8088,
-            },
+            "running_instance": (
+                running_instance_cfg.model_dump()
+                if running_instance_cfg is not None
+                else {
+                    "kind": "local_machine",
+                    "listen_port": 8088,
+                    "process_strategy": "docker",
+                    "reverse_proxy": "none",
+                }
+            ),
             "artifact_mode": artifact_mode,
             "kubernetes_packaging": packaging,
             "run_init": False,
+            "dependencies": deps.model_dump(),
+            "env_vars_configured": sorted(env_map.keys()),
         }
         row = ProvisioningWorkspace(
             id=workspace_id,
@@ -301,9 +349,13 @@ class RepoImportService:
                 "to run docker compose."
             )
         else:
+            strategy = request.process_strategy
+            proxy = request.reverse_proxy
             message = (
-                "Workspace saved as running instance. Open Launch and select this workspace "
-                "to deploy to local Docker (or the configured compute target)."
+                "Workspace saved as running instance "
+                f"(process={strategy}, proxy={proxy}). "
+                "Docker strategy deploys via Launch attach; "
+                "PM2/systemd/nginx scaffolds are under infra/instance/."
             )
         return RepoImportSaveResult(
             workspace_id=workspace_id,
@@ -460,6 +512,143 @@ class RepoImportService:
         if payload.get("source") != "repo_import":
             return None
         return payload
+
+    @staticmethod
+    def _datastore_suggestions(kinds: list[str]) -> dict[str, dict[str, str]]:
+        from pkg.detector.env_example import suggested_datastore_urls
+
+        out: dict[str, dict[str, str]] = {}
+        for kind in kinds:
+            urls = suggested_datastore_urls(kind)
+            if urls.get("in_cluster") or urls.get("external"):
+                out[kind] = urls
+        return out
+
+    @staticmethod
+    def _build_dependencies(
+        detected: list[str],
+        overrides: list[object],
+        *,
+        workspace_name: str,
+    ):
+        from app.schemas.cloud import (
+            DataStoreDependency,
+            DependencyPlacement,
+            WorkloadDependenciesConfig,
+        )
+        from app.schemas.repo_import import DatastoreImportConfig
+        from pkg.detector.env_example import suggested_datastore_urls
+
+        del workspace_name  # reserved for future per-app naming
+        by_kind: dict[str, DatastoreImportConfig] = {}
+        for raw in overrides:
+            if isinstance(raw, DatastoreImportConfig):
+                by_kind[raw.kind] = raw
+            elif isinstance(raw, dict):
+                cfg = DatastoreImportConfig.model_validate(raw)
+                by_kind[cfg.kind] = cfg
+
+        def _dep(kind: str) -> DataStoreDependency:
+            cfg = by_kind.get(kind)
+            if cfg is None:
+                if kind not in detected:
+                    return DataStoreDependency(enabled=False)
+                # Default: in-cluster for kubernetes8s-friendly local preview
+                return DataStoreDependency(
+                    enabled=True,
+                    placement=DependencyPlacement.IN_CLUSTER,
+                )
+            if cfg.placement == "skip":
+                return DataStoreDependency(enabled=False)
+            if cfg.placement == "external":
+                url = (cfg.connection_url or "").strip()
+                if not url:
+                    url = suggested_datastore_urls(kind).get("external") or ""
+                return DataStoreDependency(
+                    enabled=True,
+                    placement=DependencyPlacement.EXTERNAL,
+                    connection_url=url or None,
+                )
+            return DataStoreDependency(
+                enabled=True,
+                placement=DependencyPlacement.IN_CLUSTER,
+            )
+
+        return WorkloadDependenciesConfig(
+            postgres=_dep("postgres"),
+            mysql=_dep("mysql"),
+            mariadb=_dep("mariadb"),
+            mongodb=_dep("mongodb"),
+            redis=_dep("redis"),
+        )
+
+    @staticmethod
+    def _build_env_map(
+        detection: DetectionResult,
+        overrides: list[object],
+        deps,
+        *,
+        workspace_name: str,
+    ) -> dict[str, str]:
+        from app.schemas.cloud import DependencyPlacement
+        from app.schemas.repo_import import EnvVarOverride
+        from app.services.workload_dependencies import dependency_secret_string_data
+        from pkg.detector.env_example import suggested_datastore_urls
+
+        env_map: dict[str, str] = {}
+        for item in detection.env_example:
+            if item.suggested_value:
+                env_map[item.key] = item.suggested_value
+
+        # Datastore placement URLs override .env.example placeholders.
+        secret_bits = dependency_secret_string_data(deps, name=workspace_name)
+        for key, value in secret_bits.items():
+            if value:
+                env_map[key] = value
+
+        # Ensure external URL placeholders land even if secrets skipped empty
+        for kind, attr in (
+            ("postgres", "postgres"),
+            ("mysql", "mysql"),
+            ("mariadb", "mariadb"),
+            ("mongodb", "mongodb"),
+            ("redis", "redis"),
+        ):
+            dep = getattr(deps, attr)
+            if not dep.enabled or dep.placement != DependencyPlacement.EXTERNAL:
+                continue
+            url = (dep.connection_url or "").strip() or suggested_datastore_urls(
+                kind, app_name=workspace_name
+            ).get("external", "")
+            if not url:
+                continue
+            if kind == "redis":
+                env_map["REDIS_URL"] = url
+            elif kind == "mongodb":
+                env_map["MONGODB_URI"] = url
+            elif kind == "mysql":
+                env_map["MYSQL_URL"] = url
+                env_map["DATABASE_URL"] = url
+            elif kind == "mariadb":
+                env_map["MARIADB_URL"] = url
+                env_map["DATABASE_URL"] = url
+            else:
+                env_map["DATABASE_URL"] = url
+
+        # Explicit user overrides always win.
+        for raw in overrides:
+            if isinstance(raw, EnvVarOverride):
+                key, value = raw.key, raw.value
+            elif isinstance(raw, dict):
+                key = str(raw.get("key") or "").strip()
+                value = str(raw.get("value") or "")
+            else:
+                continue
+            if not key:
+                continue
+            env_map[key] = value
+
+        return env_map
 
     def _allocate_durable_dir(self, name: str) -> Path:
         root = Path(self._settings.iac_workspace_root).expanduser().resolve()

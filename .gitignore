@@ -1,6 +1,7 @@
 .DS_Store
 .env
 .env.*
+.env.local
 !.env.example
 !deploy/**/env.example
 node_modules/
@@ -24,6 +25,17 @@ infra/pulumi/Pulumi.*.yaml
 .vscode/
 *.log
 docker-compose.yml
+apps/api/.env.*
+apps/api/.env
+apps/api/.env.local
+apps/api/.env.development
+apps/api/.env.production
+apps/api/.env.test
+apps/api/.env.test.local
+apps/api/.env.test.production
+apps/api/.env.test.development
+apps/api/.env.test.local
+apps/api/.env.test.production
 
 # Local runtime / accidental artifacts
 apps/api/celerybeat-schedule*

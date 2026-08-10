@@ -1,4 +1,4 @@
-.PHONY: up down api worker beat web test migrate kind-up kind-down k3s-up k3s-down cluster-up cluster-down oci-up oci-down oci-logs
+.PHONY: up down api worker beat web test migrate kind-up kind-down k3s-up k3s-down cluster-up cluster-down oci-up oci-down oci-logs agent-build
 
 # Local cluster engine: k3s (default, via k3d) or kind. Override: LOCAL_K8S_ENGINE=kind make cluster-up
 LOCAL_K8S_ENGINE ?= k3s
@@ -14,6 +14,12 @@ down:
 
 migrate:
 	cd apps/api && .venv/bin/alembic upgrade head
+
+# Build the hybrid agent image locally. Tag matches settings.agent_image so the
+# host installer (/install.sh) finds it without a registry. Override AGENT_IMAGE.
+AGENT_IMAGE ?= ghcr.io/launchpad/agent:latest
+agent-build:
+	docker build -t $(AGENT_IMAGE) agent/
 
 # Applies pending Alembic revisions, then starts the API (same as Docker image entrypoint).
 api: migrate

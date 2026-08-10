@@ -266,3 +266,61 @@ async def test_preview_kind_status_endpoint(
     assert response.status_code == 200
     assert response.json()["can_launch"] is True
     assert response.json()["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_preview_kind_up_endpoint(
+    client: AsyncClient,
+    test_user: User,
+) -> None:
+    with patch(
+        "app.routers.api.ensure_kind_cluster",
+        new_callable=AsyncMock,
+        return_value={
+            "status": "ready",
+            "cluster": "dev-local",
+            "engine": "k3s",
+            "context": "k3d-dev-local",
+            "output": "ok",
+        },
+    ) as up:
+        response = await client.post(
+            "/api/v1/preview/kind/up",
+            headers=auth_header(test_user),
+            json={"cluster_name": "dev-local"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["cluster"] == "dev-local"
+    up.assert_awaited_once()
+    assert up.await_args.kwargs["cluster_name"] == "dev-local"
+    assert up.await_args.kwargs["respect_auto_manage"] is False
+
+
+@pytest.mark.asyncio
+async def test_preview_kind_down_endpoint(
+    client: AsyncClient,
+    test_user: User,
+) -> None:
+    with patch(
+        "app.routers.api.delete_kind_cluster",
+        new_callable=AsyncMock,
+        return_value={
+            "status": "deleted",
+            "cluster": "launchpad",
+            "engine": "k3s",
+            "output": "deleted",
+        },
+    ) as down:
+        response = await client.post(
+            "/api/v1/preview/kind/down",
+            headers=auth_header(test_user),
+            json={},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "deleted"
+    down.assert_awaited_once()
+    assert down.await_args.kwargs["respect_auto_manage"] is False

@@ -30,6 +30,15 @@ export interface DetectedService {
   markers: string[]
 }
 
+export interface EnvExampleVar {
+  key: string
+  example_value: string
+  suggested_value: string
+  comment: string | null
+  source: string
+  is_secret: boolean
+}
+
 export interface DetectionResult {
   layout: ProjectLayout
   monorepo_tools: MonorepoTool[]
@@ -40,6 +49,7 @@ export interface DetectionResult {
   summary: string
   has_kubernetes?: boolean
   has_compose?: boolean
+  env_example?: EnvExampleVar[]
 }
 
 export interface RepoImportSession {
@@ -51,6 +61,7 @@ export interface RepoImportSession {
   detection: DetectionResult
   services: DetectedService[]
   created_at: string | null
+  datastore_suggestions?: Record<string, { in_cluster?: string; external?: string }>
 }
 
 export interface ServiceOverride {
@@ -59,6 +70,19 @@ export interface ServiceOverride {
   port?: number | null
   is_preview_target: boolean
   name?: string | null
+}
+
+export interface EnvVarOverride {
+  key: string
+  value: string
+}
+
+export type DatastoreImportPlacement = 'in_cluster' | 'external' | 'skip'
+
+export interface DatastoreImportConfig {
+  kind: string
+  placement: DatastoreImportPlacement
+  connection_url?: string | null
 }
 
 export interface RepoImportSaveResult {

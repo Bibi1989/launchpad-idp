@@ -91,6 +91,7 @@ export default {
     "workspaces": "Workspaces",
     "projects": "Projekte",
     "provision": "Provisionierung",
+    "hybrid": "Fleet",
     "integrations": "Integrationen",
     "organization": "Organisation",
     "settings": "Einstellungen",
@@ -366,10 +367,28 @@ export default {
     "alsoConfigure": "Auch konfigurieren",
     "alsoOrg": "Organisation - Mitglieder und SSO",
     "alsoIntegrations": "Integrationen - GitHub und GitLab",
+    "localKubernetes": "Lokales Kubernetes",
+    "localKubernetesBlurb": "Lokalen Cluster für Launch → Local und lokale Provision erstellen oder löschen (Standard: k3d/k3s, oder kind). Am besten den vom API konfigurierten Namen (KIND_CLUSTER_NAME) verwenden, damit Launches denselben Cluster treffen.",
+    "localKubernetesName": "Cluster-Name",
+    "localKubernetesNameHint": "DNS-Label (Kleinbuchstaben). Standard belassen, außer KIND_CLUSTER_NAME auf der API wird ebenfalls angepasst.",
+    "localKubernetesCreate": "Cluster erstellen",
+    "localKubernetesDelete": "Cluster löschen",
+    "localKubernetesCreating": "Wird erstellt…",
+    "localKubernetesDeleting": "Wird gelöscht…",
+    "localKubernetesRefresh": "Status aktualisieren",
+    "localKubernetesCreated": "Lokaler Cluster ist bereit.",
+    "localKubernetesDeleted": "Lokaler Cluster gelöscht.",
+    "localKubernetesConfirmDelete": "Lokalen Cluster '{name}' löschen? Laufende lokale Previews und Workloads darauf werden beendet.",
+    "localKubernetesStatus": "Status",
+    "localKubernetesEngine": "Engine",
+    "localKubernetesContext": "kubectl-Kontext",
     "errors": {
       "load": "Zugangsdaten konnten nicht geladen werden",
       "save": "Speichern fehlgeschlagen",
-      "clear": "Löschen fehlgeschlagen"
+      "clear": "Löschen fehlgeschlagen",
+      "kindLoad": "Lokaler Cluster-Status konnte nicht geladen werden",
+      "kindUp": "Lokaler Cluster konnte nicht erstellt werden",
+      "kindDown": "Lokaler Cluster konnte nicht gelöscht werden"
     }
   },
   "pages": {
@@ -447,7 +466,21 @@ export default {
     "runtimeModeOverrideHint": "Du kannst weiterhin Kubernetes, Docker Compose oder Running Instance für Scaffold und Provision wählen.",
     "enableIac": "IaC scaffolden (Terraform / Pulumi)",
     "enableCicd": "CI/CD scaffolden",
-    "cicdPlatform": "CI-Plattform"
+    "cicdPlatform": "CI-Plattform",
+    "datastoresTitle": "Datenbanken & Cache",
+    "datastoresBlurb": "In-Cluster für lokale Previews, oder externe URL (Neon, Supabase, RDS, Upstash, Railway, …).",
+    "datastoreInCluster": "In-Cluster (Launchpad)",
+    "datastoreExternal": "Externe URL",
+    "datastoreSkip": "Überspringen",
+    "datastoreInClusterHint": "Launchpad startet Postgres/Redis neben der App und setzt Verbindungsvariablen.",
+    "datastoreExternalHint": "Empfohlen für shared/managed DBs. z.B. Neon/Supabase Postgres, Upstash Redis.",
+    "connectionUrl": "Connection-URL",
+    "useSuggestedUrl": "Vorschlag verwenden",
+    "envTitle": "Umgebungsvariablen",
+    "envBlurb": "Aus .env.example. Secrets bleiben leer. Beim Speichern als .env (gitignored).",
+    "showSecretKeys": "Secret-Keys anzeigen",
+    "secretBadge": "secret",
+    "noEnvExample": "Keine .env.example gefunden. Datastore-URLs können trotzdem gesetzt werden."
   },
   "notifications": {
     "title": "Benachrichtigungen",
@@ -854,13 +887,65 @@ export default {
       "attach": {
         "title": "Compute-Ziel",
         "blurb": "Wähle den Cloud-Dienst, der die App ausführt. Die Preview-URL entsteht nach dem Deploy.",
-        "dockerNote": "Cloud Run, App Runner und Container Apps führen Docker/OCI-Images aus. VMs nutzen Docker per SSH.",
+        "dockerNote": "Serverless nutzt immer Docker/OCI. Auf VMs und lokal: Docker, systemd oder PM2, optional nginx/Caddy davor.",
         "cloudflareNote": "Cloudflare Workers/Pages sind Edge-Runtimes, keine Docker-Hosts. VM per SSH nutzen oder Kubernetes / Workers in den IaC-Diensten.",
         "containerBadge": "Container-Image",
+        "processStrategy": "Prozessstrategie",
+        "reverseProxy": "Reverse Proxy",
+        "reverseProxyHint": "TLS und Routing auf den App-Port. Die App selbst nicht als nginx betreiben.",
+        "strategies": {
+          "docker": "Docker (empfohlen)",
+          "systemd": "systemd-Unit",
+          "pm2": "PM2 (Node)"
+        },
+        "strategyHints": {
+          "docker": "One-Click Launch Preview. Gleiches Image wie Compose/K8s.",
+          "systemd": "Beste native Überwachung auf Linux-VMs. Scaffolds unter infra/instance/.",
+          "pm2": "Node-Prozessmanager. Schreibt ecosystem.config.cjs."
+        },
+        "proxies": {
+          "none": "Keine",
+          "nginx": "nginx",
+          "caddy": "Caddy"
+        },
+        "localByStrategy": {
+          "docker": {
+            "title": "Lokales Docker",
+            "desc": "docker run auf dieser Maschine",
+            "badge": "Container-Image"
+          },
+          "systemd": {
+            "title": "Lokales systemd",
+            "desc": "Nativer Prozess per systemd-Unit auf dieser Maschine",
+            "badge": "systemd-Unit"
+          },
+          "pm2": {
+            "title": "Lokales PM2",
+            "desc": "Node-Prozessmanager (ecosystem.config.cjs) auf dieser Maschine",
+            "badge": "PM2-Prozess"
+          }
+        },
+        "vmByStrategy": {
+          "docker": {
+            "title": "Remote-VM (SSH)",
+            "desc": "Jeder Linux-Host mit Docker",
+            "badge": "Container-Image"
+          },
+          "systemd": {
+            "title": "Remote-VM - systemd",
+            "desc": "SSH-Host mit systemd-Unit (Ansible / infra/instance)",
+            "badge": "systemd-Unit"
+          },
+          "pm2": {
+            "title": "Remote-VM - PM2",
+            "desc": "SSH-Host mit PM2 (ecosystem.config.cjs)",
+            "badge": "PM2-Prozess"
+          }
+        },
         "serverlessHint": "Deployt das Container-Image zum Managed Service (gcloud / AWS wenn verfügbar).",
         "serverlessConfigHint": "Benötigt Container-Image, Cloud-Zugangsdaten und Region. Artifact Registry / ECR empfohlen.",
-        "vmConfigHint": "Benötigt SSH-Erreichbarkeit von der Control Plane, Docker auf der VM und Image-Pull.",
-        "localMachineHint": "Startet den Container mit Docker auf dieser Maschine (ohne Kubernetes).",
+        "vmConfigHint": "SSH von der Control Plane nötig. Docker-Strategie braucht Docker auf der VM; systemd/PM2 nutzen infra/instance.",
+        "localMachineHint": "Docker-Strategie läuft lokal per docker. systemd/PM2-Scaffolds unter infra/instance/.",
         "localBlurb": "Lokales Docker oder Remote-VM per SSH wählen. Optionale IaC- und CI/CD-Scaffolds finden Sie darunter.",
         "kind": "Compute-Art",
         "serviceName": "Service-Name",
@@ -934,6 +1019,7 @@ export default {
     },
     "stepProgress": "SCHRITT {current}/{total}",
     "workspaceSelectBlurb": "Neuen Stack erstellen oder bestehenden mit vorherigen Einstellungen wieder öffnen.",
+    "loadingWorkspaceConfig": "Workspace-Einstellungen werden geladen…",
     "iacEngineLocalHint": "Lokales Kubernetes scaffoldet nur Manifeste - zu Cloud-Anbieter wechseln für Terraform, OpenTofu oder Pulumi.",
     "iacEngineLocalRuntimeHint": "Lokale Compose- und Running-Instance-Workspaces scaffolden Terraform-, OpenTofu- oder Pulumi-Stubs plus optionales CI/CD. Für Managed Modules zu einem Cloud-Anbieter wechseln.",
     "editingExisting": "Bearbeiten",
@@ -1339,9 +1425,31 @@ export default {
     "githubConnect": "GitHub Connect",
     "teardownTtl": "Abbau & TTL",
     "workspacesTerminal": "Workspaces & Sandbox-Terminal",
+    "hybridCloud": "Fleet",
+    "catalog": "Service-Katalog",
+    "projects": "Projekte",
+    "organizationGuide": "Organisation & Zugriff",
+    "integrationsGuide": "Integrationen-Hub",
+    "environmentOps": "Umgebungs-Operationen",
+    "dockerfilesGuide": "Dockerfiles",
+    "authAccess": "Anmeldung, SSO & Einladungen",
+    "provisionExtras": "Ansible, Kustomize & Scaffolds",
     "launch": "Launch",
     "provision": "Provision",
+    "hybrid": "Fleet",
+    "catalogNav": "Katalog",
+    "projectsNav": "Projekte",
+    "orgNav": "Organisation",
+    "integrationsNav": "Integrationen",
+    "dockerfilesNav": "Dockerfiles",
     "provisionCloudInfra": "Cloud-Infrastruktur provisionieren",
+    "ansibleEngine": "Ansible",
+    "kustomizeMode": "Kustomize",
+    "pulumiEngine": "Pulumi",
+    "terraformEngine": "Terraform",
+    "productGuidePath": "docs/product-guide.md",
+    "ssoLogin": "SSO",
+    "moreGuides": "Siehe auch {productGuide} im Repo für die vollständige Feature-Karte.",
     "workspaces": "Workspaces",
     "environments": "Umgebungen",
     "integrations": "Integrationen",
@@ -1380,11 +1488,12 @@ export default {
     "cloudCredentialsLink": "Cloud-Zugangsdaten",
     "githubApp": "GitHub App",
     "overview": {
-      "intro": "Launchpad hat drei getrennte Aufgaben. Sie teilen sich dieselbe UI und können verknüpft werden, laufen aber mit unterschiedlichen Lebenszyklen:",
+      "intro": "Launchpad hat vier verwandte Aufgaben. Sie teilen sich dieselbe UI und können verknüpft werden, laufen aber mit unterschiedlichen Lebenszyklen:",
       "provisionBody": "Terraform- oder Pulumi-Workspace für GCP, AWS, Azure, Cloudflare oder kind erzeugen. Sie hängen kurzlebige Cloud-Zugangsdaten an, wählen Ressourcen und wenden den Stack im Sandbox-Terminal an. Damit stellen Sie Plattform-Infrastruktur bereit (VPC, Cluster usw.).",
       "manifestBody": "Kubernetes-YAML oder Helm-Charts aus {path} in Ihrem Workspace anwenden. Damit deployen Sie App-Objekte auf einen bereits vorhandenen Cluster. Im Sandbox-Terminal werden Manifeste getrennt nach Terraform/Pulumi angewendet.",
       "environmentBody": "kurzlebige, gesteuerte Preview einer App aus Git-Repo und Branch. Launchpad erstellt einen isolierten Namespace, deployt den Workload, streamt Status und Logs und räumt alles ab, wenn die TTL abläuft. Bei Verknüpfung mit einem Workspace mit Raw-Manifesten nutzen Umgebungen {manifestDeploy} statt des eingebauten Preview-Profils.",
-      "useFlows": "Nutzen Sie {launch} für eine One-Click-Preview - Local Sandbox (ein Bildschirm) oder Cloud, Katalogvorlage oder eigenes Repo. Verwalten Sie laufende Previews über {environments}. Erstellen Sie einen neuen Cloud-Stack über {provision} und öffnen Sie bereits erzeugte Workspaces über {workspaces}."
+      "hybridBody": "selbst gehostete Linux-Hosts als Agent-Knoten einschreiben (ausgehender sicherer Tunnel) und optional abgesicherte Infrastruktur-Blueprints mit KI erzeugen. Container auf einem Homelab-Knoten deployen oder den Blueprint auf GCP / AWS / Azure abbilden.",
+      "useFlows": "Nutzen Sie {launch} für eine One-Click-Preview - Local Sandbox (ein Bildschirm) oder Cloud, Katalogvorlage oder eigenes Repo. Verwalten Sie laufende Previews über {environments}. Erstellen Sie einen neuen Cloud-Stack über {provision}, öffnen Sie bereits erzeugte Workspaces über {workspaces}, und verwalten Sie Homelab-Knoten sowie KI-Blueprints über {hybrid}."
     },
     "gettingStartedSteps": {
       "step1": "Öffnen Sie Launchpad im Browser.",
@@ -1412,10 +1521,10 @@ export default {
     "provisionSection": {
       "intro": "Der Provision-Assistent erzeugt ein IaC-Bundle für Sie. Launchpad wendet Cloud-Änderungen nicht selbst an - Sie führen plan/apply im Sandbox-Terminal aus, nachdem das Bundle bereit ist.",
       "step1": "Gehen Sie zu {provision}.",
-      "step2": "Workspace-Namen, Cloud-Anbieter und IaC-Engine (Terraform oder Pulumi) wählen.",
+      "step2": "Workspace-Namen, Cloud-Anbieter und IaC-Engine ({terraform}, {pulumi} oder {ansible}) wählen.",
       "step3": "Kurzlebige Cloud-Zugangsdaten für diesen Anbieter einfügen (siehe {credentialsLink}).",
       "step4": "Ressourcen für den erzeugten Stack wählen (VPC, Cluster, Storage usw.).",
-      "step5": "Wenn Sie einen Cluster aktivieren (GKE, EKS, AKS, …), wählen Sie {rawK8s} oder {helm} und schalten Sie die Kubernetes-Objekte zum Scaffolding ein - Deployment, Service, Ingress, Pod, Job, CronJob, StatefulSet, DaemonSet, ConfigMap, Secret, PVC, Role, HPA und mehr.",
+      "step5": "Wenn Sie einen Cluster aktivieren (GKE, EKS, AKS, …), wählen Sie {rawK8s}, {helm} oder {kustomize} und schalten Sie die Kubernetes-Objekte zum Scaffolding ein - Deployment, Service, Ingress, Pod, Job, CronJob, StatefulSet, DaemonSet, ConfigMap, Secret, PVC, Role, HPA und mehr.",
       "step6": "Optional GitHub verbinden und ein Repository mit CI-Workflow und Cloud-Secrets bootstrappen.",
       "step7": "Mit {generateWorkspace} abschließen. Launchpad scaffoldet die IaC-Dateien und öffnet ein Sandbox-Terminal.",
       "step8": "Im Terminal zuerst Infrastruktur anwenden: {tfPlan} / {tfApply} oder {pulumiUp}. Manifest-Apply ({kubectlApply} / {helmUpgrade}) ist ein separater Schritt danach.",
@@ -1497,6 +1606,75 @@ export default {
       "step1": "Für frühen Abbau die Umgebung öffnen und {destroy} klicken (oder vom Dashboard zerstören).",
       "step2": "Status wechselt während des Abbaus, während Ressourcen entfernt werden; Live-Logs beobachten.",
       "step3": "Ohne Aktion läuft die Umgebung ab, wenn die TTL erreicht ist, und Launchpad räumt sie planmäßig auf."
+    },
+    "hybridCloudLabel": "Fleet (Knoten + KI-Deploy)",
+    "hybridSection": {
+      "intro": "Fleet verbindet selbst gehostete Hosts und Cloud-Ziele. Öffnen Sie {hybridPath}, um Agent-Knoten einzuschreiben und den KI-Infrastruktur-Provisioner zu nutzen. Ausführliche Referenz: {docPath}.",
+      "whatTitle": "Was Sie bekommen",
+      "whatAgents": "Agent-Knoten: Linux-Hosts, die einen ausgehenden sicheren Tunnel zu Launchpad aufbauen.",
+      "whatAi": "KI-Infrastruktur-Provisioner: Alltagssprache zu einem abgesicherten Container-Blueprint mit Kostenschätzung.",
+      "whatTargets": "Deploy-Ziele: ein online selbst gehosteter Knoten (Docker über den Tunnel) oder GCP / AWS / Azure über den bestehenden Provision-Pfad.",
+      "enrollTitle": "Knoten einschreiben",
+      "enroll1": "{hybridPath} öffnen und Knoten einschreiben klicken. Host benennen (z. B. homelab-nas).",
+      "enroll2": "Einzeiligen Installationsbefehl kopieren und auf dem Host ausführen (Docker erforderlich).",
+      "enroll3": "Warten, bis der Knoten Online mit aktuellem Zuletzt gesehen zeigt.",
+      "enroll4": "Widerrufen entfernt den Knoten aus Launchpad und trennt den Agenten.",
+      "aiTitle": "KI-Deploy",
+      "ai1": "Gewünschten Stack in Alltagssprache beschreiben.",
+      "ai2": "Selbst gehosteten Knoten (online wählen) oder Cloud-Anbieter wählen, dann Blueprint erzeugen.",
+      "ai3": "Services und Kosten prüfen, deployen, dann den Ansichtslink öffnen, um das Ergebnis zu sehen.",
+      "securityTitle": "Sicherheitshinweise",
+      "securityBody": "Einschreibe-Token sind einmalig und kurzlebig. Agenten authentifizieren den Reverse-Tunnel mit HMAC-Geheimnissen pro Knoten. Docker-Zugriff auf dem Host möglichst restriktiv halten."
+    },
+    "catalogSection": {
+      "intro": "Der {catalog} enthält Golden-Path-Vorlagen und markierte Workspaces für Launch.",
+      "step1": "{catalogPath} öffnen. Unter Templates fertige Stacks durchsuchen.",
+      "step2": "Im Tab Starred Workspaces anzeigen, die Sie in Workspaces favorisiert haben; Markierung entfernen, wenn fertig.",
+      "step3": "Unter {launch} eine Katalogvorlage wählen statt einer rohen Git-URL, wenn Sie einen bekannten Starter wollen."
+    },
+    "projectsSection": {
+      "intro": "Projekte gruppieren Workspaces in Ihrer aktiven Organisation und setzen Planlimits durch.",
+      "step1": "Aktive Org in der Shell prüfen, dann {projectsPath} öffnen.",
+      "step2": "Owner und Admins legen ein Projekt per Namen an (zählt gegen den Plan).",
+      "step3": "Im Projekt: Mitglieder und Einladungen verwalten, Git-Repo importieren oder Provision / Workspaces für dieses Projekt öffnen."
+    },
+    "orgSection": {
+      "intro": "{orgPath} ist der Ort, an dem Admins Zugriff und Abrechnung der aktiven Org verwalten.",
+      "members": "Personen per E-Mail und Rolle einladen, Rollen ändern und ausstehende Einladungen widerrufen. Eingeladene öffnen den Link unter /invite/….",
+      "sso": "IdP-Gruppen-Claims auf Org-Rollen für OIDC-SSO mappen. Passende Gruppen erzeugen oder fördern Mitgliedschaft beim Login (Owner werden durch SSO nie herabgestuft).",
+      "billing": "Wenn Stripe konfiguriert ist, Plan-Nutzung anzeigen und Checkout oder Kundenportal unter Organisation öffnen."
+    },
+    "integrationsSection": {
+      "intro": "{integrationsPath} ist der Hub für Quellcode- und Kollaborations-Connectoren.",
+      "github": "GitHub App - Repos anlegen, CI pushen, Webhooks, PR-Kommentare und Commit-Status (siehe GitHub Connect unten).",
+      "gitlab": "GitLab - OAuth oder Personal Access Token zum Listen von Projekten, Anlegen von Repos und Pushen gespiegelter Dateien.",
+      "slack": "Slack - Org Incoming Webhook für Ready, Failed, TTL-Warnung und Soft-Cost-Cap-Alerts.",
+      "jira": "Jira Cloud - E-Mail + API-Token + Site-URL; automatische oder manuelle Issues bei Provision-/Rebuild-Fehler. Issues von der Umgebungsdetailseite verlinken."
+    },
+    "environmentOpsSection": {
+      "intro": "Unter {environmentsPath} und auf jeder Umgebungsdetailseite können Sie Previews nach dem Start betreiben.",
+      "actions": "TTL verlängern, Pause/Resume, fehlgeschlagenes Provision erneut versuchen, Deploy to cloud (Local fördern), Drift scannen, Preview-Analyzer ausführen und Jira anlegen/öffnen wenn verbunden.",
+      "share": "Fortschritt über die Statusseite /p/:id teilen. GitHub-PR über /pr/:number auflösen, wenn Launchpad diesen PR getrackt hat.",
+      "caps": "Gleichzeitige Previews und Soft-Cost-Caps gelten. Die Benachrichtigungsglocke im Header zeigt Lifecycle-Ereignisse. Soft-Cost-Cap kann auch Slack benachrichtigen."
+    },
+    "dockerfilesSection": {
+      "intro": "{dockerfilesPath} hilft, wenn ein Repo ein Dockerfile für Preview-Builds braucht.",
+      "step1": "GitHub verbinden und ein Repository auf vorhandene Dockerfiles und Stack-Hinweise scannen.",
+      "step2": "Dockerfile scaffolden oder verbessern; mit Heuristik oder Gemini prüfen, wenn konfiguriert.",
+      "step3": "Scaffold zurück ins Repo pushen und/oder einen Registry-Build starten und den Job-Status beobachten."
+    },
+    "authSection": {
+      "intro": "Launchpad unterstützt Passwort-Konten, optionales Dev-Login und OIDC-SSO.",
+      "login": "Anmeldung unter {loginPath}. Bei aktiviertem SSO Mit SSO anmelden nutzen, um über den Firmen-IdP zu gehen.",
+      "onboarding": "Ohne Organisation führt {onboardingPath} zur ersten Org vor dem Home.",
+      "invites": "Org- und Projekt-Einladungen kommen als Links unter /invite/…. Angenommen werden, während Sie mit der eingeladenen E-Mail angemeldet sind."
+    },
+    "provisionExtrasSection": {
+      "intro": "Neben Terraform und Pulumi können Provision und die Workspace-IDE erzeugen:",
+      "ansible": "{ansible} - Inventory und Playbooks unter infra/ansible; Check/Apply aus der Workspace-Toolbar, wenn erkannt.",
+      "kustomize": "{kustomize} - dritter Kubernetes-Packaging-Modus neben Raw-Manifesten und Helm.",
+      "scaffolds": "Optionale CI (GitHub Actions / GitLab CI), Pipeline-Security-Schalter und kostenorientierte Optionen (Spot, HPA, VPA, Idle-Shutdown) im Bundle.",
+      "import": "Bestehendes GitHub- oder GitLab-Repo aus Workspaces (?import=1) oder aus einem Projekt importieren."
     }
   },
   "audit": {
@@ -1777,8 +1955,18 @@ export default {
       "tabForm": "Formular",
       "tabAdvanced": "Advanced",
       "tabCloud": "Cloud",
+      "tabAi": "Mit KI aktualisieren",
       "advancedHint": "Generierte Ansible-Dateien bearbeiten. Änderungen fließen in das Scaffold unter infra/ansible beim Speichern ein.",
       "cloudHint": "Inventory auf Cloud-VMs ausrichten. SSH-Benutzer/Schlüssel kommen weiterhin aus dem Formular oder der Running-Instance.",
+      "aiBlurb": "Beschreibe, wie der Host laufen soll (PM2, systemd, Docker, nginx/Caddy). Die KI aktualisiert Inventory, Playbook und group_vars unter infra/ansible.",
+      "aiContext": "Aktueller Modus: {mode}. Reverse-Proxy: {proxy}.",
+      "aiPrompt": "Prompt",
+      "aiPromptPlaceholder": "Beispiel: Auf PM2 mit nginx auf Port 80 umstellen, UFW fuer 22/80/443 oeffnen, SSH-Benutzer ubuntu behalten",
+      "aiPromptRequired": "Kurzen Prompt eingeben (mindestens 3 Zeichen).",
+      "aiUpdate": "Ansible-Dateien aktualisieren",
+      "aiUpdating": "Aktualisiere…",
+      "aiUpdated": "Ansible-Dateien aktualisiert.",
+      "aiFailed": "Ansible-Dateien konnten nicht aktualisiert werden.",
       "cloudProvider": "Ziel-Cloud",
       "cloudProviderHint": "Nutzt den Workspace-Cloud-Provider, wenn gesetzt.",
       "hosts": "Inventory-Hosts",
@@ -1808,7 +1996,9 @@ export default {
       "modeDockerRun": "docker run (einzelner Container)",
       "modeCompose": "docker compose",
       "modeSystemd": "systemd-Unit",
+      "modePm2": "PM2 (Node)",
       "modeNone": "Nur Bootstrap (keine App-Rolle)",
+      "reverseProxy": "Reverse-Proxy",
       "appPort": "App-Listen-Port",
       "appDir": "App-Verzeichnis auf dem Host",
       "syncWorkspace": "Workspace-Quellen ins App-Verzeichnis synchronisieren",
@@ -2131,6 +2321,93 @@ export default {
       "continueToProvision": "Weiter zu Provision",
       "continueToAnsible": "Weiter zu Ansible",
       "done": "Fertig"
+    }
+  },
+  "hybrid": {
+    "eyebrow": "Fleet",
+    "title": "Fleet",
+    "subtitle": "Selbst gehostete Hosts einschreiben und per KI auf einen Knoten oder in die Cloud deployen.",
+    "nodes": {
+      "title": "Deployment-Nodes",
+      "subtitle": "Selbst gehostete Agenten über einen sicheren Reverse-Tunnel verbunden.",
+      "empty": "Noch keine Nodes. Registriere einen selbst gehosteten Host.",
+      "enroll": "Node registrieren",
+      "enrollTitle": "Neuen Node registrieren",
+      "nameLabel": "Node-Name",
+      "namePlaceholder": "z. B. homelab-nas",
+      "create": "Installations-Token erstellen",
+      "installTitle": "Agent installieren",
+      "installHint": "Auf dem Host ausführen. Docker erforderlich. Der Token wird nur einmal angezeigt und läuft bald ab.",
+      "tokenOnce": "Token jetzt speichern, er wird nicht erneut angezeigt.",
+      "copy": "Kopieren",
+      "copied": "Kopiert",
+      "done": "Fertig",
+      "revoke": "Widerrufen",
+      "revokeConfirm": "Diesen Node aus Launchpad entfernen? Der Agent wird getrennt und der Eintrag gelöscht.",
+      "online": "Online",
+      "offline": "Offline",
+      "pending": "Ausstehend",
+      "revoked": "Widerrufen",
+      "cpu": "CPU",
+      "mem": "Speicher",
+      "disk": "Festplatte",
+      "docker": "Docker",
+      "containers": "Container",
+      "lastSeen": "Zuletzt gesehen",
+      "never": "nie",
+      "platform": "Plattform",
+      "version": "Agent"
+    },
+    "ai": {
+      "title": "KI-Infrastruktur-Provisionierung",
+      "subtitle": "Beschreibe den gewünschten Stack. Wir erzeugen ein abgesichertes Blueprint und eine Kostenschätzung.",
+      "promptLabel": "Beschreibe deine Infrastruktur",
+      "promptPlaceholder": "Redis-Cache mit 1 GB RAM und einen FastAPI-Worker mit persistentem Speicher bereitstellen",
+      "target": "Ziel",
+      "targetNode": "Selbst gehosteter Node",
+      "targetGcp": "Google Cloud",
+      "targetAws": "AWS",
+      "targetAzure": "Azure",
+      "nodeLabel": "Node",
+      "selectNode": "Node auswählen",
+      "region": "Region (optional)",
+      "generate": "Blueprint erzeugen",
+      "generating": "Wird erzeugt…",
+      "deploy": "Bereitstellen",
+      "deploying": "Wird bereitgestellt…",
+      "geminiOn": "Gemini verbunden",
+      "geminiOff": "Gemini nicht konfiguriert (Heuristik-Modus)",
+      "sourceGemini": "Von Gemini erzeugt",
+      "sourceHeuristic": "Per Heuristik erzeugt",
+      "blueprint": "Blueprint",
+      "services": "Dienste",
+      "guardrails": "Schutzregeln",
+      "valid": "Gültig",
+      "invalid": "Blockiert",
+      "adjusted": "Automatisch an Limits angepasst",
+      "cost": "Geschätzte Kosten",
+      "hourly": "Stündlich",
+      "monthly": "Monatlich",
+      "selfHosted": "Selbstgehostet (Rechen-Äquivalent-Schätzung)",
+      "deployLog": "Deployment-Protokoll",
+      "noBlueprint": "Erzeuge ein Blueprint, um Dienste, Schutzregeln und Kosten zu sehen.",
+      "deploySuccess": "Deployment abgeschlossen.",
+      "deployFailed": "Deployment mit Fehlern beendet.",
+      "needNode": "Wähle einen Online-Node zum Bereitstellen.",
+      "fixWithAi": "Mit KI beheben",
+      "fixing": "Wird behoben…",
+      "fixApplied": "Blueprint repariert. Dienste prüfen und erneut bereitstellen.",
+      "fixFailed": "Blueprint konnte nicht repariert werden.",
+      "fixHint": "Das Deployment ist fehlgeschlagen. Mit KI beheben schreibt kaputte Image-Tags und andere Blueprint-Probleme um; danach erneut bereitstellen.",
+      "nextSteps": "Weiter",
+      "viewDeployment": "Deployment ansehen",
+      "viewWorkspace": "Workspace öffnen",
+      "viewNode": "Node ansehen",
+      "openService": "{name} öffnen",
+      "deployedOnNode": "Deployed auf Node {name}",
+      "deployedServices": "Laufende Dienste",
+      "noServiceUrl": "Keine veröffentlichte URL (Containerliste am Node prüfen)",
+      "dismissResult": "Schließen"
     }
   }
 } as const

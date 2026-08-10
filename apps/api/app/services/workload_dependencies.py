@@ -190,6 +190,10 @@ def dependency_secret_string_data(
             data["DATABASE_URL"] = (
                 f"postgresql://launchpad:changeme@postgres:5432/{app_db}"
             )
+        elif dependencies.postgres.placement == DependencyPlacement.EXTERNAL:
+            url = (dependencies.postgres.connection_url or "").strip()
+            if url:
+                data["DATABASE_URL"] = url
         else:
             data["POSTGRES_PASSWORD"] = "change-me-after-terraform-apply"
             if isinstance(cloud, GcpCloudConfig):
@@ -214,6 +218,11 @@ def dependency_secret_string_data(
             data["MYSQL_PASSWORD"] = "changeme"
             data["MYSQL_URL"] = f"mysql://launchpad:changeme@mysql:3306/{app_db}"
             data.setdefault("DATABASE_URL", data["MYSQL_URL"])
+        elif dependencies.mysql.placement == DependencyPlacement.EXTERNAL:
+            url = (dependencies.mysql.connection_url or "").strip()
+            if url:
+                data["MYSQL_URL"] = url
+                data.setdefault("DATABASE_URL", url)
         else:
             data["MYSQL_PASSWORD"] = "change-me-after-terraform-apply"
             data["MYSQL_URL"] = (
@@ -226,6 +235,11 @@ def dependency_secret_string_data(
             data["MARIADB_PASSWORD"] = "changeme"
             data["MARIADB_URL"] = f"mysql://launchpad:changeme@mariadb:3306/{app_db}"
             data.setdefault("DATABASE_URL", data["MARIADB_URL"])
+        elif dependencies.mariadb.placement == DependencyPlacement.EXTERNAL:
+            url = (dependencies.mariadb.connection_url or "").strip()
+            if url:
+                data["MARIADB_URL"] = url
+                data.setdefault("DATABASE_URL", url)
         else:
             data["MARIADB_PASSWORD"] = "change-me-after-terraform-apply"
             data["MARIADB_URL"] = (
@@ -238,6 +252,10 @@ def dependency_secret_string_data(
             data["MONGODB_URI"] = (
                 f"mongodb://launchpad:changeme@mongodb:27017/{app_db}?authSource=admin"
             )
+        elif dependencies.mongodb.placement == DependencyPlacement.EXTERNAL:
+            url = (dependencies.mongodb.connection_url or "").strip()
+            if url:
+                data["MONGODB_URI"] = url
         else:
             data["MONGODB_URI"] = (
                 f"mongodb://launchpad:change-me@${{terraform_output:managed_mongodb_host}}:10255/{app_db}"
@@ -246,6 +264,10 @@ def dependency_secret_string_data(
     if dependencies.redis.enabled:
         if dependencies.redis.placement == DependencyPlacement.IN_CLUSTER:
             data["REDIS_URL"] = "redis://redis:6379/0"
+        elif dependencies.redis.placement == DependencyPlacement.EXTERNAL:
+            url = (dependencies.redis.connection_url or "").strip()
+            if url:
+                data["REDIS_URL"] = url
         else:
             data["REDIS_URL"] = "redis://${terraform_output:managed_redis_host}:6379/0"
 

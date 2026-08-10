@@ -13,7 +13,8 @@ from app.schemas.cloud import (
 
 # (cpu_request, memory_request, cpu_limit, memory_limit)
 RESOURCE_PRESETS: dict[ResourceSizingPreset, tuple[str, str, str, str]] = {
-    ResourceSizingPreset.DEVELOPER: ("100m", "128Mi", "250m", "256Mi"),
+    # 256Mi/768Mi floors avoid OOMKilled (exit 137) on Node/Vite preview cold starts.
+    ResourceSizingPreset.DEVELOPER: ("100m", "256Mi", "500m", "768Mi"),
     ResourceSizingPreset.BALANCED: ("250m", "512Mi", "500m", "1Gi"),
     ResourceSizingPreset.PERFORMANCE: ("1", "2Gi", "2", "4Gi"),
 }

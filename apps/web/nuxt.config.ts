@@ -35,8 +35,10 @@ export default defineNuxtConfig({
     public: {
       // Same-origin proxy in dev avoids browser CORS for REST; override for direct API access.
       apiBase: process.env.NUXT_PUBLIC_API_BASE || "/api/v1",
-      // WebSockets must hit the API directly - Nitro/Vite proxies often drop WS upgrades.
-      wsBase: process.env.NUXT_PUBLIC_WS_BASE || "ws://localhost:8000",
+      // Prefer 127.0.0.1 over localhost: on macOS localhost often resolves to ::1 first.
+      // Docker Desktop may still bind *:8000 on IPv6 after a compose stack stops, which
+      // makes Nuxt's proxy get ECONNRESET while local `make api` (IPv4-only) is healthy.
+      wsBase: process.env.NUXT_PUBLIC_WS_BASE || "ws://127.0.0.1:8000",
     },
   },
   nitro: {
@@ -44,7 +46,7 @@ export default defineNuxtConfig({
     sourceMap: false,
     devProxy: {
       "/api/v1": {
-        target: "http://localhost:8000/api/v1",
+        target: "http://127.0.0.1:8000/api/v1",
         changeOrigin: true,
         ws: true,
       },
@@ -59,7 +61,7 @@ export default defineNuxtConfig({
       allowedHosts: [".trycloudflare.com"],
       proxy: {
         "/api/v1": {
-          target: "http://localhost:8000",
+          target: "http://127.0.0.1:8000",
           changeOrigin: true,
           ws: true,
         },

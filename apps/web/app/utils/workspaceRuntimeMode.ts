@@ -41,6 +41,8 @@ export function defaultRunningInstanceConfig(
     ssh_port: 22,
     ssh_key_path: null,
     listen_port: 8080,
+    process_strategy: 'docker',
+    reverse_proxy: 'none',
     preview_url_override: null,
     kube_context: null,
     endpoint_url: null,

@@ -51,6 +51,17 @@ class DetectedService(BaseModel):
     markers: list[str] = Field(default_factory=list)
 
 
+class EnvExampleVar(BaseModel):
+    """One key from ``.env.example`` (or similar) for import-time configuration."""
+
+    key: str = Field(min_length=1, max_length=128)
+    example_value: str = Field(default="", max_length=4096)
+    suggested_value: str = Field(default="", max_length=4096)
+    comment: str | None = Field(default=None, max_length=512)
+    source: str = Field(default=".env.example", max_length=256)
+    is_secret: bool = False
+
+
 class DetectionResult(BaseModel):
     """Full scan result for a cloned repository."""
 
@@ -64,6 +75,7 @@ class DetectionResult(BaseModel):
     # Runtime hints for import UX (user may still pick any mode).
     has_kubernetes: bool = False
     has_compose: bool = False
+    env_example: list[EnvExampleVar] = Field(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
         if not self.summary:

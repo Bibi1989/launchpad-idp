@@ -4,15 +4,24 @@ const { t } = useI18n()
 const sections = computed(() => [
   { id: 'overview', label: t('docs.howItWorks') },
   { id: 'getting-started', label: t('docs.gettingStarted') },
+  { id: 'auth', label: t('docs.authAccess') },
   { id: 'home-settings', label: t('docs.homeSettings') },
+  { id: 'catalog', label: t('docs.catalog') },
   { id: 'environments', label: t('docs.launchEnvironment') },
+  { id: 'environment-ops', label: t('docs.environmentOps') },
   { id: 'rebuild', label: t('docs.gitPushRebuilds') },
-  { id: 'manifest', label: t('docs.applyManifests') },
   { id: 'provision', label: t('docs.provisionCloudInfra') },
+  { id: 'provision-extras', label: t('docs.provisionExtras') },
+  { id: 'hybrid', label: t('docs.hybridCloud') },
+  { id: 'manifest', label: t('docs.applyManifests') },
+  { id: 'projects', label: t('docs.projects') },
+  { id: 'workspaces', label: t('docs.workspacesTerminal') },
+  { id: 'dockerfiles', label: t('docs.dockerfilesGuide') },
+  { id: 'organization', label: t('docs.organizationGuide') },
+  { id: 'integrations', label: t('docs.integrationsGuide') },
   { id: 'network', label: t('docs.networkTopology') },
   { id: 'credentials', label: t('docs.cloudCredentials') },
   { id: 'github', label: t('docs.githubConnect') },
-  { id: 'workspaces', label: t('docs.workspacesTerminal') },
   { id: 'teardown', label: t('docs.teardownTtl') },
 ] as const)
 </script>
@@ -40,6 +49,11 @@ const sections = computed(() => [
         <p class="text-[var(--lp-muted)]">
           {{ t('docs.pageBlurb') }}
         </p>
+        <i18n-t keypath="docs.moreGuides" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #productGuide>
+            <code class="font-mono text-xs">{{ t('docs.productGuidePath') }}</code>
+          </template>
+        </i18n-t>
       </header>
 
       <section id="overview" class="scroll-mt-28 space-y-3">
@@ -70,6 +84,10 @@ const sections = computed(() => [
               </template>
             </i18n-t>
           </li>
+          <li>
+            <strong class="text-[var(--lp-text)]">{{ t('docs.hybridCloudLabel') }}</strong>
+            - {{ t('docs.overview.hybridBody') }}
+          </li>
         </ul>
         <i18n-t keypath="docs.overview.useFlows" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
           <template #launch>
@@ -83,6 +101,9 @@ const sections = computed(() => [
           </template>
           <template #workspaces>
             <NuxtLink to="/workspaces" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.workspaces') }}</NuxtLink>
+          </template>
+          <template #hybrid>
+            <NuxtLink to="/fleet" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.hybrid') }}</NuxtLink>
           </template>
         </i18n-t>
       </section>
@@ -118,6 +139,28 @@ const sections = computed(() => [
         </ol>
       </section>
 
+      <section id="auth" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.authAccess') }}</h2>
+        <p class="text-sm leading-7 text-[var(--lp-muted)]">{{ t('docs.authSection.intro') }}</p>
+        <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>
+            <i18n-t keypath="docs.authSection.login" tag="span">
+              <template #loginPath>
+                <NuxtLink to="/login" class="text-[var(--lp-accent)] hover:underline">/login</NuxtLink>
+              </template>
+            </i18n-t>
+          </li>
+          <li>
+            <i18n-t keypath="docs.authSection.onboarding" tag="span">
+              <template #onboardingPath>
+                <NuxtLink to="/onboarding/org" class="text-[var(--lp-accent)] hover:underline">/onboarding/org</NuxtLink>
+              </template>
+            </i18n-t>
+          </li>
+          <li>{{ t('docs.authSection.invites') }}</li>
+        </ul>
+      </section>
+
       <section id="home-settings" class="scroll-mt-28 space-y-3">
         <h2 class="text-xl font-semibold">{{ t('docs.homeSettings') }}</h2>
         <i18n-t keypath="docs.homeSettingsSection.body" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
@@ -128,6 +171,32 @@ const sections = computed(() => [
             <NuxtLink to="/settings" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.settings') }}</NuxtLink>
           </template>
         </i18n-t>
+      </section>
+
+      <section id="catalog" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.catalog') }}</h2>
+        <i18n-t keypath="docs.catalogSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #catalog>
+            <NuxtLink to="/catalog" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.catalogNav') }}</NuxtLink>
+          </template>
+        </i18n-t>
+        <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>
+            <i18n-t keypath="docs.catalogSection.step1" tag="span">
+              <template #catalogPath>
+                <NuxtLink to="/catalog" class="text-[var(--lp-accent)] hover:underline">/catalog</NuxtLink>
+              </template>
+            </i18n-t>
+          </li>
+          <li>{{ t('docs.catalogSection.step2') }}</li>
+          <li>
+            <i18n-t keypath="docs.catalogSection.step3" tag="span">
+              <template #launch>
+                <NuxtLink to="/launch" class="text-[var(--lp-accent)] hover:underline">{{ t('docs.launch') }}</NuxtLink>
+              </template>
+            </i18n-t>
+          </li>
+        </ol>
       </section>
 
       <section id="environments" class="scroll-mt-28 space-y-3">
@@ -181,6 +250,20 @@ const sections = computed(() => [
         </ol>
       </section>
 
+      <section id="environment-ops" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.environmentOps') }}</h2>
+        <i18n-t keypath="docs.environmentOpsSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #environmentsPath>
+            <NuxtLink to="/environments" class="text-[var(--lp-accent)] hover:underline">/environments</NuxtLink>
+          </template>
+        </i18n-t>
+        <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>{{ t('docs.environmentOpsSection.actions') }}</li>
+          <li>{{ t('docs.environmentOpsSection.share') }}</li>
+          <li>{{ t('docs.environmentOpsSection.caps') }}</li>
+        </ul>
+      </section>
+
       <section id="rebuild" class="scroll-mt-28 space-y-3">
         <h2 class="text-xl font-semibold">{{ t('docs.gitPushRebuilds') }}</h2>
         <i18n-t keypath="docs.rebuildSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
@@ -209,7 +292,19 @@ const sections = computed(() => [
               </template>
             </i18n-t>
           </li>
-          <li>{{ t('docs.provisionSection.step2') }}</li>
+          <li>
+            <i18n-t keypath="docs.provisionSection.step2" tag="span">
+              <template #terraform>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.terraformEngine') }}</strong>
+              </template>
+              <template #pulumi>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.pulumiEngine') }}</strong>
+              </template>
+              <template #ansible>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.ansibleEngine') }}</strong>
+              </template>
+            </i18n-t>
+          </li>
           <li>
             <i18n-t keypath="docs.provisionSection.step3" tag="span">
               <template #credentialsLink>
@@ -225,6 +320,9 @@ const sections = computed(() => [
               </template>
               <template #helm>
                 <strong class="text-[var(--lp-text)]">{{ t('docs.helm') }}</strong>
+              </template>
+              <template #kustomize>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.kustomizeMode') }}</strong>
               </template>
             </i18n-t>
           </li>
@@ -258,6 +356,70 @@ const sections = computed(() => [
         </ol>
         <p class="text-sm leading-7 text-[var(--lp-muted)]">
           {{ t('docs.provisionSection.credentialsNote') }}
+        </p>
+      </section>
+
+      <section id="provision-extras" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.provisionExtras') }}</h2>
+        <p class="text-sm leading-7 text-[var(--lp-muted)]">{{ t('docs.provisionExtrasSection.intro') }}</p>
+        <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>
+            <i18n-t keypath="docs.provisionExtrasSection.ansible" tag="span">
+              <template #ansible>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.ansibleEngine') }}</strong>
+              </template>
+            </i18n-t>
+          </li>
+          <li>
+            <i18n-t keypath="docs.provisionExtrasSection.kustomize" tag="span">
+              <template #kustomize>
+                <strong class="text-[var(--lp-text)]">{{ t('docs.kustomizeMode') }}</strong>
+              </template>
+            </i18n-t>
+          </li>
+          <li>{{ t('docs.provisionExtrasSection.scaffolds') }}</li>
+          <li>{{ t('docs.provisionExtrasSection.import') }}</li>
+        </ul>
+      </section>
+
+      <section id="hybrid" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.hybridCloud') }}</h2>
+        <i18n-t keypath="docs.hybridSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #hybridPath>
+            <NuxtLink to="/fleet" class="text-[var(--lp-accent)] hover:underline">/fleet</NuxtLink>
+          </template>
+          <template #docPath>
+            <code class="font-mono text-xs">docs/hybrid-cloud.md</code>
+          </template>
+        </i18n-t>
+        <h3 class="text-base font-semibold">{{ t('docs.hybridSection.whatTitle') }}</h3>
+        <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>{{ t('docs.hybridSection.whatAgents') }}</li>
+          <li>{{ t('docs.hybridSection.whatAi') }}</li>
+          <li>{{ t('docs.hybridSection.whatTargets') }}</li>
+        </ul>
+        <h3 class="text-base font-semibold">{{ t('docs.hybridSection.enrollTitle') }}</h3>
+        <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>
+            <i18n-t keypath="docs.hybridSection.enroll1" tag="span">
+              <template #hybridPath>
+                <NuxtLink to="/fleet" class="text-[var(--lp-accent)] hover:underline">/fleet</NuxtLink>
+              </template>
+            </i18n-t>
+          </li>
+          <li>{{ t('docs.hybridSection.enroll2') }}</li>
+          <li>{{ t('docs.hybridSection.enroll3') }}</li>
+          <li>{{ t('docs.hybridSection.enroll4') }}</li>
+        </ol>
+        <h3 class="text-base font-semibold">{{ t('docs.hybridSection.aiTitle') }}</h3>
+        <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>{{ t('docs.hybridSection.ai1') }}</li>
+          <li>{{ t('docs.hybridSection.ai2') }}</li>
+          <li>{{ t('docs.hybridSection.ai3') }}</li>
+        </ol>
+        <h3 class="text-base font-semibold">{{ t('docs.hybridSection.securityTitle') }}</h3>
+        <p class="text-sm leading-7 text-[var(--lp-muted)]">
+          {{ t('docs.hybridSection.securityBody') }}
         </p>
       </section>
 
@@ -514,6 +676,65 @@ const sections = computed(() => [
             </i18n-t>
           </li>
         </ol>
+      </section>
+
+      <section id="projects" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.projects') }}</h2>
+        <p class="text-sm leading-7 text-[var(--lp-muted)]">{{ t('docs.projectsSection.intro') }}</p>
+        <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>
+            <i18n-t keypath="docs.projectsSection.step1" tag="span">
+              <template #projectsPath>
+                <NuxtLink to="/projects" class="text-[var(--lp-accent)] hover:underline">/projects</NuxtLink>
+              </template>
+            </i18n-t>
+          </li>
+          <li>{{ t('docs.projectsSection.step2') }}</li>
+          <li>{{ t('docs.projectsSection.step3') }}</li>
+        </ol>
+      </section>
+
+      <section id="dockerfiles" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.dockerfilesGuide') }}</h2>
+        <i18n-t keypath="docs.dockerfilesSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #dockerfilesPath>
+            <NuxtLink to="/dockerfiles" class="text-[var(--lp-accent)] hover:underline">/dockerfiles</NuxtLink>
+          </template>
+        </i18n-t>
+        <ol class="list-decimal space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>{{ t('docs.dockerfilesSection.step1') }}</li>
+          <li>{{ t('docs.dockerfilesSection.step2') }}</li>
+          <li>{{ t('docs.dockerfilesSection.step3') }}</li>
+        </ol>
+      </section>
+
+      <section id="organization" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.organizationGuide') }}</h2>
+        <i18n-t keypath="docs.orgSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #orgPath>
+            <NuxtLink to="/org" class="text-[var(--lp-accent)] hover:underline">/org</NuxtLink>
+          </template>
+        </i18n-t>
+        <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>{{ t('docs.orgSection.members') }}</li>
+          <li>{{ t('docs.orgSection.sso') }}</li>
+          <li>{{ t('docs.orgSection.billing') }}</li>
+        </ul>
+      </section>
+
+      <section id="integrations" class="scroll-mt-28 space-y-3">
+        <h2 class="text-xl font-semibold">{{ t('docs.integrationsGuide') }}</h2>
+        <i18n-t keypath="docs.integrationsSection.intro" tag="p" class="text-sm leading-7 text-[var(--lp-muted)]">
+          <template #integrationsPath>
+            <NuxtLink to="/integrations" class="text-[var(--lp-accent)] hover:underline">/integrations</NuxtLink>
+          </template>
+        </i18n-t>
+        <ul class="list-disc space-y-2 pl-5 text-sm leading-7 text-[var(--lp-muted)]">
+          <li>{{ t('docs.integrationsSection.github') }}</li>
+          <li>{{ t('docs.integrationsSection.gitlab') }}</li>
+          <li>{{ t('docs.integrationsSection.slack') }}</li>
+          <li>{{ t('docs.integrationsSection.jira') }}</li>
+        </ul>
       </section>
 
       <section id="teardown" class="scroll-mt-28 space-y-3">

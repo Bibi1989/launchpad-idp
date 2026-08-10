@@ -33,6 +33,7 @@ import {
   infraConfigToKubernetesPackaging,
 } from '~/utils/workspaceInfraScaffold'
 import { buildAnsibleScaffold, frameworksFromContainerServices } from '~/utils/ansibleScaffold'
+import { ansibleDeployModeFromStrategy } from '~/utils/instanceComputeTargets'
 import { inferCicdSecurityFromContent } from '~/utils/cicdWorkflowGenerator'
 import { syncWorkspaceCicdToPlatform } from '~/utils/syncWorkspaceCicd'
 import { AWS_INSTANCE_TYPES, AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
@@ -469,6 +470,20 @@ function buildPayload(): ProvisioningWizardInput {
       ssh_private_key_path:
         form.running_instance.ssh_key_path || form.ansible.ssh_private_key_path,
       app_listen_port: form.running_instance.listen_port || form.ansible.app_listen_port,
+      app_deploy_mode:
+        form.runtime_mode === 'running_instance'
+          ? ansibleDeployModeFromStrategy(
+              form.running_instance.process_strategy || 'docker',
+            )
+          : form.ansible.app_deploy_mode,
+      reverse_proxy:
+        form.runtime_mode === 'running_instance'
+          ? (form.running_instance.reverse_proxy || form.ansible.reverse_proxy || 'none')
+          : (form.ansible.reverse_proxy || 'none'),
+      install_docker:
+        form.runtime_mode === 'running_instance'
+          ? (form.running_instance.process_strategy || 'docker') === 'docker'
+          : form.ansible.install_docker,
     },
   }
 
@@ -582,12 +597,13 @@ onMounted(async () => {
   try {
     const config = await getWizardConfig(props.workspaceId)
     applyConfig(config)
-    await hydrateFromWorkspaceFiles()
   } catch (err) {
     emit('error', err instanceof Error ? err.message : 'Failed to load workspace setup')
   } finally {
     loading.value = false
   }
+  // File-tree hydrate is best-effort and must not block Continue.
+  void hydrateFromWorkspaceFiles()
 })
 </script>
 
@@ -618,7 +634,7 @@ onMounted(async () => {
     <p v-if="loading" class="text-sm text-[var(--lp-muted)]">{{ t('scaffold.setup.loading') }}</p>
 
     <template v-else>
-      <div v-show="currentStep === 1" class="space-y-4">
+      <div v-if="currentStep === 1" class="space-y-4">
         <WorkspaceRuntimeModePicker
           v-model:mode="form.runtime_mode"
           v-model:running-instance="form.running_instance"
@@ -687,7 +703,7 @@ onMounted(async () => {
         </p>
       </div>
 
-      <div v-show="currentStep === 2" class="space-y-4">
+      <div v-if="currentStep === 2" class="space-y-4">
         <div
           v-if="hasStoredCredentials && !isLocalProvider"
           class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 p-3 text-sm text-[var(--lp-muted)]"
@@ -850,7 +866,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div v-show="currentStep === 3" class="space-y-4">
+      <div v-if="currentStep === 3" class="space-y-4">
         <dl class="grid gap-3 rounded-xl border border-[var(--lp-line)] p-4 text-sm sm:grid-cols-2">
           <div>
             <dt class="lp-label">{{ t('scaffold.setup.reviewWorkspace') }}</dt>
@@ -917,45 +933,46 @@ onMounted(async () => {
 
       <p v-if="fieldError" class="text-sm text-[var(--lp-danger)]">{{ fieldError }}</p>
       <p v-if="statusMessage" class="text-sm text-[var(--lp-ok)]">{{ statusMessage }}</p>
+    </template>
 
-      <div class="flex items-center justify-between gap-3 border-t border-[var(--lp-line)] pt-4">
-        <div class="flex items-center gap-2">
-          <button
-            type="button"
-            class="lp-btn-ghost"
-            :class="{ invisible: currentStep === 1 }"
-            @click="prevStep"
-          >
-            {{ t('common.back') }}
-          </button>
-          <button
-            type="button"
-            class="lp-btn-ghost text-xs uppercase tracking-wide"
-            :disabled="saving"
-            @click="emit('cancel')"
-          >
-            {{ t('common.cancel') }}
-          </button>
-        </div>
+    <div class="flex items-center justify-between gap-3 border-t border-[var(--lp-line)] pt-4">
+      <div class="flex items-center gap-2">
         <button
-          v-if="currentStep < TOTAL_STEPS"
           type="button"
-          class="lp-btn-primary"
-          :disabled="saving"
-          @click="nextStep"
+          class="lp-btn-ghost"
+          :class="{ invisible: currentStep === 1 }"
+          :disabled="loading || saving"
+          @click="prevStep"
         >
-          {{ t('common.continue') }}
+          {{ t('common.back') }}
         </button>
         <button
-          v-else
           type="button"
-          class="lp-btn-primary"
+          class="lp-btn-ghost text-xs uppercase tracking-wide"
           :disabled="saving"
-          @click="onSave"
+          @click="emit('cancel')"
         >
-          {{ saving ? t('common.saving') : t('scaffold.setup.saveSetup') }}
+          {{ t('common.cancel') }}
         </button>
       </div>
-    </template>
+      <button
+        v-if="currentStep < TOTAL_STEPS"
+        type="button"
+        class="lp-btn-primary"
+        :disabled="loading || saving"
+        @click="nextStep"
+      >
+        {{ t('common.continue') }}
+      </button>
+      <button
+        v-else
+        type="button"
+        class="lp-btn-primary"
+        :disabled="loading || saving"
+        @click="onSave"
+      >
+        {{ saving ? t('common.saving') : t('scaffold.setup.saveSetup') }}
+      </button>
+    </div>
   </section>
 </template>

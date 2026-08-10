@@ -1,12 +1,13 @@
 import type {
   CloudProvider,
+  InstanceProcessStrategy,
   RunningInstanceConfig,
   RunningInstanceKind,
 } from '~/types/provisioning'
 
 /**
  * Cloud (or local) services that can host a preview app as a running instance.
- * These are Docker/container or SSH-Docker targets - not Kubernetes clusters.
+ * Process strategy (docker / systemd / pm2) shapes how the host runs the app.
  */
 export type InstanceComputeTarget = {
   /** Stable id for UI selection (unique per provider catalog entry). */
@@ -14,9 +15,64 @@ export type InstanceComputeTarget = {
   kind: RunningInstanceKind
   /** Resource boolean to enable on the provider resources object (null for local/BYO). */
   resourceKey: string | null
-  /** True when the service runs a container image (Docker OCI). */
+  /** True when the service runs a container image (Docker OCI) by default. */
   runsContainerImage: boolean
   icon: string
+}
+
+export type ComputeTargetDisplay = {
+  titleKey: string
+  descKey: string
+  badgeKey: string
+  icon: string
+  /** Whether the badge should read as container vs native process. */
+  usesContainer: boolean
+}
+
+export function resolveProcessStrategy(
+  runningInstance: RunningInstanceConfig | null | undefined,
+): InstanceProcessStrategy {
+  if (runningInstance?.kind === 'serverless') return 'docker'
+  return runningInstance?.process_strategy || 'docker'
+}
+
+/** i18n keys + icon for a compute card given the selected process strategy. */
+export function computeTargetDisplay(
+  target: InstanceComputeTarget,
+  strategy: InstanceProcessStrategy = 'docker',
+): ComputeTargetDisplay {
+  if (target.kind === 'serverless') {
+    return {
+      titleKey: `provision.runtimeMode.attach.targets.${target.id}.title`,
+      descKey: `provision.runtimeMode.attach.targets.${target.id}.desc`,
+      badgeKey: 'provision.runtimeMode.attach.containerBadge',
+      icon: target.icon,
+      usesContainer: true,
+    }
+  }
+
+  const effective: InstanceProcessStrategy =
+    target.kind === 'serverless' ? 'docker' : strategy
+  const scope = target.kind === 'local_machine' ? 'localByStrategy' : 'vmByStrategy'
+  const icon =
+    effective === 'pm2' ? 'bolt' : effective === 'systemd' ? 'terminal' : target.icon
+
+  return {
+    titleKey: `provision.runtimeMode.attach.${scope}.${effective}.title`,
+    descKey: `provision.runtimeMode.attach.${scope}.${effective}.desc`,
+    badgeKey: `provision.runtimeMode.attach.${scope}.${effective}.badge`,
+    icon,
+    usesContainer: effective === 'docker',
+  }
+}
+
+/** Map instance process strategy → Ansible app_deploy_mode. */
+export function ansibleDeployModeFromStrategy(
+  strategy: InstanceProcessStrategy,
+): 'docker_run' | 'systemd' | 'pm2' {
+  if (strategy === 'systemd') return 'systemd'
+  if (strategy === 'pm2') return 'pm2'
+  return 'docker_run'
 }
 
 const LOCAL_TARGETS: InstanceComputeTarget[] = [
@@ -164,8 +220,12 @@ export function applyInstanceComputeTarget(input: {
     kind: target.kind,
   }
 
-  if (target.kind === 'serverless' && regionFromCloud && !next.region?.trim()) {
-    next.region = regionFromCloud
+  if (target.kind === 'serverless') {
+    next.process_strategy = 'docker'
+    next.reverse_proxy = 'none'
+    if (regionFromCloud && !next.region?.trim()) {
+      next.region = regionFromCloud
+    }
   }
 
   return next

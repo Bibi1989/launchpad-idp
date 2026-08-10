@@ -22,6 +22,8 @@ useHead({
 ├── apps/
 │   ├── web/     # Nuxt 4 UI (browser)
 │   └── api/     # FastAPI + Celery (control plane)
+├── agent/       # Hybrid Cloud host agent (outbound WSS)
+├── docs/        # Product / hybrid guides (markdown)
 ├── scripts/     # kind-up.sh / kind-down.sh
 ├── infra/       # sample / shared IaC bits
 ├── docker-compose.yml
