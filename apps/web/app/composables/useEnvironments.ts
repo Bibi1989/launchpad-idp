@@ -121,6 +121,14 @@ export function useEnvironments() {
     return environment
   }
 
+  async function cancelProvision(id: string): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/cancel-provision`, {
+      method: 'POST',
+    })
+    await refresh()
+    return environment
+  }
+
   async function retryProvision(id: string): Promise<Environment> {
     const environment = await apiFetch<Environment>(`/environments/${id}/retry`, {
       method: 'POST',
@@ -185,6 +193,7 @@ export function useEnvironments() {
     launchPreview,
     getById,
     destroy,
+    cancelProvision,
     retryProvision,
     extendTtl,
     promoteToCloud,

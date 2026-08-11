@@ -12,7 +12,7 @@ const { t } = useI18n()
 const route = useRoute()
 const id = computed(() => String(route.params.id))
 const environmentId = computed(() => id.value || null)
-const { getById, destroy, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
+const { getById, destroy, cancelProvision, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
 const { createOrLinkJiraIssue } = useOrgIntegrations()
 const { reconcileEnvironment } = useNotifications()
 const toast = useToast()
@@ -257,14 +257,26 @@ function toggleActionsMenu() {
 }
 
 const destroyAction = define(
-  () => destroy(environment.value!.id, {
-    force:
-      environment.value?.status === 'PROVISIONING'
-      || environment.value?.status === 'TEARDOWN_PENDING',
-  }),
+  () => {
+    if (environment.value?.status === 'PROVISIONING') {
+      return cancelProvision(environment.value.id)
+    }
+    return destroy(environment.value!.id, {
+      force: environment.value?.status === 'TEARDOWN_PENDING',
+    })
+  },
   {
-  success: () => ({ title: t('environments.toasts.destroyed'), message: `${environment.value?.name ?? 'Environment'} is being destroyed.` }),
-  error: (err) => ({ title: t('environments.toasts.destroyFailed'), message: toastError(err, t('common.failed')) }),
+  success: (env) =>
+    env.status === 'FAILED'
+      ? { title: t('environments.toasts.stopped'), message: `${env.name} stopped. No teardown was queued.` }
+      : { title: t('environments.toasts.destroyed'), message: `${env.name} is being destroyed.` },
+  error: (err) => ({
+    title:
+      environment.value?.status === 'PROVISIONING'
+        ? t('environments.toasts.stopFailed')
+        : t('environments.toasts.destroyFailed'),
+    message: toastError(err, t('common.failed')),
+  }),
   onSuccess: (env) => { environment.value = env; connect(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
@@ -636,7 +648,9 @@ onUnmounted(() => {
                   <span class="material-symbols-outlined text-base">delete</span>
                   {{
                     destroyAction.pending
-                      ? t('environments.actions.queuingTeardown')
+                      ? (environment.status === 'PROVISIONING'
+                        ? t('environments.actions.queuingStop')
+                        : t('environments.actions.queuingTeardown'))
                       : (environment.status === 'PROVISIONING'
                         ? t('environments.actions.stopProvision')
                         : t('environments.actions.destroy'))

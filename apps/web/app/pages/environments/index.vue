@@ -3,7 +3,7 @@ import type { OrgCostSummary } from '~/types/auth'
 import type { Environment } from '~/types/environment'
 
 const { t } = useI18n()
-const { environments, loading, error, refresh, destroy, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
+const { environments, loading, error, refresh, destroy, cancelProvision, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
 const { activeOrgId, fetchOrgCosts } = useOrgs()
 const toast = useToast()
 const route = useRoute()
@@ -165,14 +165,26 @@ async function onDestroy() {
   const name = envName(id)
   const env = environments.value.find((item) => item.id === id)
   try {
-    await destroy(id, {
-      force: env?.status === 'PROVISIONING' || env?.status === 'TEARDOWN_PENDING',
-    })
-    await refresh()
-    await loadOrgCosts()
-    toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)
+    if (env?.status === 'PROVISIONING') {
+      const updated = await cancelProvision(id)
+      onCardUpdate({ id: updated.id, status: updated.status, error_message: updated.error_message })
+      await refresh()
+      toast.info(t('environments.toasts.stopped'), `${name} stopped. No teardown was queued.`)
+    } else {
+      await destroy(id, {
+        force: env?.status === 'TEARDOWN_PENDING',
+      })
+      await refresh()
+      await loadOrgCosts()
+      toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)
+    }
   } catch (err) {
-    toast.error(t('environments.toasts.destroyFailed'), toastError(err, t('common.failed')))
+    toast.error(
+      env?.status === 'PROVISIONING'
+        ? t('environments.toasts.stopFailed')
+        : t('environments.toasts.destroyFailed'),
+      toastError(err, t('common.failed')),
+    )
   } finally {
     destroyingId.value = null
   }

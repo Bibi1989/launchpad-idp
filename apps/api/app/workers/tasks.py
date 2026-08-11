@@ -257,13 +257,16 @@ async def _record_audit(
 
 
 async def _provision_cancelled(env_repo: "EnvironmentRepository", env_uuid: UUID) -> bool:
-    """True when a force-delete flipped the environment to TEARDOWN_PENDING/DESTROYED.
+    """True when the user stopped or force-deleted mid-provision.
 
-    Re-queries the row so the running provision task observes a delete request
+    Re-queries the row so the running provision task observes a cancel/delete
     issued after it started, and aborts at the next checkpoint.
+    - ``FAILED``: stop provisioning (no teardown)
+    - ``TEARDOWN_PENDING`` / ``DESTROYED``: destroy during provision (teardown follows)
     """
     fresh = await env_repo.get_by_id(env_uuid)
     return fresh is not None and fresh.status in {
+        EnvironmentStatus.FAILED,
         EnvironmentStatus.TEARDOWN_PENDING,
         EnvironmentStatus.DESTROYED,
     }
@@ -1093,18 +1096,37 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     )
                     await session.commit()
                 except PreviewCancelled:
-                    # Force-delete during provisioning. Leave status TEARDOWN_PENDING
-                    # and re-enqueue teardown after this task releases the state lock.
-                    logger.info("provision_cancelled_by_delete", environment_id=environment_id)
+                    # User stopped provision (FAILED) or force-deleted (TEARDOWN_PENDING).
+                    # Only enqueue teardown for the destroy path.
+                    logger.info("provision_cancelled", environment_id=environment_id)
                     await session.rollback()
                     try:
-                        enqueue_teardown_environment(
-                            environment_id=str(env_uuid),
-                            correlation_id=f"post-cancel:{env_uuid}",
-                        )
+                        cancelled = await env_repo.get_by_id(env_uuid)
+                        if (
+                            cancelled is not None
+                            and cancelled.status == EnvironmentStatus.TEARDOWN_PENDING
+                        ):
+                            enqueue_teardown_environment(
+                                environment_id=str(env_uuid),
+                                correlation_id=f"post-cancel:{env_uuid}",
+                            )
+                        elif (
+                            cancelled is not None
+                            and cancelled.status == EnvironmentStatus.FAILED
+                        ):
+                            await _publish_status(
+                                env_uuid,
+                                status=EnvironmentStatus.FAILED,
+                                commit_sha=cancelled.latest_commit_sha,
+                                message=cancelled.error_message or "Provisioning stopped",
+                                stage=ExecutionStage.APPLY,
+                                app_ready=False,
+                                error_message=cancelled.error_message
+                                or "Provisioning stopped by user",
+                            )
                     except Exception:
                         logger.exception(
-                            "post_cancel_teardown_enqueue_failed",
+                            "post_cancel_followup_failed",
                             environment_id=environment_id,
                         )
                     return

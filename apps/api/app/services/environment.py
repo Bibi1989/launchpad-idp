@@ -782,6 +782,80 @@ class EnvironmentService:
         )
         return self._to_read(environment)
 
+    async def cancel_provision(
+        self,
+        environment_id: UUID,
+        *,
+        owner: User,
+        correlation_id: str,
+    ) -> EnvironmentRead:
+        """Stop an in-flight provision without tearing down resources.
+
+        Flips ``PROVISIONING`` → ``FAILED`` so the Celery provision task aborts at
+        its next cooperative checkpoint. Does **not** enqueue teardown; partial
+        resources (if any) stay until the user destroys or retries.
+        """
+        environment = await self._require_owned(environment_id, owner)
+        if environment.status != EnvironmentStatus.PROVISIONING:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "cancel_not_allowed",
+                    "message": "Only PROVISIONING environments can be stopped this way",
+                },
+            )
+
+        stop_message = "Provisioning stopped by user"
+        await self._environments.update_status(
+            environment,
+            EnvironmentStatus.FAILED,
+            error_message=stop_message,
+        )
+        await self._logs.create(
+            environment_id=environment.id,
+            message=(
+                f"Provisioning stopped by user (correlation_id={correlation_id}). "
+                "No teardown was queued."
+            ),
+            log_level=LogLevel.WARN,
+            stage=ExecutionStage.APPLY,
+        )
+        await AuditService(self._session).record(
+            action=AuditAction.PROVISION_FAILED,
+            actor_id=AuditService.user_actor(owner.id),
+            status=AuditStatus.FAILURE,
+            environment_id=environment.id,
+            workspace_id=environment.workspace_id,
+            commit_sha=environment.latest_commit_sha,
+            detail=f"stopped correlation_id={correlation_id}",
+        )
+        await self._session.commit()
+
+        try:
+            await publish_env_event(
+                environment.id,
+                event_type="STATUS_CHANGE",
+                status=EnvironmentStatus.FAILED.value,
+                commit_sha=environment.latest_commit_sha,
+                message=stop_message,
+                stage=ExecutionStage.APPLY,
+                app_ready=False,
+                error_message=stop_message,
+            )
+        except Exception:
+            logger.exception(
+                "cancel_provision_status_publish_failed",
+                environment_id=str(environment.id),
+            )
+
+        logger.info(
+            "environment_provision_cancelled",
+            environment_id=str(environment.id),
+            correlation_id=correlation_id,
+            owner_id=str(owner.id),
+        )
+        return self._to_read(environment)
+
     async def request_teardown(
         self,
         environment_id: UUID,
@@ -818,7 +892,8 @@ class EnvironmentService:
                     "code": "environment_still_provisioning",
                     "message": (
                         "Cannot teardown while provisioning is in progress. "
-                        "Retry with force=true to cancel provisioning and delete."
+                        "Use stop provisioning to cancel without teardown, "
+                        "or retry with force=true to cancel and delete."
                     ),
                 },
             )

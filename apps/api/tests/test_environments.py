@@ -569,6 +569,69 @@ async def test_teardown_rejects_provisioning_without_force(
 
 
 @pytest.mark.asyncio
+async def test_cancel_provision_stops_without_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            name="provisioning-env-stop",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-provisioning-stop",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=24),
+            cost_estimate_hourly=Decimal("0.42"),
+        )
+        await repo.update_status(environment, EnvironmentStatus.PROVISIONING)
+        await session.commit()
+        env_id = environment.id
+
+        service = EnvironmentService(session)
+        with patch("app.services.environment.enqueue_teardown_environment") as enqueue:
+            result = await service.cancel_provision(
+                env_id, owner=test_user, correlation_id="corr-stop"
+            )
+            enqueue.assert_not_called()
+
+        await session.refresh(environment)
+        assert environment.status == EnvironmentStatus.FAILED
+        assert environment.error_message == "Provisioning stopped by user"
+        assert result.status in (EnvironmentStatus.FAILED, EnvironmentStatus.FAILED.value)
+
+
+@pytest.mark.asyncio
+async def test_cancel_provision_rejects_non_provisioning(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    from fastapi import HTTPException
+
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            name="running-env-stop",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-running-stop",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=24),
+            cost_estimate_hourly=Decimal("0.42"),
+        )
+        await repo.update_status(environment, EnvironmentStatus.RUNNING)
+        await session.commit()
+
+        service = EnvironmentService(session)
+        with pytest.raises(HTTPException) as exc:
+            await service.cancel_provision(
+                environment.id, owner=test_user, correlation_id="corr-stop-bad"
+            )
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "cancel_not_allowed"
+
+
+@pytest.mark.asyncio
 async def test_force_teardown_cancels_provisioning(
     session_factory: async_sessionmaker[AsyncSession],
     test_user: User,
