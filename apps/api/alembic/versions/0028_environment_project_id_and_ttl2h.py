@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0028_environment_project_id_and_ttl2h"
+revision: str = "0028_env_proj_ttl2h"
 down_revision: str | None = "0027_agent_nodes"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
