@@ -21,6 +21,13 @@ export default defineNuxtConfig({
     },
   },
   fonts: {
+    // CI/Docker often cannot resolve fonts.bunny.net; we only use Google families.
+    provider: "google",
+    providers: {
+      bunny: false,
+      adobe: false,
+      fontshare: false,
+    },
     defaults: {
       weights: [400, 500, 600, 700],
       styles: ["normal"],

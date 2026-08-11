@@ -360,6 +360,13 @@ jobs:
           GITLAB_OAUTH_CLIENT_SECRET: ${{ secrets.GITLAB_OAUTH_CLIENT_SECRET }}
           GITLAB_OAUTH_REDIRECT_URI: ${{ secrets.GITLAB_OAUTH_REDIRECT_URI }}
           GITLAB_BASE_URL: ${{ secrets.GITLAB_BASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_EMAIL_FROM: ${{ secrets.RESEND_EMAIL_FROM }}
         run: |
           set -euo pipefail
           # actions/checkout wipes the workspace each run, so persist secrets OUTSIDE it.
@@ -405,6 +412,82 @@ jobs:
           GL_BASE_URL_V="${GL_BASE_URL_V:-https://gitlab.com}"
           GL_REDIRECT_V="${GITLAB_OAUTH_REDIRECT_URI:-$(env_get GITLAB_OAUTH_REDIRECT_URI "$STABLE_ENV")}"
           GL_REDIRECT_V="${GL_REDIRECT_V:-https://launchpad-idp.online/integrations/gitlab}"
+          GEMINI_API_KEY_V="${GEMINI_API_KEY:-$(env_get GEMINI_API_KEY "$STABLE_ENV")}"
+          if [ -n "${GEMINI_API_KEY:-}" ]; then
+            if printf '%s' "$GEMINI_API_KEY" | grep -q "BEGIN"; then
+              GEMINI_API_KEY_V="$(printf '%b' "$GEMINI_API_KEY" | base64 | tr -d '\n')"
+            else
+              GEMINI_API_KEY_V="$GEMINI_API_KEY"
+            fi
+          else
+            GEMINI_API_KEY_V="$(env_get GEMINI_API_KEY "$STABLE_ENV")"
+          fi
+
+          GEMINI_MODEL_V="${GEMINI_MODEL:-$(env_get GEMINI_MODEL "$STABLE_ENV")}"
+          if [ -n "${GEMINI_MODEL:-}" ]; then
+            if printf '%s' "$GEMINI_MODEL" | grep -q "BEGIN"; then
+              GEMINI_MODEL_V="$(printf '%b' "$GEMINI_MODEL" | base64 | tr -d '\n')"
+            else
+              GEMINI_MODEL_V="$GEMINI_MODEL"
+            fi
+          else
+            GEMINI_MODEL_V="$(env_get GEMINI_MODEL "$STABLE_ENV")"
+          fi
+
+          STRIPE_SECRET_KEY_V="${STRIPE_SECRET_KEY:-$(env_get STRIPE_SECRET_KEY "$STABLE_ENV")}"
+          if [ -n "${STRIPE_SECRET_KEY:-}" ]; then
+            if printf '%s' "$STRIPE_SECRET_KEY" | grep -q "BEGIN"; then
+              STRIPE_SECRET_KEY_V="$(printf '%b' "$STRIPE_SECRET_KEY" | base64 | tr -d '\n')"
+            else
+              STRIPE_SECRET_KEY_V="$STRIPE_SECRET_KEY"
+            fi
+          else
+            STRIPE_SECRET_KEY_V="$(env_get STRIPE_SECRET_KEY "$STABLE_ENV")"
+          fi
+
+          STRIPE_PUBLISHABLE_KEY_V="${STRIPE_PUBLISHABLE_KEY:-$(env_get STRIPE_PUBLISHABLE_KEY "$STABLE_ENV")}"
+          if [ -n "${STRIPE_PUBLISHABLE_KEY:-}" ]; then
+            if printf '%s' "$STRIPE_PUBLISHABLE_KEY" | grep -q "BEGIN"; then
+              STRIPE_PUBLISHABLE_KEY_V="$(printf '%b' "$STRIPE_PUBLISHABLE_KEY" | base64 | tr -d '\n')"
+            else
+              STRIPE_PUBLISHABLE_KEY_V="$STRIPE_PUBLISHABLE_KEY"
+            fi
+          else
+            STRIPE_PUBLISHABLE_KEY_V="$(env_get STRIPE_PUBLISHABLE_KEY "$STABLE_ENV")"
+          fi
+
+          STRIPE_WEBHOOK_SECRET_V="${STRIPE_WEBHOOK_SECRET:-$(env_get STRIPE_WEBHOOK_SECRET "$STABLE_ENV")}"
+          if [ -n "${STRIPE_WEBHOOK_SECRET:-}" ]; then
+            if printf '%s' "$STRIPE_WEBHOOK_SECRET" | grep -q "BEGIN"; then
+              STRIPE_WEBHOOK_SECRET_V="$(printf '%b' "$STRIPE_WEBHOOK_SECRET" | base64 | tr -d '\n')"
+            else
+              STRIPE_WEBHOOK_SECRET_V="$STRIPE_WEBHOOK_SECRET"
+            fi
+          else
+            STRIPE_WEBHOOK_SECRET_V="$(env_get STRIPE_WEBHOOK_SECRET "$STABLE_ENV")"
+          fi
+
+          RESEND_API_KEY_V="${RESEND_API_KEY:-$(env_get RESEND_API_KEY "$STABLE_ENV")}"
+          if [ -n "${RESEND_API_KEY:-}" ]; then
+            if printf '%s' "$RESEND_API_KEY" | grep -q "BEGIN"; then
+              RESEND_API_KEY_V="$(printf '%b' "$RESEND_API_KEY" | base64 | tr -d '\n')"
+            else
+              RESEND_API_KEY_V="$RESEND_API_KEY"
+            fi
+          else
+            RESEND_API_KEY_V="$(env_get RESEND_API_KEY "$STABLE_ENV")"
+          fi
+
+          RESEND_EMAIL_FROM_V="${RESEND_EMAIL_FROM:-$(env_get RESEND_EMAIL_FROM "$STABLE_ENV")}"
+          if [ -n "${RESEND_EMAIL_FROM:-}" ]; then
+            if printf '%s' "$RESEND_EMAIL_FROM" | grep -q "BEGIN"; then
+              RESEND_EMAIL_FROM_V="$(printf '%b' "$RESEND_EMAIL_FROM" | base64 | tr -d '\n')"
+            else
+              RESEND_EMAIL_FROM_V="$RESEND_EMAIL_FROM"
+            fi
+          else
+            RESEND_EMAIL_FROM_V="$(env_get RESEND_EMAIL_FROM "$STABLE_ENV")"
+          fi
 
           umask 077
           cat > "$STABLE_ENV" <<EOF
@@ -444,6 +527,13 @@ jobs:
           GITLAB_OAUTH_CLIENT_ID=${GL_CLIENT_ID_V}
           GITLAB_OAUTH_CLIENT_SECRET=${GL_CLIENT_SECRET_V}
           GITLAB_OAUTH_REDIRECT_URI=${GL_REDIRECT_V}
+          GEMINI_API_KEY=${GEMINI_API_KEY_V}
+          GEMINI_MODEL=${GEMINI_MODEL_V}
+          STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY_V}
+          STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY_V}
+          STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET_V}
+          RESEND_API_KEY=${RESEND_API_KEY_V}
+          RESEND_EMAIL_FROM=${RESEND_EMAIL_FROM_V}
           EOF
           sed -i.bak 's/^[[:space:]]*//' "$STABLE_ENV" && rm -f "$STABLE_ENV.bak"
           # Hand the stable env-file path to later steps.
