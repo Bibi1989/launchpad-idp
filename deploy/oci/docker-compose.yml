@@ -168,7 +168,7 @@ services:
 
   worker:
     build: *api_build
-    command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "--loglevel=INFO"]
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -187,7 +187,7 @@ services:
 
   beat:
     build: *api_build
-    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "beat", "--loglevel=INFO"]
     restart: unless-stopped
     environment:
       <<: *api_env

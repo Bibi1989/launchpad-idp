@@ -108,12 +108,30 @@ wait_service_running() {
 }
 
 wait_worker_ready() {
-  # Celery must accept inspect ping so teardown tasks are not left stranded.
+  # Do not use ``celery inspect ping``: a busy worker (long provision/teardown)
+  # often misses the control reply and CI falsely fails even though celery is up.
+  # Ready = container running + a celery worker process exists + broker reachable.
   local iters="${1:-24}"
+  local py
+  py='from pathlib import Path
+from app.workers.celery_app import celery_app
+ok=False
+for p in Path("/proc").iterdir():
+    if not p.name.isdigit():
+        continue
+    try:
+        cmd=(p/"cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="ignore")
+    except OSError:
+        continue
+    if "celery" in cmd and "worker" in cmd and "beat" not in cmd:
+        ok=True
+        break
+assert ok, "celery worker process not found"
+celery_app.connection().ensure_connection(max_retries=3)
+print("ok")'
   for i in $(seq 1 "$iters"); do
     if container_running worker \
-      && dc exec -T worker celery -A app.workers.celery_app.celery_app inspect ping -t 5 2>/dev/null \
-        | grep -qi "pong"; then
+      && dc exec -T worker python -c "$py" >/dev/null 2>&1; then
       echo "worker celery ready"
       return 0
     fi
