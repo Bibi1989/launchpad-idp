@@ -89,6 +89,44 @@ wait_web_ready() {
   return 1
 }
 
+wait_service_running() {
+  local svc="$1"
+  local iters="${2:-24}"
+  for i in $(seq 1 "$iters"); do
+    if container_running "$svc"; then
+      echo "${svc} running"
+      return 0
+    fi
+    echo "waiting for ${svc} ($i/${iters})..."
+    if [ $((i % 4)) -eq 0 ]; then
+      dc ps -a "$svc" || true
+      dc logs --tail=40 "$svc" || true
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+wait_worker_ready() {
+  # Celery must accept inspect ping so teardown tasks are not left stranded.
+  local iters="${1:-24}"
+  for i in $(seq 1 "$iters"); do
+    if container_running worker \
+      && dc exec -T worker celery -A app.workers.celery_app.celery_app inspect ping -t 5 2>/dev/null \
+        | grep -qi "pong"; then
+      echo "worker celery ready"
+      return 0
+    fi
+    echo "waiting for worker celery ($i/${iters})..."
+    if [ $((i % 4)) -eq 0 ]; then
+      dc ps -a worker || true
+      dc logs --tail=40 worker || true
+    fi
+    sleep 5
+  done
+  return 1
+}
+
 [ -f "$ENV_FILE" ] || fail "env file not found: $ENV_FILE"
 
 PGUSER="$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
@@ -101,10 +139,11 @@ PGPW="$(grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
 chmod +x "${ROOT_DIR}/deploy/oci/caddy-entrypoint.sh" || true
 
 # 1) Build first so a build failure leaves the running stack untouched (site stays up).
+# Build api image consumers explicitly so worker/beat always pick up the new code.
 echo "===== build images (old stack keeps serving) ====="
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
-if ! dc build; then
+if ! dc build api worker beat migrate web; then
   echo "===== last compose build attempt failed ====="
   fail "docker compose build failed"
 fi
@@ -182,15 +221,13 @@ dc up -d --no-deps --force-recreate web || fail "web recreate failed"
 wait_web_ready || fail "web did not become ready within $((WEB_WAIT_ITERS * 5))s after recreate"
 
 echo "===== rolling recreate: worker ====="
-if ! dc up -d --no-deps --force-recreate worker; then
-  echo "WARN: worker recreate failed - site will still serve; check worker logs"
-  dc logs --tail=80 worker || true
-fi
+dc up -d --no-deps --force-recreate worker || fail "worker recreate failed"
+wait_service_running worker || fail "worker container did not stay running after recreate"
+wait_worker_ready || fail "worker celery did not become ready after recreate"
+
 echo "===== rolling recreate: beat ====="
-if ! dc up -d --no-deps --force-recreate beat; then
-  echo "WARN: beat recreate failed - site will still serve; check beat logs"
-  dc logs --tail=50 beat || true
-fi
+dc up -d --no-deps --force-recreate beat || fail "beat recreate failed"
+wait_service_running beat || fail "beat container did not stay running after recreate"
 
 # Keep the public edge up: only recreate caddy when compose detects a config/image change.
 echo "===== ensure caddy ====="
@@ -203,10 +240,23 @@ if ! dc up -d --remove-orphans --no-recreate; then
   dc ps -a || true
 fi
 
+# Worker must still be up after reconcile (no-recreate should not drop it).
+wait_service_running worker 6 || fail "worker not running after reconcile"
+wait_service_running beat 6 || fail "beat not running after reconcile"
+
+echo "===== requeue TEARDOWN_PENDING environments ====="
+if ! dc exec -T worker python -c \
+  'from app.workers.tasks import requeue_pending_teardowns_sync; print("requeued", requeue_pending_teardowns_sync(min_age_seconds=0))'
+then
+  echo "WARN: could not requeue pending teardowns - check worker logs"
+  dc logs --tail=40 worker || true
+fi
+
 dc ps -a
 wait_api_healthy "api (final)" || fail "API did not stay healthy after rolling cutover"
 wait_web_ready || fail "web did not stay ready after rolling cutover"
+wait_worker_ready 12 || fail "worker celery not ready after rolling cutover"
 
-echo "Rolling deploy complete - site served throughout build; brief gaps only during api/web recreate"
+echo "Rolling deploy complete - site served throughout build; api/web/worker/beat recreated"
 dc ps
 exit 0

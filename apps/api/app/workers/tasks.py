@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -2161,6 +2161,10 @@ async def pause_expired_environment(
 # after this many seconds. Comfortably above the 3-minute readiness cap + overhead
 # so a legitimately slow-but-active provision is never falsely failed.
 STALE_PROVISIONING_SECONDS = 600
+# TEARDOWN_PENDING with no active lock older than this is re-queued (worker/beat
+# restarts drop in-flight Celery tasks and leave environments "tearing down").
+# Above the teardown hard time_limit (180s) so an active run is not double-queued.
+STALE_TEARDOWN_SECONDS = 240
 
 
 async def _reap_stale_provisioning(session, env_repo, *, now: datetime) -> list[tuple]:
@@ -2169,8 +2173,6 @@ async def _reap_stale_provisioning(session, env_repo, *, now: datetime) -> list[
     Skips rows still holding the provision state lock (a worker is actively
     provisioning them) so only genuinely orphaned rows flip to FAILED.
     """
-    from datetime import timedelta
-
     from sqlalchemy import select
 
     cutoff = now - timedelta(seconds=STALE_PROVISIONING_SECONDS)
@@ -2196,6 +2198,58 @@ async def _reap_stale_provisioning(session, env_repo, *, now: datetime) -> list[
     return failed
 
 
+async def _requeue_stale_teardowns(
+    session,
+    *,
+    now: datetime,
+    min_age_seconds: int = STALE_TEARDOWN_SECONDS,
+) -> int:
+    """Re-enqueue TEARDOWN_PENDING rows that lost their worker mid-flight."""
+    from sqlalchemy import select
+
+    cutoff = now - timedelta(seconds=max(0, min_age_seconds))
+    stmt = select(Environment).where(
+        Environment.status == EnvironmentStatus.TEARDOWN_PENDING,
+        Environment.updated_at < cutoff,
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    requeued = 0
+    for env in rows:
+        if await is_state_locked(env.id, scope="environment"):
+            continue
+        correlation_id = f"teardown-requeue:{env.id}:{uuid4().hex[:8]}"
+        enqueue_teardown_environment(
+            environment_id=str(env.id),
+            correlation_id=correlation_id,
+        )
+        requeued += 1
+        logger.info(
+            "stale_teardown_requeued",
+            environment_id=str(env.id),
+            correlation_id=correlation_id,
+            min_age_seconds=min_age_seconds,
+        )
+    return requeued
+
+
+async def _requeue_pending_teardowns(*, min_age_seconds: int = 0) -> int:
+    """Re-enqueue TEARDOWN_PENDING environments (used after worker restart / deploy)."""
+    session_factory = _session_factory()
+    async with session_factory() as session:
+        requeued = await _requeue_stale_teardowns(
+            session,
+            now=datetime.now(UTC),
+            min_age_seconds=min_age_seconds,
+        )
+        await session.commit()
+    return requeued
+
+
+def requeue_pending_teardowns_sync(*, min_age_seconds: int = 0) -> int:
+    """Sync entrypoint for deploy scripts (``python -c`` inside the worker container)."""
+    return asyncio.run(_requeue_pending_teardowns(min_age_seconds=min_age_seconds))
+
+
 async def _run_ttl_reaper() -> int:
     settings = get_settings()
     session_factory = _session_factory()
@@ -2219,6 +2273,7 @@ async def _run_ttl_reaper() -> int:
                 expired_events.append((environment.id, commit_sha))
 
         stale_failed = await _reap_stale_provisioning(session, env_repo, now=now)
+        stale_teardowns = await _requeue_stale_teardowns(session, now=now)
         await session.commit()
 
         for environment_id, commit_sha in expired_events:
@@ -2252,6 +2307,7 @@ async def _run_ttl_reaper() -> int:
                 event="failed",
                 message="Provisioning timed out - no active worker",
             )
+        reaped += stale_teardowns
         await session.commit()
 
         # Soft TTL warnings for RUNNING previews approaching expiry.
@@ -2274,6 +2330,12 @@ async def _run_ttl_reaper() -> int:
 
     logger.info("ttl_reaper_complete", reaped=reaped, interval=settings.ttl_reaper_interval_seconds)
     return reaped
+
+
+@celery_app.task(name="launchpad.requeue_pending_teardowns")
+def requeue_pending_teardowns_task(min_age_seconds: int = 0) -> int:
+    """Re-enqueue TEARDOWN_PENDING after worker restart (deploy / ops)."""
+    return requeue_pending_teardowns_sync(min_age_seconds=min_age_seconds)
 
 
 @celery_app.task(name="launchpad.provision_environment", bind=True, max_retries=0)
