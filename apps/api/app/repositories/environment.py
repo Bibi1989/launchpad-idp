@@ -37,6 +37,12 @@ ACTIVE_CONCURRENCY_STATUSES = (
     EnvironmentStatus.TEARDOWN_PENDING,
 )
 
+# For "running" governance caps: previews that are actively consuming runtime slots.
+ACTIVE_RUNNING_STATUSES = (
+    EnvironmentStatus.PROVISIONING,
+    EnvironmentStatus.RUNNING,
+)
+
 
 class EnvironmentRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -107,6 +113,39 @@ class EnvironmentRepository:
         )
         return len(list(result.scalars().all()))
 
+    async def count_active_for_owner_project(self, owner_id: UUID, project_id: UUID) -> int:
+        result = await self._session.execute(
+            select(Environment).where(
+                Environment.owner_id == owner_id,
+                Environment.project_id == project_id,
+                Environment.status.in_(ACTIVE_RUNNING_STATUSES),
+            )
+        )
+        return len(list(result.scalars().all()))
+
+    async def list_active_for_owner_project(
+        self,
+        owner_id: UUID,
+        project_id: UUID,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Environment]:
+        stmt = (
+            select(Environment)
+            .where(
+                Environment.owner_id == owner_id,
+                Environment.project_id == project_id,
+                Environment.status.in_(ACTIVE_RUNNING_STATUSES),
+            )
+            .order_by(Environment.created_at.asc())
+            .offset(offset)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_active_for_repo_pr(
         self,
         *,
@@ -164,6 +203,7 @@ class EnvironmentRepository:
         namespace_name: str,
         ttl_expires_at: datetime,
         cost_estimate_hourly: Decimal,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         org_id: UUID | None = None,
         latest_commit_sha: str | None = None,
@@ -181,6 +221,7 @@ class EnvironmentRepository:
         environment = Environment(
             owner_id=owner_id,
             org_id=org_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             name=name,
             git_branch=git_branch,

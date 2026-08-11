@@ -45,6 +45,7 @@ async def acquire_state_lock(
     *,
     scope: LockScope = "environment",
     settings: Settings | None = None,
+    timeout_seconds: float | None = None,
     blocking: bool = False,
 ) -> AsyncIterator[None]:
     """Acquire a Redis lock for ``resource_id``.
@@ -54,11 +55,12 @@ async def acquire_state_lock(
     with HTTP 409 / a warning log.
     """
     cfg = settings or get_settings()
+    lock_timeout = timeout_seconds if timeout_seconds is not None else cfg.state_lock_timeout_seconds
     key = _lock_key(scope, str(resource_id))
     client = redis.from_url(cfg.redis_url, encoding="utf-8", decode_responses=True)
     lock = client.lock(
         name=key,
-        timeout=cfg.state_lock_timeout_seconds,
+        timeout=lock_timeout,
         blocking_timeout=cfg.state_lock_blocking_timeout_seconds if blocking else 0,
         thread_local=False,
     )

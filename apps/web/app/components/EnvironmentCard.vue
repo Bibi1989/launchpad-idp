@@ -16,6 +16,7 @@ const emit = defineEmits<{
   retry: [id: string]
   pause: [id: string]
   resume: [id: string]
+  relaunch: [id: string]
   update: [patch: Partial<Environment>]
 }>()
 
@@ -403,14 +404,16 @@ function onCardKeydown(event: KeyboardEvent) {
             <span class="material-symbols-outlined text-base">play_arrow</span>
             {{ t('environments.card.resume') }}
           </button>
-          <span
+          <button
             v-else-if="displayStatus === 'EXPIRED'"
+            type="button"
             role="menuitem"
-            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-[var(--lp-muted)]"
+            class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-accent)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+            @click="emit('relaunch', environment.id); closeActionsMenu()"
           >
-            <span class="material-symbols-outlined text-base">timer_off</span>
-            {{ t('environments.actions.expired') }}
-          </span>
+            <span class="material-symbols-outlined text-base">replay</span>
+            {{ t('environments.actions.relaunch') }}
+          </button>
           <button
             v-if="canRetry"
             type="button"

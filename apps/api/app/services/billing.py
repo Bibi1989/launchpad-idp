@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.logging import get_logger
+from app.core.logging import get_logger, sanitize_log_message
 from app.models.domain import OrgPlan, Organization, OrgRole, User
 from app.services.orgs import OrganizationService, role_at_least
 from app.services.plans import (
@@ -59,10 +59,16 @@ class BillingService:
     async def plan_summary(self, *, user: User, org_id: UUID) -> dict[str, Any]:
         ctx = await self._orgs.resolve_context(user=user, org_id=org_id)
         org = ctx.organization
-        limits = limits_for_plan(org.plan)
+        try:
+            limits = limits_for_plan(org.plan)
+            plan_value = org.plan if isinstance(org.plan, OrgPlan) else OrgPlan(str(org.plan))
+        except Exception:  # noqa: BLE001 - never break billing UI due to bad persisted enum
+            logger.exception("billing_plan_summary_invalid_plan", org_id=str(org.id))
+            limits = limits_for_plan(OrgPlan.FREE)
+            plan_value = OrgPlan.FREE
         return {
             "org_id": org.id,
-            "plan": org.plan if isinstance(org.plan, OrgPlan) else OrgPlan(str(org.plan)),
+            "plan": plan_value,
             "max_projects": limits.max_projects,
             "max_workspaces": limits.max_workspaces,
             "project_count": await count_org_projects(self._session, org.id),
@@ -80,8 +86,8 @@ class BillingService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"code": "forbidden", "message": "Admin role required to upgrade"},
             )
-        price_id = (self._settings.stripe_price_id_pro or "").strip()
-        if not price_id:
+        raw_id = (self._settings.stripe_price_id_pro or "").strip()
+        if not raw_id:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -93,27 +99,118 @@ class BillingService:
         org = ctx.organization
         customer_id = org.stripe_customer_id
         if not customer_id:
-            customer = stripe.Customer.create(
-                email=user.email,
-                name=org.name,
-                metadata={"org_id": str(org.id)},
+            try:
+                customer = stripe.Customer.create(
+                    email=user.email,
+                    name=org.name,
+                    metadata={"org_id": str(org.id)},
+                )
+                customer_id = customer["id"]
+                org.stripe_customer_id = customer_id
+                await self._session.flush()
+            except Exception as exc:  # noqa: BLE001 - surface stripe error cleanly
+                safe_error = sanitize_log_message(str(exc))
+                logger.exception(
+                    "stripe_customer_create_failed",
+                    org_id=str(org.id),
+                    error=str(exc),
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={
+                        "code": "stripe_customer_create_failed",
+                        "message": "Stripe customer creation failed",
+                        "details": {"stripe_error": safe_error},
+                    },
+                ) from exc
+
+        if raw_id.startswith("price_"):
+            price_id = raw_id
+        elif raw_id.startswith("prod_"):
+            # Some deployments store the product id instead of the price id.
+            # Stripe checkout line_items require a price id, so resolve the
+            # product's default price automatically.
+            try:
+                product = stripe.Product.retrieve(raw_id)
+                default_price = (
+                    product.get("default_price")
+                    if hasattr(product, "get")
+                    else getattr(product, "default_price", None)
+                )
+                if isinstance(default_price, dict):
+                    price_id = default_price.get("id")
+                else:
+                    # Stripe typically returns the default_price as a `price_...` id string.
+                    price_id = default_price
+
+                if not price_id or not str(price_id).startswith("price_"):
+                    # Fallback: resolve from active Prices attached to the product.
+                    # This covers cases where the product exists but default_price is unset.
+                    prices = stripe.Price.list(product=raw_id, active=True, limit=1)
+                    first = (prices.get("data") or [None])[0] if hasattr(prices, "get") else None
+                    if first is None and hasattr(prices, "data"):
+                        first = prices.data[0] if prices.data else None
+                    resolved = (
+                        first.get("id")
+                        if first is not None and hasattr(first, "get")
+                        else getattr(first, "id", None)
+                    )
+                    price_id = resolved
+
+                if not price_id:
+                    raise ValueError(f"could not resolve price_ for product: default_price={default_price!r}")
+                if not str(price_id).startswith("price_"):
+                    raise ValueError(f"product default_price is invalid: {price_id!r}")
+            except Exception as exc:  # noqa: BLE001
+                safe_error = sanitize_log_message(str(exc))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": "stripe_price_resolution_failed",
+                        "message": "STRIPE_PRICE_ID_PRO must be a price_ id or a prod_ id with a default price",
+                        "details": {"stripe_error": safe_error, "input": raw_id},
+                    },
+                ) from exc
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "stripe_price_id_invalid",
+                    "message": "STRIPE_PRICE_ID_PRO must start with price_ (recommended) or prod_",
+                    "details": {"input": raw_id},
+                },
             )
-            customer_id = customer["id"]
-            org.stripe_customer_id = customer_id
-            await self._session.flush()
 
         app_url = (self._settings.public_app_url or "http://localhost:3000").rstrip("/")
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            customer=customer_id,
-            line_items=[{"price": price_id, "quantity": 1}],
-            success_url=f"{app_url}/org?billing=success",
-            cancel_url=f"{app_url}/org?billing=cancel",
-            client_reference_id=str(org.id),
-            metadata={"org_id": str(org.id)},
-            subscription_data={"metadata": {"org_id": str(org.id)}},
-        )
-        url = session.get("url")
+        try:
+            session = stripe.checkout.Session.create(
+                mode="subscription",
+                customer=customer_id,
+                line_items=[{"price": price_id, "quantity": 1}],
+                success_url=f"{app_url}/org?billing=success",
+                cancel_url=f"{app_url}/org?billing=cancel",
+                client_reference_id=str(org.id),
+                metadata={"org_id": str(org.id)},
+                subscription_data={"metadata": {"org_id": str(org.id)}},
+            )
+            url = session.get("url")
+        except Exception as exc:  # noqa: BLE001 - stripe API can raise many typed errors
+            safe_error = sanitize_log_message(str(exc))
+            logger.exception(
+                "stripe_checkout_create_failed",
+                org_id=str(org.id),
+                price_id=price_id,
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": "stripe_checkout_create_failed",
+                    "message": "Stripe checkout session creation failed",
+                    "details": {"price_id": price_id, "stripe_error": safe_error},
+                },
+            ) from exc
+
         if not url:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -138,10 +235,26 @@ class BillingService:
             )
         stripe = self._require_stripe()
         app_url = (self._settings.public_app_url or "http://localhost:3000").rstrip("/")
-        session = stripe.billing_portal.Session.create(
-            customer=ctx.organization.stripe_customer_id,
-            return_url=f"{app_url}/org",
-        )
+        try:
+            session = stripe.billing_portal.Session.create(
+                customer=ctx.organization.stripe_customer_id,
+                return_url=f"{app_url}/org",
+            )
+        except Exception as exc:  # noqa: BLE001
+            safe_error = sanitize_log_message(str(exc))
+            logger.exception(
+                "stripe_portal_create_failed",
+                org_id=str(org_id),
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": "stripe_portal_create_failed",
+                    "message": "Stripe portal failed to start",
+                    "details": {"stripe_error": safe_error},
+                },
+            ) from exc
         return str(session["url"])
 
     async def apply_subscription_status(

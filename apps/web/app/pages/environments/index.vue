@@ -3,7 +3,7 @@ import type { OrgCostSummary } from '~/types/auth'
 import type { Environment } from '~/types/environment'
 
 const { t } = useI18n()
-const { environments, loading, error, refresh, destroy, cancelProvision, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
+const { environments, loading, error, refresh, destroy, cancelProvision, retryProvision, pauseEnvironment, resumeEnvironment, relaunchEnvironment } = useEnvironments()
 const { activeOrgId, fetchOrgCosts } = useOrgs()
 const toast = useToast()
 const route = useRoute()
@@ -40,6 +40,11 @@ const pauseAction = define((id: string) => pauseEnvironment(id), {
 const resumeAction = define((id: string) => resumeEnvironment(id), {
   success: (env) => ({ title: t('environments.toasts.resumed'), message: `${env.name} is resuming.` }),
   error: (err) => ({ title: t('environments.toasts.resumeFailed'), message: toastError(err, t('common.failed')) }),
+})
+
+const relaunchAction = define((id: string) => relaunchEnvironment(id), {
+  success: (env) => ({ title: t('environments.toasts.relaunched'), message: `${env.name} is relaunching.` }),
+  error: (err) => ({ title: t('environments.toasts.relaunchFailed'), message: toastError(err, t('common.failed')) }),
 })
 
 const pendingDestroyEnv = computed(() => {
@@ -329,6 +334,7 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
           @retry="onRetry"
           @pause="pauseAction.run"
           @resume="resumeAction.run"
+          @relaunch="relaunchAction.run"
           @update="onCardUpdate"
         />
       </div>

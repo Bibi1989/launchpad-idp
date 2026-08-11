@@ -15,10 +15,12 @@ from app.core.logging import get_logger
 from app.models.domain import (
     AuditAction,
     AuditStatus,
+    OrgPlan,
     EnvironmentStatus,
     ExecutionStage,
     LogLevel,
     OrgRole,
+    Organization,
     ProvisioningWorkspace,
     User,
 )
@@ -54,6 +56,7 @@ from app.services.preview_urls import stable_pr_preview_url
 from app.services.drift_scanner import record_drift_if_changed, scan_environment
 from app.services.kubernetes import KubernetesProvisioner
 from app.services.orgs import OrganizationService, role_at_least
+from app.services.projects import ProjectService
 from app.services.preview_templates import get_preview_template, list_preview_templates
 from app.services.provisioning import ProvisioningService
 from app.services.state_lock import (
@@ -92,13 +95,13 @@ def _is_placeholder_workload_image(
 def _ttl_timedelta(*, ttl_hours: int | None, ttl_minutes: int | None) -> timedelta:
     if ttl_minutes is not None:
         return timedelta(minutes=ttl_minutes)
-    return timedelta(hours=ttl_hours if ttl_hours is not None else 72)
+    return timedelta(hours=ttl_hours if ttl_hours is not None else 2)
 
 
 def _ttl_label(*, ttl_hours: int | None, ttl_minutes: int | None) -> str:
     if ttl_minutes is not None:
         return f"{ttl_minutes}m"
-    return f"{ttl_hours if ttl_hours is not None else 72}h"
+    return f"{ttl_hours if ttl_hours is not None else 2}h"
 
 
 def _ttl_is_past(expires_at: datetime, *, now: datetime | None = None) -> bool:
@@ -154,14 +157,28 @@ class EnvironmentService:
             if not rows:
                 rows = await self._environments.list_for_owner(owner.id)
         await self._pause_expired_rows(rows)
-        active = await self._environments.count_active_for_owner(owner.id)
-        reads = [self._to_read(row, concurrent_active_count=active) for row in rows]
+        project_ids = {row.project_id for row in rows if row.project_id is not None}
+        active_by_project: dict[UUID, int] = {}
+        for pid in project_ids:
+            active_by_project[pid] = await self._environments.count_active_for_owner_project(owner.id, pid)
+        reads = [
+            self._to_read(
+                row,
+                concurrent_active_count=(
+                    active_by_project.get(row.project_id) if row.project_id is not None else None
+                ),
+            )
+            for row in rows
+        ]
         return await self._enrich_drift(reads, [row.id for row in rows])
 
     async def get_environment(self, environment_id: UUID, owner: User) -> EnvironmentRead:
         environment = await self._require_access(environment_id, owner, mutate=False)
         await self._pause_expired_rows([environment])
-        active = await self._environments.count_active_for_owner(owner.id)
+        if environment.project_id is not None:
+            active = await self._environments.count_active_for_owner_project(owner.id, environment.project_id)
+        else:
+            active = await self._environments.count_active_for_owner(owner.id)
         read = self._to_read(environment, concurrent_active_count=active)
         enriched = await self._enrich_drift([read], [environment.id])
         return enriched[0]
@@ -429,32 +446,76 @@ class EnvironmentService:
         correlation_id: str,
         org_id: UUID | None = None,
     ) -> EnvironmentRead:
+        now = datetime.now(UTC)
         existing = await self._environments.get_by_name(payload.name)
+
+        if org_id is None:
+            org = await OrganizationService(self._session).ensure_personal_org(owner)
+            org_id = org.id
+        else:
+            org = await self._session.get(Organization, org_id)
+            if org is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "org_not_found", "message": "Organization not found"},
+                )
+
+        cap: int | None = 6 if org.plan == OrgPlan.FREE else None
+
+        reuse_row = None
         if existing is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "environment_exists",
-                    "message": f"Environment '{payload.name}' already exists",
-                },
-            )
+            if existing.owner_id != owner.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "environment_exists",
+                        "message": f"Environment '{payload.name}' already exists",
+                    },
+                )
+            if existing.status in {EnvironmentStatus.EXPIRED, EnvironmentStatus.PAUSED} and _ttl_is_past(
+                existing.ttl_expires_at, now=now
+            ):
+                reuse_row = existing
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "environment_exists",
+                        "message": f"Environment '{payload.name}' already exists",
+                    },
+                )
 
-        await self._auto_pause_if_needed(owner)
-        await self._enforce_soft_cost_cap(owner, payload)
-
+        project_id: UUID | None = None
         if payload.workspace_id is not None:
             provisioning = ProvisioningService(self._session)
             workspace = await provisioning.get_workspace_for_owner(payload.workspace_id, owner)
+            project_id = workspace.project_id
+            if project_id is None:
+                project_id = (
+                    await ProjectService(self._session, self._settings).ensure_default_project(org=org, actor=owner)
+                ).id
             deploy_mode, manifest_packaging = self._resolve_deploy_mode(payload, workspace, provisioning)
         else:
             deploy_mode = payload.deploy_mode or DeployMode.PREVIEW
             manifest_packaging = None
+            project_id = (
+                await ProjectService(self._session, self._settings).ensure_default_project(org=org, actor=owner)
+            ).id
 
-        ttl_expires_at = datetime.now(UTC) + _ttl_timedelta(
-            ttl_hours=payload.ttl_hours,
-            ttl_minutes=payload.ttl_minutes,
-        )
+        ttl_hours = payload.ttl_hours
+        ttl_minutes = payload.ttl_minutes
+        # Governance policy: TTL hard max is 2 hours, regardless of .env overrides.
+        max_total_hours = min(int(self._settings.ttl_max_total_hours_from_create), 2)
+        if ttl_hours is not None:
+            ttl_hours = min(ttl_hours, max_total_hours)
+        if ttl_minutes is not None:
+            ttl_minutes = min(ttl_minutes, max_total_hours * 60)
+
+        ttl_expires_at = now + _ttl_timedelta(ttl_hours=ttl_hours, ttl_minutes=ttl_minutes)
         placeholder_namespace = f"launchpad-env-pending-{payload.name}"[:253]
+
+        await self._auto_pause_if_needed(owner, project_id=project_id, cap=cap, exclude_id=reuse_row.id if reuse_row else None)
+        await self._enforce_soft_cost_cap(owner, payload)
         if payload.cost_estimate_hourly is not None:
             hourly = payload.cost_estimate_hourly
         else:
@@ -513,35 +574,66 @@ class EnvironmentService:
             # For MANIFEST deploys, the real image is resolved later from workspace manifests.
             workload_image_for_log = "from workspace manifests"
 
-        environment = await self._environments.create(
-            owner_id=owner.id,
-            org_id=org_id or (await OrganizationService(self._session).ensure_personal_org(owner)).id,
-            name=payload.name,
-            git_branch=payload.git_branch,
-            git_repo_url=payload.git_repo_url,
-            namespace_name=placeholder_namespace,
-            ttl_expires_at=ttl_expires_at,
-            cost_estimate_hourly=hourly,
-            workspace_id=payload.workspace_id,
-            template_id=payload.template_id,
-            provider=payload.provider,
-            workload_image=workload_image,
-            github_pr_number=payload.github_pr_number,
-            github_pr_url=payload.github_pr_url,
-            deploy_mode=deploy_mode.value,
-            manifest_packaging=manifest_packaging,
-            enable_postgres=payload.enable_postgres,
-            enable_redis=payload.enable_redis,
-        )
-        environment.namespace_name = f"launchpad-env-{environment.id}"
-        await self._session.flush()
-        await self._session.refresh(environment)
+        if reuse_row is not None:
+            environment = reuse_row
+            environment.project_id = project_id
+            environment.org_id = org_id
+            environment.workspace_id = payload.workspace_id
+            environment.git_branch = payload.git_branch
+            environment.git_repo_url = payload.git_repo_url
+            environment.template_id = payload.template_id
+            environment.provider = payload.provider
+            environment.workload_image = workload_image
+            environment.github_pr_number = payload.github_pr_number
+            environment.github_pr_url = payload.github_pr_url
+            environment.deploy_mode = deploy_mode.value
+            environment.manifest_packaging = manifest_packaging
+            environment.enable_postgres = payload.enable_postgres
+            environment.enable_redis = payload.enable_redis
+            environment.ttl_expires_at = ttl_expires_at
+            environment.cost_estimate_hourly = hourly
+            environment.cost_accrued = Decimal("0.0000")
+            environment.cost_sampled_at = None
+            environment.cost_source = None
+            environment.error_message = None
+            environment.preview_url = None
+            environment.preview_endpoints_json = None
+            environment.node_port = None
+            environment.latest_commit_sha = None
+            environment.status = EnvironmentStatus.PROVISIONING
+            await self._session.flush()
+            await self._session.refresh(environment)
+        else:
+            environment = await self._environments.create(
+                owner_id=owner.id,
+                org_id=org_id,
+                project_id=project_id,
+                name=payload.name,
+                git_branch=payload.git_branch,
+                git_repo_url=payload.git_repo_url,
+                namespace_name=placeholder_namespace,
+                ttl_expires_at=ttl_expires_at,
+                cost_estimate_hourly=hourly,
+                workspace_id=payload.workspace_id,
+                template_id=payload.template_id,
+                provider=payload.provider,
+                workload_image=workload_image,
+                github_pr_number=payload.github_pr_number,
+                github_pr_url=payload.github_pr_url,
+                deploy_mode=deploy_mode.value,
+                manifest_packaging=manifest_packaging,
+                enable_postgres=payload.enable_postgres,
+                enable_redis=payload.enable_redis,
+            )
+            environment.namespace_name = f"launchpad-env-{environment.id}"
+            await self._session.flush()
+            await self._session.refresh(environment)
 
         await self._logs.create(
             environment_id=environment.id,
             message=(
                 f"Queued {deploy_mode.value} deploy for {payload.git_repo_url}@{payload.git_branch} "
-                f"(TTL {_ttl_label(ttl_hours=payload.ttl_hours, ttl_minutes=payload.ttl_minutes)}, "
+                f"(TTL {_ttl_label(ttl_hours=ttl_hours, ttl_minutes=ttl_minutes)}, "
                 f"image={workload_image_for_log}, "
                 f"correlation_id={correlation_id})"
             ),
@@ -569,7 +661,10 @@ class EnvironmentService:
             git_branch=payload.git_branch,
             owner_id=str(owner.id),
         )
-        active = await self._environments.count_active_for_owner(owner.id)
+        if project_id is not None:
+            active = await self._environments.count_active_for_owner_project(owner.id, project_id)
+        else:
+            active = await self._environments.count_active_for_owner(owner.id)
         return self._to_read(environment, concurrent_active_count=active)
 
     async def extend_ttl(
@@ -612,7 +707,7 @@ class EnvironmentService:
 
         base = max(expires, now)
         candidate = base + extend_delta
-        max_expiry = created + timedelta(hours=self._settings.ttl_max_total_hours_from_create)
+        max_expiry = created + timedelta(hours=min(int(self._settings.ttl_max_total_hours_from_create), 2))
         if candidate > max_expiry:
             candidate = max_expiry
         if candidate <= expires:
@@ -621,8 +716,7 @@ class EnvironmentService:
                 detail={
                     "code": "ttl_max_reached",
                     "message": (
-                        f"Cannot extend beyond {self._settings.ttl_max_total_hours_from_create}h "
-                        "from create time"
+                        "Cannot extend beyond 2h from create time"
                     ),
                 },
             )
@@ -1072,7 +1166,16 @@ class EnvironmentService:
                 },
             )
 
-        await self._auto_pause_if_needed(owner, exclude_id=environment.id)
+        # Free tier governance: pause oldest previews in the same project/user scope
+        # so resume/relaunch can take a runtime slot.
+        cap: int | None = None
+        if environment.org_id is not None:
+            org_row = await self._session.get(Organization, environment.org_id)
+            if org_row is not None and org_row.plan == OrgPlan.FREE:
+                cap = 6
+        if cap is None and environment.org_id is None:
+            cap = 6 if (await OrganizationService(self._session).ensure_personal_org(owner)).plan == OrgPlan.FREE else None
+        await self._auto_pause_if_needed(owner, project_id=environment.project_id, cap=cap, exclude_id=environment.id)
 
         deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
         if deploy_mode == DeployMode.COMPOSE.value:
@@ -1162,21 +1265,101 @@ class EnvironmentService:
         await self._session.commit()
         return self._to_read(environment)
 
-    async def _auto_pause_if_needed(self, owner: User, exclude_id: UUID | None = None) -> None:
-        limit = self._settings.max_concurrent_environments
-        rows = await self._environments.list_for_owner(owner.id)
-        active_envs = [
-            row
-            for row in rows
-            if row.status in {EnvironmentStatus.RUNNING, EnvironmentStatus.PROVISIONING}
-            and row.id != exclude_id
-        ]
-        if len(active_envs) < limit:
-            return
+    async def relaunch_environment(
+        self,
+        environment_id: UUID,
+        *,
+        owner: User,
+        correlation_id: str,
+    ) -> EnvironmentRead:
+        """Relaunch an EXPIRED/ttl-past environment using the same configuration row."""
+        environment = await self._require_owned(environment_id, owner)
+        now = datetime.now(UTC)
 
-        active_envs.sort(key=lambda x: x.created_at)
+        ttl_past = _ttl_is_past(environment.ttl_expires_at, now=now)
+        if not ttl_past or environment.status not in {EnvironmentStatus.EXPIRED, EnvironmentStatus.PAUSED}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "ttl_expired", "message": "Environment TTL is not eligible for relaunch"},
+            )
+
+        cap: int | None = None
+        if environment.org_id is not None:
+            org_row = await self._session.get(Organization, environment.org_id)
+            if org_row is not None and org_row.plan == OrgPlan.FREE:
+                cap = 6
+        if cap is None and environment.org_id is None:
+            org = await OrganizationService(self._session).ensure_personal_org(owner)
+            cap = 6 if org.plan == OrgPlan.FREE else None
+
+        await self._auto_pause_if_needed(
+            owner,
+            project_id=environment.project_id,
+            cap=cap,
+            exclude_id=environment.id,
+        )
+
+        environment.status = EnvironmentStatus.PROVISIONING
+        environment.error_message = None
+        environment.preview_url = None
+        environment.preview_endpoints_json = None
+        environment.node_port = None
+        environment.latest_commit_sha = None
+        environment.ttl_expires_at = now + _ttl_timedelta(
+            ttl_hours=min(int(self._settings.ttl_max_total_hours_from_create), 2),
+            ttl_minutes=None,
+        )
+        environment.cost_accrued = Decimal("0.0000")
+        environment.cost_sampled_at = None
+        environment.cost_source = None
+
+        await self._logs.create(
+            environment_id=environment.id,
+            message=(
+                "Relaunch queued after TTL expiry "
+                "(ttl cap 2h, "
+                f"correlation_id={correlation_id})"
+            ),
+        )
+        await AuditService(self._session).record(
+            action=AuditAction.PROVISION_INITIATED,
+            actor_id=AuditService.user_actor(owner.id),
+            status=AuditStatus.PENDING,
+            environment_id=environment.id,
+            workspace_id=environment.workspace_id,
+            commit_sha=None,
+            detail=f"correlation_id={correlation_id}",
+        )
+        await self._session.commit()
+
+        enqueue_provision_environment(
+            environment_id=str(environment.id),
+            correlation_id=correlation_id,
+        )
+
+        if environment.project_id is not None:
+            active = await self._environments.count_active_for_owner_project(owner.id, environment.project_id)
+        else:
+            active = await self._environments.count_active_for_owner(owner.id)
+        await self._session.refresh(environment)
+        return self._to_read(environment, concurrent_active_count=active)
+
+    async def _auto_pause_if_needed(
+        self,
+        owner: User,
+        *,
+        project_id: UUID | None,
+        cap: int | None,
+        exclude_id: UUID | None = None,
+    ) -> None:
+        if cap is None or project_id is None:
+            return
+        active_envs = await self._environments.list_active_for_owner_project(owner.id, project_id)
+        active_envs = [row for row in active_envs if row.id != exclude_id]
+        if len(active_envs) < cap:
+            return
         provisioner = KubernetesProvisioner(settings=self._settings)
-        while len(active_envs) >= limit:
+        while len(active_envs) >= cap:
             oldest = active_envs.pop(0)
             provisioner.scale_deployment(namespace=oldest.namespace_name, replicas=0)
             await self._environments.update_status(oldest, EnvironmentStatus.PAUSED)
@@ -1184,9 +1367,9 @@ class EnvironmentService:
                 environment_id=oldest.id,
                 log_level=LogLevel.WARN,
                 stage=ExecutionStage.APPLY,
-                message=f"Environment auto-paused to enforce max active limit of {limit}.",
+                message=f"Environment auto-paused to enforce free-tier max active limit of {cap} per project.",
             )
-            logger.info("environment_auto_paused", environment_id=str(oldest.id), limit=limit)
+            logger.info("environment_auto_paused", environment_id=str(oldest.id), cap=cap)
 
     async def _enforce_soft_cost_cap(
         self,

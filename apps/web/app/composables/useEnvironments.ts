@@ -177,6 +177,14 @@ export function useEnvironments() {
     return environment
   }
 
+  async function relaunchEnvironment(id: string): Promise<Environment> {
+    const environment = await apiFetch<Environment>(`/environments/${id}/relaunch`, {
+      method: 'POST',
+    })
+    await refresh()
+    return environment
+  }
+
   return {
     environments,
     loading,
@@ -199,5 +207,6 @@ export function useEnvironments() {
     promoteToCloud,
     pauseEnvironment,
     resumeEnvironment,
+    relaunchEnvironment,
   }
 }

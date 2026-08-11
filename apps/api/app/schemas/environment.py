@@ -130,7 +130,7 @@ class EnvironmentCreate(BaseModel):
         if self.ttl_hours is not None and self.ttl_minutes is not None:
             raise ValueError("Provide ttl_hours or ttl_minutes, not both")
         if self.ttl_hours is None and self.ttl_minutes is None:
-            self.ttl_hours = 72
+            self.ttl_hours = 2
         return self
 
 

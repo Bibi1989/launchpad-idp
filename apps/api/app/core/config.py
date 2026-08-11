@@ -26,19 +26,26 @@ class Settings(BaseSettings):
     # Distributed state lock (Redis) - guards concurrent provision / rebuild / teardown
     state_lock_timeout_seconds: float = 900.0
     state_lock_blocking_timeout_seconds: float = 0.0
+    # TEARDOWN state lock should expire quickly so worker restarts
+    # can re-queue orphaned TEARDOWN_PENDING environments without waiting
+    # for the full provisioning lock TTL.
+    teardown_state_lock_timeout_seconds: float = 180.0
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
-    default_ttl_hours: int = 72
+    default_ttl_hours: int = 2
     cost_estimate_hourly: Decimal = Decimal("0.4200")
     provision_step_delay_seconds: float = 0.0
 
     # Preview governance (Launch / Environments)
-    max_concurrent_environments: int = 4
+    # Free tier: max 6 running environments per project per user.
+    # Pro tier: unlimited.
+    max_concurrent_environments: int = 6
     preview_soft_cost_cap: Decimal = Decimal("25.00")
-    ttl_extend_hours_default: int = 8
+    ttl_extend_hours_default: int = 1
     ttl_warning_hours: int = 2
-    ttl_max_total_hours_from_create: int = 168
+    # Total TTL hard cap from create (TTL extension cannot push past this).
+    ttl_max_total_hours_from_create: int = 2
 
     # Usage-based cost metering (ResourceQuota / pod requests × rate card)
     cost_metering_enabled: bool = True

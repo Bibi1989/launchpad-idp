@@ -101,6 +101,7 @@ async def test_enqueue_provision_creates_environment(
         service = EnvironmentService(session)
         with patch("app.services.environment.enqueue_provision_environment") as enqueue:
             enqueue.return_value = "celery-task-id"
+            now = datetime.now(UTC)
             result = await service.enqueue_provision(
                 EnvironmentCreate(
                     name="demo-env",
@@ -120,6 +121,15 @@ async def test_enqueue_provision_creates_environment(
         assert result.namespace_name == f"launchpad-env-{result.id}"
         assert result.status == EnvironmentStatus.PROVISIONING
         assert result.cost_estimate_hourly == Decimal("0.4200")
+        # Max TTL policy: clamp to 2 hours.
+        expires = result.ttl_expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        base = now
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=UTC)
+        ttl_delta_hours = (expires - base).total_seconds() / 3600
+        assert 1.8 <= ttl_delta_hours <= 2.2
 
 
 @pytest.mark.asyncio
@@ -820,6 +830,49 @@ async def test_resume_blocked_when_ttl_expired(
 
 
 @pytest.mark.asyncio
+async def test_relaunch_environment_allows_when_ttl_expired(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    async with session_factory() as session:
+        from app.services.orgs import OrganizationService
+        from app.services.projects import ProjectService
+
+        org = await OrganizationService(session).ensure_personal_org(test_user)
+        default_project = await ProjectService(session, get_settings()).ensure_default_project(
+            org=org,
+            actor=test_user,
+        )
+
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            org_id=org.id,
+            project_id=default_project.id,
+            name="relaunch-expired",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-relaunch-expired",
+            ttl_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            cost_estimate_hourly=Decimal("0.42"),
+        )
+        await repo.update_status(environment, EnvironmentStatus.EXPIRED)
+        await session.commit()
+
+        service = EnvironmentService(session)
+        with patch("app.services.environment.enqueue_provision_environment") as enqueue:
+            enqueue.return_value = "celery-task-id"
+            env_read = await service.relaunch_environment(
+                environment.id,
+                owner=test_user,
+                correlation_id="corr-relaunch",
+            )
+
+        assert env_read.status == EnvironmentStatus.PROVISIONING
+        assert enqueue.called
+
+
+@pytest.mark.asyncio
 async def test_create_environment_accepts_ttl_minutes(
     client: AsyncClient,
     test_user: User,
@@ -849,8 +902,16 @@ async def test_auto_pause_oldest_when_exceeding_max_concurrent_limit(
     session_factory: async_sessionmaker[AsyncSession],
     test_user: User,
 ) -> None:
-    limit = get_settings().max_concurrent_environments
     async with session_factory() as session:
+        # Free tier: cap applies per project, so seed a personal org + default project
+        # and create running envs attached to that project.
+        from app.services.orgs import OrganizationService
+        from app.services.projects import ProjectService
+
+        org = await OrganizationService(session).ensure_personal_org(test_user)
+        default_project = await ProjectService(session, get_settings()).ensure_default_project(org=org, actor=test_user)
+
+        limit = 6
         repo = EnvironmentRepository(session)
         created_envs = []
         for i in range(limit):
@@ -862,6 +923,8 @@ async def test_auto_pause_oldest_when_exceeding_max_concurrent_limit(
                 namespace_name=f"launchpad-env-{i+1}",
                 ttl_expires_at=datetime.now(UTC) + timedelta(hours=24),
                 cost_estimate_hourly=Decimal("0.10"),
+                project_id=default_project.id,
+                org_id=org.id,
             )
             await repo.update_status(env, EnvironmentStatus.RUNNING)
             created_envs.append(env)

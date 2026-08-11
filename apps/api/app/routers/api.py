@@ -466,6 +466,26 @@ async def resume_environment(
 
 
 @router.post(
+    "/environments/{environment_id}/relaunch",
+    response_model=EnvironmentRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def relaunch_environment(
+    environment_id: UUID,
+    request: Request,
+    user: CurrentUser,
+    service: EnvironmentService = Depends(get_environment_service),
+) -> EnvironmentRead:
+    """Relaunch a ttl-expired environment without requiring a new name."""
+    correlation_id = getattr(request.state, "correlation_id", "unknown")
+    return await service.relaunch_environment(
+        environment_id,
+        owner=user,
+        correlation_id=correlation_id,
+    )
+
+
+@router.post(
     "/environments/{environment_id}/promote",
     response_model=EnvironmentRead,
     status_code=status.HTTP_202_ACCEPTED,

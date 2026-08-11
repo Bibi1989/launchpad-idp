@@ -542,7 +542,12 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
     workspace_id: UUID | None = None
 
     try:
-        async with acquire_state_lock(env_uuid, scope="environment", settings=settings):
+        async with acquire_state_lock(
+            env_uuid,
+            scope="environment",
+            settings=settings,
+            timeout_seconds=getattr(settings, "teardown_state_lock_timeout_seconds", None),
+        ):
             async with session_factory() as session:
                 env_repo = EnvironmentRepository(session)
                 log_repo = DeploymentLogRepository(session)
@@ -2185,8 +2190,9 @@ async def pause_expired_environment(
 STALE_PROVISIONING_SECONDS = 600
 # TEARDOWN_PENDING with no active lock older than this is re-queued (worker/beat
 # restarts drop in-flight Celery tasks and leave environments "tearing down").
-# Above the teardown hard time_limit (180s) so an active run is not double-queued.
-STALE_TEARDOWN_SECONDS = 240
+# Keep comfortably above Celery teardown time_limit, while still reducing the
+# long "stuck for hours until worker restart" window.
+STALE_TEARDOWN_SECONDS = 120
 
 
 async def _reap_stale_provisioning(session, env_repo, *, now: datetime) -> list[tuple]:

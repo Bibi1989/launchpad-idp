@@ -95,6 +95,16 @@ async def stripe_webhook(
     service = BillingService(session, settings)
     # stripe Event may be a dict-like object
     event_dict = event if isinstance(event, dict) else dict(event)
-    await service.handle_webhook_event(event_dict)
-    await session.commit()
+    try:
+        await service.handle_webhook_event(event_dict)
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 - do not let webhook retries hide errors
+        logger.exception(
+            "stripe_webhook_event_failed",
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "stripe_webhook_event_failed", "message": "Webhook handling failed"},
+        ) from exc
     return {"status": "ok"}

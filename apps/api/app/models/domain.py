@@ -462,6 +462,7 @@ class Environment(Base):
         Index("ix_environments_name", "name"),
         Index("ix_environments_owner_id", "owner_id"),
         Index("ix_environments_org_id", "org_id"),
+        Index("ix_environments_project_id", "project_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -473,6 +474,11 @@ class Environment(Base):
     org_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("projects.id", ondelete="SET NULL"),
         nullable=True,
     )
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(
