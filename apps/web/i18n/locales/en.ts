@@ -1018,6 +1018,21 @@ export default {
     "stepProgress": "STEP {current}/{total}",
     "workspaceSelectBlurb": "Create a new stack, or reopen an existing one with its previous settings filled in.",
     "loadingWorkspaceConfig": "Loading workspace settings…",
+    "promote": {
+      "enable": "Promote this workspace into a new environment",
+      "target": "Promotion target",
+      "staging": "Staging",
+      "prod": "Production",
+      "name": "Promoted workspace name"
+    },
+    "cost": {
+      "label": "Live cost estimate before generate",
+      "hourly": "Estimated hourly",
+      "monthly": "Estimated monthly",
+      "breakdown": "Estimated breakdown",
+      "refreshing": "Refreshing estimate…",
+      "estimateFailed": "Could not refresh estimate right now."
+    },
     "iacEngineLocalHint": "Local Kubernetes scaffolds manifests only - switch to a cloud provider for Terraform, OpenTofu, or Pulumi.",
     "iacEngineLocalRuntimeHint": "Local Compose and running-instance workspaces scaffold Terraform, OpenTofu, or Pulumi stubs plus optional CI/CD. Promote to a cloud provider for managed modules.",
     "editingExisting": "Editing",
@@ -1180,6 +1195,7 @@ export default {
       "gcpProjectRequired": "GCP Project ID is required.",
       "azureResourceGroupRequired": "Azure resource group is required.",
       "cloudflareAccountRequired": "Cloudflare account ID is required.",
+      "promotedNameInvalid": "Promoted workspace name must use lowercase letters, numbers, and hyphens.",
       "invalidForm": "Invalid form",
       "invalidGithubForm": "Invalid GitHub form",
       "timeoutCreated": "Workspace was created, but a later step timed out. Click Generate again to finish - a duplicate will not be created.",

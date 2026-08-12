@@ -280,6 +280,32 @@ export interface WorkspaceWizardConfig {
   credential_label?: string | null
 }
 
+export type WorkspacePromotionTarget = 'staging' | 'prod'
+
+export interface WorkspacePromoteInput {
+  target_environment: WorkspacePromotionTarget
+  promoted_name?: string | null
+  project_id?: string | null
+  run_init?: boolean | null
+}
+
+export interface ProvisionCostEstimateLineItem {
+  id: string
+  label: string
+  hourly_usd: number
+  monthly_usd: number
+  note?: string | null
+}
+
+export interface ProvisioningCostEstimate {
+  currency: string
+  provider: CloudProvider
+  hourly_usd: number
+  monthly_usd: number
+  breakdown: ProvisionCostEstimateLineItem[]
+  assumptions: string[]
+}
+
 export interface GcpApiEnablementResult {
   project_id: string
   required: string[]

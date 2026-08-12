@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from app.schemas.cloud import (
     CloudflareResources,
     CloudCredentials,
     CloudProvider,
+    CostEstimateLineItem,
     GcpCloudConfig,
     GcpResources,
     GitHubRepoRequest,
@@ -39,6 +41,7 @@ from app.schemas.cloud import (
     LocalCloudConfig,
     LocalResources,
     ProvisioningWizardRequest,
+    ProvisioningCostEstimate,
     WorkspaceFileContent,
     WorkspaceFileNode,
     WorkspaceFormatResponse,
@@ -46,6 +49,8 @@ from app.schemas.cloud import (
     WorkspacePushRequest,
     WorkspaceTemplateApplyRequest,
     WorkspaceTemplateInfo,
+    WorkspacePromotionTarget,
+    WorkspacePromoteRequest,
     WorkspaceWizardConfig,
     WorkspaceArtifactsMode,
     WorkspaceRuntimeMode,
@@ -63,6 +68,33 @@ from app.services.state_lock import (
 from app.services.workspace_templates import get_template, list_templates
 
 logger = get_logger(__name__)
+
+_DEFAULT_MONTH_HOURS = Decimal("730")
+_DEFAULT_GCP_COMPUTE_HOURLY = Decimal("0.19")
+_DEFAULT_AWS_COMPUTE_HOURLY = Decimal("0.21")
+_DEFAULT_AZURE_COMPUTE_HOURLY = Decimal("0.23")
+_DEFAULT_CLOUDFLARE_SERVICE_HOURLY = Decimal("0.03")
+
+_GCP_MACHINE_RATES: dict[str, Decimal] = {
+    "e2-small": Decimal("0.03"),
+    "e2-medium": Decimal("0.04"),
+    "e2-standard-2": Decimal("0.09"),
+    "e2-standard-4": Decimal("0.19"),
+    "n2-standard-2": Decimal("0.13"),
+    "n2-standard-4": Decimal("0.26"),
+}
+_AWS_INSTANCE_RATES: dict[str, Decimal] = {
+    "t3.micro": Decimal("0.0104"),
+    "t3.small": Decimal("0.0208"),
+    "t3.medium": Decimal("0.0416"),
+    "t3.large": Decimal("0.0832"),
+    "m5.large": Decimal("0.096"),
+}
+_AZURE_VM_RATES: dict[str, Decimal] = {
+    "Standard_B2s": Decimal("0.0464"),
+    "Standard_D2_v2": Decimal("0.096"),
+    "Standard_D4_v3": Decimal("0.192"),
+}
 
 
 class ProvisioningService:
@@ -458,6 +490,228 @@ class ProvisioningService:
             has_credentials=has_credentials,
             credential_label=credential_label,
         )
+
+    async def promote_workspace(
+        self,
+        source_workspace_id: UUID,
+        payload: WorkspacePromoteRequest,
+        *,
+        owner: User,
+        org_id: UUID,
+    ) -> IaCBundleSummary:
+        source = await self.get_workspace_for_owner(source_workspace_id, owner)
+        config = await self.get_wizard_config(source_workspace_id, owner)
+        target_suffix = payload.target_environment.value
+        promoted_name = payload.promoted_name or self._promoted_name(config.name, target_suffix)
+
+        credentials = CloudCredentials()
+        if source.encrypted_credentials:
+            try:
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(source.encrypted_credentials)
+                )
+            except Exception:
+                logger.warning(
+                    "workspace_promotion_credentials_unreadable",
+                    workspace_id=str(source_workspace_id),
+                )
+
+        promoted_request = ProvisioningWizardRequest(
+            name=promoted_name,
+            iac_engine=config.iac_engine,
+            cloud=config.cloud,
+            credentials=credentials,
+            run_init=config.run_init if payload.run_init is None else payload.run_init,
+            runtime_mode=config.runtime_mode,
+            running_instance=config.running_instance,
+            artifact_mode=config.artifact_mode,
+            kubernetes_packaging=config.kubernetes_packaging,
+            kubernetes_options=config.kubernetes_options,
+            cost_optimization=config.cost_optimization,
+            container_scaffold=config.container_scaffold,
+            dependencies=config.dependencies,
+            ansible=config.ansible,
+        )
+        return await self.generate_bundle(
+            promoted_request,
+            owner=owner,
+            org_id=org_id,
+            project_id=payload.project_id,
+        )
+
+    @staticmethod
+    def _promoted_name(base_name: str, suffix: str) -> str:
+        normalized = base_name.strip().lower()
+        if normalized.endswith(f"-{suffix}"):
+            return normalized
+        return f"{normalized}-{suffix}"
+
+    def estimate_workspace_cost(
+        self,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        cloud = request.cloud
+        if isinstance(cloud, LocalCloudConfig):
+            return ProvisioningCostEstimate(
+                provider=CloudProvider.LOCAL,
+                hourly_usd=0.0,
+                monthly_usd=0.0,
+                assumptions=["Local provider uses operator-managed compute, no cloud bill estimate."],
+            )
+
+        if isinstance(cloud, GcpCloudConfig):
+            return self._estimate_gcp(cloud.resources, request)
+        if isinstance(cloud, AwsCloudConfig):
+            return self._estimate_aws(cloud.resources, request)
+        if isinstance(cloud, AzureCloudConfig):
+            return self._estimate_azure(cloud.resources, request)
+        if isinstance(cloud, CloudflareCloudConfig):
+            return self._estimate_cloudflare(cloud.resources, request)
+        return ProvisioningCostEstimate(
+            provider=cloud.provider,
+            hourly_usd=0.0,
+            monthly_usd=0.0,
+        )
+
+    def _monthly_hours(self) -> Decimal:
+        from app.core.config import get_settings
+
+        value = getattr(get_settings(), "cost_hours_per_month", None)
+        if isinstance(value, (int, float, Decimal)) and Decimal(value) > 0:
+            return Decimal(str(value))
+        return _DEFAULT_MONTH_HOURS
+
+    def _finalize_cost(
+        self,
+        provider: CloudProvider,
+        breakdown: list[tuple[str, str, Decimal, str | None]],
+        assumptions: list[str],
+    ) -> ProvisioningCostEstimate:
+        month_hours = self._monthly_hours()
+        line_items: list[CostEstimateLineItem] = []
+        hourly = Decimal("0")
+        for item_id, label, line_hourly, note in breakdown:
+            clamped = max(line_hourly, Decimal("0"))
+            line_items.append(
+                CostEstimateLineItem(
+                    id=item_id,
+                    label=label,
+                    hourly_usd=float(clamped.quantize(Decimal("0.0001"))),
+                    monthly_usd=float((clamped * month_hours).quantize(Decimal("0.01"))),
+                    note=note,
+                )
+            )
+            hourly += clamped
+        monthly = hourly * month_hours
+        return ProvisioningCostEstimate(
+            provider=provider,
+            hourly_usd=float(hourly.quantize(Decimal("0.0001"))),
+            monthly_usd=float(monthly.quantize(Decimal("0.01"))),
+            breakdown=line_items,
+            assumptions=assumptions,
+        )
+
+    def _compute_discount_factor(self, request: ProvisioningWizardRequest) -> Decimal:
+        cost = request.cost_optimization
+        if not cost.spot_scheduling.enabled:
+            return Decimal("1")
+        allocation = Decimal(str(cost.spot_scheduling.allocation_percent)) / Decimal("100")
+        # Approximate blended discount: up to 60% savings on spot share.
+        discount = allocation * Decimal("0.6")
+        return max(Decimal("0.2"), Decimal("1") - discount)
+
+    def _estimate_gcp(
+        self,
+        resources: GcpResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        discount = self._compute_discount_factor(request)
+        compute_rate = _GCP_MACHINE_RATES.get(resources.machine_type, _DEFAULT_GCP_COMPUTE_HOURLY)
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Rates are directional estimates, check provider calculator before production."]
+
+        if resources.gke or resources.cloud_run or resources.cloud_functions:
+            breakdown.append(
+                ("compute", f"Compute ({resources.machine_type})", compute_rate * discount, None)
+            )
+        if resources.cloud_sql:
+            breakdown.append(("cloud_sql", "Cloud SQL", Decimal("0.11"), None))
+        if resources.memorystore:
+            mem_rate = Decimal("0.05") if resources.memorystore_engine.value == "redis" else Decimal("0.04")
+            breakdown.append(("memorystore", "Memorystore", mem_rate, None))
+        if resources.artifact_registry:
+            breakdown.append(("artifact_registry", "Artifact Registry", Decimal("0.01"), None))
+        if resources.bigquery:
+            breakdown.append(("bigquery", "BigQuery baseline", Decimal("0.02"), "Storage and query volume varies"))
+        if resources.pubsub:
+            breakdown.append(("pubsub", "Pub/Sub baseline", Decimal("0.01"), "Traffic-dependent"))
+        return self._finalize_cost(CloudProvider.GCP, breakdown, assumptions)
+
+    def _estimate_aws(
+        self,
+        resources: AwsResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        discount = self._compute_discount_factor(request)
+        compute_rate = _AWS_INSTANCE_RATES.get(resources.instance_type, _DEFAULT_AWS_COMPUTE_HOURLY)
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Rates are directional estimates, check provider calculator before production."]
+
+        if resources.ec2 or resources.eks or resources.app_runner or resources.lambda_fn:
+            breakdown.append(
+                ("compute", f"Compute ({resources.instance_type})", compute_rate * discount, None)
+            )
+        if resources.rds:
+            breakdown.append(("rds", "RDS", Decimal("0.12"), None))
+        if resources.elasticache:
+            cache_rate = Decimal("0.06") if resources.elasticache_engine.value == "redis" else Decimal("0.05")
+            breakdown.append(("elasticache", "ElastiCache", cache_rate, None))
+        if resources.alb:
+            breakdown.append(("network", "NAT/ALB baseline", Decimal("0.05"), "Data transfer excluded"))
+        if resources.ecr:
+            breakdown.append(("ecr", "ECR baseline", Decimal("0.01"), None))
+        return self._finalize_cost(CloudProvider.AWS, breakdown, assumptions)
+
+    def _estimate_azure(
+        self,
+        resources: AzureResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        discount = self._compute_discount_factor(request)
+        compute_rate = _AZURE_VM_RATES.get(resources.vm_size, _DEFAULT_AZURE_COMPUTE_HOURLY)
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Rates are directional estimates, check provider calculator before production."]
+
+        if resources.aks or resources.container_apps or resources.app_service:
+            breakdown.append(("compute", f"Compute ({resources.vm_size})", compute_rate * discount, None))
+        if resources.cosmos_db:
+            breakdown.append(("cosmos_db", "Cosmos DB", Decimal("0.12"), "Provisioned RU profile"))
+        if resources.redis_cache:
+            breakdown.append(("redis", "Azure Cache for Redis", Decimal("0.06"), None))
+        if resources.log_analytics:
+            breakdown.append(("logs", "Log Analytics baseline", Decimal("0.02"), "Ingestion-dependent"))
+        return self._finalize_cost(CloudProvider.AZURE, breakdown, assumptions)
+
+    def _estimate_cloudflare(
+        self,
+        resources: CloudflareResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        _ = request
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Cloudflare bills are often request-volume based, estimates are baseline only."]
+        for key, enabled, label in (
+            ("workers", resources.workers, "Workers"),
+            ("r2", resources.r2, "R2"),
+            ("pages", resources.pages, "Pages"),
+            ("d1", resources.d1, "D1"),
+            ("queues", resources.queues, "Queues"),
+            ("kv", resources.kv, "KV"),
+            ("tunnels", resources.tunnels, "Tunnel"),
+        ):
+            if enabled:
+                breakdown.append((key, label, _DEFAULT_CLOUDFLARE_SERVICE_HOURLY, "Usage-dependent"))
+        return self._finalize_cost(CloudProvider.CLOUDFLARE, breakdown, assumptions)
 
     async def enable_required_cloud_apis(
         self,

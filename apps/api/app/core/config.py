@@ -38,9 +38,10 @@ class Settings(BaseSettings):
     provision_step_delay_seconds: float = 0.0
 
     # Preview governance (Launch / Environments)
-    # Free tier: max 6 running environments per project per user.
-    # Pro tier: unlimited.
+    # Free tier: max running environments per project per user.
+    # Pro tier: unlimited unless max_concurrent_environments_pro is set.
     max_concurrent_environments: int = 6
+    max_concurrent_environments_pro: int | None = None
     preview_soft_cost_cap: Decimal = Decimal("25.00")
     ttl_extend_hours_default: int = 1
     ttl_warning_hours: int = 2
@@ -456,6 +457,15 @@ class Settings(BaseSettings):
                         self.preview_node_host = "127.0.0.1"
                 except Exception:
                     self.preview_node_host = "127.0.0.1"
+        return self
+
+    @model_validator(mode="after")
+    def _validate_production_preview_ingress(self) -> "Settings":
+        production_like = self.use_cloudflare_tunnel or self.environment.strip().lower() == "production"
+        if production_like and not (self.preview_base_domain or "").strip():
+            raise ValueError(
+                "PREVIEW_BASE_DOMAIN is required when USE_CLOUDFLARE_TUNNEL=true or ENVIRONMENT=production"
+            )
         return self
 
     @property

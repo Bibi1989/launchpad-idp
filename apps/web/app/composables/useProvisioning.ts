@@ -16,9 +16,11 @@ import type {
   WorkspaceFileNode,
   WorkspaceListItem,
   WorkspacePushRequest,
+  WorkspacePromoteInput,
   WorkspaceTemplateInfo,
   WorkspaceWizardConfig,
   GcpApiEnablementResult,
+  ProvisioningCostEstimate,
 } from '~/types/provisioning'
 import type { GitHubRepoInput, ProvisioningWizardInput } from '~/utils/cloudValidation'
 import { costOptimizationToApi } from '~/utils/costOptimization'
@@ -124,6 +126,45 @@ export function useProvisioning() {
 
   async function getWizardConfig(workspaceId: string): Promise<WorkspaceWizardConfig> {
     return apiFetch<WorkspaceWizardConfig>(`/provisioning/workspaces/${workspaceId}/config`)
+  }
+
+  async function promoteWorkspace(
+    workspaceId: string,
+    input: WorkspacePromoteInput,
+  ): Promise<IaCBundleSummary> {
+    return apiFetch<IaCBundleSummary>(`/provisioning/workspaces/${workspaceId}/promote`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+      timeoutMs: PROVISION_TIMEOUT_MS,
+    })
+  }
+
+  async function estimateProvisioningCost(
+    input: ProvisioningWizardInput,
+  ): Promise<ProvisioningCostEstimate> {
+    const payload = {
+      name: input.name,
+      iac_engine: input.iac_engine,
+      run_init: input.run_init,
+      runtime_mode: input.runtime_mode,
+      running_instance: input.running_instance,
+      artifact_mode: input.artifact_mode,
+      kubernetes_packaging: input.kubernetes_packaging,
+      kubernetes_options: input.kubernetes_options,
+      cost_optimization: costOptimizationToApi(input.cost_optimization),
+      container_scaffold: input.container_scaffold,
+      dependencies: input.dependencies,
+      cloud: {
+        provider: input.provider,
+        resources: input.resources,
+      },
+      credentials: input.credentials,
+    }
+    return apiFetch<ProvisioningCostEstimate>('/provisioning/estimate-cost', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    })
   }
 
   async function enableCloudApis(workspaceId: string): Promise<GcpApiEnablementResult> {
@@ -394,6 +435,8 @@ export function useProvisioning() {
     getWorkspace,
     listAudits,
     getWizardConfig,
+    promoteWorkspace,
+    estimateProvisioningCost,
     enableCloudApis,
     destroyWorkspace,
     openTerminal,

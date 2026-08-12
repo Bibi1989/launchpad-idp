@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -57,6 +57,94 @@ async def client(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIter
 
 def auth_header(user: User) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_access_token(user_id=user.id, email=user.email)}"}
+
+
+@pytest.mark.asyncio
+async def test_promote_workspace_creates_new_bundle_from_snapshot(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+    tmp_path: Path,
+) -> None:
+    from app.schemas.cloud import IaCBundleSummary
+    from app.services.orgs import OrganizationService
+
+    source_id = uuid4()
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+
+    async with session_factory() as session:
+        personal = await OrganizationService(session).ensure_personal_org(test_user)
+        session.add(
+            ProvisioningWorkspace(
+                id=source_id,
+                owner_id=test_user.id,
+                org_id=personal.id,
+                name="dev-stack",
+                engine="terraform",
+                provider="gcp",
+                root_dir=str(source_root),
+                status="ready",
+                wizard_config_json=(
+                    '{"name":"dev-stack","iac_engine":"terraform",'
+                    '"cloud":{"provider":"gcp","resources":{"project_id":"my-proj"}}}'
+                ),
+            )
+        )
+        await session.commit()
+
+    promoted = IaCBundleSummary(
+        workspace_id=str(uuid4()),
+        engine="terraform",
+        provider="gcp",
+        root_dir=str(tmp_path / "promoted"),
+        files=["infra/terraform/main.tf"],
+    )
+    mocked_generate = AsyncMock(return_value=promoted)
+    with patch(
+        "app.services.provisioning.ProvisioningService.generate_bundle",
+        mocked_generate,
+    ):
+        res = await client.post(
+            f"/api/v1/provisioning/workspaces/{source_id}/promote",
+            headers=auth_header(test_user),
+            json={"target_environment": "staging"},
+        )
+    assert res.status_code == 201
+    assert res.json()["workspace_id"] == promoted.workspace_id
+    assert mocked_generate.await_count == 1
+    promoted_request = mocked_generate.await_args.args[0]
+    assert promoted_request.name == "dev-stack-staging"
+
+
+@pytest.mark.asyncio
+async def test_estimate_cost_endpoint_returns_estimate(
+    client: AsyncClient,
+    test_user: User,
+) -> None:
+    res = await client.post(
+        "/api/v1/provisioning/estimate-cost",
+        headers=auth_header(test_user),
+        json={
+            "name": "cost-demo",
+            "iac_engine": "terraform",
+            "cloud": {
+                "provider": "gcp",
+                "resources": {
+                    "project_id": "my-proj",
+                    "region": "us-central1",
+                    "gke": True,
+                    "cloud_sql": True,
+                },
+            },
+            "credentials": {},
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["provider"] == "gcp"
+    assert body["hourly_usd"] > 0
+    assert body["monthly_usd"] > 0
 
 
 @pytest.mark.asyncio

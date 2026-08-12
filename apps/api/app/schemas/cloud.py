@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Literal
@@ -955,6 +956,49 @@ class WorkspaceWizardConfig(BaseModel):
     has_credentials: bool = False
     """Safe display name for the stored cloud key (never the secret itself)."""
     credential_label: str | None = None
+
+
+class WorkspacePromotionTarget(str, Enum):
+    STAGING = "staging"
+    PROD = "prod"
+
+
+class WorkspacePromoteRequest(BaseModel):
+    target_environment: WorkspacePromotionTarget
+    promoted_name: str | None = Field(default=None, min_length=3, max_length=128)
+    project_id: UUID | None = None
+    run_init: bool | None = None
+
+    @field_validator("promoted_name")
+    @classmethod
+    def normalize_promoted_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return None
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", cleaned):
+            raise ValueError(
+                "promoted_name must match ^[a-z][a-z0-9-]*$"
+            )
+        return cleaned
+
+
+class CostEstimateLineItem(BaseModel):
+    id: str
+    label: str
+    hourly_usd: float = Field(default=0.0, ge=0)
+    monthly_usd: float = Field(default=0.0, ge=0)
+    note: str | None = None
+
+
+class ProvisioningCostEstimate(BaseModel):
+    currency: str = "USD"
+    provider: CloudProvider
+    hourly_usd: float = Field(default=0.0, ge=0)
+    monthly_usd: float = Field(default=0.0, ge=0)
+    breakdown: list[CostEstimateLineItem] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
 
 
 class GcpApiEnablementResponse(BaseModel):

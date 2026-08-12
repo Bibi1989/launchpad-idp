@@ -1026,6 +1026,21 @@ export default {
     "stepProgress": "SCHRITT {current}/{total}",
     "workspaceSelectBlurb": "Neuen Stack erstellen oder bestehenden mit vorherigen Einstellungen wieder öffnen.",
     "loadingWorkspaceConfig": "Workspace-Einstellungen werden geladen…",
+    "promote": {
+      "enable": "Diesen Workspace als neue Umgebung promoten",
+      "target": "Promotion-Ziel",
+      "staging": "Staging",
+      "prod": "Produktion",
+      "name": "Name des promoteten Workspace"
+    },
+    "cost": {
+      "label": "Live-Kostenschätzung vor dem Erzeugen",
+      "hourly": "Geschätzt pro Stunde",
+      "monthly": "Geschätzt pro Monat",
+      "breakdown": "Geschätzte Aufschlüsselung",
+      "refreshing": "Schätzung wird aktualisiert…",
+      "estimateFailed": "Schätzung konnte gerade nicht aktualisiert werden."
+    },
     "iacEngineLocalHint": "Lokales Kubernetes scaffoldet nur Manifeste - zu Cloud-Anbieter wechseln für Terraform, OpenTofu oder Pulumi.",
     "iacEngineLocalRuntimeHint": "Lokale Compose- und Running-Instance-Workspaces scaffolden Terraform-, OpenTofu- oder Pulumi-Stubs plus optionales CI/CD. Für Managed Modules zu einem Cloud-Anbieter wechseln.",
     "editingExisting": "Bearbeiten",
@@ -1188,6 +1203,7 @@ export default {
       "gcpProjectRequired": "GCP-Projekt-ID ist erforderlich.",
       "azureResourceGroupRequired": "Azure-Ressourcengruppe ist erforderlich.",
       "cloudflareAccountRequired": "Cloudflare-Account-ID ist erforderlich.",
+      "promotedNameInvalid": "Name des promoteten Workspace darf nur Kleinbuchstaben, Zahlen und Bindestriche enthalten.",
       "invalidForm": "Ungültiges Formular",
       "invalidGithubForm": "Ungültiges GitHub-Formular",
       "timeoutCreated": "Workspace wurde erstellt, aber ein späterer Schritt ist abgelaufen. Erneut Erzeugen klicken zum Abschließen - kein Duplikat wird erstellt.",

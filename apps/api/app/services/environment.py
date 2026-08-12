@@ -123,6 +123,11 @@ class EnvironmentService:
         self._environments = EnvironmentRepository(session)
         self._logs = DeploymentLogRepository(session)
 
+    def _plan_concurrency_cap(self, plan: OrgPlan) -> int | None:
+        if plan == OrgPlan.FREE:
+            return self._settings.max_concurrent_environments
+        return self._settings.max_concurrent_environments_pro
+
     async def _pause_expired_rows(self, rows: list) -> None:
         """Mark past-TTL environments EXPIRED (eager, no Celery required)."""
         from app.workers.tasks import pause_expired_environment
@@ -460,7 +465,7 @@ class EnvironmentService:
                     detail={"code": "org_not_found", "message": "Organization not found"},
                 )
 
-        cap: int | None = 6 if org.plan == OrgPlan.FREE else None
+        cap = self._plan_concurrency_cap(org.plan)
 
         reuse_row = None
         if existing is not None:
@@ -1171,10 +1176,11 @@ class EnvironmentService:
         cap: int | None = None
         if environment.org_id is not None:
             org_row = await self._session.get(Organization, environment.org_id)
-            if org_row is not None and org_row.plan == OrgPlan.FREE:
-                cap = 6
+            if org_row is not None:
+                cap = self._plan_concurrency_cap(org_row.plan)
         if cap is None and environment.org_id is None:
-            cap = 6 if (await OrganizationService(self._session).ensure_personal_org(owner)).plan == OrgPlan.FREE else None
+            org = await OrganizationService(self._session).ensure_personal_org(owner)
+            cap = self._plan_concurrency_cap(org.plan)
         await self._auto_pause_if_needed(owner, project_id=environment.project_id, cap=cap, exclude_id=environment.id)
 
         deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
@@ -1286,11 +1292,11 @@ class EnvironmentService:
         cap: int | None = None
         if environment.org_id is not None:
             org_row = await self._session.get(Organization, environment.org_id)
-            if org_row is not None and org_row.plan == OrgPlan.FREE:
-                cap = 6
+            if org_row is not None:
+                cap = self._plan_concurrency_cap(org_row.plan)
         if cap is None and environment.org_id is None:
             org = await OrganizationService(self._session).ensure_personal_org(owner)
-            cap = 6 if org.plan == OrgPlan.FREE else None
+            cap = self._plan_concurrency_cap(org.plan)
 
         await self._auto_pause_if_needed(
             owner,
@@ -1367,7 +1373,7 @@ class EnvironmentService:
                 environment_id=oldest.id,
                 log_level=LogLevel.WARN,
                 stage=ExecutionStage.APPLY,
-                message=f"Environment auto-paused to enforce free-tier max active limit of {cap} per project.",
+                message=f"Environment auto-paused to enforce plan max active limit of {cap} per project.",
             )
             logger.info("environment_auto_paused", environment_id=str(oldest.id), cap=cap)
 
