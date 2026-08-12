@@ -126,21 +126,24 @@ class ProvisioningService:
         from app.services.projects import ProjectService
 
         orgs = OrganizationService(self._session)
-        if org_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "needs_org_setup",
-                    "message": "Create an organization before provisioning workspaces",
-                },
-            )
         resolved_org_id = org_id
-        org = await self._session.get(Organization, resolved_org_id)
-        if org is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"code": "org_not_found", "message": "Organization not found"},
+        org: Organization | None = None
+        if resolved_org_id is None:
+            org = await orgs.ensure_personal_org(owner)
+            resolved_org_id = org.id
+            await self._session.commit()
+            logger.warning(
+                "provisioning_org_context_missing_autofixed",
+                owner_id=str(owner.id),
+                resolved_org_id=str(resolved_org_id),
             )
+        if org is None:
+            org = await self._session.get(Organization, resolved_org_id)
+            if org is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "org_not_found", "message": "Organization not found"},
+                )
         await assert_can_create_workspace(self._session, org)
         org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
         project = await ProjectService(self._session).resolve_project_for_workspace(
