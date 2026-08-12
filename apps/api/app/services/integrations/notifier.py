@@ -47,7 +47,7 @@ class IntegrationNotifier:
             logger.warning(
                 "integration_notify_failed",
                 environment_id=str(environment_id),
-                event=event,
+                slack_event=event,
                 error=str(exc),
             )
 

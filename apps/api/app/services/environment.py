@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -321,7 +322,7 @@ class EnvironmentService:
         template = None
         workload_image = (self._settings.default_workload_image or "").strip() or None
         if payload.workspace_id is not None:
-            git_repo_url, git_branch = self._workspace_git_source(payload.workspace_id)
+            git_repo_url, git_branch = await self._workspace_git_source(payload.workspace_id)
             template_id = None
             default_ttl = self._settings.default_ttl_hours
             cost_from_template = None
@@ -390,6 +391,14 @@ class EnvironmentService:
             workspace = await provisioning.get_workspace_for_owner(payload.workspace_id, owner)
             workspace_id = payload.workspace_id
             if not workspace.encrypted_credentials:
+                payload = payload.model_copy(
+                    update={
+                        "credentials": await provisioning.fill_cloud_credentials_from_account_vault(
+                            payload.credentials,
+                            owner,
+                        )
+                    }
+                )
                 self._require_inline_cloud_credentials(payload)
             if cost_from_template is not None:
                 cost_override = cost_from_template
@@ -775,6 +784,8 @@ class EnvironmentService:
                 ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
+                workspace_id=source.workspace_id,
+                deploy_mode=source.deploy_mode,
             )
         else:
             launch = PreviewLaunchRequest(
@@ -787,6 +798,8 @@ class EnvironmentService:
                 ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
+                workspace_id=source.workspace_id,
+                deploy_mode=source.deploy_mode,
             )
         result = await self.launch_preview(
             launch,
@@ -1556,8 +1569,42 @@ class EnvironmentService:
             return DeployMode.MANIFEST, packaging.value
         return DeployMode.PREVIEW, packaging.value if packaging else None
 
-    def _workspace_git_source(self, workspace_id: UUID) -> tuple[str, str]:
-        return f"https://launchpad.local/workspaces/{workspace_id}", "main"
+    async def _workspace_git_source(self, workspace_id: UUID) -> tuple[str, str]:
+        """Resolve upstream repo+branch for workspace-linked previews.
+
+        GitOps rebuild matching (webhooks) relies on Environment.git_repo_url and
+        Environment.git_branch. For repo_import workspaces, those values are stored
+        in the workspace's `wizard_config_json`, so we extract them here instead of
+        hardcoding a launchpad.local URL.
+        """
+        from app.models.domain import ProvisioningWorkspace
+
+        row = await self._session.get(ProvisioningWorkspace, workspace_id)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "workspace_not_found", "message": "Workspace not found"},
+            )
+
+        try:
+            raw = row.wizard_config_json or ""
+            payload = json.loads(raw) if raw else {}
+        except Exception:
+            payload = {}
+
+        if not isinstance(payload, dict):
+            payload = {}
+
+        git_repo_url = str(payload.get("git_repo_url") or "").strip()
+        git_branch = str(payload.get("git_branch") or "").strip() or "main"
+
+        if not git_repo_url:
+            # Backward-compatible fallback: previews still deploy, but push-based
+            # webhook matching can only work when the workspace includes repo_import
+            # wizard metadata (git_repo_url/git_branch).
+            return f"https://launchpad.local/workspaces/{workspace_id}", "main"
+
+        return git_repo_url, git_branch
 
     def _require_inline_cloud_credentials(self, payload: PreviewLaunchRequest) -> None:
         from app.core.secrets import has_aws_auth, has_gcp_auth

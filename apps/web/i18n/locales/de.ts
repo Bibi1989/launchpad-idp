@@ -557,6 +557,8 @@ export default {
       "openAppWhenRunning": "App-URL verfügbar, wenn Status Running ist",
       "ttlExpiredResumeDisabled": "TTL abgelaufen - Fortsetzen ist deaktiviert",
       "promoteBlurb": "Erstellt eine neue Cloud-Preview aus derselben Vorlage/demselben Repo. Die lokale Umgebung läuft weiter, bis Sie sie zerstören.",
+      "useStoredCredentials": "Gespeicherte Credentials verwenden",
+      "useStoredCredentialsHint": "Secrets bleiben in den Einstellungen verschlüsselt. Felder leer lassen nutzt das Vault.",
       "appUrlWhenRunning": "Verfügbar bei Running - Logs unten beobachten",
       "postgres": "Postgres",
       "redis": "Redis",

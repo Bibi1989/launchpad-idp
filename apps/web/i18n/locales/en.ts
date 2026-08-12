@@ -616,6 +616,8 @@ export default {
       "openAppWhenRunning": "App URL is available when status is Running",
       "ttlExpiredResumeDisabled": "TTL expired - resume is disabled",
       "promoteBlurb": "Creates a new cloud preview from the same template/repo. Your local environment keeps running until you destroy it.",
+      "useStoredCredentials": "Use saved credentials",
+      "useStoredCredentialsHint": "Secrets remain encrypted in settings. Leaving fields blank uses the vault.",
       "appUrlWhenRunning": "Available when Running - watch logs below",
       "postgres": "Postgres",
       "redis": "Redis",

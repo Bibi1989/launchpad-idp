@@ -380,7 +380,70 @@ class PreviewLaunchRequest(BaseModel):
             return self
         if self.workspace_id is not None:
             return self
-        from app.core.secrets import validate_cloud_credentials
+        # Credentials may be left blank when the user has encrypted account
+        # credentials stored in settings. In that case provisioning will fill
+        # them server-side before sandbox / IaC materialization.
+        from app.core.secrets import (
+            has_aws_auth,
+            has_gcp_auth,
+            validate_cloud_credentials,
+        )
+
+        creds = self.credentials
+        data = creds.model_dump()
+
+        def any_non_empty(keys: list[str]) -> bool:
+            return any((data.get(key) or "").strip() for key in keys)
+
+        if self.provider == PreviewProvider.GCP:
+            if has_gcp_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "gcp_sa_key_json",
+                    "gcp_wif_project_number",
+                    "gcp_wif_pool_id",
+                    "gcp_wif_provider_id",
+                    "gcp_wif_target_sa_email",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AWS:
+            if has_aws_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "aws_access_key_id",
+                    "aws_secret_access_key",
+                    "aws_session_token",
+                    "aws_role_arn",
+                    "aws_role_session_name",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AZURE:
+            azure_ok = bool(
+                creds.azure_client_id
+                and creds.azure_client_secret
+                and creds.azure_tenant_id
+                and creds.azure_subscription_id
+            )
+            if azure_ok:
+                return self
+            if not any_non_empty(
+                [
+                    "azure_client_id",
+                    "azure_client_secret",
+                    "azure_tenant_id",
+                    "azure_subscription_id",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.CLOUDFLARE:
+            if creds.cloudflare_api_token:
+                return self
+            if not any_non_empty(["cloudflare_api_token"]):
+                return self
 
         validate_cloud_credentials(self.provider, self.credentials)
         return self
@@ -419,7 +482,70 @@ class EnvironmentPromoteRequest(BaseModel):
             raise ValueError("Provide ttl_hours or ttl_minutes, not both")
         if self.provider == PreviewProvider.LOCAL:
             raise ValueError("Promote target must be a cloud provider")
-        from app.core.secrets import validate_cloud_credentials
+        # Credentials may be left blank when the user has encrypted account
+        # credentials stored in settings. In that case we validate "empty
+        # allowed", and server-side preview launch will fill from the vault.
+        from app.core.secrets import (
+            has_aws_auth,
+            has_gcp_auth,
+            validate_cloud_credentials,
+        )
+
+        creds = self.credentials
+        data = creds.model_dump()
+
+        def any_non_empty(keys: list[str]) -> bool:
+            return any((data.get(key) or "").strip() for key in keys)
+
+        if self.provider == PreviewProvider.GCP:
+            if has_gcp_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "gcp_sa_key_json",
+                    "gcp_wif_project_number",
+                    "gcp_wif_pool_id",
+                    "gcp_wif_provider_id",
+                    "gcp_wif_target_sa_email",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AWS:
+            if has_aws_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "aws_access_key_id",
+                    "aws_secret_access_key",
+                    "aws_session_token",
+                    "aws_role_arn",
+                    "aws_role_session_name",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AZURE:
+            azure_ok = bool(
+                creds.azure_client_id
+                and creds.azure_client_secret
+                and creds.azure_tenant_id
+                and creds.azure_subscription_id
+            )
+            if azure_ok:
+                return self
+            if not any_non_empty(
+                [
+                    "azure_client_id",
+                    "azure_client_secret",
+                    "azure_tenant_id",
+                    "azure_subscription_id",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.CLOUDFLARE:
+            if creds.cloudflare_api_token:
+                return self
+            if not any_non_empty(["cloudflare_api_token"]):
+                return self
 
         validate_cloud_credentials(self.provider, self.credentials)
         return self

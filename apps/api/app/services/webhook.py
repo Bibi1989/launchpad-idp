@@ -529,3 +529,210 @@ class GitHubWebhookService:
             matched_environment_ids=matched_ids,
             message=f"Queued rebuild for {len(matched_ids)} environment(s)",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class GitLabPushEventDetails:
+    repository_full_name: str
+    branch: str
+    commit_sha: str
+    full_commit_sha: str
+
+
+class GitLabWebhookService:
+    """Process GitLab webhook events (primarily push) for GitOps rebuilds."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        settings: Settings | None = None,
+    ) -> None:
+        self._session = session
+        self._settings = settings or get_settings()
+        self._environments = EnvironmentRepository(session)
+        self._logs = DeploymentLogRepository(session)
+
+    @staticmethod
+    def verify_signature(*, body: bytes, signature_header: str | None, secret: str) -> bool:
+        _ = body
+        return bool(signature_header) and signature_header == secret
+
+    @staticmethod
+    def parse_push_event(payload: dict[str, Any]) -> GitLabPushEventDetails | None:
+        if payload.get("object_kind") != "push":
+            return None
+
+        ref = payload.get("ref")
+        if not isinstance(ref, str):
+            return None
+        branch = branch_from_git_ref(ref)
+        if branch is None:
+            return None
+
+        project = payload.get("project")
+        if not isinstance(project, dict):
+            return None
+        path_with_namespace = project.get("path_with_namespace")
+        if not isinstance(path_with_namespace, str) or not path_with_namespace.strip():
+            return None
+
+        after = payload.get("after")
+        checkout_sha = payload.get("checkout_sha")
+        full_commit_sha: str | None = None
+        if isinstance(after, str) and after.strip():
+            full_commit_sha = after.strip()
+        elif isinstance(checkout_sha, str) and checkout_sha.strip():
+            full_commit_sha = checkout_sha.strip()
+        if not full_commit_sha:
+            return None
+
+        short_sha = short_commit_sha(full_commit_sha) or full_commit_sha[:7]
+        return GitLabPushEventDetails(
+            repository_full_name=path_with_namespace.strip(),
+            branch=branch,
+            commit_sha=short_sha,
+            full_commit_sha=full_commit_sha,
+        )
+
+    async def process_event(
+        self,
+        *,
+        event_name: str,
+        payload: dict[str, Any],
+        correlation_id: str,
+    ) -> WebhookProcessResult:
+        _ = event_name
+        if payload.get("object_kind") == "push":
+            return await self._process_push(payload=payload, correlation_id=correlation_id)
+
+        return WebhookProcessResult(
+            accepted=True,
+            event=str(payload.get("object_kind") or event_name or "unknown"),
+            matched_environment_ids=[],
+            message="Ignored event",
+        )
+
+    async def _process_push(
+        self,
+        *,
+        payload: dict[str, Any],
+        correlation_id: str,
+    ) -> WebhookProcessResult:
+        from app.workers.tasks import enqueue_rebuild_environment
+
+        details = self.parse_push_event(payload)
+        if details is None:
+            return WebhookProcessResult(
+                accepted=True,
+                event="push",
+                matched_environment_ids=[],
+                message="Push event missing repository/branch/commit details (or tag/delete)",
+            )
+
+        matches = await self._environments.list_active_for_repo_branch(
+            repo_full_name=details.repository_full_name,
+            branch=details.branch,
+        )
+        if not matches:
+            logger.info(
+                "webhook_gitlab_push_no_match",
+                repo=details.repository_full_name,
+                branch=details.branch,
+                commit=details.commit_sha,
+            )
+            return WebhookProcessResult(
+                accepted=True,
+                event="push",
+                matched_environment_ids=[],
+                message="No active environments matched repository/branch",
+            )
+
+        matched_ids: list[UUID] = []
+        audit = AuditService(self._session)
+        for candidate in matches:
+            if await is_state_locked(candidate.id, scope="environment"):
+                logger.warning(
+                    "webhook_gitlab_rebuild_skipped_lock_held",
+                    environment_id=str(candidate.id),
+                    message=PROVISIONING_IN_PROGRESS_MESSAGE,
+                )
+                await self._logs.create(
+                    environment_id=candidate.id,
+                    message=PROVISIONING_IN_PROGRESS_MESSAGE,
+                    log_level=LogLevel.WARN,
+                )
+                await audit.record(
+                    action=AuditAction.REBUILD_INITIATED,
+                    actor_id=AuditService.webhook_actor("gitlab"),
+                    status=AuditStatus.REJECTED,
+                    environment_id=candidate.id,
+                    workspace_id=candidate.workspace_id,
+                    commit_sha=details.commit_sha,
+                    detail=PROVISIONING_IN_PROGRESS_MESSAGE,
+                )
+                await self._session.commit()
+                continue
+
+            environment = await self._environments.mark_rebuild(
+                candidate.id,
+                commit_sha=details.commit_sha,
+            )
+            if environment is None:
+                continue
+
+            await self._logs.create(
+                environment_id=environment.id,
+                message=(
+                    f"GitOps rebuild queued for {details.repository_full_name}"
+                    f"@{details.branch} ({details.commit_sha})"
+                ),
+                log_level=LogLevel.INFO,
+            )
+            await audit.record(
+                action=AuditAction.REBUILD_INITIATED,
+                actor_id=AuditService.webhook_actor("gitlab"),
+                status=AuditStatus.PENDING,
+                environment_id=environment.id,
+                workspace_id=environment.workspace_id,
+                commit_sha=details.commit_sha,
+            )
+            await self._session.commit()
+
+            await publish_env_event(
+                environment.id,
+                event_type="STATUS_CHANGE",
+                status=EnvironmentStatus.PROVISIONING.value,
+                commit_sha=details.commit_sha,
+                message="Rebuild queued from GitLab push",
+            )
+
+            await publish_env_event(
+                environment.id,
+                event_type="LOG",
+                status=EnvironmentStatus.PROVISIONING.value,
+                commit_sha=details.commit_sha,
+                message=f"GitOps rebuild queued for commit {details.commit_sha}",
+                log_level=LogLevel.INFO.value,
+            )
+
+            enqueue_rebuild_environment(
+                environment_id=str(environment.id),
+                commit_sha=details.commit_sha,
+                correlation_id=correlation_id,
+            )
+            matched_ids.append(environment.id)
+            logger.info(
+                "webhook_gitlab_rebuild_enqueued",
+                environment_id=str(environment.id),
+                repo=details.repository_full_name,
+                branch=details.branch,
+                commit=details.commit_sha,
+                correlation_id=correlation_id,
+            )
+
+        return WebhookProcessResult(
+            accepted=True,
+            event="push",
+            matched_environment_ids=matched_ids,
+            message=f"Queued rebuild for {len(matched_ids)} environment(s)",
+        )

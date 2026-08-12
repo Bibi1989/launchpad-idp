@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { AuditLogEntry, Environment, PreviewLaunchPayload } from '~/types/environment'
+import { ApiError } from '~/composables/useApi'
+import type { UserCloudCredentialsStatus } from '~/types/userCredentials'
 import { applyEnvStreamPatch } from '~/utils/envStreamPatch'
 import {
   resolvePreviewEndpoints,
@@ -52,6 +54,11 @@ const audits = ref<AuditLogEntry[]>([])
 const auditsLoading = ref(false)
 const actionsMenuOpen = ref(false)
 
+const { getStatus: getUserCloudCredentialsStatus } = useUserCloudCredentials()
+const storedCredentialsStatus = ref<UserCloudCredentialsStatus | null>(null)
+const storedCredentialsLoading = ref(false)
+const useStoredCredentials = ref(false)
+
 const promoteCredentials = reactive({
   gcp_sa_key_json: '',
   gcp_wif_project_number: '',
@@ -72,6 +79,89 @@ const promoteCredentials = reactive({
 
 const promoteForm = reactive({
   provider: 'gcp' as CloudProvider,
+})
+
+function clearPromoteCredentials() {
+  promoteCredentials.gcp_sa_key_json = ''
+  promoteCredentials.gcp_wif_project_number = ''
+  promoteCredentials.gcp_wif_pool_id = ''
+  promoteCredentials.gcp_wif_provider_id = ''
+  promoteCredentials.gcp_wif_target_sa_email = ''
+  promoteCredentials.aws_access_key_id = ''
+  promoteCredentials.aws_secret_access_key = ''
+  promoteCredentials.aws_session_token = ''
+  promoteCredentials.aws_role_arn = ''
+  promoteCredentials.aws_role_session_name = ''
+  promoteCredentials.azure_client_id = ''
+  promoteCredentials.azure_client_secret = ''
+  promoteCredentials.azure_tenant_id = ''
+  promoteCredentials.azure_subscription_id = ''
+  promoteCredentials.cloudflare_api_token = ''
+}
+
+function promoteCredentialsEmpty() {
+  return Object.values(promoteCredentials).every((v) => !String(v ?? '').trim())
+}
+
+function hasStoredCredsForProvider(provider: CloudProvider) {
+  if (!storedCredentialsStatus.value) return false
+  if (provider === 'gcp') return storedCredentialsStatus.value.has_gcp
+  if (provider === 'aws') return storedCredentialsStatus.value.has_aws
+  if (provider === 'azure') return storedCredentialsStatus.value.has_azure
+  return storedCredentialsStatus.value.has_cloudflare
+}
+
+const storedCredsLabel = computed(() => {
+  const s = storedCredentialsStatus.value
+  if (!s) return null
+  if (promoteForm.provider === 'gcp') return s.gcp_label ?? null
+  if (promoteForm.provider === 'aws') return s.aws_label ?? null
+  if (promoteForm.provider === 'azure') return s.azure_label ?? null
+  return s.cloudflare_label ?? null
+})
+
+async function refreshStoredCredentialsForPromotion() {
+  if (!showPromote.value) return
+  storedCredentialsLoading.value = true
+  try {
+    storedCredentialsStatus.value = await getUserCloudCredentialsStatus()
+  } finally {
+    storedCredentialsLoading.value = false
+  }
+
+  // If user hasn't typed anything yet, default to the encrypted vault.
+  if (hasStoredCredsForProvider(promoteForm.provider) && promoteCredentialsEmpty()) {
+    useStoredCredentials.value = true
+    clearPromoteCredentials()
+  } else {
+    useStoredCredentials.value = false
+  }
+}
+
+watch(
+  showPromote,
+  (open) => {
+    if (open) void refreshStoredCredentialsForPromotion()
+  },
+)
+
+watch(
+  () => promoteForm.provider,
+  () => {
+    if (!showPromote.value) return
+    // Switching providers should reset the "use stored" toggle only when the
+    // user hasn't typed creds yet.
+    if (promoteCredentialsEmpty() && hasStoredCredsForProvider(promoteForm.provider)) {
+      useStoredCredentials.value = true
+      clearPromoteCredentials()
+    } else {
+      useStoredCredentials.value = false
+    }
+  },
+)
+
+watch(useStoredCredentials, (enabled) => {
+  if (enabled) clearPromoteCredentials()
 })
 
 const { lines, connected, done, connect } = useEnvironmentLogStream(environmentId)
@@ -329,7 +419,14 @@ const promoteAction = define(
   }),
   {
     success: () => ({ title: t('environments.detail.launchCloudPreview'), message: t('environments.detail.deployingToCloud', { provider: promoteForm.provider.toUpperCase() }) }),
-    error: (err) => ({ title: t('environments.toasts.cloudFailed'), message: toastError(err, t('common.failed')) }),
+    error: (err) => {
+      if (err instanceof ApiError) {
+        const code = err.code ? ` (${err.code})` : ''
+        const corr = err.correlationId ? ` [${err.correlationId}]` : ''
+        return { title: t('environments.toasts.cloudFailed'), message: `${err.message}${code}${corr}` }
+      }
+      return { title: t('environments.toasts.cloudFailed'), message: toastError(err, t('common.failed')) }
+    },
     onSuccess: async (created) => {
       showPromote.value = false
       loadError.value = null
@@ -684,10 +781,32 @@ onUnmounted(() => {
               {{ p }}
             </button>
           </div>
-          <CloudCredentialsFields
-            v-model:credentials="promoteCredentials"
-            :provider="promoteForm.provider"
-          />
+          <div
+            v-if="hasStoredCredsForProvider(promoteForm.provider)"
+            class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-3 py-2 text-sm"
+          >
+            <label class="flex items-center gap-2">
+              <input
+                type="checkbox"
+                class="h-4 w-4 accent-[var(--lp-accent)]"
+                v-model="useStoredCredentials"
+              >
+              <span>
+                {{ t('environments.detail.useStoredCredentials') }}
+                <span v-if="storedCredsLabel" class="ml-2 font-mono text-xs text-[var(--lp-text)]">{{ storedCredsLabel }}</span>
+              </span>
+            </label>
+            <p class="mt-1 text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.useStoredCredentialsHint') }}
+            </p>
+          </div>
+
+          <template v-if="!useStoredCredentials">
+            <CloudCredentialsFields
+              v-model:credentials="promoteCredentials"
+              :provider="promoteForm.provider"
+            />
+          </template>
           <button
             type="button"
             class="lp-btn-primary"

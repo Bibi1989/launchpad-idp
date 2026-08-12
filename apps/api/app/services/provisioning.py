@@ -186,6 +186,18 @@ class ProvisioningService:
             starred=False,
         )
 
+    async def fill_cloud_credentials_from_account_vault(
+        self,
+        credentials: CloudCredentials,
+        owner: User,
+    ) -> CloudCredentials:
+        """Fill blank cloud credential fields from the user's account vault.
+
+        This is used for flows like "Deploy to cloud" where a workspace may have
+        been created without storing encrypted cloud credentials yet.
+        """
+        return await self._fill_from_account_vault(credentials, owner.id)
+
     async def list_workspaces(
         self,
         owner: User,
