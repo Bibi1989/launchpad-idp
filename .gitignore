@@ -42,3 +42,4 @@ apps/api/celerybeat-schedule*
 apps/api/launchpad.db
 apps/api/MagicMock/
 **/MagicMock/
+key.json
