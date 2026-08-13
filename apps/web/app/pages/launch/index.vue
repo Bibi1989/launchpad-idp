@@ -10,7 +10,7 @@ import type {
 } from '~/types/provisioning'
 import type { GitHost } from '~/types/git'
 import { githubCloneUrl } from '~/utils/githubAccount'
-import { hasAwsAuth, hasGcpAuth } from '~/utils/cloudValidation'
+import { hasAwsAuth, hasGcpAuth, emptyCloudCredentials } from '~/utils/cloudValidation'
 import {
   resolvePreviewDeployPlan,
   type PreviewDeployPlan,
@@ -19,6 +19,11 @@ import {
   launchRequiresWorkloadImage,
   launchShowsWorkloadImageInput,
 } from '~/utils/launchWorkloadImage'
+import {
+  PREVIEW_TTL_DEFAULT_HOURS,
+  PREVIEW_TTL_MAX_HOURS,
+  PREVIEW_TTL_MAX_MINUTES,
+} from '~/utils/previewTtl'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
 
@@ -76,7 +81,7 @@ const form = reactive({
   name: '',
   provider: 'local' as PreviewTarget,
   ttl_unit: 'hours' as 'hours' | 'minutes',
-  ttl_value: 8,
+  ttl_value: PREVIEW_TTL_DEFAULT_HOURS,
   workload_image: '',
   workspace_id: null as string | null,
   git_repo_url: '',
@@ -84,23 +89,7 @@ const form = reactive({
   github_pr_number: null as number | null,
   enable_postgres: false,
   enable_redis: false,
-  credentials: {
-    gcp_sa_key_json: '',
-    gcp_wif_project_number: '',
-    gcp_wif_pool_id: '',
-    gcp_wif_provider_id: '',
-    gcp_wif_target_sa_email: '',
-    aws_access_key_id: '',
-    aws_secret_access_key: '',
-    aws_session_token: '',
-    aws_role_arn: '',
-    aws_role_session_name: '',
-    azure_client_id: '',
-    azure_client_secret: '',
-    azure_tenant_id: '',
-    azure_subscription_id: '',
-    cloudflare_api_token: '',
-  },
+  credentials: emptyCloudCredentials(),
 })
 
 const PROVIDER_STORAGE_KEY = 'launchpad.lastPreviewProvider'
@@ -935,7 +924,7 @@ async function launch() {
               v-model.number="form.ttl_value"
               type="number"
               min="1"
-              :max="form.ttl_unit === 'minutes' ? 10080 : 168"
+              :max="form.ttl_unit === 'minutes' ? PREVIEW_TTL_MAX_MINUTES : PREVIEW_TTL_MAX_HOURS"
               class="lp-input flex-1"
             >
             <select v-model="form.ttl_unit" class="lp-input w-28">
@@ -1153,7 +1142,7 @@ async function launch() {
             v-model.number="form.ttl_value"
             type="number"
             min="1"
-            :max="form.ttl_unit === 'minutes' ? 10080 : 168"
+            :max="form.ttl_unit === 'minutes' ? PREVIEW_TTL_MAX_MINUTES : PREVIEW_TTL_MAX_HOURS"
             class="lp-input flex-1"
           >
           <select v-model="form.ttl_unit" class="lp-input w-28">

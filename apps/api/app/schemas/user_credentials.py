@@ -16,10 +16,16 @@ class UserCloudCredentialsStatus(BaseModel):
     has_aws: bool = False
     has_azure: bool = False
     has_cloudflare: bool = False
+    has_gcp_sa: bool = False
+    has_gcp_oauth: bool = False
     gcp_label: str | None = None
     aws_label: str | None = None
     azure_label: str | None = None
     cloudflare_label: str | None = None
+    gcp_project_id: str | None = None
+    gcp_region: str | None = None
+    aws_region: str | None = None
+    azure_location: str | None = None
     updated_at: datetime | None = None
 
 

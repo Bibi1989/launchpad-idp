@@ -124,6 +124,16 @@ class InstanceProcessStrategy(str, Enum):
     """Node.js process manager (Node stacks only)."""
 
 
+class InstanceCodeSource(str, Enum):
+    """How application source reaches a cloud VM (ignored for serverless / docker)."""
+
+    SSH = "ssh"
+    """Copy workspace files from the control plane over SSH (rsync/scp)."""
+
+    GITHUB = "github"
+    """Clone/pull from the environment git repository on the VM."""
+
+
 class InstanceReverseProxy(str, Enum):
     """Optional TLS/HTTP edge in front of the app listen port."""
 
@@ -239,6 +249,8 @@ class RunningInstanceConfig(BaseModel):
     listen_port: int = Field(default=8080, ge=1, le=65535)
     # How the app is supervised on VM / local (ignored for serverless → forced docker).
     process_strategy: InstanceProcessStrategy = InstanceProcessStrategy.DOCKER
+    # How source reaches a cloud VM when process_strategy is not docker.
+    code_source: InstanceCodeSource = InstanceCodeSource.SSH
     # Optional HTTP edge in front of listen_port (VM / local only).
     reverse_proxy: InstanceReverseProxy = InstanceReverseProxy.NONE
     # Optional: force Open-app URL after deploy (advanced)
@@ -638,40 +650,66 @@ class CloudCredentials(BaseModel):
     """Ephemeral credentials injected into the sandbox - never logged in plaintext."""
 
     gcp_sa_key_json: str | None = None
+    # Target GCP project for gcloud / compute (required for Connect OAuth; SA JSON embeds its own).
+    gcp_project_id: str | None = None
+    # Preferred deploy region (non-secret preference stored with vault).
+    gcp_region: str | None = None
     # GCP Workload Identity Federation (Keyless OIDC)
     gcp_wif_project_number: str | None = None
     gcp_wif_pool_id: str | None = None
     gcp_wif_provider_id: str | None = None
     gcp_wif_target_sa_email: str | None = None
+    # Interactive user OAuth (gcloud auth login style) - CloudTokenSet JSON
+    gcp_oauth_token_json: str | None = None
 
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
+    # Preferred AWS region for deploy wizards.
+    aws_region: str | None = None
     # AWS IAM Roles with Web Identity (Keyless OIDC)
     aws_role_arn: str | None = None
     aws_role_session_name: str | None = None
+    # Interactive AWS IAM Identity Center (SSO) - CloudTokenSet JSON
+    aws_oauth_token_json: str | None = None
+    aws_sso_account_id: str | None = None
+    aws_sso_role_name: str | None = None
 
     azure_client_id: str | None = None
     azure_client_secret: str | None = None
     azure_tenant_id: str | None = None
     azure_subscription_id: str | None = None
+    # Preferred Azure location for deploy wizards.
+    azure_location: str | None = None
+    # Interactive Entra ID user OAuth - CloudTokenSet JSON
+    azure_oauth_token_json: str | None = None
+
     cloudflare_api_token: str | None = None
 
     @field_validator(
         "gcp_sa_key_json",
+        "gcp_project_id",
+        "gcp_region",
         "gcp_wif_project_number",
         "gcp_wif_pool_id",
         "gcp_wif_provider_id",
         "gcp_wif_target_sa_email",
+        "gcp_oauth_token_json",
         "aws_access_key_id",
         "aws_secret_access_key",
         "aws_session_token",
+        "aws_region",
         "aws_role_arn",
         "aws_role_session_name",
+        "aws_oauth_token_json",
+        "aws_sso_account_id",
+        "aws_sso_role_name",
         "azure_client_id",
         "azure_client_secret",
         "azure_tenant_id",
         "azure_subscription_id",
+        "azure_location",
+        "azure_oauth_token_json",
         "cloudflare_api_token",
         mode="before",
     )

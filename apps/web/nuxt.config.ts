@@ -1,6 +1,15 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
   compatibilityDate: "2025-07-15",
+  // SPA mode. Auth token, active org, locale preference, and theme all live in
+  // localStorage (client-only), so a server render can never match the client:
+  // SSR always produced the logged-out, defaultLocale ("de") page while the client
+  // hydrated to the authenticated, English page. That mismatch corrupted hydration
+  // at the <App> root (Symbol(v-cmt) node mismatch) and broke client-side
+  // navigation ("cannot navigate to pages"). This is an internal, auth-gated tool
+  // with no SEO need, so client rendering is the correct model - AppSplash covers
+  // first paint.
+  ssr: false,
   // Skip DevTools overhead in production Docker builds.
   devtools: { enabled: process.env.NODE_ENV !== "production" },
   modules: ["@nuxtjs/tailwindcss", "@nuxt/fonts", "@nuxtjs/i18n"],

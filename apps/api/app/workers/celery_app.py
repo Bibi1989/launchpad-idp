@@ -23,6 +23,10 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Bound task runtime so a hung task frees the worker (and releases its state
+    # lock via the task's finally) instead of blocking teardown indefinitely.
+    task_soft_time_limit=settings.celery_task_soft_time_limit_seconds,
+    task_time_limit=settings.celery_task_time_limit_seconds,
     beat_schedule={
         "ttl-reaper-every-5-minutes": {
             "task": "launchpad.reap_expired_environments",

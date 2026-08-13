@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import yaml
 from fastapi import HTTPException, status
@@ -150,6 +151,20 @@ class ProvisioningService:
             org=org_ctx,
             project_id=project_id,
         )
+        existing_ws = await self._session.execute(
+            select(ProvisioningWorkspace).where(
+                ProvisioningWorkspace.org_id == resolved_org_id,
+                ProvisioningWorkspace.name == request.name,
+            )
+        )
+        if existing_ws.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "workspace_exists",
+                    "message": f"Workspace '{request.name}' already exists in this organization",
+                },
+            )
         row = ProvisioningWorkspace(
             id=UUID(bundle.workspace_id),
             owner_id=owner.id,
@@ -554,6 +569,126 @@ class ProvisioningService:
             project_id=payload.project_id,
         )
 
+    async def clone_workspace_for_cloud_promote(
+        self,
+        source_workspace_id: UUID,
+        *,
+        owner: User,
+        org_id: UUID | None,
+        target_provider: CloudProvider,
+        credentials: CloudCredentials,
+        workspace_name: str,
+        primary_service: str | None = None,
+        code_source: str | None = None,
+        region: str | None = None,
+        create_vpc: bool = False,
+        create_subnets: bool = False,
+        project_id: UUID | None = None,
+    ) -> UUID:
+        """Copy a local workspace tree and re-target wizard config for cloud serverless."""
+        from app.core.config import get_settings
+        from app.models.domain import Organization
+        from app.schemas.cloud import InstanceCodeSource
+        from app.services.cloud_promote import build_cloud_promote_wizard_request
+        from app.services.orgs import OrganizationService
+        from app.services.plans import assert_can_create_workspace
+        from app.services.projects import ProjectService
+
+        source = await self.get_workspace_for_owner(source_workspace_id, owner)
+        config = await self.get_wizard_config(source_workspace_id, owner)
+        source_root = Path(source.root_dir)
+        if not source_root.is_dir():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "workspace_source_missing",
+                    "message": "Source workspace files are missing on disk",
+                },
+            )
+
+        resolved_code: InstanceCodeSource | None = None
+        if code_source:
+            resolved_code = InstanceCodeSource(code_source)
+        request = build_cloud_promote_wizard_request(
+            config,
+            workspace_name=workspace_name,
+            provider=target_provider,
+            credentials=credentials,
+            primary_service=primary_service,
+            code_source=resolved_code,
+            region=region,
+            create_vpc=create_vpc,
+            create_subnets=create_subnets,
+        )
+        request = await self._with_account_credentials(request, owner)
+        request = self._with_gcp_project_from_sa(request)
+
+        new_id = uuid4()
+        settings_root = Path(get_settings().iac_workspace_root).expanduser()
+        settings_root.mkdir(parents=True, exist_ok=True)
+        dest = settings_root / f"{workspace_name}-{new_id.hex[:8]}"
+        if dest.exists():
+            dest = settings_root / f"{workspace_name}-{new_id.hex[:8]}-cloud"
+        shutil.copytree(source_root, dest, symlinks=False, ignore_dangling_symlinks=True)
+
+        orgs = OrganizationService(self._session)
+        resolved_org_id = org_id
+        org: Organization | None = None
+        if resolved_org_id is None:
+            org = await orgs.ensure_personal_org(owner)
+            resolved_org_id = org.id
+        if org is None:
+            org = await self._session.get(Organization, resolved_org_id)
+            if org is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "org_not_found", "message": "Organization not found"},
+                )
+        await assert_can_create_workspace(self._session, org)
+        org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
+        project = await ProjectService(self._session).resolve_project_for_workspace(
+            org=org_ctx,
+            project_id=project_id or source.project_id,
+        )
+
+        final_name = workspace_name
+        for i in range(0, 10):
+            candidate = workspace_name if i == 0 else f"{workspace_name}-{i}"[:128]
+            clash = await self._session.execute(
+                select(ProvisioningWorkspace).where(
+                    ProvisioningWorkspace.org_id == resolved_org_id,
+                    ProvisioningWorkspace.name == candidate,
+                )
+            )
+            if clash.scalar_one_or_none() is None:
+                final_name = candidate
+                break
+
+        encrypted = encrypt_secret(request.credentials.model_dump_json())
+        row = ProvisioningWorkspace(
+            id=new_id,
+            owner_id=owner.id,
+            org_id=resolved_org_id,
+            project_id=project.id,
+            name=final_name,
+            engine=request.iac_engine.value,
+            provider=target_provider.value,
+            root_dir=str(dest),
+            status="ready",
+            encrypted_credentials=encrypted,
+            wizard_config_json=self._wizard_config_json(request),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        logger.info(
+            "cloud_promote_workspace_cloned",
+            source_workspace_id=str(source_workspace_id),
+            workspace_id=str(new_id),
+            provider=target_provider.value,
+            root_dir=str(dest),
+        )
+        return new_id
+
     @staticmethod
     def _promoted_name(base_name: str, suffix: str) -> str:
         normalized = base_name.strip().lower()
@@ -952,7 +1087,12 @@ class ProvisioningService:
         credentials: CloudCredentials,
         user_id: UUID,
     ) -> CloudCredentials:
-        """Fill blank credential fields from the user's account vault."""
+        """Merge account vault into workspace credentials.
+
+        Service account / WIF keys are preferred. Connect OAuth and other vault
+        fields only fill blanks. gcp_project_id from the vault always overlays
+        so Settings can set the target project without replacing keys.
+        """
         from app.core.secrets import has_aws_auth, has_gcp_auth
         from app.services.user_credentials import UserCloudCredentialsService
 
@@ -961,6 +1101,9 @@ class ProvisioningService:
         data = credentials.model_dump()
         vault_data = vault.model_dump()
 
+        if vault.gcp_project_id:
+            updates["gcp_project_id"] = vault.gcp_project_id
+
         gcp_ok = has_gcp_auth(credentials)
         aws_ok = has_aws_auth(credentials)
         azure_ok = bool(
@@ -968,11 +1111,13 @@ class ProvisioningService:
             and credentials.azure_client_secret
             and credentials.azure_tenant_id
             and credentials.azure_subscription_id
-        )
+        ) or bool(credentials.azure_oauth_token_json)
         cf_ok = bool(credentials.cloudflare_api_token)
 
         for key, value in vault_data.items():
             if not value or not str(value).strip():
+                continue
+            if key in updates:
                 continue
             if key.startswith("gcp_") and gcp_ok:
                 continue
@@ -989,6 +1134,55 @@ class ProvisioningService:
     async def destroy_workspace(self, workspace_id: UUID, owner: User) -> None:
         row = await self.get_workspace_for_owner(workspace_id, owner)
         was_local = row.provider == CloudProvider.LOCAL.value
+
+        # Destroy any cloud infrastructure this workspace APPLIED (terraform/pulumi)
+        # before any local teardown so, on failure, the workspace + IaC state stay
+        # intact for retry and real cloud resources are never orphaned. Skipped for
+        # the local provider and for workspaces that were never applied (no state).
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if not was_local and settings.iac_destroy_on_workspace_delete:
+            from app.services.iac_destroy import run_workspace_iac_destroy
+
+            credentials: CloudCredentials | None = None
+            if row.encrypted_credentials:
+                try:
+                    credentials = CloudCredentials.model_validate_json(
+                        decrypt_secret(row.encrypted_credentials)
+                    )
+                except Exception:  # noqa: BLE001 - proceed without creds; destroy will skip/fail clearly
+                    logger.warning(
+                        "workspace_credentials_decrypt_failed",
+                        workspace_id=str(workspace_id),
+                    )
+            destroy_result = await asyncio.to_thread(
+                run_workspace_iac_destroy,
+                root_dir=row.root_dir,
+                engine=row.engine,
+                credentials=credentials,
+                org_id=str(row.org_id) if row.org_id else "default-org",
+                workspace_id=str(row.id),
+                settings=settings,
+            )
+            logger.info(
+                "workspace_iac_destroy",
+                workspace_id=str(workspace_id),
+                status=destroy_result.status,
+                detail=destroy_result.detail,
+            )
+            if destroy_result.status == "failed":
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={
+                        "code": "cloud_teardown_failed",
+                        "message": (
+                            f"Cloud infrastructure teardown failed ({destroy_result.detail}). "
+                            "The workspace was kept so you can retry destroy; its cloud "
+                            "resources were not deleted."
+                        ),
+                    },
+                )
 
         result = await self._session.execute(
             select(TerminalSessionRecord).where(
@@ -1085,7 +1279,10 @@ class ProvisioningService:
         if not active:
             return
         env_repo = EnvironmentRepository(self._session)
+        from app.services.teardown_context import capture_environment_teardown_context
+
         for env in active:
+            await capture_environment_teardown_context(self._session, env)
             await env_repo.update_status(env, EnvironmentStatus.TEARDOWN_PENDING)
         await self._session.commit()
         for env in active:

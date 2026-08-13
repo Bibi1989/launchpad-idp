@@ -15,6 +15,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -463,6 +464,7 @@ class Environment(Base):
         Index("ix_environments_owner_id", "owner_id"),
         Index("ix_environments_org_id", "org_id"),
         Index("ix_environments_project_id", "project_id"),
+        UniqueConstraint("org_id", "name", name="uq_environments_org_id_name"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -486,7 +488,7 @@ class Environment(Base):
         ForeignKey("provisioning_workspaces.id", ondelete="SET NULL"),
         nullable=True,
     )
-    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     git_branch: Mapped[str] = mapped_column(String(256), nullable=False)
     git_repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
     latest_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -525,6 +527,9 @@ class Environment(Base):
     )
     cost_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sealed JSON (encrypt_secret) with workspace creds + wizard handles for async
+    # cloud teardown after the workspace row may already be gone.
+    teardown_context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -650,6 +655,7 @@ class ProvisioningWorkspace(Base):
         Index("ix_provisioning_workspaces_org_id", "org_id"),
         Index("ix_provisioning_workspaces_project_id", "project_id"),
         Index("ix_provisioning_workspaces_starred_at", "starred_at"),
+        UniqueConstraint("org_id", "name", name="uq_provisioning_workspaces_org_id_name"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)

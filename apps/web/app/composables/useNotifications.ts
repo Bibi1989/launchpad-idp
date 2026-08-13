@@ -192,7 +192,7 @@ export function useNotifications() {
     // Pause/resume/destroy are user-initiated and already raise action toasts,
     // so we only surface asynchronous transitions (ready/failed/ttl/cost) here.
     if (next.ttlWarn && !prev.ttlWarn) {
-      emit('ttl', 'TTL expiring soon', `${env.name} has under 2 hours left - extend it to keep it alive.`, 'warning')
+      emit('ttl', 'TTL expiring soon', `${env.name} has under 1 hour left - extend it to keep it alive.`, 'warning')
     }
     if (next.costCap && !prev.costCap) {
       emit('cost', 'Cost cap reached', `${env.name} hit the soft cost cap. Destroy it or raise the cap.`, 'error')

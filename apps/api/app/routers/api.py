@@ -495,6 +495,7 @@ async def promote_environment_to_cloud(
     payload: EnvironmentPromoteRequest,
     request: Request,
     user: CurrentUser,
+    org: CurrentOrg,
     service: EnvironmentService = Depends(get_environment_service),
 ) -> EnvironmentRead:
     correlation_id = getattr(request.state, "correlation_id", "unknown")
@@ -503,6 +504,7 @@ async def promote_environment_to_cloud(
         payload,
         owner=user,
         correlation_id=correlation_id,
+        org_id=org.org_id,
     )
 
 

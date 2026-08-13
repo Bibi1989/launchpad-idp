@@ -11,7 +11,10 @@ import {
   defaultContainerScaffold,
   defaultWorkloadDependencies,
 } from '~/utils/cloudValidation'
-import { defaultRunningInstanceConfig } from '~/utils/workspaceRuntimeMode'
+import {
+  defaultRunningInstanceConfig,
+  validateRunningInstanceFields,
+} from '~/utils/workspaceRuntimeMode'
 import { defaultCostOptimizationConfig } from '~/utils/costOptimization'
 import { defaultKubernetesWorkloadOptions } from '~/utils/cloudValidation'
 
@@ -20,6 +23,18 @@ describe('workspaceRuntimeMode', () => {
     expect(isRuntimeModeAllowed('local', 'docker_compose')).toBe(true)
     expect(isRuntimeModeAllowed('gcp', 'docker_compose')).toBe(false)
     expect(runtimeModesForProvider('gcp')).not.toContain('docker_compose')
+  })
+
+  it('vm without host is allowed for local/gcp/aws, required for azure', () => {
+    const vm = { ...defaultRunningInstanceConfig(), kind: 'vm' as const, host: '' }
+    for (const provider of ['local', 'gcp', 'aws'] as const) {
+      expect(
+        validateRunningInstanceFields({ provider, mode: 'running_instance', runningInstance: vm }),
+      ).toBeNull()
+    }
+    expect(
+      validateRunningInstanceFields({ provider: 'azure', mode: 'running_instance', runningInstance: vm }),
+    ).toBe('vm_host')
   })
 
   it('normalizes compose to packaging none and scaffold on', () => {

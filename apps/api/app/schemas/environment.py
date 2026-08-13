@@ -468,6 +468,28 @@ class EnvironmentPromoteRequest(BaseModel):
     name: str | None = Field(default=None, min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     ttl_hours: int | None = Field(default=None, ge=1, le=168)
     ttl_minutes: int | None = Field(default=None, ge=1, le=10_080)
+    primary_service: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Multi-service instance/compose: which service gets the preview URL",
+    )
+    code_source: str | None = Field(
+        default=None,
+        description="How source reaches a cloud VM: ssh (copy) or github (clone). Ignored for docker strategy.",
+    )
+    region: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Cloud region/location for the promoted preview (e.g. us-central1, us-east-1, eastus).",
+    )
+    create_vpc: bool = Field(
+        default=False,
+        description="Create an isolated VPC/VNet for this cloud preview instead of the default network.",
+    )
+    create_subnets: bool = Field(
+        default=False,
+        description="Create subnets in the preview VPC/VNet (implies create_vpc).",
+    )
 
     @field_validator("name")
     @classmethod
@@ -475,6 +497,30 @@ class EnvironmentPromoteRequest(BaseModel):
         if value is None:
             return None
         return value.strip().lower()
+
+    @field_validator("code_source")
+    @classmethod
+    def normalize_code_source(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if cleaned not in {"ssh", "github"}:
+            raise ValueError("code_source must be ssh or github")
+        return cleaned
+
+    @field_validator("region")
+    @classmethod
+    def normalize_region(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def imply_vpc_from_subnets(self) -> EnvironmentPromoteRequest:
+        if self.create_subnets and not self.create_vpc:
+            self.create_vpc = True
+        return self
 
     @model_validator(mode="after")
     def require_cloud_provider(self) -> EnvironmentPromoteRequest:

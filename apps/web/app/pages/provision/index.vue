@@ -7,6 +7,7 @@ import {
   defaultAnsibleConfig,
   defaultWorkloadDependencies,
   workloadDependenciesSchema,
+  emptyCloudCredentials,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
@@ -57,6 +58,7 @@ import {
   enhanceDockerScaffoldTargets,
 } from '~/utils/workspaceRepoScaffold'
 import { AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, AWS_INSTANCE_TYPES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
+import { applyPreferredCloudRegions } from '~/utils/preferredCloudRegions'
 import {
   AWS_SERVICE_OPTIONS,
   AZURE_SERVICE_OPTIONS,
@@ -107,6 +109,7 @@ const ansibleConfiguratorRef = ref<{
 
 const { listProjects, projects: launchpadProjects } = useProjects()
 const launchpadProjectId = ref<string>('')
+const { getStatus: getCloudCredentialStatus } = useUserCloudCredentials()
 
 const form = reactive({
   name: '',
@@ -199,23 +202,7 @@ const form = reactive({
     account_id: '',
     zone_name: '',
   },
-  credentials: {
-    gcp_sa_key_json: '',
-    gcp_wif_project_number: '',
-    gcp_wif_pool_id: '',
-    gcp_wif_provider_id: '',
-    gcp_wif_target_sa_email: '',
-    aws_access_key_id: '',
-    aws_secret_access_key: '',
-    aws_session_token: '',
-    aws_role_arn: '',
-    aws_role_session_name: '',
-    azure_client_id: '',
-    azure_client_secret: '',
-    azure_tenant_id: '',
-    azure_subscription_id: '',
-    cloudflare_api_token: '',
-  },
+  credentials: emptyCloudCredentials(),
   github: {
     name: '',
     description: 'Bootstrapped by Launchpad',
@@ -474,6 +461,17 @@ onMounted(async () => {
       installations: [],
     }
   }
+  try {
+    const credStatus = await getCloudCredentialStatus()
+    applyPreferredCloudRegions(credStatus, {
+      gcp: form.gcp,
+      aws: form.aws,
+      azure: form.azure,
+      running_instance: form.running_instance,
+    }, { overwrite: true })
+  } catch {
+    // Vault preferences are optional
+  }
 })
 
 onUnmounted(() => {
@@ -570,21 +568,7 @@ const azureResourceOptions = AZURE_SERVICE_OPTIONS
 const cloudflareResourceOptions = CLOUDFLARE_SERVICE_OPTIONS
 
 function clearCredentials() {
-  form.credentials.gcp_sa_key_json = ''
-  form.credentials.gcp_wif_project_number = ''
-  form.credentials.gcp_wif_pool_id = ''
-  form.credentials.gcp_wif_provider_id = ''
-  form.credentials.gcp_wif_target_sa_email = ''
-  form.credentials.aws_access_key_id = ''
-  form.credentials.aws_secret_access_key = ''
-  form.credentials.aws_session_token = ''
-  form.credentials.aws_role_arn = ''
-  form.credentials.aws_role_session_name = ''
-  form.credentials.azure_client_id = ''
-  form.credentials.azure_client_secret = ''
-  form.credentials.azure_tenant_id = ''
-  form.credentials.azure_subscription_id = ''
-  form.credentials.cloudflare_api_token = ''
+  Object.assign(form.credentials, emptyCloudCredentials())
 }
 
 function applyWizardConfig(config: WorkspaceWizardConfig) {

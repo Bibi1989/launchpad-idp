@@ -1,1 +1,1 @@
-"""pkg/auth package for authentication & OIDC modules."""
+"""pkg/auth package for authentication, keyless OIDC, and cloud OAuth loopback."""

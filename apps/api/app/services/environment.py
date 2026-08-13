@@ -39,6 +39,7 @@ from app.schemas.cloud import (
     IaCEngine,
     KubernetesPackaging,
     ProvisioningWizardRequest,
+    WorkspaceWizardConfig,
 )
 from app.schemas.environment import (
     DeploymentLogRead,
@@ -365,7 +366,11 @@ class EnvironmentService:
         ):
             workload_image = payload.workload_image
 
-        existing = await self._environments.get_by_name(payload.name)
+        if org_id is None:
+            org = await OrganizationService(self._session).ensure_personal_org(owner)
+            org_id = org.id
+
+        existing = await self._environments.get_by_name(payload.name, org_id=org_id)
         if existing is not None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -418,8 +423,9 @@ class EnvironmentService:
 
         ttl_hours = payload.ttl_hours
         ttl_minutes = payload.ttl_minutes
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         if ttl_hours is None and ttl_minutes is None:
-            ttl_hours = min(default_ttl, 168)
+            ttl_hours = min(int(default_ttl), max_total_hours)
         create_payload = EnvironmentCreate(
             name=payload.name,
             git_branch=git_branch,
@@ -461,8 +467,6 @@ class EnvironmentService:
         org_id: UUID | None = None,
     ) -> EnvironmentRead:
         now = datetime.now(UTC)
-        existing = await self._environments.get_by_name(payload.name)
-
         if org_id is None:
             org = await OrganizationService(self._session).ensure_personal_org(owner)
             org_id = org.id
@@ -473,6 +477,8 @@ class EnvironmentService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"code": "org_not_found", "message": "Organization not found"},
                 )
+
+        existing = await self._environments.get_by_name(payload.name, org_id=org_id)
 
         cap = self._plan_concurrency_cap(org.plan)
 
@@ -518,8 +524,8 @@ class EnvironmentService:
 
         ttl_hours = payload.ttl_hours
         ttl_minutes = payload.ttl_minutes
-        # Governance policy: TTL hard max is 2 hours, regardless of .env overrides.
-        max_total_hours = min(int(self._settings.ttl_max_total_hours_from_create), 2)
+        # Governance: cannot exceed ttl_max_total_hours_from_create from create time.
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         if ttl_hours is not None:
             ttl_hours = min(ttl_hours, max_total_hours)
         if ttl_minutes is not None:
@@ -721,7 +727,8 @@ class EnvironmentService:
 
         base = max(expires, now)
         candidate = base + extend_delta
-        max_expiry = created + timedelta(hours=min(int(self._settings.ttl_max_total_hours_from_create), 2))
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
+        max_expiry = created + timedelta(hours=max_total_hours)
         if candidate > max_expiry:
             candidate = max_expiry
         if candidate <= expires:
@@ -730,7 +737,7 @@ class EnvironmentService:
                 detail={
                     "code": "ttl_max_reached",
                     "message": (
-                        "Cannot extend beyond 2h from create time"
+                        f"Cannot extend beyond {max_total_hours}h from create time"
                     ),
                 },
             )
@@ -769,23 +776,156 @@ class EnvironmentService:
         *,
         owner: User,
         correlation_id: str,
+        org_id: UUID | None = None,
     ) -> EnvironmentRead:
         """Launch a new cloud preview from an existing environment's source."""
+        from app.services.cloud_promote import needs_cloud_retarget
+
         source = await self._require_owned(environment_id, owner)
+        provisioning = ProvisioningService(self._session)
+        filled_credentials = await provisioning.fill_cloud_credentials_from_account_vault(
+            payload.credentials,
+            owner,
+        )
+
+        # If credentials are still incomplete after vault-fill, fail fast with a
+        # structured 4xx instead of allowing later unhandled exceptions.
+        from app.core.secrets import validate_cloud_credentials
+
+        try:
+            validate_cloud_credentials(payload.provider.value, filled_credentials)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "credentials_required",
+                    "message": str(exc),
+                },
+            )
+
         suffix = payload.provider.value[:8]
-        name = payload.name or f"{source.name}-{suffix}"[:64]
-        if source.template_id:
+        if payload.name is not None:
+            name = payload.name
+        else:
+            # Promotion retries should be frictionless: if the user didn't
+            # provide an explicit name, pick the next available candidate to
+            # avoid environment_exists conflicts.
+            base = f"{source.name}-{suffix}"[:64]
+            name = base
+            for i in range(1, 10):
+                existing = await self._environments.get_by_name(name, org_id=org_id)
+                if existing is None:
+                    break
+                # Keep within schema max length (64) and allowed characters.
+                # Example: my-env-gcp -> my-env-gcp-1
+                suffix_part = f"-{i}"
+                name = f"{base[:64 - len(suffix_part)]}{suffix_part}"
+                if len(name) < 3:
+                    name = base[:3]
+
+        target_provider = CloudProvider(payload.provider.value)
+        retarget = needs_cloud_retarget(
+            source_provider=source.provider,
+            deploy_mode=source.deploy_mode,
+        )
+        cloud_deploy_mode = DeployMode.ATTACH if retarget else source.deploy_mode
+        workspace_id = source.workspace_id
+
+        if retarget and source.workspace_id is not None:
+            workspace_id = await provisioning.clone_workspace_for_cloud_promote(
+                source.workspace_id,
+                owner=owner,
+                org_id=org_id,
+                target_provider=target_provider,
+                credentials=filled_credentials,
+                workspace_name=name,
+                primary_service=payload.primary_service,
+                code_source=payload.code_source,
+                region=payload.region,
+                create_vpc=payload.create_vpc,
+                create_subnets=payload.create_subnets,
+                project_id=source.project_id,
+            )
+        elif retarget and source.workspace_id is None:
+            from app.schemas.cloud import (
+                InstanceCodeSource,
+                ProvisioningWizardRequest,
+                RunningInstanceKind,
+                WorkspaceRuntimeMode,
+            )
+            from app.services.cloud_promote import (
+                build_cloud_promote_wizard_request,
+                build_cloud_running_instance,
+            )
+
+            resolved_code = (
+                InstanceCodeSource(payload.code_source)
+                if payload.code_source
+                else InstanceCodeSource.SSH
+            )
+            stub = WorkspaceWizardConfig.model_validate(
+                {
+                    "name": name,
+                    "iac_engine": IaCEngine.TERRAFORM.value,
+                    "cloud": self._cloud_config_for_provider(target_provider).model_dump(
+                        mode="json",
+                    ),
+                    "credentials": {},
+                    "has_credentials": True,
+                    "runtime_mode": WorkspaceRuntimeMode.RUNNING_INSTANCE.value,
+                    "running_instance": build_cloud_running_instance(
+                        provider=target_provider,
+                        environment_name=name,
+                        primary_service=payload.primary_service,
+                        source=None,
+                        target_kind=RunningInstanceKind.VM,
+                        code_source=resolved_code,
+                        region=payload.region,
+                    ).model_dump(mode="json"),
+                }
+            )
+            bundle_req = build_cloud_promote_wizard_request(
+                stub,
+                workspace_name=name,
+                provider=target_provider,
+                credentials=filled_credentials,
+                primary_service=payload.primary_service,
+                code_source=resolved_code,
+                region=payload.region,
+                create_vpc=payload.create_vpc,
+                create_subnets=payload.create_subnets,
+            )
+            bundle = await provisioning.generate_bundle(
+                bundle_req,
+                owner=owner,
+                org_id=org_id,
+                project_id=source.project_id,
+            )
+            workspace_id = UUID(bundle.workspace_id)
+
+        if workspace_id is not None:
             launch = PreviewLaunchRequest(
                 name=name,
-                template_id=source.template_id,
                 provider=payload.provider,
-                credentials=payload.credentials,
+                credentials=filled_credentials,
                 ttl_hours=payload.ttl_hours,
                 ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
-                workspace_id=source.workspace_id,
-                deploy_mode=source.deploy_mode,
+                workspace_id=workspace_id,
+                deploy_mode=cloud_deploy_mode,
+            )
+        elif source.template_id:
+            launch = PreviewLaunchRequest(
+                name=name,
+                template_id=source.template_id,
+                provider=payload.provider,
+                credentials=filled_credentials,
+                ttl_hours=payload.ttl_hours,
+                ttl_minutes=payload.ttl_minutes,
+                github_pr_number=source.github_pr_number,
+                github_pr_url=source.github_pr_url,
+                deploy_mode=cloud_deploy_mode,
             )
         else:
             launch = PreviewLaunchRequest(
@@ -793,18 +933,18 @@ class EnvironmentService:
                 git_repo_url=source.git_repo_url,
                 git_branch=source.git_branch,
                 provider=payload.provider,
-                credentials=payload.credentials,
+                credentials=filled_credentials,
                 ttl_hours=payload.ttl_hours,
                 ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
-                workspace_id=source.workspace_id,
-                deploy_mode=source.deploy_mode,
+                deploy_mode=cloud_deploy_mode,
             )
         result = await self.launch_preview(
             launch,
             owner=owner,
             correlation_id=correlation_id,
+            org_id=org_id,
         )
         await self._logs.create(
             environment_id=source.id,
@@ -1019,6 +1159,9 @@ class EnvironmentService:
             )
 
         prior_status = environment.status
+        from app.services.teardown_context import capture_environment_teardown_context
+
+        await capture_environment_teardown_context(self._session, environment)
         await self._environments.update_status(environment, EnvironmentStatus.TEARDOWN_PENDING)
         await self._logs.create(
             environment_id=environment.id,
@@ -1040,10 +1183,23 @@ class EnvironmentService:
         )
         await self._session.commit()
 
-        enqueue_teardown_environment(
-            environment_id=str(environment.id),
-            correlation_id=correlation_id,
-        )
+        try:
+            # Never let a slow Redis/Celery publish hang the HTTP delete.
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    enqueue_teardown_environment,
+                    environment_id=str(environment.id),
+                    correlation_id=correlation_id,
+                ),
+                timeout=5.0,
+            )
+        except Exception:
+            logger.exception(
+                "teardown_enqueue_failed",
+                environment_id=str(environment.id),
+                correlation_id=correlation_id,
+            )
+            # Status is already TEARDOWN_PENDING; beat/requeue will pick it up.
         return self._to_read(environment)
 
     async def list_logs(
@@ -1324,8 +1480,9 @@ class EnvironmentService:
         environment.preview_endpoints_json = None
         environment.node_port = None
         environment.latest_commit_sha = None
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         environment.ttl_expires_at = now + _ttl_timedelta(
-            ttl_hours=min(int(self._settings.ttl_max_total_hours_from_create), 2),
+            ttl_hours=max_total_hours,
             ttl_minutes=None,
         )
         environment.cost_accrued = Decimal("0.0000")
@@ -1336,7 +1493,7 @@ class EnvironmentService:
             environment_id=environment.id,
             message=(
                 "Relaunch queued after TTL expiry "
-                "(ttl cap 2h, "
+                f"(ttl cap {max_total_hours}h, "
                 f"correlation_id={correlation_id})"
             ),
         )
@@ -1655,24 +1812,13 @@ class EnvironmentService:
             )
 
     def _cloud_config_for_provider(self, provider: CloudProvider):
-        if provider == CloudProvider.GCP:
-            return GcpCloudConfig(
-                provider=CloudProvider.GCP,
-                resources=GcpResources(project_id="launchpad-preview", vpc=True, subnets=True),
-            )
-        if provider == CloudProvider.AWS:
-            return AwsCloudConfig(
-                provider=CloudProvider.AWS,
-                resources=AwsResources(vpc=True, subnets=True),
-            )
-        if provider == CloudProvider.AZURE:
-            return AzureCloudConfig(
-                provider=CloudProvider.AZURE,
-                resources=AzureResources(resource_group="launchpad-preview", vnet=True, subnets=True),
-            )
-        return CloudflareCloudConfig(
-            provider=CloudProvider.CLOUDFLARE,
-            resources=CloudflareResources(account_id="00000000000000000000000000000000"),
+        from app.schemas.cloud import RunningInstanceKind
+        from app.services.cloud_promote import cloud_config_for_promote
+
+        return cloud_config_for_promote(
+            provider,
+            CloudCredentials(),
+            target_kind=RunningInstanceKind.VM,
         )
 
     async def _require_owned(self, environment_id: UUID, owner: User):

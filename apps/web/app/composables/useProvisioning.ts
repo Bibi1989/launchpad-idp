@@ -180,6 +180,9 @@ export function useProvisioning() {
   async function destroyWorkspace(workspaceId: string): Promise<void> {
     await apiFetch<void>(`/provisioning/workspaces/${workspaceId}`, {
       method: 'DELETE',
+      // Destroy runs terraform/pulumi destroy on any applied cloud infra, which
+      // can take minutes; don't time out at the default 20s.
+      timeoutMs: LOCAL_CLUSTER_TIMEOUT_MS,
     })
   }
 

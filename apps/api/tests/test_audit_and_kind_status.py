@@ -134,6 +134,37 @@ async def test_list_environment_audits_owner_isolation(
 
 
 @pytest.mark.asyncio
+async def test_audit_record_clears_missing_workspace_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            name="orphan-ws-audit",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-orphan-ws",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=24),
+            cost_estimate_hourly=Decimal("0.01"),
+        )
+        audits = AuditService(session)
+        missing_ws = uuid4()
+        entry = await audits.record(
+            action=AuditAction.TEARDOWN_SUCCEEDED,
+            actor_id=str(test_user.id),
+            status=AuditStatus.SUCCESS,
+            environment_id=environment.id,
+            workspace_id=missing_ws,
+            detail="workspace already deleted",
+        )
+        await session.commit()
+        assert entry.workspace_id is None
+        assert entry.environment_id == environment.id
+
+
+@pytest.mark.asyncio
 async def test_audit_list_for_environment_orders_newest_first() -> None:
     session = AsyncMock()
     older = MagicMock()

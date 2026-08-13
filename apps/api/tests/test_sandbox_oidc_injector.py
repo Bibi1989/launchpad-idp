@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,144 @@ def test_credentials_to_env_auto_triggers_keyless_oidc(
     assert cfg_path.is_file()
     cfg_data = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert "my-pool" in cfg_data["audience"]
+
+
+def test_unwrap_markdown_url() -> None:
+    from app.core.secrets import unwrap_markdown_url
+
+    assert (
+        unwrap_markdown_url(
+            "[https://sts.googleapis.com/v1/token](https://sts.googleapis.com/v1/token)"
+        )
+        == "https://sts.googleapis.com/v1/token"
+    )
+    assert unwrap_markdown_url("https://sts.googleapis.com/v1/token") == (
+        "https://sts.googleapis.com/v1/token"
+    )
+
+
+def test_credentials_to_env_sanitizes_markdown_token_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset_key_manager()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "app.core.secrets.get_settings",
+        lambda: type(
+            "S",
+            (),
+            {
+                "launchpad_oidc_issuer_url": "https://oidc.launchpad.test",
+                "launchpad_oidc_token_ttl_seconds": 900,
+            },
+        )(),
+    )
+    blob = json.dumps(
+        {
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/x",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": (
+                "[https://sts.googleapis.com/v1/token]"
+                "(https://sts.googleapis.com/v1/token)"
+            ),
+            "credential_source": {"file": "/tmp/launchpad_oidc_token.jwt"},
+        }
+    )
+    env = credentials_to_env({"GCP_SA_KEY": blob}, workspace_id="ws-md-url")
+    data = json.loads(Path(env["GOOGLE_APPLICATION_CREDENTIALS"]).read_text(encoding="utf-8"))
+    assert data["token_url"] == "https://sts.googleapis.com/v1/token"
+
+
+def test_credentials_to_env_prefers_keys_over_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    reset_key_manager()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "app.core.secrets.get_settings",
+        lambda: type(
+            "S",
+            (),
+            {
+                "launchpad_oidc_issuer_url": "https://oidc.launchpad.test",
+                "gcp_oauth_client_id": "client.apps.googleusercontent.com",
+                "gcp_oauth_client_secret": "secret",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "app.core.secrets._mint_gcp_user_access_token",
+        lambda **_kwargs: "ya29.minted",
+    )
+    oauth = {
+        "provider": "gcp",
+        "access_token": "ya29.access",
+        "refresh_token": "1//refresh",
+        "token_type": "Bearer",
+        "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        "claims": {"client_id": "client.apps.googleusercontent.com"},
+    }
+    blob = json.dumps(
+        {
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/x",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": "https://sts.googleapis.com/v1/token",
+            "credential_source": {"file": "/tmp/stale.jwt"},
+        }
+    )
+    env = credentials_to_env(
+        {"GCP_SA_KEY": blob, "GCP_OAUTH_TOKEN_JSON": json.dumps(oauth)},
+        workspace_id="ws-keys-prefer",
+    )
+    assert "CLOUDSDK_AUTH_ACCESS_TOKEN" not in env
+    data = json.loads(Path(env["GOOGLE_APPLICATION_CREDENTIALS"]).read_text(encoding="utf-8"))
+    assert data["type"] == "external_account"
+    assert Path(data["credential_source"]["file"]).is_file()
+
+
+def test_credentials_to_env_rewrites_external_account_sa_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset_key_manager()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "app.core.secrets.get_settings",
+        lambda: type(
+            "S",
+            (),
+            {
+                "launchpad_oidc_issuer_url": "https://oidc.launchpad.test",
+                "launchpad_oidc_token_ttl_seconds": 900,
+            },
+        )(),
+    )
+    blob = json.dumps(
+        {
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/x",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": "https://sts.googleapis.com/v1/token",
+            "credential_source": {"file": "/tmp/launchpad_oidc_token.jwt"},
+            "service_account_impersonation_url": (
+                "https://iamcredentials.googleapis.com/v1/projects/-/"
+                "serviceAccounts/sa@proj.iam.gserviceaccount.com:generateAccessToken"
+            ),
+        }
+    )
+    env = credentials_to_env({"GCP_SA_KEY": blob}, workspace_id="ws-ext-acct")
+    assert "GCP_SA_KEY" not in env
+    cfg_path = Path(env["GOOGLE_APPLICATION_CREDENTIALS"])
+    assert cfg_path.is_file()
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    token_file = Path(data["credential_source"]["file"])
+    assert token_file.is_file()
+    assert token_file.name == "oidc_token.jwt"
+    assert "/tmp/launchpad_oidc_token.jwt" not in str(token_file)
+    assert env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] == str(cfg_path)
 
 
 def test_credentials_to_env_wif_strips_static_sa_key(monkeypatch: pytest.MonkeyPatch) -> None:

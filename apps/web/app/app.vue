@@ -22,7 +22,7 @@ const bareShell = computed(() => {
     overlay - do not flip bare on !ready or the main column loses its sidebar offset.
   -->
   <AppShell :bare="bareShell">
-    <NuxtPage />
+    <NuxtPage :key="route.fullPath" />
   </AppShell>
   <AppSplash v-if="!ready" fullscreen />
   <ToastHost />

@@ -42,6 +42,7 @@ export function defaultRunningInstanceConfig(
     ssh_key_path: null,
     listen_port: 8080,
     process_strategy: 'docker',
+    code_source: 'ssh',
     reverse_proxy: 'none',
     preview_url_override: null,
     kube_context: null,
@@ -227,7 +228,11 @@ export function validateRunningInstanceFields(input: {
       input.runningInstance.preview_url_override?.trim()
       || input.runningInstance.endpoint_url?.trim(),
     )
-    if (!hasHost && !hasOverride) return 'vm_host'
+    // A host is only required when nothing can supply one automatically:
+    // local falls back to a Docker preview; GCP/AWS auto-create the VM. Azure
+    // auto-provisioning is not implemented yet, so it still needs a host.
+    const canAutocreate = ['local', 'gcp', 'aws'].includes(input.provider)
+    if (!hasHost && !hasOverride && !canAutocreate) return 'vm_host'
     return null
   }
 

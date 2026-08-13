@@ -123,6 +123,39 @@ async def acquire_state_lock(
             logger.exception("state_lock_redis_close_failed", lock_key=key)
 
 
+async def force_release_state_lock(
+    resource_id: UUID | str,
+    *,
+    scope: LockScope = "environment",
+    settings: Settings | None = None,
+) -> bool:
+    """Forcibly delete a state-lock key (break a stale lock).
+
+    Used by explicit, terminal destroy: when a provision task was killed (worker
+    restart) or hung, its Redis lock lingers until TTL and blocks teardown. A
+    user-requested destroy is authoritative and must win, so break the lock and
+    proceed. Returns True when a key was actually removed.
+    """
+    cfg = settings or get_settings()
+    key = _lock_key(scope, str(resource_id))
+    client = redis.from_url(cfg.redis_url, encoding="utf-8", decode_responses=True)
+    try:
+        deleted = bool(await client.delete(key))
+        logger.warning(
+            "state_lock_force_released",
+            scope=scope,
+            resource_id=str(resource_id),
+            lock_key=key,
+            existed=deleted,
+        )
+        return deleted
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            logger.exception("state_lock_force_release_close_failed", lock_key=key)
+
+
 async def is_state_locked(
     resource_id: UUID | str,
     *,

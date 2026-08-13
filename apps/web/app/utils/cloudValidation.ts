@@ -91,6 +91,7 @@ export const runningInstanceSchema = z.object({
   ssh_key_path: z.string().max(512).nullable().optional(),
   listen_port: z.number().int().min(1).max(65535).default(8080),
   process_strategy: z.enum(['docker', 'systemd', 'pm2']).default('docker'),
+  code_source: z.enum(['ssh', 'github']).default('ssh'),
   reverse_proxy: z.enum(['none', 'nginx', 'caddy']).default('none'),
   preview_url_override: z.string().max(512).nullable().optional(),
   kube_context: z.string().max(128).nullable().optional(),
@@ -386,6 +387,8 @@ export const cloudflareResourcesSchema = z
 
 export const cloudCredentialsSchema = z.object({
   gcp_sa_key_json: z.string().optional().nullable(),
+  gcp_project_id: z.string().optional().nullable(),
+  gcp_region: z.string().optional().nullable(),
   gcp_wif_project_number: z.string().optional().nullable(),
   gcp_wif_pool_id: z.string().optional().nullable(),
   gcp_wif_provider_id: z.string().optional().nullable(),
@@ -393,17 +396,21 @@ export const cloudCredentialsSchema = z.object({
   aws_access_key_id: z.string().optional().nullable(),
   aws_secret_access_key: z.string().optional().nullable(),
   aws_session_token: z.string().optional().nullable(),
+  aws_region: z.string().optional().nullable(),
   aws_role_arn: z.string().optional().nullable(),
   aws_role_session_name: z.string().optional().nullable(),
   azure_client_id: z.string().optional().nullable(),
   azure_client_secret: z.string().optional().nullable(),
   azure_tenant_id: z.string().optional().nullable(),
   azure_subscription_id: z.string().optional().nullable(),
+  azure_location: z.string().optional().nullable(),
   cloudflare_api_token: z.string().optional().nullable(),
 })
 
 export type CloudCredentialsForm = {
   gcp_sa_key_json: string
+  gcp_project_id: string
+  gcp_region: string
   gcp_wif_project_number: string
   gcp_wif_pool_id: string
   gcp_wif_provider_id: string
@@ -411,17 +418,21 @@ export type CloudCredentialsForm = {
   aws_access_key_id: string
   aws_secret_access_key: string
   aws_session_token: string
+  aws_region: string
   aws_role_arn: string
   aws_role_session_name: string
   azure_client_id: string
   azure_client_secret: string
   azure_tenant_id: string
   azure_subscription_id: string
+  azure_location: string
   cloudflare_api_token: string
 }
 
 export const emptyCloudCredentials = (): CloudCredentialsForm => ({
   gcp_sa_key_json: '',
+  gcp_project_id: '',
+  gcp_region: '',
   gcp_wif_project_number: '',
   gcp_wif_pool_id: '',
   gcp_wif_provider_id: '',
@@ -429,12 +440,14 @@ export const emptyCloudCredentials = (): CloudCredentialsForm => ({
   aws_access_key_id: '',
   aws_secret_access_key: '',
   aws_session_token: '',
+  aws_region: '',
   aws_role_arn: '',
   aws_role_session_name: '',
   azure_client_id: '',
   azure_client_secret: '',
   azure_tenant_id: '',
   azure_subscription_id: '',
+  azure_location: '',
   cloudflare_api_token: '',
 })
 
@@ -576,6 +589,7 @@ const wizardCommonFields = {
     ssh_key_path: null,
     listen_port: 8080,
     process_strategy: 'docker',
+    code_source: 'ssh',
     reverse_proxy: 'none',
     preview_url_override: null,
     kube_context: null,
@@ -673,10 +687,13 @@ export const provisioningWizardSchema = z.discriminatedUnion('provider', [
         value.running_instance.preview_url_override?.trim()
         || value.running_instance.endpoint_url?.trim(),
       )
-      if (!hasHost && !hasOverride) {
+      // local falls back to a Docker preview; GCP/AWS auto-create the VM. Only
+      // Azure (no auto-provision yet) still requires a host up front.
+      const canAutocreate = ['local', 'gcp', 'aws'].includes(value.provider)
+      if (!hasHost && !hasOverride && !canAutocreate) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'VM host (IP/hostname) is required',
+          message: 'VM host (IP/hostname) is required for Azure',
           path: ['running_instance', 'host'],
         })
       }

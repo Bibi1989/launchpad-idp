@@ -7,9 +7,21 @@ from pathlib import Path
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_API_DIR = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_ENV_FILES = (
+    str(_API_DIR / ".env"),
+    str(_REPO_ROOT / ".env"),
+    str(_REPO_ROOT / "deploy" / "oci" / ".env"),
+)
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     app_name: str = "Launchpad IDP Control Plane"
     environment: str = "development"
@@ -28,8 +40,16 @@ class Settings(BaseSettings):
     state_lock_blocking_timeout_seconds: float = 0.0
     # TEARDOWN state lock should expire quickly so worker restarts
     # can re-queue orphaned TEARDOWN_PENDING environments without waiting
-    # for the full provisioning lock TTL.
+    # for the full provisioning lock TTL. Also the grace window after which an
+    # explicit destroy breaks a stale provision lock instead of waiting it out.
     teardown_state_lock_timeout_seconds: float = 180.0
+
+    # Celery task limits so a single hung task (e.g. blocked on an unreachable
+    # apiserver) cannot occupy the worker forever and starve teardown. The SOFT
+    # limit raises inside the task so it releases its state lock and marks the env
+    # FAILED cleanly; the HARD limit is a last-resort backstop.
+    celery_task_soft_time_limit_seconds: int = 900
+    celery_task_time_limit_seconds: int = 1000
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
@@ -44,7 +64,8 @@ class Settings(BaseSettings):
     max_concurrent_environments_pro: int | None = None
     preview_soft_cost_cap: Decimal = Decimal("25.00")
     ttl_extend_hours_default: int = 1
-    ttl_warning_hours: int = 2
+    # Warn when remaining TTL is at or below this many hours (must be < max TTL).
+    ttl_warning_hours: int = 1
     # Total TTL hard cap from create (TTL extension cannot push past this).
     ttl_max_total_hours_from_create: int = 2
 
@@ -146,6 +167,14 @@ class Settings(BaseSettings):
     launchpad_oidc_private_key_path: str | None = None
     launchpad_oidc_key_id: str = "launchpad-key-1"
     launchpad_oidc_token_ttl_seconds: int = 900
+
+    # Interactive cloud OAuth (Settings → Connect Google/AWS/Azure)
+    # Local/dev only: browser loopback runs on the API host (same machine as the user).
+    gcp_oauth_client_id: str | None = None
+    gcp_oauth_client_secret: str | None = None
+    azure_oauth_client_id: str | None = None
+    azure_oauth_tenant_id: str = "common"
+    cloud_oauth_timeout_seconds: int = 180
 
 
 
@@ -287,6 +316,13 @@ class Settings(BaseSettings):
     agent_local_node_max_vcpu: float = 2.0
     agent_local_node_max_memory_mb: int = 8192
 
+    # When a workspace is destroyed, run terraform/pulumi destroy on its applied
+    # cloud infrastructure before deleting the local IaC + state, so cloud resources
+    # (VPC, GKE/EKS, Cloud SQL, buckets, …) are not orphaned. Skipped for the local
+    # provider and for workspaces that were never applied (no state).
+    iac_destroy_on_workspace_delete: bool = True
+    iac_destroy_timeout_seconds: int = 1200
+
     # AI Infrastructure Provisioner (Gemini blueprint generation, heuristic fallback)
     ai_provisioner_heuristic_fallback: bool = True
     # Hours/month used to project an hourly rate-card estimate to a monthly figure.
@@ -384,6 +420,9 @@ class Settings(BaseSettings):
         "oidc_default_org_slug",
         "launchpad_oidc_private_key",
         "launchpad_oidc_private_key_path",
+        "gcp_oauth_client_id",
+        "gcp_oauth_client_secret",
+        "azure_oauth_client_id",
         "gemini_api_key",
         mode="before",
     )

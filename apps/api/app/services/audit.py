@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger, sanitize_log_message
-from app.models.domain import AuditAction, AuditLog, AuditStatus
+from app.models.domain import AuditAction, AuditLog, AuditStatus, Environment, ProvisioningWorkspace
 
 logger = get_logger(__name__)
 
@@ -37,6 +37,10 @@ class AuditService:
         timestamp: datetime | None = None,
     ) -> AuditLog:
         safe_detail = sanitize_log_message(detail) if detail else None
+        # INSERT still enforces FKs. Workspace/env may already be gone during
+        # teardown or workspace delete - drop stale ids instead of failing audit.
+        workspace_id = await self._living_workspace_id(workspace_id)
+        environment_id = await self._living_environment_id(environment_id)
         entry = AuditLog(
             workspace_id=workspace_id,
             environment_id=environment_id,
@@ -61,6 +65,32 @@ class AuditService:
             commit_sha=commit_sha,
         )
         return entry
+
+    async def _living_workspace_id(self, workspace_id: UUID | None) -> UUID | None:
+        if workspace_id is None:
+            return None
+        row = await self._session.get(ProvisioningWorkspace, workspace_id)
+        if row is None:
+            logger.warning(
+                "audit_workspace_id_cleared",
+                workspace_id=str(workspace_id),
+                reason="missing_from_provisioning_workspaces",
+            )
+            return None
+        return workspace_id
+
+    async def _living_environment_id(self, environment_id: UUID | None) -> UUID | None:
+        if environment_id is None:
+            return None
+        row = await self._session.get(Environment, environment_id)
+        if row is None:
+            logger.warning(
+                "audit_environment_id_cleared",
+                environment_id=str(environment_id),
+                reason="missing_from_environments",
+            )
+            return None
+        return environment_id
 
     async def list_for_environment(
         self,

@@ -62,14 +62,20 @@ class EnvironmentRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_name(self, name: str) -> Environment | None:
-        """Return a non-destroyed environment with this name, if any."""
-        result = await self._session.execute(
-            select(Environment).where(
-                Environment.name == name,
-                Environment.status != EnvironmentStatus.DESTROYED,
-            )
-        )
+    async def get_by_name(
+        self,
+        name: str,
+        *,
+        org_id: UUID | None = None,
+    ) -> Environment | None:
+        """Return a non-destroyed environment with this name in the org (or globally if org omitted)."""
+        filters = [
+            Environment.name == name,
+            Environment.status != EnvironmentStatus.DESTROYED,
+        ]
+        if org_id is not None:
+            filters.append(Environment.org_id == org_id)
+        result = await self._session.execute(select(Environment).where(*filters))
         return result.scalar_one_or_none()
 
     async def list_for_owner(

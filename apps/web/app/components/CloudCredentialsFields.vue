@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { CloudCredentialsForm } from '~/utils/cloudValidation'
+import { AWS_REGIONS, AZURE_LOCATIONS, GCP_REGIONS } from '~/utils/cloudRegions'
 
 const credentials = defineModel<CloudCredentialsForm>('credentials', { required: true })
 
@@ -7,9 +8,12 @@ const props = withDefaults(
   defineProps<{
     provider: 'gcp' | 'aws' | 'azure' | 'cloudflare'
     saPlaceholder?: string
+    /** When true, show GCP project id (Connect / WIF). Hidden when SA JSON embeds project_id. */
+    showGcpProjectId?: boolean
   }>(),
   {
-    saPlaceholder: 'Paste service account JSON (encrypted at rest)',
+    saPlaceholder: '',
+    showGcpProjectId: undefined,
   },
 )
 
@@ -17,6 +21,44 @@ const { t } = useI18n()
 
 const gcpAuthMode = ref<'sa' | 'wif'>('sa')
 const awsAuthMode = ref<'keys' | 'oidc'>('keys')
+
+const gcpSaPlaceholder = computed(
+  () => props.saPlaceholder || t('credentials.fields.gcpSaKeyJsonPlaceholder'),
+)
+
+function projectIdFromSaJson(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  try {
+    const parsed = JSON.parse(trimmed) as { project_id?: unknown }
+    if (typeof parsed.project_id === 'string' && parsed.project_id.trim()) {
+      return parsed.project_id.trim()
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+const saEmbeddedProjectId = computed(() => projectIdFromSaJson(credentials.value.gcp_sa_key_json || ''))
+
+const showProjectIdField = computed(() => {
+  if (props.showGcpProjectId === false) return false
+  if (props.showGcpProjectId === true) return true
+  // Default: hide when SA JSON already includes project_id; show for Connect / WIF.
+  if (saEmbeddedProjectId.value) return false
+  return gcpAuthMode.value === 'wif'
+})
+
+watch(
+  () => credentials.value.gcp_sa_key_json,
+  (raw) => {
+    const project = projectIdFromSaJson(raw || '')
+    if (project && !(credentials.value.gcp_project_id || '').trim()) {
+      credentials.value.gcp_project_id = project
+    }
+  },
+)
 
 watch(
   () => props.provider,
@@ -30,6 +72,34 @@ watch(
 <template>
   <div class="space-y-3">
     <template v-if="provider === 'gcp'">
+      <label v-if="showProjectIdField" class="block space-y-2">
+        <span class="lp-label">{{ t('credentials.fields.gcpProjectId') }}</span>
+        <input
+          v-model="credentials.gcp_project_id"
+          class="lp-input font-mono text-xs"
+          placeholder="my-gcp-project"
+          autocomplete="off"
+        >
+        <p class="text-xs text-[var(--lp-muted)]">{{ t('credentials.fields.gcpProjectIdHint') }}</p>
+      </label>
+      <p
+        v-else-if="saEmbeddedProjectId"
+        class="text-xs text-[var(--lp-muted)]"
+      >
+        {{ t('credentials.fields.gcpProjectIdFromSa', { project: saEmbeddedProjectId }) }}
+      </p>
+
+      <label class="block space-y-2">
+        <span class="lp-label">{{ t('credentials.fields.preferredRegion') }}</span>
+        <select v-model="credentials.gcp_region" class="lp-input">
+          <option value="">{{ t('credentials.fields.preferredRegionPlaceholder') }}</option>
+          <option v-for="region in GCP_REGIONS" :key="region.value" :value="region.value">
+            {{ region.label }}
+          </option>
+        </select>
+        <p class="text-xs text-[var(--lp-muted)]">{{ t('credentials.fields.preferredRegionHint') }}</p>
+      </label>
+
       <div class="flex gap-2">
         <button
           type="button"
@@ -57,15 +127,31 @@ watch(
         </button>
       </div>
 
-      <label v-if="gcpAuthMode === 'sa'" class="block space-y-2">
-        <span class="lp-label">{{ t('credentials.fields.gcpSaKeyJson') }}</span>
-        <textarea
-          v-model="credentials.gcp_sa_key_json"
-          rows="4"
-          class="lp-input font-mono text-xs"
-          :placeholder="saPlaceholder"
-        />
-      </label>
+      <div v-if="gcpAuthMode === 'sa'" class="space-y-2">
+        <label class="block space-y-2">
+          <span class="lp-label">{{ t('credentials.fields.gcpSaKeyJson') }}</span>
+          <textarea
+            v-model="credentials.gcp_sa_key_json"
+            rows="5"
+            class="lp-input font-mono text-xs"
+            :placeholder="gcpSaPlaceholder"
+          />
+        </label>
+        <div class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/60 px-3 py-2 text-xs text-[var(--lp-muted)] space-y-1.5">
+          <p class="font-medium text-[var(--lp-text)]">{{ t('credentials.fields.gcpSaKeyHowTitle') }}</p>
+          <p>{{ t('credentials.fields.gcpSaKeyHowIntro') }}</p>
+          <ol class="list-decimal pl-4 space-y-1">
+            <li>{{ t('credentials.fields.gcpSaKeyHowStep1') }}</li>
+            <li>{{ t('credentials.fields.gcpSaKeyHowStep2') }}</li>
+            <li>{{ t('credentials.fields.gcpSaKeyHowStep3') }}</li>
+            <li>{{ t('credentials.fields.gcpSaKeyHowStep4') }}</li>
+          </ol>
+          <p class="font-mono text-[11px] text-[var(--lp-text)] break-all">
+            {{ t('credentials.fields.gcpSaKeyHowCli') }}
+          </p>
+          <p>{{ t('credentials.fields.gcpSaKeyHowNote') }}</p>
+        </div>
+      </div>
 
       <div v-else class="grid gap-3 sm:grid-cols-2">
         <p class="sm:col-span-2 text-xs text-[var(--lp-muted)]">
@@ -111,6 +197,17 @@ watch(
     </template>
 
     <template v-else-if="provider === 'aws'">
+      <label class="block space-y-2">
+        <span class="lp-label">{{ t('credentials.fields.preferredRegion') }}</span>
+        <select v-model="credentials.aws_region" class="lp-input">
+          <option value="">{{ t('credentials.fields.preferredRegionPlaceholder') }}</option>
+          <option v-for="region in AWS_REGIONS" :key="region.value" :value="region.value">
+            {{ region.label }}
+          </option>
+        </select>
+        <p class="text-xs text-[var(--lp-muted)]">{{ t('credentials.fields.preferredRegionHint') }}</p>
+      </label>
+
       <div class="flex gap-2">
         <button
           type="button"
@@ -184,6 +281,17 @@ watch(
     </template>
 
     <template v-else-if="provider === 'azure'">
+      <label class="block space-y-2">
+        <span class="lp-label">{{ t('credentials.fields.preferredRegion') }}</span>
+        <select v-model="credentials.azure_location" class="lp-input">
+          <option value="">{{ t('credentials.fields.preferredRegionPlaceholder') }}</option>
+          <option v-for="region in AZURE_LOCATIONS" :key="region.value" :value="region.value">
+            {{ region.label }}
+          </option>
+        </select>
+        <p class="text-xs text-[var(--lp-muted)]">{{ t('credentials.fields.preferredRegionHint') }}</p>
+      </label>
+
       <div class="grid gap-3 sm:grid-cols-2">
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.clientId') }}</span>

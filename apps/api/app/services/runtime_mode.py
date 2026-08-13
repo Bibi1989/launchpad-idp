@@ -89,9 +89,23 @@ def validate_runtime_mode(
             return
 
         if kind == RunningInstanceKind.VM:
-            if not (cfg.host or "").strip() and not (cfg.preview_url_override or "").strip():
+            has_target = (
+                (cfg.host or "").strip()
+                or (cfg.preview_url_override or "").strip()
+                or (cfg.service_name or "").strip()
+            )
+            # A host is only mandatory when nothing can supply one automatically:
+            #  - local provider -> one-click preview falls back to local Docker
+            #  - GCP / AWS      -> the VM (and its public IP) are auto-created at deploy
+            # Azure auto-provisioning is not implemented yet, so it still needs a host.
+            can_autocreate = isinstance(
+                cloud, (LocalCloudConfig, GcpCloudConfig, AwsCloudConfig)
+            )
+            if not has_target and not can_autocreate:
                 raise RuntimeModeViolation(
-                    "VM compute requires a host (IP/hostname) for SSH deploy"
+                    "VM compute needs a host (IP or hostname), a preview URL override, "
+                    "or a cloud instance name. GCP/AWS create the VM for you; Azure "
+                    "auto-provisioning is not available yet, so set a host for Azure."
                 )
             return
 

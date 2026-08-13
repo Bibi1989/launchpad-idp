@@ -8,6 +8,7 @@ import {
   iacDestroyWizardSteps,
   iacInitWizardSteps,
 } from '~/utils/workspaceInfraScaffold'
+import { emptyCloudCredentials } from '~/utils/cloudValidation'
 
 const props = defineProps<{
   open: boolean
@@ -61,23 +62,7 @@ const aiTargetContent = ref('')
 const aiErrorContext = ref<string | null>(null)
 const savedNewCredentials = ref(false)
 
-const credentials = reactive({
-  gcp_sa_key_json: '',
-  gcp_wif_project_number: '',
-  gcp_wif_pool_id: '',
-  gcp_wif_provider_id: '',
-  gcp_wif_target_sa_email: '',
-  aws_access_key_id: '',
-  aws_secret_access_key: '',
-  aws_session_token: '',
-  aws_role_arn: '',
-  aws_role_session_name: '',
-  azure_client_id: '',
-  azure_client_secret: '',
-  azure_tenant_id: '',
-  azure_subscription_id: '',
-  cloudflare_api_token: '',
-})
+const credentials = reactive(emptyCloudCredentials())
 
 const isDestroy = computed(() => props.mode === 'destroy')
 const steps = computed(() =>

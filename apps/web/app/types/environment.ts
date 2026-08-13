@@ -193,6 +193,16 @@ export interface EnvironmentPromotePayload {
   name?: string | null
   ttl_hours?: number | null
   ttl_minutes?: number | null
+  /** Multi-service attach/compose: which service gets the cloud preview URL. */
+  primary_service?: string | null
+  /** How source reaches a cloud VM: ssh copy or github clone (ignored for docker). */
+  code_source?: 'ssh' | 'github' | null
+  /** Cloud region/location for the promoted preview. */
+  region?: string | null
+  /** Create an isolated VPC/VNet for this cloud preview. */
+  create_vpc?: boolean
+  /** Create subnets in the preview VPC/VNet (implies create_vpc). */
+  create_subnets?: boolean
 }
 
 export interface ApiErrorBody {

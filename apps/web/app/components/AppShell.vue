@@ -162,7 +162,7 @@ async function ensureSearchIndex() {
   searchIndexReady.value = true
   try {
     await Promise.all([
-      refreshEnvironments().catch(() => undefined),
+      refreshEnvironments({ soft: environments.value.length > 0 }).catch(() => undefined),
       listWorkspaces()
         .then((rows) => {
           workspaces.value = rows

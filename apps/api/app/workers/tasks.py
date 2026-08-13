@@ -46,12 +46,91 @@ from app.services.state_lock import (
     PROVISIONING_IN_PROGRESS_MESSAGE,
     StateLockConflict,
     acquire_state_lock,
+    force_release_state_lock,
     is_state_locked,
 )
 from app.workers.celery_app import celery_app
 
 configure_logging()
 logger = get_logger(__name__)
+
+
+async def _attach_org_slug(session: AsyncSession, environment: Environment) -> str | None:
+    org_id = getattr(environment, "org_id", None)
+    if org_id is None:
+        return None
+    from app.models.domain import Organization
+
+    org = await session.get(Organization, org_id)
+    slug = (getattr(org, "slug", None) or "").strip().lower() if org is not None else ""
+    return slug or None
+
+
+async def _merge_attach_credentials_from_vault(
+    session: AsyncSession,
+    *,
+    attach_credentials: object | None,
+    owner_id: UUID | None,
+) -> object | None:
+    """Overlay Settings → Connect vault onto workspace creds (OAuth wins)."""
+    if owner_id is None:
+        return attach_credentials
+    from app.schemas.cloud import CloudCredentials
+    from app.services.provisioning import ProvisioningService
+
+    owner_row = await session.get(User, owner_id)
+    if owner_row is None:
+        return attach_credentials
+    base = attach_credentials if isinstance(attach_credentials, CloudCredentials) else CloudCredentials()
+    return await ProvisioningService(session).fill_cloud_credentials_from_account_vault(
+        base,
+        owner_row,
+    )
+
+
+def _wizard_cloud_provider(snapshot: dict | None) -> str | None:
+    if not isinstance(snapshot, dict):
+        return None
+    cloud = snapshot.get("cloud")
+    if isinstance(cloud, dict):
+        raw = cloud.get("provider")
+        if raw is not None:
+            return str(getattr(raw, "value", raw))
+    return None
+
+
+def _wizard_network_flags(snapshot: dict | None) -> tuple[bool, bool]:
+    """Return (create_vpc, create_subnets) from wizard cloud resources."""
+    if not isinstance(snapshot, dict):
+        return False, False
+    cloud = snapshot.get("cloud")
+    if not isinstance(cloud, dict):
+        return False, False
+    resources = cloud.get("resources")
+    if not isinstance(resources, dict):
+        return False, False
+    create_vpc = bool(resources.get("vpc") or resources.get("vnet"))
+    create_subnets = bool(resources.get("subnets"))
+    if create_subnets:
+        create_vpc = True
+    return create_vpc, create_subnets
+
+
+def _wizard_gcp_project_id(snapshot: dict | None) -> str | None:
+    """GCP project id from wizard cloud.resources.project_id."""
+    if not isinstance(snapshot, dict):
+        return None
+    cloud = snapshot.get("cloud")
+    if not isinstance(cloud, dict):
+        return None
+    resources = cloud.get("resources")
+    if not isinstance(resources, dict):
+        return None
+    raw = resources.get("project_id")
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
 
 
 async def _effective_deploy_mode(
@@ -824,22 +903,36 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             RunningInstanceConfig,
                             WorkspaceWizardConfig,
                         )
-                        from app.services.attach_deploy import AttachDeployError, deploy_attach
+                        from app.services.attach_deploy import AttachDeployError, deploy_attach, prepare_attach_deploy
                         from app.services.provisioning import ProvisioningService
 
                         running_instance = RunningInstanceConfig()
                         attach_services = None
+                        attach_runtime_mode = None
                         packaging: KubernetesPackaging | None = None
+                        attach_credentials = None
+                        workspace_encrypted: str | None = None
+                        workspace_provider: str | None = None
+                        wizard_cloud_provider: str | None = None
+                        create_vpc = False
+                        create_subnets = False
+                        gcp_project_id: str | None = None
+                        attach_org_slug = await _attach_org_slug(session, environment)
                         if workspace_id is not None:
                             provisioning = ProvisioningService(session)
                             workspace_row = await session.get(
                                 ProvisioningWorkspace, workspace_id
                             )
                             if workspace_row is not None:
+                                workspace_encrypted = workspace_row.encrypted_credentials
+                                workspace_provider = workspace_row.provider
                                 packaging = provisioning.get_workspace_kubernetes_packaging(
                                     workspace_row
                                 )
                                 snapshot = provisioning._load_wizard_snapshot(workspace_row)
+                                wizard_cloud_provider = _wizard_cloud_provider(snapshot)
+                                create_vpc, create_subnets = _wizard_network_flags(snapshot)
+                                gcp_project_id = _wizard_gcp_project_id(snapshot)
                                 if snapshot is not None:
                                     try:
                                         wizard = WorkspaceWizardConfig.model_validate(
@@ -849,11 +942,26 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                         attach_services = list(
                                             wizard.container_scaffold.services or []
                                         )
+                                        attach_runtime_mode = wizard.runtime_mode
                                     except Exception:
                                         logger.warning(
                                             "attach_wizard_snapshot_invalid",
                                             workspace_id=str(workspace_id),
                                         )
+                        running_instance, attach_credentials, attach_provider = prepare_attach_deploy(
+                            running_instance=running_instance,
+                            cloud_provider=getattr(environment, "provider", None),
+                            environment_name=environment.name,
+                            encrypted_credentials=workspace_encrypted,
+                            runtime_mode=attach_runtime_mode,
+                            workspace_provider=workspace_provider,
+                            wizard_cloud_provider=wizard_cloud_provider,
+                        )
+                        attach_credentials = await _merge_attach_credentials_from_vault(
+                            session,
+                            attach_credentials=attach_credentials,
+                            owner_id=environment.owner_id,
+                        )
 
                         await _emit_stage(
                             log_repo,
@@ -862,7 +970,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             stage=ExecutionStage.APPLY,
                             message=(
                                 f"APPLY - deploying to running instance "
-                                f"({running_instance.kind.value})"
+                                f"({running_instance.kind.value}/{attach_provider})"
                             ),
                             commit_sha=commit_sha,
                         )
@@ -884,6 +992,14 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 packaging=packaging,
                                 settings=settings,
                                 services=attach_services,
+                                cloud_provider=attach_provider,
+                                credentials=attach_credentials,
+                                org_slug=attach_org_slug,
+                                workspace_provider=workspace_provider,
+                                wizard_cloud_provider=wizard_cloud_provider,
+                                create_vpc=create_vpc,
+                                create_subnets=create_subnets,
+                                gcp_project_id=gcp_project_id,
                             )
                         except AttachDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -1440,22 +1556,36 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                             RunningInstanceConfig,
                             WorkspaceWizardConfig,
                         )
-                        from app.services.attach_deploy import AttachDeployError, deploy_attach
+                        from app.services.attach_deploy import AttachDeployError, deploy_attach, prepare_attach_deploy
                         from app.services.provisioning import ProvisioningService
 
                         running_instance = RunningInstanceConfig()
                         attach_services = None
+                        attach_runtime_mode = None
                         packaging: KubernetesPackaging | None = None
+                        attach_credentials = None
+                        workspace_encrypted: str | None = None
+                        workspace_provider: str | None = None
+                        wizard_cloud_provider: str | None = None
+                        create_vpc = False
+                        create_subnets = False
+                        gcp_project_id: str | None = None
+                        attach_org_slug = await _attach_org_slug(session, environment)
                         if workspace_id is not None:
                             provisioning = ProvisioningService(session)
                             workspace_row = await session.get(
                                 ProvisioningWorkspace, workspace_id
                             )
                             if workspace_row is not None:
+                                workspace_encrypted = workspace_row.encrypted_credentials
+                                workspace_provider = workspace_row.provider
                                 packaging = provisioning.get_workspace_kubernetes_packaging(
                                     workspace_row
                                 )
                                 snapshot = provisioning._load_wizard_snapshot(workspace_row)
+                                wizard_cloud_provider = _wizard_cloud_provider(snapshot)
+                                create_vpc, create_subnets = _wizard_network_flags(snapshot)
+                                gcp_project_id = _wizard_gcp_project_id(snapshot)
                                 if snapshot is not None:
                                     try:
                                         wizard = WorkspaceWizardConfig.model_validate(
@@ -1465,8 +1595,23 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                         attach_services = list(
                                             wizard.container_scaffold.services or []
                                         )
+                                        attach_runtime_mode = wizard.runtime_mode
                                     except Exception:
                                         pass
+                        running_instance, attach_credentials, attach_provider = prepare_attach_deploy(
+                            running_instance=running_instance,
+                            cloud_provider=getattr(environment, "provider", None),
+                            environment_name=environment.name,
+                            encrypted_credentials=workspace_encrypted,
+                            runtime_mode=attach_runtime_mode,
+                            workspace_provider=workspace_provider,
+                            wizard_cloud_provider=wizard_cloud_provider,
+                        )
+                        attach_credentials = await _merge_attach_credentials_from_vault(
+                            session,
+                            attach_credentials=attach_credentials,
+                            owner_id=environment.owner_id,
+                        )
 
                         await _emit_stage(
                             log_repo,
@@ -1475,7 +1620,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                             stage=ExecutionStage.APPLY,
                             message=(
                                 "APPLY - redeploying running instance "
-                                f"({running_instance.kind.value})"
+                                f"({running_instance.kind.value}/{attach_provider})"
                             ),
                             commit_sha=short_sha,
                         )
@@ -1499,6 +1644,14 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                 packaging=packaging,
                                 settings=settings,
                                 services=attach_services,
+                                cloud_provider=attach_provider,
+                                credentials=attach_credentials,
+                                org_slug=attach_org_slug,
+                                workspace_provider=workspace_provider,
+                                wizard_cloud_provider=wizard_cloud_provider,
+                                create_vpc=create_vpc,
+                                create_subnets=create_subnets,
+                                gcp_project_id=gcp_project_id,
                             )
                             from app.schemas.environment import dump_preview_endpoints
 
@@ -1682,6 +1835,13 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                 actor_id = str(environment.owner_id)
                 workspace_id = environment.workspace_id
                 current_stage = ExecutionStage.INIT
+                # Snapshot scalars before any commit/rollback. After rollback SQLAlchemy
+                # expires the instance and lazy refresh would raise MissingGreenlet.
+                commit_sha = environment.latest_commit_sha
+                namespace_name = environment.namespace_name
+                workload_image = environment.workload_image
+                env_provider = environment.provider
+                env_name = environment.name
 
                 if environment.status != EnvironmentStatus.TEARDOWN_PENDING:
                     await env_repo.update_status(
@@ -1691,7 +1851,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     await _publish_status(
                         env_uuid,
                         status=EnvironmentStatus.TEARDOWN_PENDING,
-                        commit_sha=environment.latest_commit_sha,
+                        commit_sha=commit_sha,
                         message="Teardown started",
                         stage=ExecutionStage.INIT,
                     )
@@ -1701,8 +1861,8 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     session,
                     environment_id=env_uuid,
                     stage=ExecutionStage.INIT,
-                    message=f"INIT - tearing down namespace {environment.namespace_name}",
-                    commit_sha=environment.latest_commit_sha,
+                    message=f"INIT - tearing down namespace {namespace_name}",
+                    commit_sha=commit_sha,
                     status=EnvironmentStatus.TEARDOWN_PENDING.value,
                 )
 
@@ -1714,7 +1874,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         environment_id=env_uuid,
                         stage=ExecutionStage.APPLY,
                         message="APPLY - deleting namespace and resources",
-                        commit_sha=environment.latest_commit_sha,
+                        commit_sha=commit_sha,
                         status=EnvironmentStatus.TEARDOWN_PENDING.value,
                     )
 
@@ -1724,9 +1884,9 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     deploy_mode = await _effective_deploy_mode(session, environment)
                     await session.commit()
                     workspace_root: Path | None = None
-                    if environment.workspace_id is not None:
+                    if workspace_id is not None:
                         workspace_row = await session.get(
-                            ProvisioningWorkspace, environment.workspace_id
+                            ProvisioningWorkspace, workspace_id
                         )
                         if workspace_row is not None and workspace_row.root_dir:
                             workspace_root = Path(workspace_row.root_dir)
@@ -1737,14 +1897,14 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                             await asyncio.to_thread(
                                 teardown_compose,
                                 workspace_root=workspace_root,
-                                namespace=environment.namespace_name,
-                                environment_id=str(environment.id),
+                                namespace=namespace_name,
+                                environment_id=str(env_uuid),
                             )
                             # Drop the ws-* Ingress bridge namespace (Docker host backend).
                             try:
                                 await asyncio.wait_for(
                                     asyncio.to_thread(
-                                        provisioner.teardown, environment.namespace_name
+                                        provisioner.teardown, namespace_name
                                     ),
                                     timeout=30.0,
                                 )
@@ -1757,38 +1917,110 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         elif deploy_mode == DeployMode.ATTACH.value:
                             from app.schemas.cloud import (
                                 RunningInstanceConfig,
+                                WorkspaceRuntimeMode,
                                 WorkspaceWizardConfig,
                             )
-                            from app.services.attach_deploy import teardown_attach
+                            from app.services.attach_deploy import teardown_attach, prepare_attach_deploy
                             from app.services.provisioning import ProvisioningService
+                            from app.services.teardown_context import (
+                                owner_id_from_context,
+                                parse_teardown_context,
+                            )
 
                             running_instance = RunningInstanceConfig()
-                            if environment.workspace_id is not None:
+                            workspace_encrypted: str | None = None
+                            attach_runtime_mode = None
+                            workspace_provider: str | None = None
+                            wizard_cloud_provider: str | None = None
+                            attach_org_slug = await _attach_org_slug(session, environment)
+
+                            ctx = parse_teardown_context(
+                                getattr(environment, "teardown_context_json", None)
+                            )
+                            if ctx:
+                                workspace_encrypted = ctx.get("encrypted_credentials")
+                                workspace_provider = ctx.get("workspace_provider")
+                                wizard_cloud_provider = ctx.get("wizard_cloud_provider")
+                                runtime_raw = ctx.get("runtime_mode")
+                                if runtime_raw:
+                                    try:
+                                        attach_runtime_mode = WorkspaceRuntimeMode(str(runtime_raw))
+                                    except ValueError:
+                                        attach_runtime_mode = None
+                                ri = ctx.get("running_instance")
+                                if isinstance(ri, dict):
+                                    try:
+                                        running_instance = RunningInstanceConfig.model_validate(ri)
+                                    except Exception:
+                                        pass
+
+                            if workspace_id is not None and workspace_encrypted is None:
                                 provisioning = ProvisioningService(session)
                                 workspace_row = await session.get(
-                                    ProvisioningWorkspace, environment.workspace_id
+                                    ProvisioningWorkspace, workspace_id
                                 )
                                 if workspace_row is not None:
+                                    workspace_encrypted = workspace_row.encrypted_credentials
+                                    workspace_provider = workspace_provider or workspace_row.provider
                                     snapshot = provisioning._load_wizard_snapshot(workspace_row)
-                                    if snapshot is not None:
+                                    wizard_cloud_provider = (
+                                        wizard_cloud_provider or _wizard_cloud_provider(snapshot)
+                                    )
+                                    if snapshot is not None and not ctx:
                                         try:
                                             wizard = WorkspaceWizardConfig.model_validate(
                                                 {**snapshot, "has_credentials": False}
                                             )
                                             running_instance = wizard.running_instance
+                                            attach_runtime_mode = wizard.runtime_mode
                                         except Exception:
                                             pass
+
+                            running_instance, attach_credentials, attach_provider = prepare_attach_deploy(
+                                running_instance=running_instance,
+                                cloud_provider=env_provider,
+                                environment_name=env_name,
+                                encrypted_credentials=workspace_encrypted,
+                                runtime_mode=attach_runtime_mode,
+                                workspace_provider=workspace_provider,
+                                wizard_cloud_provider=wizard_cloud_provider,
+                            )
+
+                            owner_for_vault = owner_id_from_context(ctx) or getattr(
+                                environment, "owner_id", None
+                            )
+                            attach_credentials = await _merge_attach_credentials_from_vault(
+                                session,
+                                attach_credentials=attach_credentials,
+                                owner_id=owner_for_vault,
+                            )
+
+                            logger.info(
+                                "attach_teardown_resolved",
+                                environment_id=environment_id,
+                                provider=attach_provider,
+                                kind=getattr(running_instance.kind, "value", running_instance.kind),
+                                has_credentials=bool(attach_credentials),
+                                from_teardown_context=bool(ctx),
+                            )
+
                             await asyncio.to_thread(
                                 teardown_attach,
                                 running_instance=running_instance,
-                                namespace=environment.namespace_name,
-                                environment_id=str(environment.id),
+                                namespace=namespace_name,
+                                environment_id=str(env_uuid),
+                                environment_name=env_name,
                                 settings=settings,
+                                cloud_provider=attach_provider,
+                                credentials=attach_credentials,
+                                org_slug=attach_org_slug,
+                                workspace_provider=workspace_provider,
+                                wizard_cloud_provider=wizard_cloud_provider,
                             )
                             try:
                                 await asyncio.wait_for(
                                     asyncio.to_thread(
-                                        provisioner.teardown, environment.namespace_name
+                                        provisioner.teardown, namespace_name
                                     ),
                                     timeout=30.0,
                                 )
@@ -1801,7 +2033,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         else:
                             await asyncio.wait_for(
                                 asyncio.to_thread(
-                                    provisioner.teardown, environment.namespace_name
+                                    provisioner.teardown, namespace_name
                                 ),
                                 timeout=30.0,
                             )
@@ -1809,7 +2041,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         logger.warning(
                             "teardown_namespace_cleanup_failed",
                             environment_id=environment_id,
-                            namespace=environment.namespace_name,
+                            namespace=namespace_name,
                             deploy_mode=deploy_mode,
                             error=str(cleanup_exc),
                         )
@@ -1822,7 +2054,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                             ),
                             log_level=LogLevel.WARN,
                             status=EnvironmentStatus.TEARDOWN_PENDING.value,
-                            commit_sha=environment.latest_commit_sha,
+                            commit_sha=commit_sha,
                             stage=ExecutionStage.APPLY,
                         )
                     # Stop the per-preview cloudflared tunnel (if any) so we don't
@@ -1848,12 +2080,12 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         preview_images = collect_preview_environment_images(
                             settings=settings,
                             environment_id=str(env_uuid),
-                            workload_image=environment.workload_image,
-                            commit_sha=environment.latest_commit_sha,
+                            workload_image=workload_image,
+                            commit_sha=commit_sha,
                         )
                         images = list(dict.fromkeys(preview_images))
                         if images:
-                            is_local = environment.provider == "local" or (
+                            is_local = env_provider == "local" or (
                                 (settings.resolved_kubernetes_context or settings.kubernetes_context or "")
                                 .startswith(("kind-", "k3d-"))
                             )
@@ -1868,13 +2100,14 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                             "teardown_image_cleanup_failed", environment_id=environment_id
                         )
                     await asyncio.sleep(settings.provision_step_delay_seconds)
+                    environment.teardown_context_json = None
                     await env_repo.update_status(environment, EnvironmentStatus.DESTROYED)
                     await _emit_log(
                         log_repo,
                         environment_id=env_uuid,
                         message="APPLY - teardown completed, DESTROYED",
                         status=EnvironmentStatus.DESTROYED.value,
-                        commit_sha=environment.latest_commit_sha,
+                        commit_sha=commit_sha,
                         stage=ExecutionStage.APPLY,
                     )
                     await _record_audit(
@@ -1884,13 +2117,13 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         status=AuditStatus.SUCCESS,
                         environment_id=env_uuid,
                         workspace_id=workspace_id,
-                        commit_sha=environment.latest_commit_sha,
+                        commit_sha=commit_sha,
                     )
                     await session.commit()
                     await _publish_status(
                         env_uuid,
                         status=EnvironmentStatus.DESTROYED,
-                        commit_sha=environment.latest_commit_sha,
+                        commit_sha=commit_sha,
                         message="Teardown completed",
                         stage=ExecutionStage.APPLY,
                     )
@@ -1902,7 +2135,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         session_factory,
                         environment_id=env_uuid,
                         error_text=f"Teardown failed: {error_text}",
-                        commit_sha=environment.latest_commit_sha,
+                        commit_sha=commit_sha,
                         stage=current_stage,
                         audit_action=AuditAction.TEARDOWN_FAILED,
                         actor_id=actor_id,
@@ -1914,12 +2147,30 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
             environment_id=environment_id,
             message=PROVISIONING_IN_PROGRESS_MESSAGE,
         )
+        # A user-requested destroy must not wait out the full provision lock TTL
+        # (up to state_lock_timeout_seconds). Give an in-flight provision a grace
+        # window to notice the cancel and release cooperatively; past that, the
+        # holder is stuck or dead (e.g. worker restart left a stale key), so break
+        # the lock and let the retry proceed. Destroy is terminal and authoritative.
+        force_after = settings.teardown_state_lock_timeout_seconds
+        should_force = False
         async with session_factory() as session:
+            env_row = await EnvironmentRepository(session).get_by_id(env_uuid)
+            if env_row is not None and env_row.status == EnvironmentStatus.TEARDOWN_PENDING:
+                pending_since = env_row.updated_at
+                if pending_since.tzinfo is None:
+                    pending_since = pending_since.replace(tzinfo=UTC)
+                pending_age = (datetime.now(UTC) - pending_since).total_seconds()
+                should_force = pending_age >= force_after
             log_repo = DeploymentLogRepository(session)
             await _emit_log(
                 log_repo,
                 environment_id=env_uuid,
-                message=PROVISIONING_IN_PROGRESS_MESSAGE,
+                message=(
+                    "Destroy is overriding a stale provisioning lock and continuing."
+                    if should_force
+                    else PROVISIONING_IN_PROGRESS_MESSAGE
+                ),
                 log_level=LogLevel.WARN,
                 stage=ExecutionStage.INIT,
             )
@@ -1934,15 +2185,31 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                 detail=PROVISIONING_IN_PROGRESS_MESSAGE,
             )
             await session.commit()
-        # Provision (or another teardown) holds the lock. Retry shortly so a
-        # force-destroy during PROVISIONING does not leave TEARDOWN_PENDING forever.
+
+        if should_force:
+            logger.warning(
+                "teardown_forcing_stale_lock",
+                environment_id=environment_id,
+                pending_seconds=round(pending_age, 1),
+            )
+            try:
+                await force_release_state_lock(
+                    env_uuid, scope="environment", settings=settings
+                )
+            except Exception:
+                logger.exception(
+                    "teardown_force_release_failed", environment_id=environment_id
+                )
+
+        # Retry immediately after breaking a stale lock; otherwise leave a short
+        # grace for a live provision to cancel and release on its own.
         try:
             teardown_environment_task.apply_async(
                 kwargs={
                     "environment_id": str(env_uuid),
                     "correlation_id": f"teardown-retry:{env_uuid}",
                 },
-                countdown=15,
+                countdown=1 if should_force else 15,
             )
         except Exception:
             logger.exception(
@@ -2012,32 +2279,91 @@ async def _reclaim_environment_runtime(
                         error=str(bridge_exc),
                     )
         elif deploy_mode == DeployMode.ATTACH.value:
-            from app.schemas.cloud import RunningInstanceConfig, WorkspaceWizardConfig
-            from app.services.attach_deploy import teardown_attach
+            from app.schemas.cloud import (
+                RunningInstanceConfig,
+                WorkspaceRuntimeMode,
+                WorkspaceWizardConfig,
+            )
+            from app.services.attach_deploy import teardown_attach, prepare_attach_deploy
             from app.services.provisioning import ProvisioningService
+            from app.services.teardown_context import (
+                owner_id_from_context,
+                parse_teardown_context,
+            )
 
             running_instance = RunningInstanceConfig()
-            if environment.workspace_id is not None:
+            workspace_encrypted: str | None = None
+            attach_runtime_mode = None
+            workspace_provider: str | None = None
+            wizard_cloud_provider: str | None = None
+            attach_org_slug = await _attach_org_slug(session, environment)
+            ctx = parse_teardown_context(getattr(environment, "teardown_context_json", None))
+            if ctx:
+                workspace_encrypted = ctx.get("encrypted_credentials")
+                workspace_provider = ctx.get("workspace_provider")
+                wizard_cloud_provider = ctx.get("wizard_cloud_provider")
+                runtime_raw = ctx.get("runtime_mode")
+                if runtime_raw:
+                    try:
+                        attach_runtime_mode = WorkspaceRuntimeMode(str(runtime_raw))
+                    except ValueError:
+                        attach_runtime_mode = None
+                ri = ctx.get("running_instance")
+                if isinstance(ri, dict):
+                    try:
+                        running_instance = RunningInstanceConfig.model_validate(ri)
+                    except Exception:
+                        pass
+            if environment.workspace_id is not None and workspace_encrypted is None:
                 provisioning = ProvisioningService(session)
                 workspace_row = await session.get(
                     ProvisioningWorkspace, environment.workspace_id
                 )
                 if workspace_row is not None:
+                    workspace_encrypted = workspace_row.encrypted_credentials
+                    workspace_provider = workspace_provider or workspace_row.provider
                     snapshot = provisioning._load_wizard_snapshot(workspace_row)
-                    if snapshot is not None:
+                    wizard_cloud_provider = wizard_cloud_provider or _wizard_cloud_provider(
+                        snapshot
+                    )
+                    if snapshot is not None and not ctx:
                         try:
                             wizard = WorkspaceWizardConfig.model_validate(
                                 {**snapshot, "has_credentials": False}
                             )
                             running_instance = wizard.running_instance
+                            attach_runtime_mode = wizard.runtime_mode
                         except Exception:
                             pass
+            running_instance, attach_credentials, attach_provider = prepare_attach_deploy(
+                running_instance=running_instance,
+                cloud_provider=getattr(environment, "provider", None),
+                environment_name=environment.name,
+                encrypted_credentials=workspace_encrypted,
+                runtime_mode=attach_runtime_mode,
+                workspace_provider=workspace_provider,
+                wizard_cloud_provider=wizard_cloud_provider,
+            )
+            owner_for_vault = owner_id_from_context(ctx) or getattr(
+                environment, "owner_id", None
+            )
+            attach_credentials = await _merge_attach_credentials_from_vault(
+                session,
+                attach_credentials=attach_credentials,
+                owner_id=owner_for_vault,
+            )
             await asyncio.to_thread(
                 teardown_attach,
                 running_instance=running_instance,
                 namespace=environment.namespace_name,
                 environment_id=str(environment.id),
+                environment_name=environment.name,
                 settings=settings,
+                cloud_provider=attach_provider,
+                credentials=attach_credentials,
+                org_slug=attach_org_slug,
+                workspace_provider=workspace_provider,
+                wizard_cloud_provider=wizard_cloud_provider,
             )
             notes.append("attach instance stopped")
             if provisioner is not None:
@@ -2385,8 +2711,8 @@ def rebuild_environment_task(
     name="launchpad.teardown_environment",
     bind=True,
     max_retries=0,
-    soft_time_limit=150,
-    time_limit=180,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def teardown_environment_task(self, environment_id: str, correlation_id: str) -> None:
     asyncio.run(_run_teardown(environment_id, correlation_id))

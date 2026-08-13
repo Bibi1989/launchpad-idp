@@ -40,6 +40,7 @@ export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
 export type WorkspaceRuntimeMode = 'kubernetes' | 'docker_compose' | 'running_instance'
 export type RunningInstanceKind = 'serverless' | 'vm' | 'local_machine'
 export type InstanceProcessStrategy = 'docker' | 'systemd' | 'pm2'
+export type InstanceCodeSource = 'ssh' | 'github'
 export type InstanceReverseProxy = 'none' | 'nginx' | 'caddy'
 export type ProvisionEngine = IaCEngine
 export type K8sScaffoldMode = 'k8s' | 'helm' | 'kustomize'
@@ -220,6 +221,8 @@ export interface RunningInstanceConfig {
   listen_port?: number
   /** How the app is supervised on VM/local (serverless forces docker). */
   process_strategy?: InstanceProcessStrategy
+  /** How source reaches a cloud VM when process_strategy is not docker. */
+  code_source?: InstanceCodeSource
   /** Optional HTTP edge in front of listen_port. */
   reverse_proxy?: InstanceReverseProxy
   preview_url_override?: string | null
