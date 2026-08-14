@@ -91,3 +91,51 @@ export const INSTANCE_SIZE_OPTIONS: CloudRegionOption[] = [
   ...AWS_INSTANCE_TYPES,
   ...AZURE_VM_SIZES,
 ]
+
+export function regionsForProvider(
+  provider: 'gcp' | 'aws' | 'azure' | 'cloudflare' | 'local',
+): CloudRegionOption[] {
+  if (provider === 'gcp') return GCP_REGIONS
+  if (provider === 'aws') return AWS_REGIONS
+  if (provider === 'azure') return AZURE_LOCATIONS
+  return []
+}
+
+export function defaultRegionForProvider(
+  provider: 'gcp' | 'aws' | 'azure' | 'cloudflare' | 'local',
+): string {
+  if (provider === 'gcp') return 'us-central1'
+  if (provider === 'aws') return 'us-east-1'
+  if (provider === 'azure') return 'eastus'
+  return 'auto'
+}
+
+/** True when ``region`` is a known option for the provider (not a cross-cloud leak). */
+export function isRegionForProvider(
+  provider: 'gcp' | 'aws' | 'azure' | 'cloudflare' | 'local',
+  region: string | null | undefined,
+): boolean {
+  const value = (region || '').trim().toLowerCase()
+  if (!value) return false
+  return regionsForProvider(provider).some((o) => o.value === value)
+}
+
+/**
+ * Return a region safe for the provider. Maps common cross-cloud mistakes
+ * (e.g. GCP ``us-central1`` on AWS) to the provider default.
+ */
+export function coerceRegionForProvider(
+  provider: 'gcp' | 'aws' | 'azure' | 'cloudflare' | 'local',
+  region: string | null | undefined,
+  preferred?: string | null,
+): string {
+  const preferredClean = (preferred || '').trim()
+  if (preferredClean && isRegionForProvider(provider, preferredClean)) {
+    return preferredClean
+  }
+  const current = (region || '').trim()
+  if (current && isRegionForProvider(provider, current)) {
+    return current
+  }
+  return defaultRegionForProvider(provider)
+}

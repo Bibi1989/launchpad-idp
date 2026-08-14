@@ -114,6 +114,109 @@ def project_id_from_gcp_sa_json(sa_json: str | None) -> str | None:
     return None
 
 
+def _parse_gcp_credential_json(raw: str | None) -> dict[str, object] | None:
+    if not raw or not raw.strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+_MARKDOWN_LINK_RE = re.compile(
+    r"^\[(?P<label>[^\]]*)\]\((?P<url>https?://[^)\s]+)\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def unwrap_markdown_url(value: str) -> str:
+    """Strip accidental markdown link wrapping from copied URLs.
+
+    Chat/docs paste often yields ``[https://...](https://...)`` which breaks
+    HTTP clients (``No connection adapters were found for '[https://...]'``).
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return raw
+    match = _MARKDOWN_LINK_RE.match(raw)
+    if match:
+        return match.group("url").strip()
+    return raw
+
+
+def sanitize_gcp_external_account(config: dict[str, object]) -> dict[str, object]:
+    """Normalize URL fields on a GCP external_account credential config."""
+    rewritten = dict(config)
+    for key in (
+        "token_url",
+        "service_account_impersonation_url",
+        "token_info_url",
+        "universe_domain",
+    ):
+        current = rewritten.get(key)
+        if isinstance(current, str) and current.strip():
+            rewritten[key] = unwrap_markdown_url(current)
+    return rewritten
+
+
+def materialize_external_account_credentials(
+    config: dict[str, object],
+    *,
+    org_id: str,
+    workspace_id: str,
+    env_type: str = "production",
+) -> tuple[str, str, str]:
+    """Rewrite a GCP external_account config onto a fresh Launchpad OIDC JWT.
+
+    Returns ``(credential_config_path, token_path, token)``.
+    """
+    settings = get_settings()
+    workdir = _oidc_workdir(workspace_id)
+    token_path = workdir / "oidc_token.jwt"
+    cfg_path = workdir / "gcp_credential_config.json"
+
+    from pkg.auth.oidc.token_engine import OidcTokenEngine, TokenRequest
+
+    token = OidcTokenEngine(
+        issuer_url=settings.launchpad_oidc_issuer_url,
+    ).generate_token(
+        TokenRequest(
+            org_id=org_id,
+            workspace_id=workspace_id,
+            env_type=env_type,
+            provider="gcp",
+            ttl_seconds=int(getattr(settings, "launchpad_oidc_token_ttl_seconds", 900) or 900),
+        )
+    )
+    token_path.write_text(token, encoding="utf-8")
+    try:
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass
+
+    rewritten = sanitize_gcp_external_account(config)
+    cred_src = rewritten.get("credential_source")
+    if not isinstance(cred_src, dict):
+        cred_src = {}
+    else:
+        cred_src = dict(cred_src)
+    cred_src["file"] = str(token_path)
+    rewritten["credential_source"] = cred_src
+    if not str(rewritten.get("token_url") or "").strip():
+        rewritten["token_url"] = "https://sts.googleapis.com/v1/token"
+    # Explicit scopes avoid "insufficient authentication scopes" on compute APIs.
+    existing_scopes = rewritten.get("scopes")
+    if not isinstance(existing_scopes, list) or not existing_scopes:
+        rewritten["scopes"] = ["https://www.googleapis.com/auth/cloud-platform"]
+    cfg_path.write_text(json.dumps(rewritten, indent=2), encoding="utf-8")
+    try:
+        os.chmod(cfg_path, 0o600)
+    except OSError:
+        pass
+    return str(cfg_path), str(token_path), token
+
+
 def gcp_wif_complete(creds: CloudCredentials | Mapping[str, str | None]) -> bool:
     """True when all four GCP WIF fields are present."""
     if isinstance(creds, CloudCredentials):
@@ -136,15 +239,47 @@ def gcp_wif_complete(creds: CloudCredentials | Mapping[str, str | None]) -> bool
 
 
 def has_gcp_auth(creds: CloudCredentials) -> bool:
-    """GCP auth is satisfied by SA JSON or complete WIF config."""
-    return bool(creds.gcp_sa_key_json) or gcp_wif_complete(creds)
+    """GCP auth is satisfied by SA JSON, WIF config, or interactive OAuth tokens."""
+    return (
+        bool(creds.gcp_sa_key_json)
+        or gcp_wif_complete(creds)
+        or bool(creds.gcp_oauth_token_json)
+    )
 
 
 def has_aws_auth(creds: CloudCredentials) -> bool:
-    """AWS auth is satisfied by access keys or a role ARN for web identity."""
-    if creds.aws_role_arn:
+    """AWS auth is satisfied by access keys, role ARN, or interactive SSO tokens."""
+    if creds.aws_role_arn and _is_valid_aws_role_arn(creds.aws_role_arn):
+        return True
+    if creds.aws_oauth_token_json:
         return True
     return bool(creds.aws_access_key_id and creds.aws_secret_access_key)
+
+
+def _is_valid_aws_role_arn(value: str | None) -> bool:
+    """True for IAM role ARNs like arn:aws:iam::123456789012:role/Name."""
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    # Partition may be aws / aws-cn / aws-us-gov.
+    return bool(
+        re.match(
+            r"^arn:aws(?:-cn|-us-gov)?:iam::\d{12}:role/[\w+=,.@\-_/]+$",
+            raw,
+        )
+    )
+
+
+def has_azure_auth(creds: CloudCredentials) -> bool:
+    """Azure auth is satisfied by service principal or interactive Entra OAuth."""
+    if creds.azure_oauth_token_json:
+        return True
+    return bool(
+        creds.azure_client_id
+        and creds.azure_client_secret
+        and creds.azure_tenant_id
+        and creds.azure_subscription_id
+    )
 
 
 def validate_cloud_credentials(provider: str, creds: CloudCredentials) -> None:
@@ -156,19 +291,16 @@ def validate_cloud_credentials(provider: str, creds: CloudCredentials) -> None:
     """
     if provider == "gcp" and not has_gcp_auth(creds):
         raise ValueError(
-            "GCP credentials required: service account JSON or complete Workload Identity Federation config"
+            "GCP credentials required: service account JSON, WIF config, or Connect Google Cloud"
         )
     if provider == "aws" and not has_aws_auth(creds):
         raise ValueError(
-            "AWS credentials required: access key + secret, or IAM role ARN for keyless OIDC"
+            "AWS credentials required: access keys, role ARN, or Connect AWS SSO"
         )
-    if provider == "azure" and (
-        not creds.azure_client_id
-        or not creds.azure_client_secret
-        or not creds.azure_tenant_id
-        or not creds.azure_subscription_id
-    ):
-        raise ValueError("Azure service principal fields are required")
+    if provider == "azure" and not has_azure_auth(creds):
+        raise ValueError(
+            "Azure credentials required: service principal fields or Connect Microsoft"
+        )
     if provider == "cloudflare" and not creds.cloudflare_api_token:
         raise ValueError("Cloudflare API token is required")
 
@@ -177,19 +309,25 @@ def cloud_credentials_to_map(credentials: CloudCredentials) -> dict[str, str | N
     """Flatten CloudCredentials for sandbox env materialization."""
     return {
         "GCP_SA_KEY": credentials.gcp_sa_key_json,
+        "GCP_PROJECT_ID": credentials.gcp_project_id,
         "GCP_WIF_PROJECT_NUMBER": credentials.gcp_wif_project_number,
         "GCP_WIF_POOL_ID": credentials.gcp_wif_pool_id,
         "GCP_WIF_PROVIDER_ID": credentials.gcp_wif_provider_id,
         "GCP_WIF_TARGET_SA_EMAIL": credentials.gcp_wif_target_sa_email,
+        "GCP_OAUTH_TOKEN_JSON": credentials.gcp_oauth_token_json,
         "AWS_ACCESS_KEY_ID": credentials.aws_access_key_id,
         "AWS_SECRET_ACCESS_KEY": credentials.aws_secret_access_key,
         "AWS_SESSION_TOKEN": credentials.aws_session_token,
         "AWS_ROLE_ARN": credentials.aws_role_arn,
         "AWS_ROLE_SESSION_NAME": credentials.aws_role_session_name,
+        "AWS_OAUTH_TOKEN_JSON": credentials.aws_oauth_token_json,
+        "AWS_SSO_ACCOUNT_ID": credentials.aws_sso_account_id,
+        "AWS_SSO_ROLE_NAME": credentials.aws_sso_role_name,
         "AZURE_CLIENT_ID": credentials.azure_client_id,
         "AZURE_CLIENT_SECRET": credentials.azure_client_secret,
         "AZURE_TENANT_ID": credentials.azure_tenant_id,
         "AZURE_SUBSCRIPTION_ID": credentials.azure_subscription_id,
+        "AZURE_OAUTH_TOKEN_JSON": credentials.azure_oauth_token_json,
         "CLOUDFLARE_API_TOKEN": credentials.cloudflare_api_token,
     }
 
@@ -258,6 +396,7 @@ def credentials_to_env(
         env.update(res.env_vars)
         # Prefer keyless - do not expose long-lived SA JSON alongside WIF.
         env.pop("GCP_SA_KEY", None)
+        env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = str(cfg_path)
         for meta in (
             "GCP_WIF_PROJECT_NUMBER",
             "GCP_WIF_POOL_ID",
@@ -270,10 +409,39 @@ def credentials_to_env(
         ):
             env.pop(meta, None)
 
-    aws_role_arn = env.get("aws_role_arn") or env.get("AWS_ROLE_ARN")
-    aws_role_session = env.get("aws_role_session_name") or env.get("AWS_ROLE_SESSION_NAME")
+    # Some workspaces store a GCP external_account (WIF) JSON in the SA key field.
+    # Those configs often point at /tmp/launchpad_oidc_token.jwt; rewrite onto a
+    # freshly minted workspace-scoped JWT before any CLI uses ADC.
+    if "GOOGLE_APPLICATION_CREDENTIALS" not in env:
+        sa_blob = env.get("GCP_SA_KEY") or env.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        parsed = _parse_gcp_credential_json(sa_blob)
+        if parsed is not None and parsed.get("type") == "external_account":
+            cfg_path, _token_path, token = materialize_external_account_credentials(
+                parsed,
+                org_id=org_id,
+                workspace_id=workspace_id,
+                env_type=env_type,
+            )
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = cfg_path
+            env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = cfg_path
+            env["LAUNCHPAD_OIDC_JWT"] = token
+            env.pop("GCP_SA_KEY", None)
+            env.pop("GOOGLE_APPLICATION_CREDENTIALS_JSON", None)
 
-    if aws_role_arn and "AWS_WEB_IDENTITY_TOKEN_FILE" not in env:
+    aws_role_arn = (env.get("aws_role_arn") or env.get("AWS_ROLE_ARN") or "").strip()
+    aws_role_session = env.get("aws_role_session_name") or env.get("AWS_ROLE_SESSION_NAME")
+    has_aws_keys = bool(env.get("AWS_ACCESS_KEY_ID") and env.get("AWS_SECRET_ACCESS_KEY"))
+    has_aws_oauth = bool(env.get("AWS_OAUTH_TOKEN_JSON"))
+
+    # Access keys and Connect SSO win over keyless OIDC. Web-identity is only for
+    # sandbox/IaC when a valid role ARN is the sole AWS auth method.
+    if (
+        aws_role_arn
+        and _is_valid_aws_role_arn(aws_role_arn)
+        and not has_aws_keys
+        and not has_aws_oauth
+        and "AWS_WEB_IDENTITY_TOKEN_FILE" not in env
+    ):
         from pkg.auth.oidc.token_engine import OidcTokenEngine
         from pkg.sandbox.exec import AwsWebIdentityConfig, CredentialInjector
 
@@ -304,12 +472,398 @@ def credentials_to_env(
                 env.pop(key, None)
             elif key.startswith("aws_"):
                 env.pop(key, None)
+    elif aws_role_arn and (has_aws_keys or has_aws_oauth):
+        # Stale / optional role ARN must not block keys or SSO Connect.
+        env.pop("AWS_ROLE_ARN", None)
+        env.pop("aws_role_arn", None)
+        env.pop("AWS_ROLE_SESSION_NAME", None)
+        env.pop("aws_role_session_name", None)
+        env.pop("AWS_WEB_IDENTITY_TOKEN_FILE", None)
+        logger.info(
+            "aws_role_arn_ignored_prefer_keys_or_sso",
+            workspace_id=workspace_id,
+            has_keys=has_aws_keys,
+            has_oauth=has_aws_oauth,
+        )
+    elif aws_role_arn and not _is_valid_aws_role_arn(aws_role_arn):
+        env.pop("AWS_ROLE_ARN", None)
+        env.pop("aws_role_arn", None)
+        logger.warning(
+            "aws_role_arn_invalid_ignored",
+            workspace_id=workspace_id,
+            role_arn_prefix=aws_role_arn[:32],
+        )
 
     # Prefer the project_id embedded in the GCP SA key over workspace form defaults.
-    gcp_project = project_id_from_gcp_sa_json(env.get("GCP_SA_KEY"))
+    gcp_project = project_id_from_gcp_sa_json(env.get("GCP_SA_KEY")) or (
+        env.get("GCP_PROJECT_ID") or ""
+    ).strip() or None
     if gcp_project:
         env.setdefault("TF_VAR_project_id", gcp_project)
         env.setdefault("GOOGLE_CLOUD_PROJECT", gcp_project)
         env.setdefault("CLOUDSDK_CORE_PROJECT", gcp_project)
         env.setdefault("GCLOUD_PROJECT", gcp_project)
+
+    # Connect OAuth is optional fallback when no SA / WIF ADC was materialized.
+    _materialize_interactive_oauth_env(env, workspace_id=workspace_id)
     return env
+
+
+def _materialize_interactive_oauth_env(env: dict[str, str], *, workspace_id: str) -> None:
+    """Turn stored user OAuth token JSON into CLI/SDK env (gcloud ADC, AWS keys, Azure)."""
+    settings = get_settings()
+    workdir = _oidc_workdir(workspace_id)
+
+    gcp_oauth = env.pop("GCP_OAUTH_TOKEN_JSON", None)
+    if gcp_oauth and not env.get("GOOGLE_APPLICATION_CREDENTIALS") and not env.get("GCP_SA_KEY"):
+        try:
+            from pkg.auth.oauth_loopback.models import CloudTokenSet
+            from pkg.auth.oauth_loopback.providers.gcp import gcp_token_has_cloud_platform
+
+            token_set = CloudTokenSet.model_validate_json(gcp_oauth)
+            client_id = str(
+                (token_set.claims or {}).get("client_id")
+                or settings.gcp_oauth_client_id
+                or ""
+            ).strip()
+            client_secret = (settings.gcp_oauth_client_secret or "").strip()
+            if token_set.refresh_token and client_id:
+                access_token = _mint_gcp_user_access_token(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    refresh_token=token_set.refresh_token,
+                )
+                if access_token:
+                    # gcloud compute needs an access token minted with cloud-platform.
+                    # Credential-file ADC alone often yields "insufficient authentication scopes".
+                    env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = access_token
+                    if not gcp_token_has_cloud_platform(token_set.scope):
+                        logger.info(
+                            "gcp_oauth_access_token_minted",
+                            workspace_id=workspace_id,
+                            had_scope_claim=bool(token_set.scope),
+                        )
+                adc = {
+                    "type": "authorized_user",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": token_set.refresh_token,
+                }
+                adc_path = workdir / "gcp_authorized_user.json"
+                adc_path.write_text(json.dumps(adc), encoding="utf-8")
+                try:
+                    os.chmod(adc_path, 0o600)
+                except OSError:
+                    pass
+                env["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
+                env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = str(adc_path)
+            elif token_set.access_token:
+                env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token_set.access_token
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gcp_oauth_materialize_failed", error=str(exc))
+
+    aws_oauth = env.pop("AWS_OAUTH_TOKEN_JSON", None)
+    account_id = (env.pop("AWS_SSO_ACCOUNT_ID", None) or "").strip() or None
+    role_name = (env.pop("AWS_SSO_ROLE_NAME", None) or "").strip() or None
+    if aws_oauth and not env.get("AWS_ACCESS_KEY_ID") and not env.get("AWS_ROLE_ARN"):
+        try:
+            minted = _materialize_aws_sso_keys(
+                aws_oauth=aws_oauth,
+                account_id=account_id,
+                role_name=role_name,
+            )
+            if minted:
+                env["AWS_ACCESS_KEY_ID"] = minted["access_key_id"]
+                env["AWS_SECRET_ACCESS_KEY"] = minted["secret_access_key"]
+                env["AWS_SESSION_TOKEN"] = minted["session_token"]
+                region = minted.get("region") or "us-east-1"
+                env.setdefault("AWS_DEFAULT_REGION", region)
+                env.setdefault("AWS_REGION", region)
+            else:
+                logger.warning(
+                    "aws_oauth_materialize_empty",
+                    workspace_id=workspace_id,
+                    has_account=bool(account_id),
+                    has_role=bool(role_name),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("aws_oauth_materialize_failed", error=str(exc))
+
+    azure_oauth = env.pop("AZURE_OAUTH_TOKEN_JSON", None)
+    if azure_oauth:
+        try:
+            from pkg.auth.oauth_loopback.models import CloudTokenSet
+
+            token_set = CloudTokenSet.model_validate_json(azure_oauth)
+            if token_set.access_token:
+                env["AZURE_ACCESS_TOKEN"] = token_set.access_token
+            tenant = str((token_set.claims or {}).get("tenant_id") or "").strip()
+            if tenant:
+                env.setdefault("AZURE_TENANT_ID", tenant)
+            client_id = str((token_set.claims or {}).get("client_id") or "").strip()
+            if client_id:
+                env.setdefault("AZURE_CLIENT_ID", client_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("azure_oauth_materialize_failed", error=str(exc))
+
+
+def _mint_gcp_user_access_token(
+    *,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> str | None:
+    """Refresh a user OAuth token with cloud-platform scopes for gcloud compute."""
+    from pkg.auth.oauth_loopback.providers.gcp import (
+        GCP_CLOUD_PLATFORM_SCOPE,
+        GCP_COMPUTE_SCOPE,
+        gcp_token_has_cloud_platform,
+    )
+
+    scopes = [
+        GCP_CLOUD_PLATFORM_SCOPE,
+        GCP_COMPUTE_SCOPE,
+        "https://www.googleapis.com/auth/userinfo.email",
+        "openid",
+    ]
+    token: str | None = None
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret or None,
+            scopes=scopes,
+        )
+        creds.refresh(Request())
+        token = (creds.token or "").strip() or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gcp_oauth_access_token_refresh_failed", error=str(exc))
+        # Fallback: refresh without explicit scopes (uses original grant).
+        try:
+            import httpx
+
+            data = {
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "refresh_token": refresh_token,
+            }
+            if client_secret:
+                data["client_secret"] = client_secret
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post("https://oauth2.googleapis.com/token", data=data)
+            if resp.status_code >= 400:
+                logger.warning(
+                    "gcp_oauth_access_token_fallback_http",
+                    status=resp.status_code,
+                    detail=resp.text[:200],
+                )
+                return None
+            payload = resp.json()
+            token = str(payload.get("access_token") or "").strip() or None
+        except Exception as fallback_exc:  # noqa: BLE001
+            logger.warning("gcp_oauth_access_token_fallback_failed", error=str(fallback_exc))
+            return None
+
+    if not token:
+        return None
+
+    # Confirm the minted token actually carries compute scopes.
+    try:
+        import httpx
+
+        with httpx.Client(timeout=15.0) as client:
+            info = client.get(
+                "https://oauth2.googleapis.com/tokeninfo",
+                params={"access_token": token},
+            )
+        if info.status_code < 400:
+            granted = str(info.json().get("scope") or "")
+            if not gcp_token_has_cloud_platform(granted):
+                logger.warning(
+                    "gcp_oauth_token_missing_cloud_platform",
+                    scope=granted[:200],
+                )
+                return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gcp_oauth_tokeninfo_failed", error=str(exc))
+    return token
+
+
+def _materialize_aws_sso_keys(
+    *,
+    aws_oauth: str,
+    account_id: str | None,
+    role_name: str | None,
+) -> dict[str, str] | None:
+    """Turn a stored AWS SSO OAuth token into temporary access keys."""
+    from pkg.auth.oauth_loopback.models import CloudTokenSet
+    from pkg.auth.oauth_loopback.providers.aws import AwsSsoOAuthProvider
+
+    token_set = CloudTokenSet.model_validate_json(aws_oauth)
+    claims = dict(token_set.claims or {})
+    region = str(claims.get("region") or "us-east-1").strip() or "us-east-1"
+    access_token = (token_set.access_token or "").strip()
+
+    # Refresh when possible so federation/credentials does not fail on expiry.
+    start_url = str(claims.get("start_url") or "").strip()
+    client_id = str(claims.get("client_id") or "").strip()
+    client_secret = str(claims.get("client_secret") or "").strip()
+    if token_set.refresh_token and start_url and client_id and client_secret:
+        try:
+            provider = AwsSsoOAuthProvider(
+                start_url=start_url,
+                region=region,
+                client_id=client_id,
+                client_secret=client_secret,
+                token_endpoint=str(claims.get("token_endpoint") or "") or None,
+            )
+            refreshed = provider.refresh(token_set)
+            access_token = (refreshed.access_token or access_token).strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("aws_sso_refresh_failed", error=str(exc))
+
+    if not access_token:
+        return None
+
+    resolved_account = (account_id or str(claims.get("account_id") or "")).strip()
+    resolved_role = (role_name or str(claims.get("role_name") or "")).strip()
+    if not resolved_account or not resolved_role:
+        discovered = _aws_sso_discover_account_role(access_token=access_token, region=region)
+        if discovered:
+            resolved_account = resolved_account or discovered["account_id"]
+            resolved_role = resolved_role or discovered["role_name"]
+
+    if not resolved_account or not resolved_role:
+        logger.warning(
+            "aws_sso_missing_account_role",
+            has_account=bool(resolved_account),
+            has_role=bool(resolved_role),
+        )
+        return None
+
+    keys = _aws_sso_get_role_credentials(
+        access_token=access_token,
+        account_id=resolved_account,
+        role_name=resolved_role,
+        region=region,
+    )
+    if not keys:
+        return None
+    return {**keys, "region": region, "account_id": resolved_account, "role_name": resolved_role}
+
+
+def _aws_sso_discover_account_role(
+    *,
+    access_token: str,
+    region: str,
+) -> dict[str, str] | None:
+    """Pick the first (or AdministratorAccess) account/role from the SSO portal."""
+    import httpx
+
+    base = f"https://portal.sso.{region}.amazonaws.com"
+    headers = {
+        "x-amz-sso_bearer_token": access_token,
+        "x-amz-sso-bearer-token": access_token,
+        "Accept": "application/json",
+    }
+    with httpx.Client(timeout=30.0) as client:
+        accounts_resp = client.get(f"{base}/assignment/accounts", headers=headers)
+        if accounts_resp.status_code >= 400:
+            logger.warning(
+                "aws_sso_list_accounts_failed",
+                status=accounts_resp.status_code,
+                detail=accounts_resp.text[:200],
+            )
+            return None
+        accounts_body = accounts_resp.json()
+        account_list = accounts_body.get("accountList") if isinstance(accounts_body, dict) else None
+        if not isinstance(account_list, list) or not account_list:
+            return None
+        account = account_list[0] if isinstance(account_list[0], dict) else None
+        if account is None:
+            return None
+        account_id = str(account.get("accountId") or "").strip()
+        if not account_id:
+            return None
+
+        roles_resp = client.get(
+            f"{base}/assignment/accounts/{account_id}/roles",
+            headers=headers,
+        )
+        if roles_resp.status_code >= 400:
+            logger.warning(
+                "aws_sso_list_roles_failed",
+                status=roles_resp.status_code,
+                account_id=account_id,
+            )
+            return None
+        roles_body = roles_resp.json()
+        role_list = roles_body.get("roleList") if isinstance(roles_body, dict) else None
+        if not isinstance(role_list, list) or not role_list:
+            return None
+
+        preferred = None
+        for row in role_list:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("roleName") or "").strip()
+            if not name:
+                continue
+            if name.lower() in {"administratoraccess", "admin", "poweruseraccess"}:
+                preferred = name
+                break
+            if preferred is None:
+                preferred = name
+        if not preferred:
+            return None
+        return {"account_id": account_id, "role_name": preferred}
+
+
+def _aws_sso_get_role_credentials(
+    *,
+    access_token: str,
+    account_id: str,
+    role_name: str,
+    region: str,
+) -> dict[str, str] | None:
+    """Exchange an IAM Identity Center access token for temporary AWS keys."""
+    import httpx
+
+    url = f"https://portal.sso.{region}.amazonaws.com/federation/credentials"
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.get(
+            url,
+            params={"account_id": account_id, "role_name": role_name},
+            headers={
+                "x-amz-sso_bearer_token": access_token,
+                "x-amz-sso-bearer-token": access_token,
+            },
+        )
+    if resp.status_code >= 400:
+        logger.warning(
+            "aws_sso_get_role_credentials_failed",
+            status=resp.status_code,
+            account_id=account_id,
+            role_name=role_name,
+            detail=resp.text[:200],
+        )
+        return None
+    body = resp.json()
+    role_creds = body.get("roleCredentials") if isinstance(body, dict) else None
+    if not isinstance(role_creds, dict):
+        return None
+    access_key = str(role_creds.get("accessKeyId") or "").strip()
+    secret = str(role_creds.get("secretAccessKey") or "").strip()
+    session = str(role_creds.get("sessionToken") or "").strip()
+    if not (access_key and secret and session):
+        return None
+    return {
+        "access_key_id": access_key,
+        "secret_access_key": secret,
+        "session_token": session,
+    }

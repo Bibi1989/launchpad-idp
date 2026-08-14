@@ -59,7 +59,17 @@ def test_environment_read_app_ready_and_ttl() -> None:
 
 def test_governance_settings_defaults() -> None:
     assert Settings.model_fields["max_concurrent_environments"].default in (6,)
+    assert Settings.model_fields["max_concurrent_environments_pro"].default is None
     assert Settings.model_fields["ttl_extend_hours_default"].default == 1
-    assert Settings.model_fields["ttl_warning_hours"].default == 2
+    assert Settings.model_fields["ttl_warning_hours"].default == 0.5
+    assert Settings.model_fields["ttl_max_total_hours_from_create"].default == 2
     cap = Settings.model_fields["preview_soft_cost_cap"].default
     assert cap is not None and Decimal(str(cap)) > 0
+
+
+def test_production_preview_requires_base_domain() -> None:
+    with pytest.raises(ValidationError):
+        Settings(environment="production", preview_base_domain=None)
+
+    with pytest.raises(ValidationError):
+        Settings(use_cloudflare_tunnel=True, preview_base_domain=None)

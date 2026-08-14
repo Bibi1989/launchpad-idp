@@ -1,21 +1,31 @@
 <script setup lang="ts">
 import type { KindClusterStatus } from '~/types/environment'
 import type { UserCloudCredentialsStatus } from '~/types/userCredentials'
+import type { CloudOAuthCapabilities } from '~/composables/useUserCloudCredentials'
 import { emptyCloudCredentials } from '~/utils/cloudValidation'
 
 const { user } = useAuth()
 const { t } = useI18n()
-const { getStatus, save, clearAll } = useUserCloudCredentials()
+const { getStatus, save, clearAll, oauthCapabilities, connectWithBrowser } = useUserCloudCredentials()
 const { getKindStatus, ensureKindCluster, deleteKindCluster } = useEnvironments()
 
 const status = ref<UserCloudCredentialsStatus | null>(null)
 const loading = ref(true)
 const saving = ref(false)
 const clearing = ref(false)
+const connecting = ref(false)
 const errorMessage = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 const activeProvider = ref<'gcp' | 'aws' | 'azure' | 'cloudflare'>('gcp')
 const credentials = reactive(emptyCloudCredentials())
+const caps = ref<CloudOAuthCapabilities | null>(null)
+
+const awsStartUrl = ref('')
+const awsRegion = ref('us-east-1')
+const awsAccountId = ref('')
+const awsRoleName = ref('')
+const azureTenantId = ref('common')
+const azureSubscriptionId = ref('')
 
 const kindStatus = ref<KindClusterStatus | null>(null)
 const kindLoading = ref(false)
@@ -25,11 +35,38 @@ const kindError = ref<string | null>(null)
 const kindSuccess = ref<string | null>(null)
 const clusterName = ref('launchpad')
 
+function applyStatusPreferences(credStatus: UserCloudCredentialsStatus) {
+  if (credStatus.gcp_region) credentials.gcp_region = credStatus.gcp_region
+  if (credStatus.aws_region) credentials.aws_region = credStatus.aws_region
+  if (credStatus.azure_location) credentials.azure_location = credStatus.azure_location
+  if (credStatus.gcp_project_id && !(credentials.gcp_project_id || '').trim()) {
+    credentials.gcp_project_id = credStatus.gcp_project_id
+  }
+}
+
+/** Show project id for Connect / WIF; hide when SA JSON embeds project_id. */
+const showGcpProjectId = computed(() => {
+  const raw = (credentials.gcp_sa_key_json || '').trim()
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { project_id?: unknown }
+      if (typeof parsed.project_id === 'string' && parsed.project_id.trim()) return false
+    } catch {
+      /* keep showing until JSON is valid */
+    }
+  }
+  if (status.value?.has_gcp_sa && !raw) return false
+  return true
+})
+
 async function refresh() {
   loading.value = true
   errorMessage.value = null
   try {
-    status.value = await getStatus()
+    const [credStatus, oauthCaps] = await Promise.all([getStatus(), oauthCapabilities()])
+    status.value = credStatus
+    caps.value = oauthCaps
+    applyStatusPreferences(credStatus)
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('settings.errors.load')
   } finally {
@@ -63,7 +100,9 @@ async function onSave() {
   successMessage.value = null
   try {
     status.value = await save({ ...credentials })
-    Object.assign(credentials, emptyCloudCredentials())
+    const next = emptyCloudCredentials()
+    Object.assign(credentials, next)
+    applyStatusPreferences(status.value)
     successMessage.value = t('settings.credentialsSaved')
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('settings.errors.save')
@@ -73,6 +112,11 @@ async function onSave() {
 }
 
 async function onClearProvider() {
+  if (!providers.value.find((p) => p.id === activeProvider.value)?.has()) return
+  const ok = window.confirm(
+    t('settings.removeKeysConfirm', { provider: activeProvider.value.toUpperCase() }),
+  )
+  if (!ok) return
   saving.value = true
   errorMessage.value = null
   successMessage.value = null
@@ -83,6 +127,8 @@ async function onClearProvider() {
       clear_azure: activeProvider.value === 'azure',
       clear_cloudflare: activeProvider.value === 'cloudflare',
     })
+    Object.assign(credentials, emptyCloudCredentials())
+    applyStatusPreferences(status.value)
     successMessage.value = t('settings.clearedProvider', { provider: activeProvider.value.toUpperCase() })
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('settings.errors.clear')
@@ -102,6 +148,42 @@ async function onClearAll() {
     errorMessage.value = err instanceof Error ? err.message : t('settings.errors.clear')
   } finally {
     clearing.value = false
+  }
+}
+
+const canConnect = computed(() => {
+  if (activeProvider.value === 'gcp') return Boolean(caps.value?.gcp)
+  if (activeProvider.value === 'aws') return Boolean(caps.value?.aws)
+  if (activeProvider.value === 'azure') return Boolean(caps.value?.azure)
+  return false
+})
+
+async function onConnectBrowser() {
+  if (activeProvider.value === 'cloudflare' || !canConnect.value) return
+  connecting.value = true
+  errorMessage.value = null
+  successMessage.value = null
+  try {
+    const result = await connectWithBrowser({
+      provider: activeProvider.value,
+      aws_start_url: awsStartUrl.value || undefined,
+      aws_region: awsRegion.value || undefined,
+      aws_account_id: awsAccountId.value || undefined,
+      aws_role_name: awsRoleName.value || undefined,
+      azure_tenant_id: azureTenantId.value || undefined,
+      azure_subscription_id: azureSubscriptionId.value || undefined,
+    })
+    if (result.status === 'succeeded') {
+      status.value = await getStatus()
+      applyStatusPreferences(status.value)
+      successMessage.value = result.message || t('settings.oauthConnected')
+    } else {
+      errorMessage.value = result.message || t('settings.errors.oauthFailed')
+    }
+  } catch (err) {
+    errorMessage.value = err instanceof Error ? err.message : t('settings.errors.oauthFailed')
+  } finally {
+    connecting.value = false
   }
 }
 
@@ -271,15 +353,92 @@ const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kind
         </button>
       </div>
 
-      <p v-if="status && providers.find((p) => p.id === activeProvider)?.has()" class="text-xs text-[var(--lp-muted)]">
-        {{ t('settings.stored') }}
-        <span class="font-mono text-[var(--lp-accent)]">
-          {{ providers.find((p) => p.id === activeProvider)?.hint() || t('settings.configured') }}
+      <p v-if="status && providers.find((p) => p.id === activeProvider)?.has()" class="flex flex-wrap items-center gap-3 text-xs text-[var(--lp-muted)]">
+        <span>
+          {{ t('settings.stored') }}
+          <span class="font-mono text-[var(--lp-accent)]">
+            {{ providers.find((p) => p.id === activeProvider)?.hint() || t('settings.configured') }}
+          </span>
+          - {{ t('settings.replaceHint') }}
         </span>
-        - {{ t('settings.replaceHint') }}
+        <button
+          type="button"
+          class="lp-btn-ghost text-xs uppercase tracking-wide text-[var(--lp-danger)]"
+          :disabled="saving || loading"
+          @click="onClearProvider"
+        >
+          {{ t('settings.clearProviderNamed', { provider: activeProvider.toUpperCase() }) }}
+        </button>
       </p>
 
-      <CloudCredentialsFields v-model:credentials="credentials" :provider="activeProvider" />
+      <div
+        v-if="activeProvider !== 'cloudflare'"
+        class="space-y-3 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 p-4"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p class="text-sm font-medium text-[var(--lp-text)]">{{ t('settings.oauthConnectTitle') }}</p>
+            <p class="text-xs text-[var(--lp-muted)]">{{ t('settings.oauthConnectHint') }}</p>
+          </div>
+          <button
+            type="button"
+            class="lp-btn-primary"
+            :disabled="connecting || !canConnect"
+            @click="onConnectBrowser"
+          >
+            {{ connecting ? t('settings.oauthConnecting') : t('settings.oauthConnect', { provider: activeProvider.toUpperCase() }) }}
+          </button>
+        </div>
+        <p v-if="!canConnect && activeProvider === 'gcp'" class="text-xs text-[var(--lp-muted)]">
+          {{ t('settings.oauthNeedGcpClient') }}
+        </p>
+        <p v-if="!canConnect && activeProvider === 'azure'" class="text-xs text-[var(--lp-muted)]">
+          {{ t('settings.oauthNeedAzureClient') }}
+        </p>
+        <div v-if="activeProvider === 'aws'" class="grid gap-3 sm:grid-cols-2">
+          <label class="block space-y-1 sm:col-span-2">
+            <span class="lp-label">{{ t('settings.awsStartUrl') }}</span>
+            <input v-model="awsStartUrl" class="lp-input font-mono text-xs" placeholder="https://d-xxxxxxxxxx.awsapps.com/start" autocomplete="off">
+          </label>
+          <label class="block space-y-1">
+            <span class="lp-label">{{ t('settings.awsRegion') }}</span>
+            <input v-model="awsRegion" class="lp-input font-mono text-xs" placeholder="us-east-1" autocomplete="off">
+          </label>
+          <label class="block space-y-1">
+            <span class="lp-label">{{ t('settings.awsAccountIdOptional') }}</span>
+            <input v-model="awsAccountId" class="lp-input font-mono text-xs" placeholder="123456789012" autocomplete="off">
+          </label>
+          <label class="block space-y-1 sm:col-span-2">
+            <span class="lp-label">{{ t('settings.awsRoleNameOptional') }}</span>
+            <input v-model="awsRoleName" class="lp-input font-mono text-xs" placeholder="AdministratorAccess" autocomplete="off">
+          </label>
+        </div>
+        <div v-if="activeProvider === 'azure'" class="grid gap-3 sm:grid-cols-2">
+          <label class="block space-y-1">
+            <span class="lp-label">{{ t('settings.azureTenantOptional') }}</span>
+            <input v-model="azureTenantId" class="lp-input font-mono text-xs" placeholder="common" autocomplete="off">
+          </label>
+          <label class="block space-y-1">
+            <span class="lp-label">{{ t('settings.azureSubscriptionOptional') }}</span>
+            <input v-model="azureSubscriptionId" class="lp-input font-mono text-xs" autocomplete="off">
+          </label>
+        </div>
+        <label v-if="activeProvider === 'gcp' && showGcpProjectId" class="block space-y-1">
+          <span class="lp-label">{{ t('credentials.fields.gcpProjectId') }}</span>
+          <input
+            v-model="credentials.gcp_project_id"
+            class="lp-input font-mono text-xs"
+            placeholder="my-gcp-project"
+            autocomplete="off"
+          >
+          <p class="text-xs text-[var(--lp-muted)]">{{ t('credentials.fields.gcpProjectIdHint') }}</p>
+        </label>
+      </div>
+
+      <CloudCredentialsFields
+        v-model:credentials="credentials"
+        :provider="activeProvider"
+      />
 
       <div class="flex flex-wrap gap-3 pt-2">
         <button type="button" class="lp-btn-primary" :disabled="saving" @click="onSave">
@@ -287,11 +446,11 @@ const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kind
         </button>
         <button
           type="button"
-          class="lp-btn-ghost text-xs uppercase tracking-wide"
+          class="lp-btn-ghost text-xs uppercase tracking-wide text-[var(--lp-danger)]"
           :disabled="saving || !providers.find((p) => p.id === activeProvider)?.has()"
           @click="onClearProvider"
         >
-          {{ t('settings.clearProvider', { provider: activeProvider.toUpperCase() }) }}
+          {{ t('settings.clearProviderNamed', { provider: activeProvider.toUpperCase() }) }}
         </button>
       </div>
 

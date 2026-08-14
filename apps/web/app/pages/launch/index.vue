@@ -10,7 +10,7 @@ import type {
 } from '~/types/provisioning'
 import type { GitHost } from '~/types/git'
 import { githubCloneUrl } from '~/utils/githubAccount'
-import { hasAwsAuth, hasGcpAuth } from '~/utils/cloudValidation'
+import { hasAwsAuth, hasGcpAuth, emptyCloudCredentials } from '~/utils/cloudValidation'
 import {
   resolvePreviewDeployPlan,
   type PreviewDeployPlan,
@@ -19,6 +19,11 @@ import {
   launchRequiresWorkloadImage,
   launchShowsWorkloadImageInput,
 } from '~/utils/launchWorkloadImage'
+import {
+  PREVIEW_TTL_DEFAULT_HOURS,
+  PREVIEW_TTL_MAX_HOURS,
+  PREVIEW_TTL_MAX_MINUTES,
+} from '~/utils/previewTtl'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
 
@@ -76,31 +81,16 @@ const form = reactive({
   name: '',
   provider: 'local' as PreviewTarget,
   ttl_unit: 'hours' as 'hours' | 'minutes',
-  ttl_value: 8,
+  ttl_value: PREVIEW_TTL_DEFAULT_HOURS,
   workload_image: '',
+  kubernetes_image_source: 'build_registry' as 'external' | 'build_registry',
   workspace_id: null as string | null,
   git_repo_url: '',
   git_branch: 'main',
   github_pr_number: null as number | null,
   enable_postgres: false,
   enable_redis: false,
-  credentials: {
-    gcp_sa_key_json: '',
-    gcp_wif_project_number: '',
-    gcp_wif_pool_id: '',
-    gcp_wif_provider_id: '',
-    gcp_wif_target_sa_email: '',
-    aws_access_key_id: '',
-    aws_secret_access_key: '',
-    aws_session_token: '',
-    aws_role_arn: '',
-    aws_role_session_name: '',
-    azure_client_id: '',
-    azure_client_secret: '',
-    azure_tenant_id: '',
-    azure_subscription_id: '',
-    cloudflare_api_token: '',
-  },
+  credentials: emptyCloudCredentials(),
 })
 
 const PROVIDER_STORAGE_KEY = 'launchpad.lastPreviewProvider'
@@ -159,12 +149,21 @@ const workspaceHasManifests = computed(() => {
   )
 })
 
+const showKubernetesImageSource = computed(
+  () =>
+    usesWorkspaceSource.value
+    && (workspacePlan.value?.deploy_mode === 'manifest' || workspacePlan.value?.deploy_mode === 'preview'),
+)
+
 const showWorkloadImageInput = computed(() =>
   launchShowsWorkloadImageInput({
     usesWorkspaceSource: usesWorkspaceSource.value,
     buildsFromRepo: buildsFromRepo.value,
     workspaceHasManifests: workspaceHasManifests.value,
     deployMode: workspacePlan.value?.deploy_mode ?? null,
+    kubernetesImageSource: showKubernetesImageSource.value
+      ? form.kubernetes_image_source
+      : null,
   }),
 )
 
@@ -174,6 +173,9 @@ const requiresWorkloadImage = computed(() =>
     buildsFromRepo: buildsFromRepo.value,
     workspaceHasManifests: workspaceHasManifests.value,
     deployMode: workspacePlan.value?.deploy_mode ?? null,
+    kubernetesImageSource: showKubernetesImageSource.value
+      ? form.kubernetes_image_source
+      : null,
   }),
 )
 
@@ -628,6 +630,9 @@ async function launch() {
     if (form.workload_image.trim()) {
       payload.workload_image = form.workload_image.trim()
     }
+    if (showKubernetesImageSource.value) {
+      payload.kubernetes_image_source = form.kubernetes_image_source
+    }
     if (form.workspace_id) {
       payload.workspace_id = form.workspace_id
     } else if (form.git_repo_url.trim()) {
@@ -935,7 +940,7 @@ async function launch() {
               v-model.number="form.ttl_value"
               type="number"
               min="1"
-              :max="form.ttl_unit === 'minutes' ? 10080 : 168"
+              :max="form.ttl_unit === 'minutes' ? PREVIEW_TTL_MAX_MINUTES : PREVIEW_TTL_MAX_HOURS"
               class="lp-input flex-1"
             >
             <select v-model="form.ttl_unit" class="lp-input w-28">
@@ -944,6 +949,12 @@ async function launch() {
             </select>
           </div>
         </label>
+        <KubernetesImageSourcePicker
+          v-if="showKubernetesImageSource"
+          v-model:source="form.kubernetes_image_source"
+          :cloud-provider="form.provider"
+          class="sm:col-span-2"
+        />
         <label v-if="showWorkloadImageInput" class="block space-y-2 sm:col-span-2">
           <span class="lp-label">{{ t('launch.containerImage') }}</span>
           <input
@@ -1153,7 +1164,7 @@ async function launch() {
             v-model.number="form.ttl_value"
             type="number"
             min="1"
-            :max="form.ttl_unit === 'minutes' ? 10080 : 168"
+            :max="form.ttl_unit === 'minutes' ? PREVIEW_TTL_MAX_MINUTES : PREVIEW_TTL_MAX_HOURS"
             class="lp-input flex-1"
           >
           <select v-model="form.ttl_unit" class="lp-input w-28">
@@ -1162,6 +1173,11 @@ async function launch() {
           </select>
         </div>
       </label>
+      <KubernetesImageSourcePicker
+        v-if="showKubernetesImageSource"
+        v-model:source="form.kubernetes_image_source"
+        :cloud-provider="form.provider"
+      />
       <label
         v-if="showWorkloadImageInput"
         class="block space-y-2"

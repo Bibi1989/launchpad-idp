@@ -91,6 +91,7 @@ export const runningInstanceSchema = z.object({
   ssh_key_path: z.string().max(512).nullable().optional(),
   listen_port: z.number().int().min(1).max(65535).default(8080),
   process_strategy: z.enum(['docker', 'systemd', 'pm2']).default('docker'),
+  code_source: z.enum(['ssh', 'github']).default('ssh'),
   reverse_proxy: z.enum(['none', 'nginx', 'caddy']).default('none'),
   preview_url_override: z.string().max(512).nullable().optional(),
   kube_context: z.string().max(128).nullable().optional(),
@@ -174,6 +175,8 @@ export const defaultCostOptimization = (): z.infer<typeof costOptimizationSchema
   },
 })
 
+export const kubernetesImageSourceSchema = z.enum(['external', 'build_registry'])
+
 export const kubernetesWorkloadOptionsSchema = z
   .object({
     deployment: z.boolean().default(true),
@@ -198,6 +201,7 @@ export const kubernetesWorkloadOptionsSchema = z
     network_policy: z.boolean().default(false),
     resource_quota: z.boolean().default(false),
     limit_range: z.boolean().default(false),
+    image_source: kubernetesImageSourceSchema.default('build_registry'),
   })
   .superRefine((value, ctx) => {
     if (value.install_ingress_nginx && !value.ingress) {
@@ -270,6 +274,7 @@ export const defaultKubernetesWorkloadOptions = (): z.infer<
   network_policy: false,
   resource_quota: false,
   limit_range: false,
+  image_source: 'build_registry',
 })
 
 export const networkTopologySchema = z.enum(['simple', 'standard'])
@@ -282,6 +287,7 @@ export const lambdaRuntimeSchema = z.enum(['nodejs20.x', 'python3.12', 'provided
 export const gcpResourcesSchema = z.object({
   vpc: z.boolean().default(true),
   subnets: z.boolean().default(true),
+  existing_vpc_id: z.string().max(128).nullable().optional(),
   network_topology: networkTopologySchema.default('simple'),
   gke: z.boolean().default(false),
   artifact_registry: z.boolean().default(false),
@@ -316,6 +322,8 @@ export const gcpResourcesSchema = z.object({
 export const awsResourcesSchema = z.object({
   vpc: z.boolean().default(true),
   subnets: z.boolean().default(true),
+  existing_vpc_id: z.string().max(128).nullable().optional(),
+  existing_security_group_id: z.string().max(128).nullable().optional(),
   network_topology: networkTopologySchema.default('simple'),
   ec2: z.boolean().default(false),
   s3: z.boolean().default(false),
@@ -386,6 +394,8 @@ export const cloudflareResourcesSchema = z
 
 export const cloudCredentialsSchema = z.object({
   gcp_sa_key_json: z.string().optional().nullable(),
+  gcp_project_id: z.string().optional().nullable(),
+  gcp_region: z.string().optional().nullable(),
   gcp_wif_project_number: z.string().optional().nullable(),
   gcp_wif_pool_id: z.string().optional().nullable(),
   gcp_wif_provider_id: z.string().optional().nullable(),
@@ -393,17 +403,21 @@ export const cloudCredentialsSchema = z.object({
   aws_access_key_id: z.string().optional().nullable(),
   aws_secret_access_key: z.string().optional().nullable(),
   aws_session_token: z.string().optional().nullable(),
+  aws_region: z.string().optional().nullable(),
   aws_role_arn: z.string().optional().nullable(),
   aws_role_session_name: z.string().optional().nullable(),
   azure_client_id: z.string().optional().nullable(),
   azure_client_secret: z.string().optional().nullable(),
   azure_tenant_id: z.string().optional().nullable(),
   azure_subscription_id: z.string().optional().nullable(),
+  azure_location: z.string().optional().nullable(),
   cloudflare_api_token: z.string().optional().nullable(),
 })
 
 export type CloudCredentialsForm = {
   gcp_sa_key_json: string
+  gcp_project_id: string
+  gcp_region: string
   gcp_wif_project_number: string
   gcp_wif_pool_id: string
   gcp_wif_provider_id: string
@@ -411,17 +425,21 @@ export type CloudCredentialsForm = {
   aws_access_key_id: string
   aws_secret_access_key: string
   aws_session_token: string
+  aws_region: string
   aws_role_arn: string
   aws_role_session_name: string
   azure_client_id: string
   azure_client_secret: string
   azure_tenant_id: string
   azure_subscription_id: string
+  azure_location: string
   cloudflare_api_token: string
 }
 
 export const emptyCloudCredentials = (): CloudCredentialsForm => ({
   gcp_sa_key_json: '',
+  gcp_project_id: '',
+  gcp_region: '',
   gcp_wif_project_number: '',
   gcp_wif_pool_id: '',
   gcp_wif_provider_id: '',
@@ -429,12 +447,14 @@ export const emptyCloudCredentials = (): CloudCredentialsForm => ({
   aws_access_key_id: '',
   aws_secret_access_key: '',
   aws_session_token: '',
+  aws_region: '',
   aws_role_arn: '',
   aws_role_session_name: '',
   azure_client_id: '',
   azure_client_secret: '',
   azure_tenant_id: '',
   azure_subscription_id: '',
+  azure_location: '',
   cloudflare_api_token: '',
 })
 
@@ -576,6 +596,7 @@ const wizardCommonFields = {
     ssh_key_path: null,
     listen_port: 8080,
     process_strategy: 'docker',
+    code_source: 'ssh',
     reverse_proxy: 'none',
     preview_url_override: null,
     kube_context: null,
@@ -673,10 +694,13 @@ export const provisioningWizardSchema = z.discriminatedUnion('provider', [
         value.running_instance.preview_url_override?.trim()
         || value.running_instance.endpoint_url?.trim(),
       )
-      if (!hasHost && !hasOverride) {
+      // local falls back to a Docker preview; GCP/AWS auto-create the VM. Only
+      // Azure (no auto-provision yet) still requires a host up front.
+      const canAutocreate = ['local', 'gcp', 'aws'].includes(value.provider)
+      if (!hasHost && !hasOverride && !canAutocreate) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'VM host (IP/hostname) is required',
+          message: 'VM host (IP/hostname) is required for Azure',
           path: ['running_instance', 'host'],
         })
       }

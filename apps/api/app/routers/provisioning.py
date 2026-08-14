@@ -40,8 +40,10 @@ from app.schemas.cloud import (
     WorkspaceStarRequest,
     WorkspaceTemplateApplyRequest,
     WorkspaceTemplateInfo,
+    WorkspacePromoteRequest,
     WorkspaceWizardConfig,
     GcpApiEnablementResponse,
+    ProvisioningCostEstimate,
 )
 from app.schemas.environment import AuditLogRead
 from app.services.audit import AuditService
@@ -185,6 +187,36 @@ async def get_workspace_wizard_config(
     service: ProvisioningService = Depends(get_provisioning_service),
 ) -> WorkspaceWizardConfig:
     return await service.get_wizard_config(workspace_id, user)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/promote",
+    response_model=IaCBundleSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+async def promote_workspace(
+    workspace_id: UUID,
+    payload: WorkspacePromoteRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> IaCBundleSummary:
+    return await service.promote_workspace(
+        workspace_id,
+        payload,
+        owner=user,
+        org_id=org.org_id,
+    )
+
+
+@router.post("/estimate-cost", response_model=ProvisioningCostEstimate)
+async def estimate_provisioning_cost(
+    payload: ProvisioningWizardRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> ProvisioningCostEstimate:
+    _ = user
+    return service.estimate_workspace_cost(payload)
 
 
 @router.post(

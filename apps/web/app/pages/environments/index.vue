@@ -3,7 +3,7 @@ import type { OrgCostSummary } from '~/types/auth'
 import type { Environment } from '~/types/environment'
 
 const { t } = useI18n()
-const { environments, loading, error, refresh, destroy, cancelProvision, retryProvision, pauseEnvironment, resumeEnvironment, relaunchEnvironment } = useEnvironments()
+const { environments, loading, error, refresh, destroy, retryProvision, pauseEnvironment, resumeEnvironment, relaunchEnvironment } = useEnvironments()
 const { activeOrgId, fetchOrgCosts } = useOrgs()
 const toast = useToast()
 const route = useRoute()
@@ -96,7 +96,7 @@ const softCap = computed(() => {
 const softCapExceeded = computed(() => Boolean(orgCosts.value?.soft_cost_cap_exceeded))
 
 const liveEnvironments = computed(() =>
-  environments.value.filter((e) => e.status !== 'DESTROYED').slice(0, 12),
+  environments.value.filter((e) => e.status !== 'DESTROYED'),
 )
 
 const providers = computed(() => {
@@ -116,6 +116,8 @@ async function loadOrgCosts() {
   }
 }
 
+let softRefreshTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   // Do not await in a way that can block route transitions; fire-and-forget load.
   void (async () => {
@@ -130,14 +132,22 @@ onMounted(() => {
       `[${new Date().toLocaleTimeString()}] INFO: Dashboard synced with control plane`,
       ...activeEnvs.value.slice(0, 4).map(
         (e) =>
-          `[${new Date(e.updated_at).toLocaleTimeString()}] ${e.status}: ${e.name} · ${e.namespace_name}`,
+          `[${new Date().toLocaleTimeString()}] ${e.status}: ${e.name} · ${e.namespace_name}`,
       ),
     ]
   })()
 
+  softRefreshTimer = setInterval(() => {
+    void refresh({ soft: true }).catch(() => undefined)
+  }, 15_000)
+
   if (linkedWorkspaceId.value) {
     void navigateTo(`/launch?workspace=${encodeURIComponent(linkedWorkspaceId.value)}`)
   }
+})
+
+onUnmounted(() => {
+  if (softRefreshTimer) clearInterval(softRefreshTimer)
 })
 
 watch(environments, (list) => {
@@ -170,24 +180,16 @@ async function onDestroy() {
   const name = envName(id)
   const env = environments.value.find((item) => item.id === id)
   try {
-    if (env?.status === 'PROVISIONING') {
-      const updated = await cancelProvision(id)
-      onCardUpdate({ id: updated.id, status: updated.status, error_message: updated.error_message })
-      await refresh()
-      toast.info(t('environments.toasts.stopped'), `${name} stopped. No teardown was queued.`)
-    } else {
-      await destroy(id, {
-        force: env?.status === 'TEARDOWN_PENDING',
-      })
-      await refresh()
-      await loadOrgCosts()
-      toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)
-    }
+    await destroy(id, {
+      force:
+        env?.status === 'PROVISIONING'
+        || env?.status === 'TEARDOWN_PENDING',
+    })
+    void loadOrgCosts()
+    toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)
   } catch (err) {
     toast.error(
-      env?.status === 'PROVISIONING'
-        ? t('environments.toasts.stopFailed')
-        : t('environments.toasts.destroyFailed'),
+      t('environments.toasts.destroyFailed'),
       toastError(err, t('common.failed')),
     )
   } finally {
@@ -240,7 +242,7 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
       <div class="lp-glass rounded-xl border-l-2 border-l-[var(--lp-accent)] p-4">
         <p class="lp-label">{{ t('environments.index.estHourlySpend') }}</p>
         <div class="mt-2 flex items-baseline gap-1">
-          <span class="text-3xl font-bold tracking-tight text-[var(--lp-accent)]">${{ hourlySpend }}</span>
+          <span class="text-3xl font-bold tracking-tight text-[var(--lp-accent)]">{{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(hourlySpend, { decimals: 4 }) }}</span>
           <span class="text-sm text-[var(--lp-muted)]">/hr</span>
         </div>
       </div>
@@ -255,9 +257,9 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
             class="text-3xl font-bold tracking-tight"
             :class="softCapExceeded ? 'text-[var(--lp-danger)]' : 'text-[var(--lp-text)]'"
           >
-            ${{ accruedSpend }}
+            {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(accruedSpend) }}
           </span>
-          <span v-if="softCap" class="text-sm text-[var(--lp-muted)]">/ ${{ softCap }}</span>
+          <span v-if="softCap" class="text-sm text-[var(--lp-muted)]">/ {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(softCap) }}</span>
         </div>
       </div>
 
@@ -293,7 +295,7 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
       <div class="flex flex-wrap items-center justify-between gap-3">
         <h2 class="text-xl font-semibold">{{ t('environments.index.live') }}</h2>
         <div class="flex items-center gap-2">
-          <button type="button" class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide" @click="refresh()">
+          <button type="button" class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide" @click="refresh({ soft: true })">
             <span class="material-symbols-outlined text-sm">refresh</span>
             {{ t('common.refresh') }}
           </button>
@@ -342,11 +344,11 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
 
     <ConfirmDialog
       :open="confirmDestroyId !== null"
-      :title="pendingDestroyIsProvisioning ? t('environments.destroy.titleStop') : t('environments.destroy.title')"
+      :title="t('environments.destroy.title')"
       :message="pendingDestroyIsProvisioning
-        ? t('environments.destroy.messageProvisioning', { name: pendingDestroyName })
+        ? t('environments.destroy.messageForce', { name: pendingDestroyName })
         : t('environments.destroy.message', { name: pendingDestroyName })"
-      :confirm-label="pendingDestroyIsProvisioning ? t('environments.destroy.confirmStop') : t('environments.destroy.confirm')"
+      :confirm-label="t('environments.destroy.confirm')"
       :cancel-label="t('environments.destroy.cancel')"
       :busy="destroyingId !== null"
       @update:open="(value) => { if (!value) confirmDestroyId = null }"

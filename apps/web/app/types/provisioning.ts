@@ -36,10 +36,12 @@ export interface AnsibleConfig {
   vault_password_file?: string | null
 }
 export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm' | 'kustomize'
+export type KubernetesImageSource = 'external' | 'build_registry'
 export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
 export type WorkspaceRuntimeMode = 'kubernetes' | 'docker_compose' | 'running_instance'
 export type RunningInstanceKind = 'serverless' | 'vm' | 'local_machine'
 export type InstanceProcessStrategy = 'docker' | 'systemd' | 'pm2'
+export type InstanceCodeSource = 'ssh' | 'github'
 export type InstanceReverseProxy = 'none' | 'nginx' | 'caddy'
 export type ProvisionEngine = IaCEngine
 export type K8sScaffoldMode = 'k8s' | 'helm' | 'kustomize'
@@ -190,6 +192,7 @@ export interface KubernetesWorkloadOptions {
   network_policy: boolean
   resource_quota: boolean
   limit_range: boolean
+  image_source: KubernetesImageSource
 }
 
 export type DependencyPlacement = 'in_cluster' | 'managed' | 'external'
@@ -220,6 +223,8 @@ export interface RunningInstanceConfig {
   listen_port?: number
   /** How the app is supervised on VM/local (serverless forces docker). */
   process_strategy?: InstanceProcessStrategy
+  /** How source reaches a cloud VM when process_strategy is not docker. */
+  code_source?: InstanceCodeSource
   /** Optional HTTP edge in front of listen_port. */
   reverse_proxy?: InstanceReverseProxy
   preview_url_override?: string | null
@@ -241,6 +246,8 @@ export interface IaCBundleSummary {
   status?: string | null
   created_at?: string | null
   starred?: boolean
+  project_id?: string | null
+  project_name?: string | null
 }
 
 export interface WorkspaceListItem {
@@ -254,6 +261,8 @@ export interface WorkspaceListItem {
   root_dir: string
   starred: boolean
   project_id?: string | null
+  project_name?: string | null
+  runtime_mode?: WorkspaceRuntimeMode | null
 }
 
 export interface WorkspaceWizardConfig {
@@ -278,6 +287,32 @@ export interface WorkspaceWizardConfig {
   has_credentials: boolean
   /** Safe display name for the stored cloud key (never the secret). */
   credential_label?: string | null
+}
+
+export type WorkspacePromotionTarget = 'staging' | 'prod'
+
+export interface WorkspacePromoteInput {
+  target_environment: WorkspacePromotionTarget
+  promoted_name?: string | null
+  project_id?: string | null
+  run_init?: boolean | null
+}
+
+export interface ProvisionCostEstimateLineItem {
+  id: string
+  label: string
+  hourly_usd: number
+  monthly_usd: number
+  note?: string | null
+}
+
+export interface ProvisioningCostEstimate {
+  currency: string
+  provider: CloudProvider
+  hourly_usd: number
+  monthly_usd: number
+  breakdown: ProvisionCostEstimateLineItem[]
+  assumptions: string[]
 }
 
 export interface GcpApiEnablementResult {

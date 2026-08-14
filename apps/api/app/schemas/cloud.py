@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Literal
@@ -78,6 +79,13 @@ class KubernetesPackaging(str, Enum):
     KUSTOMIZE = "kustomize"
 
 
+class KubernetesImageSource(str, Enum):
+    """How Kubernetes previews resolve container images."""
+
+    EXTERNAL = "external"
+    BUILD_REGISTRY = "build_registry"
+
+
 class WorkspaceArtifactsMode(str, Enum):
     """Which artifact families Launchpad writes into a workspace."""
 
@@ -121,6 +129,16 @@ class InstanceProcessStrategy(str, Enum):
 
     PM2 = "pm2"
     """Node.js process manager (Node stacks only)."""
+
+
+class InstanceCodeSource(str, Enum):
+    """How application source reaches a cloud VM (ignored for serverless / docker)."""
+
+    SSH = "ssh"
+    """Copy workspace files from the control plane over SSH (rsync/scp)."""
+
+    GITHUB = "github"
+    """Clone/pull from the environment git repository on the VM."""
 
 
 class InstanceReverseProxy(str, Enum):
@@ -238,6 +256,8 @@ class RunningInstanceConfig(BaseModel):
     listen_port: int = Field(default=8080, ge=1, le=65535)
     # How the app is supervised on VM / local (ignored for serverless → forced docker).
     process_strategy: InstanceProcessStrategy = InstanceProcessStrategy.DOCKER
+    # How source reaches a cloud VM when process_strategy is not docker.
+    code_source: InstanceCodeSource = InstanceCodeSource.SSH
     # Optional HTTP edge in front of listen_port (VM / local only).
     reverse_proxy: InstanceReverseProxy = InstanceReverseProxy.NONE
     # Optional: force Open-app URL after deploy (advanced)
@@ -448,6 +468,8 @@ class KubernetesWorkloadOptions(BaseModel):
     network_policy: bool = False
     resource_quota: bool = False
     limit_range: bool = False
+    # Preview image strategy (external ref vs build and push to registry).
+    image_source: KubernetesImageSource = KubernetesImageSource.BUILD_REGISTRY
 
     @model_validator(mode="after")
     def ingress_nginx_requires_ingress(self) -> KubernetesWorkloadOptions:
@@ -507,6 +529,8 @@ class LocalCloudConfig(BaseModel):
 class GcpResources(BaseModel):
     vpc: bool = True
     subnets: bool = True
+    # When set, attach to this existing VPC network instead of creating one.
+    existing_vpc_id: str | None = Field(default=None, max_length=128)
     network_topology: NetworkTopology = NetworkTopology.SIMPLE
     gke: bool = False
     artifact_registry: bool = False
@@ -537,6 +561,10 @@ class GcpResources(BaseModel):
 class AwsResources(BaseModel):
     vpc: bool = True
     subnets: bool = True
+    # When set, launch into this existing VPC instead of creating one.
+    existing_vpc_id: str | None = Field(default=None, max_length=128)
+    # When set, attach this existing security group instead of creating lp-preview-sg.
+    existing_security_group_id: str | None = Field(default=None, max_length=128)
     network_topology: NetworkTopology = NetworkTopology.SIMPLE
     ec2: bool = False
     s3: bool = False
@@ -637,40 +665,66 @@ class CloudCredentials(BaseModel):
     """Ephemeral credentials injected into the sandbox - never logged in plaintext."""
 
     gcp_sa_key_json: str | None = None
+    # Target GCP project for gcloud / compute (required for Connect OAuth; SA JSON embeds its own).
+    gcp_project_id: str | None = None
+    # Preferred deploy region (non-secret preference stored with vault).
+    gcp_region: str | None = None
     # GCP Workload Identity Federation (Keyless OIDC)
     gcp_wif_project_number: str | None = None
     gcp_wif_pool_id: str | None = None
     gcp_wif_provider_id: str | None = None
     gcp_wif_target_sa_email: str | None = None
+    # Interactive user OAuth (gcloud auth login style) - CloudTokenSet JSON
+    gcp_oauth_token_json: str | None = None
 
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
+    # Preferred AWS region for deploy wizards.
+    aws_region: str | None = None
     # AWS IAM Roles with Web Identity (Keyless OIDC)
     aws_role_arn: str | None = None
     aws_role_session_name: str | None = None
+    # Interactive AWS IAM Identity Center (SSO) - CloudTokenSet JSON
+    aws_oauth_token_json: str | None = None
+    aws_sso_account_id: str | None = None
+    aws_sso_role_name: str | None = None
 
     azure_client_id: str | None = None
     azure_client_secret: str | None = None
     azure_tenant_id: str | None = None
     azure_subscription_id: str | None = None
+    # Preferred Azure location for deploy wizards.
+    azure_location: str | None = None
+    # Interactive Entra ID user OAuth - CloudTokenSet JSON
+    azure_oauth_token_json: str | None = None
+
     cloudflare_api_token: str | None = None
 
     @field_validator(
         "gcp_sa_key_json",
+        "gcp_project_id",
+        "gcp_region",
         "gcp_wif_project_number",
         "gcp_wif_pool_id",
         "gcp_wif_provider_id",
         "gcp_wif_target_sa_email",
+        "gcp_oauth_token_json",
         "aws_access_key_id",
         "aws_secret_access_key",
         "aws_session_token",
+        "aws_region",
         "aws_role_arn",
         "aws_role_session_name",
+        "aws_oauth_token_json",
+        "aws_sso_account_id",
+        "aws_sso_role_name",
         "azure_client_id",
         "azure_client_secret",
         "azure_tenant_id",
         "azure_subscription_id",
+        "azure_location",
+        "azure_oauth_token_json",
         "cloudflare_api_token",
         mode="before",
     )
@@ -926,6 +980,8 @@ class IaCBundleSummary(BaseModel):
     status: str | None = None
     created_at: datetime | None = None
     starred: bool = False
+    project_id: UUID | None = None
+    project_name: str | None = None
 
 
 class WorkspaceWizardConfig(BaseModel):
@@ -957,6 +1013,49 @@ class WorkspaceWizardConfig(BaseModel):
     credential_label: str | None = None
 
 
+class WorkspacePromotionTarget(str, Enum):
+    STAGING = "staging"
+    PROD = "prod"
+
+
+class WorkspacePromoteRequest(BaseModel):
+    target_environment: WorkspacePromotionTarget
+    promoted_name: str | None = Field(default=None, min_length=3, max_length=128)
+    project_id: UUID | None = None
+    run_init: bool | None = None
+
+    @field_validator("promoted_name")
+    @classmethod
+    def normalize_promoted_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return None
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", cleaned):
+            raise ValueError(
+                "promoted_name must match ^[a-z][a-z0-9-]*$"
+            )
+        return cleaned
+
+
+class CostEstimateLineItem(BaseModel):
+    id: str
+    label: str
+    hourly_usd: float = Field(default=0.0, ge=0)
+    monthly_usd: float = Field(default=0.0, ge=0)
+    note: str | None = None
+
+
+class ProvisioningCostEstimate(BaseModel):
+    currency: str = "USD"
+    provider: CloudProvider
+    hourly_usd: float = Field(default=0.0, ge=0)
+    monthly_usd: float = Field(default=0.0, ge=0)
+    breakdown: list[CostEstimateLineItem] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+
 class GcpApiEnablementResponse(BaseModel):
     """Result of enabling required Google APIs before provision."""
 
@@ -981,6 +1080,8 @@ class WorkspaceListItem(BaseModel):
     root_dir: str
     starred: bool = False
     project_id: UUID | None = None
+    project_name: str | None = None
+    runtime_mode: WorkspaceRuntimeMode | None = None
 
 
 class WorkspaceStarRequest(BaseModel):

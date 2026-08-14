@@ -211,6 +211,8 @@ class ProvisionedResources:
     notice: str | None = None
     # Exposed preview endpoints (frontend first). Open-app uses preview_url.
     preview_endpoints: list[dict[str, object]] = field(default_factory=list)
+    # Filled after cloud VM/serverless attach deploy (host, region, instance id).
+    running_instance: object | None = None
 
 
 class KubernetesProvisioner:

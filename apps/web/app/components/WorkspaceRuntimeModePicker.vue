@@ -203,6 +203,23 @@ watch(
             {{ t(`provision.runtimeMode.attach.strategyHints.${runningInstance.process_strategy || 'docker'}`) }}
           </p>
         </label>
+        <label
+          v-if="runningInstance.process_strategy !== 'docker'"
+          class="block space-y-2"
+        >
+          <span class="lp-label">{{ t('provision.runtimeMode.attach.codeSource') }}</span>
+          <select
+            v-model="runningInstance.code_source"
+            class="lp-input"
+            :disabled="disabled"
+          >
+            <option value="ssh">{{ t('provision.runtimeMode.attach.codeSources.ssh') }}</option>
+            <option value="github">{{ t('provision.runtimeMode.attach.codeSources.github') }}</option>
+          </select>
+          <p class="text-[11px] text-[var(--lp-muted)]">
+            {{ t(`provision.runtimeMode.attach.codeSourceHints.${runningInstance.code_source || 'ssh'}`) }}
+          </p>
+        </label>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('provision.runtimeMode.attach.reverseProxy') }}</span>
           <select

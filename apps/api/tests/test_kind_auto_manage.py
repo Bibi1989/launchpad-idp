@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
-from fastapi import HTTPException
 
-from app.models.domain import Organization
 from app.schemas.cloud import (
     CloudCredentials,
     CloudProvider,
@@ -123,12 +122,31 @@ async def test_generate_bundle_skips_kind_for_local(tmp_path: Path) -> None:
     )
 
     session = AsyncMock()
+    session.commit = AsyncMock()
+    session.add = MagicMock()
+    session.get = AsyncMock(return_value=None)
     service = ProvisioningService(session)
     with (
         patch("app.services.provisioning.ensure_kind_cluster", new_callable=AsyncMock) as up,
         patch.object(service, "_with_account_credentials", new_callable=AsyncMock, return_value=request),
         patch.object(service, "_with_gcp_project_from_sa", return_value=request),
         patch.object(service._iac, "generate") as gen,
+        patch(
+            "app.services.orgs.OrganizationService.ensure_personal_org",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(id=UUID("11111111-1111-1111-1111-111111111112")),
+        ),
+        patch(
+            "app.services.orgs.OrganizationService.resolve_context",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(org_id=UUID("11111111-1111-1111-1111-111111111112")),
+        ),
+        patch("app.services.plans.assert_can_create_workspace", new_callable=AsyncMock),
+        patch(
+            "app.services.projects.ProjectService.resolve_project_for_workspace",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(id=UUID("11111111-1111-1111-1111-111111111113")),
+        ),
     ):
         from app.schemas.cloud import IaCBundleSummary
 
@@ -140,12 +158,10 @@ async def test_generate_bundle_skips_kind_for_local(tmp_path: Path) -> None:
             files=["README.md"],
             name="kind-auto",
         )
-        with pytest.raises(HTTPException) as exc:
-            await service.generate_bundle(request, owner=AsyncMock(id="owner"))
+        result = await service.generate_bundle(request, owner=AsyncMock(id="owner"))
 
     up.assert_not_awaited()
-    assert exc.value.status_code == 403
-    assert exc.value.detail["code"] == "needs_org_setup"
+    assert result.workspace_id == "11111111-1111-1111-1111-111111111111"
 
 
 @pytest.mark.asyncio

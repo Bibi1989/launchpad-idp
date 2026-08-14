@@ -125,3 +125,11 @@ def test_display_cost_provisional_tick() -> None:
         now=sampled + timedelta(hours=1),
     )
     assert display == Decimal("1.5000")
+
+
+def test_convert_display_cost_eur() -> None:
+    from app.core.config import Settings
+    from app.services.cost_metering import convert_display_cost
+
+    settings = Settings(cost_display_currency="EUR", cost_usd_to_eur_rate=Decimal("0.92"))
+    assert convert_display_cost(Decimal("1.0000"), settings=settings) == Decimal("0.9200")

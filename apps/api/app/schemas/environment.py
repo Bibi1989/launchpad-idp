@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models.domain import EnvironmentStatus, ExecutionStage, LogLevel
 from app.schemas.k8s import DeployMode
-from app.schemas.cloud import CloudCredentials
+from app.schemas.cloud import CloudCredentials, KubernetesImageSource
 
 
 class PreviewEndpoint(BaseModel):
@@ -91,6 +91,7 @@ class EnvironmentCreate(BaseModel):
     deploy_mode: DeployMode | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
+    kubernetes_image_source: str | None = Field(default=None, max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -159,6 +160,7 @@ class EnvironmentRead(BaseModel):
     stable_pr_url: str | None = None
     deploy_mode: DeployMode = DeployMode.PREVIEW
     manifest_packaging: str | None = None
+    kubernetes_image_source: str | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
     ttl_expires_at: datetime
@@ -201,13 +203,22 @@ class EnvironmentRead(BaseModel):
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
 
-        self.cost_accrued = display_cost_accrued(
+        from app.core.config import get_settings
+        from app.services.cost_metering import convert_display_cost
+
+        settings = get_settings()
+        accrued_usd = display_cost_accrued(
             cost_accrued=self.cost_accrued or Decimal("0.0000"),
             cost_estimate_hourly=self.cost_estimate_hourly,
             cost_sampled_at=self.cost_sampled_at,
             created_at=created,
             status=self.status,
             now=now,
+        )
+        self.cost_accrued = convert_display_cost(accrued_usd, settings=settings)
+        self.cost_estimate_hourly = convert_display_cost(
+            self.cost_estimate_hourly or Decimal("0.0000"),
+            settings=settings,
         )
         self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
         deploy_mode = (
@@ -301,6 +312,7 @@ class PreviewLaunchRequest(BaseModel):
     deploy_mode: DeployMode | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
+    kubernetes_image_source: KubernetesImageSource | None = None
 
     @field_validator("name")
     @classmethod
@@ -380,7 +392,70 @@ class PreviewLaunchRequest(BaseModel):
             return self
         if self.workspace_id is not None:
             return self
-        from app.core.secrets import validate_cloud_credentials
+        # Credentials may be left blank when the user has encrypted account
+        # credentials stored in settings. In that case provisioning will fill
+        # them server-side before sandbox / IaC materialization.
+        from app.core.secrets import (
+            has_aws_auth,
+            has_gcp_auth,
+            validate_cloud_credentials,
+        )
+
+        creds = self.credentials
+        data = creds.model_dump()
+
+        def any_non_empty(keys: list[str]) -> bool:
+            return any((data.get(key) or "").strip() for key in keys)
+
+        if self.provider == PreviewProvider.GCP:
+            if has_gcp_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "gcp_sa_key_json",
+                    "gcp_wif_project_number",
+                    "gcp_wif_pool_id",
+                    "gcp_wif_provider_id",
+                    "gcp_wif_target_sa_email",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AWS:
+            if has_aws_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "aws_access_key_id",
+                    "aws_secret_access_key",
+                    "aws_session_token",
+                    "aws_role_arn",
+                    "aws_role_session_name",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AZURE:
+            azure_ok = bool(
+                creds.azure_client_id
+                and creds.azure_client_secret
+                and creds.azure_tenant_id
+                and creds.azure_subscription_id
+            )
+            if azure_ok:
+                return self
+            if not any_non_empty(
+                [
+                    "azure_client_id",
+                    "azure_client_secret",
+                    "azure_tenant_id",
+                    "azure_subscription_id",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.CLOUDFLARE:
+            if creds.cloudflare_api_token:
+                return self
+            if not any_non_empty(["cloudflare_api_token"]):
+                return self
 
         validate_cloud_credentials(self.provider, self.credentials)
         return self
@@ -405,6 +480,41 @@ class EnvironmentPromoteRequest(BaseModel):
     name: str | None = Field(default=None, min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     ttl_hours: int | None = Field(default=None, ge=1, le=168)
     ttl_minutes: int | None = Field(default=None, ge=1, le=10_080)
+    primary_service: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Multi-service instance/compose: which service gets the preview URL",
+    )
+    code_source: str | None = Field(
+        default=None,
+        description="How source reaches a cloud VM: ssh (copy) or github (clone). Ignored for docker strategy.",
+    )
+    region: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Cloud region/location for the promoted preview (e.g. us-central1, us-east-1, eastus).",
+    )
+    create_vpc: bool = Field(
+        default=False,
+        description="Create an isolated VPC/VNet for this cloud preview instead of the default network.",
+    )
+    create_subnets: bool = Field(
+        default=False,
+        description="Create subnets in the preview VPC/VNet (implies create_vpc).",
+    )
+    existing_vpc_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Reuse an existing VPC/network id (AWS vpc-… or GCP network name). "
+            "When set, create_vpc is ignored."
+        ),
+    )
+    existing_security_group_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Reuse an existing AWS security group (sg-…). AWS only.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -413,13 +523,120 @@ class EnvironmentPromoteRequest(BaseModel):
             return None
         return value.strip().lower()
 
+    @field_validator("code_source")
+    @classmethod
+    def normalize_code_source(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if cleaned not in {"ssh", "github"}:
+            raise ValueError("code_source must be ssh or github")
+        return cleaned
+
+    @field_validator("region")
+    @classmethod
+    def normalize_region(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        return cleaned or None
+
+    @field_validator("existing_vpc_id")
+    @classmethod
+    def normalize_existing_vpc_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @field_validator("existing_security_group_id")
+    @classmethod
+    def normalize_existing_security_group_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def imply_vpc_from_subnets(self) -> EnvironmentPromoteRequest:
+        if self.existing_vpc_id:
+            self.create_vpc = False
+            self.create_subnets = False
+            return self
+        if self.create_subnets and not self.create_vpc:
+            self.create_vpc = True
+        return self
+
     @model_validator(mode="after")
     def require_cloud_provider(self) -> EnvironmentPromoteRequest:
         if self.ttl_hours is not None and self.ttl_minutes is not None:
             raise ValueError("Provide ttl_hours or ttl_minutes, not both")
         if self.provider == PreviewProvider.LOCAL:
             raise ValueError("Promote target must be a cloud provider")
-        from app.core.secrets import validate_cloud_credentials
+        # Credentials may be left blank when the user has encrypted account
+        # credentials stored in settings. In that case we validate "empty
+        # allowed", and server-side preview launch will fill from the vault.
+        from app.core.secrets import (
+            has_aws_auth,
+            has_gcp_auth,
+            validate_cloud_credentials,
+        )
+
+        creds = self.credentials
+        data = creds.model_dump()
+
+        def any_non_empty(keys: list[str]) -> bool:
+            return any((data.get(key) or "").strip() for key in keys)
+
+        if self.provider == PreviewProvider.GCP:
+            if has_gcp_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "gcp_sa_key_json",
+                    "gcp_wif_project_number",
+                    "gcp_wif_pool_id",
+                    "gcp_wif_provider_id",
+                    "gcp_wif_target_sa_email",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AWS:
+            if has_aws_auth(creds):
+                return self
+            if not any_non_empty(
+                [
+                    "aws_access_key_id",
+                    "aws_secret_access_key",
+                    "aws_session_token",
+                    "aws_role_arn",
+                    "aws_role_session_name",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.AZURE:
+            azure_ok = bool(
+                creds.azure_client_id
+                and creds.azure_client_secret
+                and creds.azure_tenant_id
+                and creds.azure_subscription_id
+            )
+            if azure_ok:
+                return self
+            if not any_non_empty(
+                [
+                    "azure_client_id",
+                    "azure_client_secret",
+                    "azure_tenant_id",
+                    "azure_subscription_id",
+                ],
+            ):
+                return self
+        elif self.provider == PreviewProvider.CLOUDFLARE:
+            if creds.cloudflare_api_token:
+                return self
+            if not any_non_empty(["cloudflare_api_token"]):
+                return self
 
         validate_cloud_credentials(self.provider, self.credentials)
         return self

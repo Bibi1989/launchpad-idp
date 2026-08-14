@@ -82,6 +82,7 @@ class CredentialInjector:
                 "file": wif_config.token_file_path,
             },
             "service_account_impersonation_url": service_account_impersonation_url,
+            "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
         }
 
         written_files: list[str] = []

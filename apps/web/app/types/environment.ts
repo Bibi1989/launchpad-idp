@@ -180,6 +180,7 @@ export interface PreviewLaunchPayload {
   enable_postgres?: boolean
   enable_redis?: boolean
   deploy_mode?: 'preview' | 'manifest' | 'compose' | 'attach'
+  kubernetes_image_source?: 'external' | 'build_registry' | null
 }
 
 export interface EnvironmentExtendPayload {
@@ -193,6 +194,20 @@ export interface EnvironmentPromotePayload {
   name?: string | null
   ttl_hours?: number | null
   ttl_minutes?: number | null
+  /** Multi-service attach/compose: which service gets the cloud preview URL. */
+  primary_service?: string | null
+  /** How source reaches a cloud VM: ssh copy or github clone (ignored for docker). */
+  code_source?: 'ssh' | 'github' | null
+  /** Cloud region/location for the promoted preview. */
+  region?: string | null
+  /** Create an isolated VPC/VNet for this cloud preview. */
+  create_vpc?: boolean
+  /** Create subnets in the preview VPC/VNet (implies create_vpc). */
+  create_subnets?: boolean
+  /** Reuse an existing VPC/network (AWS vpc-… or GCP network name). */
+  existing_vpc_id?: string | null
+  /** Reuse an existing AWS security group (sg-…). */
+  existing_security_group_id?: string | null
 }
 
 export interface ApiErrorBody {

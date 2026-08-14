@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -782,6 +783,143 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
         )
 
     return loaded
+
+
+def _image_name_from_tag(image_tag: str) -> str:
+    repo = image_tag.split("@", 1)[0]
+    name = repo.rsplit(":", 1)[0]
+    if "/" in name:
+        name = name.rsplit("/", 1)[-1]
+    cleaned = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+    return cleaned or "app"
+
+
+def remap_manifest_image_references(
+    documents: list[dict[str, Any]],
+    image_map: dict[str, str],
+) -> None:
+    """Rewrite Deployment container images using local_tag -> remote_uri mappings."""
+    if not image_map:
+        return
+    for doc in documents:
+        if str(doc.get("kind") or "").lower() != "deployment":
+            continue
+        containers = (
+            ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+        ).get("containers") or []
+        if not isinstance(containers, list):
+            continue
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            current = str(container.get("image") or "").strip()
+            if not current:
+                continue
+            replacement = image_map.get(current)
+            if replacement:
+                container["image"] = replacement
+                container["imagePullPolicy"] = "Always"
+                continue
+            # Match by repository name when tags differ (launch-web:latest -> remote:tag).
+            base = current.split("@", 1)[0]
+            for local_tag, remote_uri in image_map.items():
+                if base.split(":")[0] == local_tag.split(":")[0]:
+                    container["image"] = remote_uri
+                    container["imagePullPolicy"] = "Always"
+                    break
+
+
+def build_and_push_workspace_images(
+    *,
+    workspace_root: Path,
+    environment_id: str,
+    cloud_provider: str,
+    credentials: Any,
+    region: str,
+) -> dict[str, str]:
+    """Build workspace images and push each to the target cloud registry."""
+    import shutil
+
+    from app.schemas.cloud import CloudCredentials
+    from app.services.cloud_instance_compute import (
+        CloudInstanceComputeError,
+        CLOUD_CONTAINER_PLATFORM,
+        push_local_image_to_cloud_registry,
+    )
+
+    if not shutil.which("docker"):
+        raise RuntimeError("docker CLI is required to build and push workspace images")
+
+    builds, required_tags = plan_workspace_image_builds(workspace_root)
+    groups: dict[tuple[Path, Path], list[str]] = {}
+    for context, df, image_tag in builds:
+        key = (context.resolve(), df.resolve())
+        groups.setdefault(key, []).append(image_tag)
+
+    mapping: dict[str, str] = {}
+    failed_required: list[str] = []
+
+    for (context, df), tags in groups.items():
+        primary = next((t for t in tags if t in required_tags), tags[0])
+        fingerprint = workspace_image_fingerprint(dockerfile=df, context=context)
+        try:
+            rel = df.relative_to(workspace_root)
+        except ValueError:
+            rel = df
+        logger.info(
+            "building_cloud_workspace_image",
+            image=primary,
+            dockerfile=str(rel),
+            provider=cloud_provider,
+        )
+        build_res = subprocess.run(
+            [
+                "docker",
+                "build",
+                "--platform",
+                CLOUD_CONTAINER_PLATFORM,
+                "-t",
+                primary,
+                "-f",
+                str(df),
+                "--label",
+                f"{BUILD_FINGERPRINT_LABEL}={fingerprint}",
+                str(context),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if build_res.returncode != 0:
+            detail = (build_res.stderr or build_res.stdout or "").strip()[-800:]
+            for image_tag in tags:
+                if image_tag in required_tags:
+                    failed_required.append(f"{image_tag} ({rel}): {detail[:200]}")
+            continue
+        try:
+            remote = push_local_image_to_cloud_registry(
+                local_tag=primary,
+                image_name=_image_name_from_tag(primary),
+                cloud_provider=cloud_provider,
+                credentials=credentials if isinstance(credentials, CloudCredentials) else None,
+                region=region,
+                environment_id=environment_id,
+                tag="latest",
+            )
+        except CloudInstanceComputeError as exc:
+            for image_tag in tags:
+                if image_tag in required_tags:
+                    failed_required.append(f"{image_tag}: {exc}")
+            continue
+        for image_tag in tags:
+            mapping[image_tag] = remote
+
+    if failed_required:
+        raise RuntimeError(
+            "Failed to build/push required workspace image(s) to cloud registry. "
+            + "; ".join(failed_required[:3])
+        )
+    return mapping
 
 
 def ensure_local_deployment_images(
@@ -1964,6 +2102,10 @@ class ManifestDeployer:
         ttl_expires_at: str,
         owner_label: str = "launchpad",
         image: str | None = None,
+        cloud_provider: str | None = None,
+        credentials: object | None = None,
+        region: str | None = None,
+        image_source: str | None = None,
     ) -> ProvisionedResources:
         workload_image = image or self._settings.default_workload_image
         labels = build_preview_labels(
@@ -2027,14 +2169,37 @@ class ManifestDeployer:
             )
             return resources
 
-        if self._settings.kubernetes_enabled:
-            build_and_load_kind_images(workspace_root, cluster_name=self._settings.kubernetes_context)
+        from app.schemas.cloud import CloudProvider, KubernetesImageSource
+
+        provider = (cloud_provider or CloudProvider.LOCAL.value).strip().lower()
+        use_external = (image_source or "").strip().lower() == KubernetesImageSource.EXTERNAL.value
+        custom_image = (image or "").strip()
+        default_image = (self._settings.default_workload_image or "").strip()
+        if not use_external and custom_image and custom_image != default_image:
+            use_external = True
+
+        image_map: dict[str, str] = {}
+        if not use_external and self._settings.kubernetes_enabled:
+            if provider != CloudProvider.LOCAL.value:
+                image_map = build_and_push_workspace_images(
+                    workspace_root=workspace_root,
+                    environment_id=environment_id,
+                    cloud_provider=provider,
+                    credentials=credentials,
+                    region=(region or "us-central1").strip() or "us-central1",
+                )
+            else:
+                build_and_load_kind_images(
+                    workspace_root, cluster_name=self._settings.kubernetes_context
+                )
 
         documents = load_workspace_manifest_documents(
             workspace_root,
             namespace=namespace,
         )
-        if self._settings.kubernetes_enabled:
+        if image_map:
+            remap_manifest_image_references(documents, image_map)
+        elif self._settings.kubernetes_enabled and provider == CloudProvider.LOCAL.value:
             ensure_local_deployment_images(
                 workspace_root,
                 documents,
@@ -2042,9 +2207,12 @@ class ManifestDeployer:
             )
         workload_image = resolve_manifest_workload_image(
             documents,
-            provided_image=image,
+            provided_image=image if use_external else None,
             default_image=self._settings.default_workload_image,
         )
+        if image_map:
+            # Prefer first remapped remote URI for preview URL / port resolution.
+            workload_image = next(iter(image_map.values()), workload_image)
         resources.image = workload_image
         host = self._provisioner.workspace_preview_host(
             name=name, environment_id=environment_id, namespace=namespace

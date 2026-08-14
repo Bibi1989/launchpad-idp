@@ -10,7 +10,9 @@ export function launchRequiresWorkloadImage(input: {
   buildsFromRepo: boolean
   workspaceHasManifests: boolean
   deployMode?: PreviewDeployPlan['deploy_mode'] | null
+  kubernetesImageSource?: 'external' | 'build_registry' | null
 }): boolean {
+  if (input.kubernetesImageSource === 'build_registry') return false
   if (input.usesWorkspaceSource) return false
   if (input.buildsFromRepo) return false
   if (input.workspaceHasManifests) return false
@@ -23,6 +25,8 @@ export function launchShowsWorkloadImageInput(input: {
   buildsFromRepo: boolean
   workspaceHasManifests: boolean
   deployMode?: PreviewDeployPlan['deploy_mode'] | null
+  kubernetesImageSource?: 'external' | 'build_registry' | null
 }): boolean {
+  if (input.kubernetesImageSource !== 'external') return false
   return launchRequiresWorkloadImage(input)
 }

@@ -7,6 +7,7 @@ import {
   defaultAnsibleConfig,
   defaultWorkloadDependencies,
   workloadDependenciesSchema,
+  emptyCloudCredentials,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
@@ -23,8 +24,10 @@ import type {
   KubernetesPackaging,
   KubernetesWorkloadOptions,
   RunningInstanceConfig,
+  ProvisioningCostEstimate,
   WorkspaceArtifactsMode,
   WorkspaceListItem,
+  WorkspacePromotionTarget,
   WorkspaceRuntimeMode,
   WorkspaceWizardConfig,
   WorkloadDependenciesConfig,
@@ -55,6 +58,7 @@ import {
   enhanceDockerScaffoldTargets,
 } from '~/utils/workspaceRepoScaffold'
 import { AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, AWS_INSTANCE_TYPES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
+import { applyPreferredCloudRegions } from '~/utils/preferredCloudRegions'
 import {
   AWS_SERVICE_OPTIONS,
   AZURE_SERVICE_OPTIONS,
@@ -71,6 +75,8 @@ const {
   createGitlabRepo,
   getGithubAppStatus,
   getWizardConfig,
+  promoteWorkspace,
+  estimateProvisioningCost,
   getWorkspace,
   listWorkspaces,
   listWorkspaceFiles,
@@ -103,6 +109,7 @@ const ansibleConfiguratorRef = ref<{
 
 const { listProjects, projects: launchpadProjects } = useProjects()
 const launchpadProjectId = ref<string>('')
+const { getStatus: getCloudCredentialStatus } = useUserCloudCredentials()
 
 const form = reactive({
   name: '',
@@ -195,23 +202,7 @@ const form = reactive({
     account_id: '',
     zone_name: '',
   },
-  credentials: {
-    gcp_sa_key_json: '',
-    gcp_wif_project_number: '',
-    gcp_wif_pool_id: '',
-    gcp_wif_provider_id: '',
-    gcp_wif_target_sa_email: '',
-    aws_access_key_id: '',
-    aws_secret_access_key: '',
-    aws_session_token: '',
-    aws_role_arn: '',
-    aws_role_session_name: '',
-    azure_client_id: '',
-    azure_client_secret: '',
-    azure_tenant_id: '',
-    azure_subscription_id: '',
-    cloudflare_api_token: '',
-  },
+  credentials: emptyCloudCredentials(),
   github: {
     name: '',
     description: 'Bootstrapped by Launchpad',
@@ -264,6 +255,14 @@ const isNewWorkspace = computed(() => selectedWorkspaceId.value === NEW_WORKSPAC
 const selectedExisting = computed(() =>
   existingWorkspaces.value.find((ws) => ws.id === selectedWorkspaceId.value) ?? null,
 )
+const promoteFromExisting = ref(false)
+const promoteTarget = ref<WorkspacePromotionTarget>('staging')
+const promotedWorkspaceName = ref('')
+const liveCostEstimate = ref<ProvisioningCostEstimate | null>(null)
+const liveCostLoading = ref(false)
+const liveCostError = ref<string | null>(null)
+let liveCostReqSeq = 0
+let liveCostTimer: ReturnType<typeof setTimeout> | null = null
 
 const hasKubernetesRuntime = computed(() => {
   if (form.provider === 'local') return true
@@ -462,6 +461,24 @@ onMounted(async () => {
       installations: [],
     }
   }
+  try {
+    const credStatus = await getCloudCredentialStatus()
+    applyPreferredCloudRegions(credStatus, {
+      gcp: form.gcp,
+      aws: form.aws,
+      azure: form.azure,
+      running_instance: form.running_instance,
+    }, { overwrite: true })
+  } catch {
+    // Vault preferences are optional
+  }
+})
+
+onUnmounted(() => {
+  if (liveCostTimer) {
+    clearTimeout(liveCostTimer)
+    liveCostTimer = null
+  }
 })
 
 function applyGithubDefaults(status: GitHubAppStatus) {
@@ -551,21 +568,7 @@ const azureResourceOptions = AZURE_SERVICE_OPTIONS
 const cloudflareResourceOptions = CLOUDFLARE_SERVICE_OPTIONS
 
 function clearCredentials() {
-  form.credentials.gcp_sa_key_json = ''
-  form.credentials.gcp_wif_project_number = ''
-  form.credentials.gcp_wif_pool_id = ''
-  form.credentials.gcp_wif_provider_id = ''
-  form.credentials.gcp_wif_target_sa_email = ''
-  form.credentials.aws_access_key_id = ''
-  form.credentials.aws_secret_access_key = ''
-  form.credentials.aws_session_token = ''
-  form.credentials.aws_role_arn = ''
-  form.credentials.aws_role_session_name = ''
-  form.credentials.azure_client_id = ''
-  form.credentials.azure_client_secret = ''
-  form.credentials.azure_tenant_id = ''
-  form.credentials.azure_subscription_id = ''
-  form.credentials.cloudflare_api_token = ''
+  Object.assign(form.credentials, emptyCloudCredentials())
 }
 
 function applyWizardConfig(config: WorkspaceWizardConfig) {
@@ -704,12 +707,38 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
 
 let workspaceConfigLoadSeq = 0
 
+function suggestedPromotedName(baseName: string, target: WorkspacePromotionTarget): string {
+  const normalized = baseName.trim().toLowerCase()
+  if (!normalized) return ''
+  if (normalized.endsWith(`-${target}`)) return normalized
+  return `${normalized}-${target}`
+}
+
+watch(
+  [selectedExisting, promoteTarget],
+  ([existing, target]) => {
+    if (!existing || !promoteFromExisting.value) return
+    promotedWorkspaceName.value = suggestedPromotedName(existing.name, target)
+  },
+  { immediate: true },
+)
+
+watch(promoteFromExisting, (enabled) => {
+  if (!enabled || !selectedExisting.value) return
+  promotedWorkspaceName.value = suggestedPromotedName(
+    selectedExisting.value.name,
+    promoteTarget.value,
+  )
+})
+
 watch(selectedWorkspaceId, async (id) => {
   if (id === NEW_WORKSPACE) {
     workspaceConfigLoadSeq += 1
     loadingConfig.value = false
     sessionCreatedWorkspaceId.value = null
     hasStoredCredentials.value = false
+    promoteFromExisting.value = false
+    promotedWorkspaceName.value = ''
     clearCredentials()
     return
   }
@@ -720,6 +749,12 @@ watch(selectedWorkspaceId, async (id) => {
     const config = await getWizardConfig(id)
     if (seq !== workspaceConfigLoadSeq) return
     applyWizardConfig(config)
+    if (promoteFromExisting.value && selectedExisting.value) {
+      promotedWorkspaceName.value = suggestedPromotedName(
+        selectedExisting.value.name,
+        promoteTarget.value,
+      )
+    }
   } catch (err) {
     if (seq !== workspaceConfigLoadSeq) return
     const ws = existingWorkspaces.value.find((item) => item.id === id)
@@ -821,6 +856,64 @@ function buildWizardPayload(): ProvisioningWizardInput {
   }
 }
 
+async function refreshLiveCostEstimate() {
+  if (currentStep.value !== 2 || form.provider === 'local') {
+    liveCostEstimate.value = null
+    liveCostError.value = null
+    liveCostLoading.value = false
+    return
+  }
+  const parsed = provisioningWizardSchema.safeParse(buildWizardPayload())
+  if (!parsed.success) {
+    liveCostEstimate.value = null
+    liveCostError.value = null
+    liveCostLoading.value = false
+    return
+  }
+  const reqSeq = ++liveCostReqSeq
+  liveCostLoading.value = true
+  try {
+    const estimate = await estimateProvisioningCost(parsed.data)
+    if (reqSeq !== liveCostReqSeq) return
+    liveCostEstimate.value = estimate
+    liveCostError.value = null
+  } catch (err) {
+    if (reqSeq !== liveCostReqSeq) return
+    liveCostEstimate.value = null
+    liveCostError.value = err instanceof Error ? err.message : t('provision.cost.estimateFailed')
+  } finally {
+    if (reqSeq === liveCostReqSeq) {
+      liveCostLoading.value = false
+    }
+  }
+}
+
+function scheduleLiveCostEstimate() {
+  if (liveCostTimer) clearTimeout(liveCostTimer)
+  liveCostTimer = setTimeout(() => {
+    void refreshLiveCostEstimate()
+  }, 450)
+}
+
+watch(
+  [
+    () => currentStep.value,
+    () => form.provider,
+    () => form.runtime_mode,
+    () => form.iac_engine,
+    () => form.artifact_mode,
+    () => form.gcp,
+    () => form.aws,
+    () => form.azure,
+    () => form.cloudflare,
+    () => form.cost_optimization,
+  ],
+  () => {
+    scheduleLiveCostEstimate()
+  },
+  { deep: true },
+)
+
 function validateStep(): boolean {
   fieldError.value = null
   if (currentStep.value === 1) {
@@ -828,6 +921,13 @@ function validateStep(): boolean {
       if (!selectedExisting.value) {
         fieldError.value = t('provision.errors.selectWorkspace')
         return false
+      }
+      if (promoteFromExisting.value) {
+        const promoted = promotedWorkspaceName.value.trim().toLowerCase()
+        if (!/^[a-z][a-z0-9-]*$/.test(promoted) || promoted.length < 3) {
+          fieldError.value = t('provision.errors.promotedNameInvalid')
+          return false
+        }
       }
       return true
     }
@@ -1053,8 +1153,10 @@ async function onGenerate() {
     }
 
     creationStep.value = 1
+    const existingId = !isNewWorkspace.value ? selectedExisting.value?.id ?? null : null
+    const shouldPromote = Boolean(existingId && promoteFromExisting.value)
     const reuseId =
-      (!isNewWorkspace.value && selectedExisting.value?.id) ||
+      (existingId && !shouldPromote ? existingId : null) ||
       sessionCreatedWorkspaceId.value ||
       null
 
@@ -1076,6 +1178,35 @@ async function onGenerate() {
       if (selectedWorkspaceId.value !== workspaceId) {
         selectedWorkspaceId.value = workspaceId
       }
+    } else if (shouldPromote && existingId) {
+      creationStep.value = 2
+      const promotedName = promotedWorkspaceName.value.trim().toLowerCase()
+      if (!/^[a-z][a-z0-9-]*$/.test(promotedName) || promotedName.length < 3) {
+        fieldError.value = t('provision.errors.promotedNameInvalid')
+        return
+      }
+      bundle.value = await promoteWorkspace(existingId, {
+        target_environment: promoteTarget.value,
+        promoted_name: promotedName,
+        project_id: launchpadProjectId.value || null,
+        run_init: form.run_init,
+      })
+      workspaceId = bundle.value.workspace_id
+      sessionCreatedWorkspaceId.value = workspaceId
+      creationStep.value = 3
+      await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
+      await scaffoldCiCdFiles(workspaceId)
+      await scaffoldAnsibleFiles(workspaceId)
+      await refreshBundle(workspaceId)
+      creationStep.value = 4
+      const terminal = await openTerminal(workspaceId, {
+        run_init: form.run_init,
+      })
+      wsPath.value = terminal.ws_path
+      activeTerminalWsPath.value = terminal.ws_path
+      terminalOpen.value = false
+      existingWorkspaces.value = await listWorkspaces()
+      selectedWorkspaceId.value = workspaceId
     } else {
       creationStep.value = 2
       bundle.value = await createWorkspace(parsed.data)
@@ -1359,6 +1490,28 @@ async function onPrimaryAction() {
             {{ t('provision.editingExisting') }}
             <strong class="text-[var(--lp-text)]">{{ selectedExisting.name }}</strong>
             - {{ t('provision.editingExistingSuffix') }}
+          </div>
+          <div
+            v-if="!isNewWorkspace && selectedExisting"
+            class="space-y-3 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/30 p-4"
+          >
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="promoteFromExisting" type="checkbox" class="accent-[var(--lp-accent)]">
+              {{ t('provision.promote.enable') }}
+            </label>
+            <div v-if="promoteFromExisting" class="grid gap-3 sm:grid-cols-2">
+              <label class="block space-y-2">
+                <span class="lp-label">{{ t('provision.promote.target') }}</span>
+                <select v-model="promoteTarget" class="lp-input">
+                  <option value="staging">{{ t('provision.promote.staging') }}</option>
+                  <option value="prod">{{ t('provision.promote.prod') }}</option>
+                </select>
+              </label>
+              <label class="block space-y-2">
+                <span class="lp-label">{{ t('provision.promote.name') }}</span>
+                <input v-model="promotedWorkspaceName" class="lp-input" placeholder="demo-staging">
+              </label>
+            </div>
           </div>
 
           <div class="grid gap-4 sm:grid-cols-2">
@@ -1790,6 +1943,44 @@ async function onPrimaryAction() {
           <template v-if="form.provider === 'cloudflare'">
             <CloudCredentialsFields v-model:credentials="form.credentials" provider="cloudflare" />
           </template>
+
+          <div
+            v-if="!isLocalProvider"
+            class="space-y-3 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 p-4"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <p class="lp-label">{{ t('provision.cost.label') }}</p>
+              <span v-if="liveCostLoading" class="text-xs text-[var(--lp-muted)]">
+                {{ t('provision.cost.refreshing') }}
+              </span>
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="rounded-lg border border-[var(--lp-line)] p-3">
+                <p class="text-xs text-[var(--lp-muted)]">{{ t('provision.cost.hourly') }}</p>
+                <p class="font-mono text-base text-[var(--lp-text)]">
+                  ${{ liveCostEstimate ? liveCostEstimate.hourly_usd.toFixed(4) : '-' }}
+                </p>
+              </div>
+              <div class="rounded-lg border border-[var(--lp-line)] p-3">
+                <p class="text-xs text-[var(--lp-muted)]">{{ t('provision.cost.monthly') }}</p>
+                <p class="font-mono text-base text-[var(--lp-text)]">
+                  ${{ liveCostEstimate ? liveCostEstimate.monthly_usd.toFixed(2) : '-' }}
+                </p>
+              </div>
+            </div>
+            <p v-if="liveCostError" class="text-xs text-[var(--lp-danger)]">{{ liveCostError }}</p>
+            <div v-if="liveCostEstimate?.breakdown?.length" class="space-y-1">
+              <p class="text-xs text-[var(--lp-muted)]">{{ t('provision.cost.breakdown') }}</p>
+              <div
+                v-for="line in liveCostEstimate.breakdown"
+                :key="line.id"
+                class="flex items-center justify-between rounded border border-[var(--lp-line)] px-2 py-1 text-xs"
+              >
+                <span class="text-[var(--lp-muted)]">{{ line.label }}</span>
+                <span class="font-mono text-[var(--lp-text)]">${{ line.hourly_usd.toFixed(4) }}/hr</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Step 3: Source control -->

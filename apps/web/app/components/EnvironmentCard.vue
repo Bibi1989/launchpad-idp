@@ -2,6 +2,11 @@
 import type { Environment, EnvironmentStatus } from '~/types/environment'
 import { envStreamToPatch } from '~/utils/envStreamPatch'
 import { secondaryPreviewEndpoints } from '~/utils/previewEndpoints'
+import {
+  ttlIsExpired,
+  ttlLeftSeconds,
+  ttlProgressRatio,
+} from '~/utils/previewTtl'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -26,8 +31,19 @@ const actionsMenuOpen = ref(false)
 const liveStatus = ref<EnvironmentStatus>(props.environment.status)
 const liveCommit = ref<string | null>(props.environment.latest_commit_sha)
 const seenNotices = new Set<string>()
+const tick = ref(0)
+let tickTimer: ReturnType<typeof setInterval> | null = null
 
-const environmentId = computed(() => props.environment.id)
+// Hold SSE only while logs are open or the env is actively changing.
+// List soft-refresh covers RUNNING/PAUSED status drift without exhausting connections.
+const streamEnvironmentId = computed(() => {
+  if (logsOpen.value) return props.environment.id
+  const status = props.environment.status
+  if (status === 'PROVISIONING' || status === 'TEARDOWN_PENDING') {
+    return props.environment.id
+  }
+  return null
+})
 
 function closeActionsMenu() {
   actionsMenuOpen.value = false
@@ -43,13 +59,17 @@ function onDocClick() {
 
 onMounted(() => {
   document.addEventListener('click', onDocClick)
+  tickTimer = setInterval(() => {
+    tick.value += 1
+  }, 1000)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', onDocClick)
+  if (tickTimer) clearInterval(tickTimer)
 })
 
-const { logLines, connected } = useEnvironmentLiveStream(environmentId, {
+const { logLines, connected } = useEnvironmentLiveStream(streamEnvironmentId, {
   onEvent: (event) => {
     if (event.status) {
       liveStatus.value = event.status as EnvironmentStatus
@@ -80,16 +100,14 @@ watch(
 )
 
 const remaining = computed(() => {
-  const expires = new Date(props.environment.ttl_expires_at).getTime()
-  const created = new Date(props.environment.created_at).getTime()
-  const now = Date.now()
-  const totalMs = Math.max(expires - created, 1)
-  const leftMs = Math.max(expires - now, 0)
-  const ratio = Math.min(Math.max(leftMs / totalMs, 0), 1)
+  tick.value
+  const expiresAt = props.environment.ttl_expires_at
+  const leftSeconds = ttlLeftSeconds(expiresAt)
+  const ratio = ttlProgressRatio(expiresAt)
   return {
-    label: formatDuration(Math.floor(leftMs / 1000), { pad: true }),
+    label: formatDuration(leftSeconds, { pad: true }),
     dashOffset: CIRCUMFERENCE * (1 - ratio),
-    expired: leftMs <= 0,
+    expired: ttlIsExpired(expiresAt),
   }
 })
 
@@ -246,9 +264,9 @@ function onCardKeydown(event: KeyboardEvent) {
             <p class="lp-label">
               {{ isLocal ? t('environments.detail.localShadow') : t('environments.detail.costToDate') }}
             </p>
-            <p class="font-mono text-sm">${{ costToDate }}</p>
+            <p class="font-mono text-sm">{{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(costToDate, { decimals: 4 }) }}</p>
             <p class="font-mono text-[10px] text-[var(--lp-muted)]">
-              ${{ environment.cost_estimate_hourly }}/hr
+              {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_estimate_hourly, { decimals: 4 }) }}/hr
               <span v-if="costSourceLabel" class="opacity-80"> · {{ costSourceLabel }}</span>
             </p>
           </div>
@@ -444,11 +462,7 @@ function onCardKeydown(event: KeyboardEvent) {
             @click="emit('destroy', environment.id); closeActionsMenu()"
           >
             <span class="material-symbols-outlined text-base">delete</span>
-            {{
-              liveStatus === 'PROVISIONING'
-                ? t('environments.actions.stopProvision')
-                : t('environments.card.destroy')
-            }}
+            {{ t('environments.card.destroy') }}
           </button>
         </div>
       </div>

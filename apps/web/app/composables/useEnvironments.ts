@@ -17,10 +17,15 @@ export function useEnvironments() {
   const environments = useState<Environment[]>('environments', () => [])
   const loading = useState<boolean>('environments-loading', () => false)
   const error = useState<string | null>('environments-error', () => null)
+  let refreshInFlight = 0
 
-  async function refresh() {
-    // Re-entrant safe: concurrent callers share one in-flight flag via finally.
-    loading.value = true
+  async function refresh(opts: { soft?: boolean } = {}) {
+    // Soft refresh keeps existing cards visible (destroy/teardown must not
+    // blank the whole environments page behind AppSplash).
+    refreshInFlight += 1
+    if (!opts.soft || environments.value.length === 0) {
+      loading.value = true
+    }
     error.value = null
     try {
       environments.value = await apiFetch<Environment[]>('/environments')
@@ -28,7 +33,11 @@ export function useEnvironments() {
       error.value = err instanceof Error ? err.message : 'Failed to load environments'
       throw err
     } finally {
-      loading.value = false
+      refreshInFlight -= 1
+      if (refreshInFlight <= 0) {
+        refreshInFlight = 0
+        loading.value = false
+      }
     }
   }
 
@@ -48,7 +57,7 @@ export function useEnvironments() {
       method: 'POST',
       body: JSON.stringify(body),
     })
-    await refresh()
+    await refresh({ soft: true })
     return result
   }
 
@@ -90,7 +99,7 @@ export function useEnvironments() {
     const environment = await apiFetch<Environment>(`/environments/${id}/drift-scan`, {
       method: 'POST',
     })
-    await refresh()
+    await refresh({ soft: true })
     return environment
   }
 
@@ -101,7 +110,7 @@ export function useEnvironments() {
       // Local first create can still be slow if other sync work runs; keep headroom.
       timeoutMs: 90_000,
     })
-    await refresh()
+    await refresh({ soft: true })
     return result
   }
 
@@ -109,23 +118,53 @@ export function useEnvironments() {
     return apiFetch<Environment>(`/environments/${id}`)
   }
 
+  function patchEnvironment(environment: Environment) {
+    const idx = environments.value.findIndex((item) => item.id === environment.id)
+    if (idx >= 0) {
+      environments.value[idx] = environment
+    }
+  }
+
   async function destroy(
     id: string,
     opts: { force?: boolean } = {},
   ): Promise<Environment> {
     const query = opts.force ? '?force=true' : ''
-    const environment = await apiFetch<Environment>(`/environments/${id}${query}`, {
-      method: 'DELETE',
-    })
-    await refresh()
-    return environment
+    const existing = environments.value.find((item) => item.id === id)
+    const previousStatus = existing?.status
+    // Optimistic: show TEARDOWN_PENDING immediately so destroy never looks hung.
+    if (existing && existing.status !== 'DESTROYED') {
+      environments.value = environments.value.map((item) =>
+        item.id === id
+          ? { ...item, status: 'TEARDOWN_PENDING' as Environment['status'] }
+          : item,
+      )
+    }
+    try {
+      const environment = await apiFetch<Environment>(`/environments/${id}${query}`, {
+        method: 'DELETE',
+        // Enqueue-only; should be fast. Don't wait forever if the API is busy.
+        timeoutMs: 30_000,
+      })
+      patchEnvironment(environment)
+      void refresh({ soft: true }).catch(() => undefined)
+      return environment
+    } catch (err) {
+      if (previousStatus && existing) {
+        environments.value = environments.value.map((item) =>
+          item.id === id ? { ...item, status: previousStatus } : item,
+        )
+      }
+      throw err
+    }
   }
 
   async function cancelProvision(id: string): Promise<Environment> {
     const environment = await apiFetch<Environment>(`/environments/${id}/cancel-provision`, {
       method: 'POST',
     })
-    await refresh()
+    patchEnvironment(environment)
+    void refresh({ soft: true }).catch(() => undefined)
     return environment
   }
 
@@ -133,7 +172,8 @@ export function useEnvironments() {
     const environment = await apiFetch<Environment>(`/environments/${id}/retry`, {
       method: 'POST',
     })
-    await refresh()
+    patchEnvironment(environment)
+    void refresh({ soft: true }).catch(() => undefined)
     return environment
   }
 
@@ -145,7 +185,8 @@ export function useEnvironments() {
       method: 'POST',
       body: JSON.stringify(payload),
     })
-    await refresh()
+    patchEnvironment(environment)
+    void refresh({ soft: true }).catch(() => undefined)
     return environment
   }
 
@@ -156,8 +197,12 @@ export function useEnvironments() {
     const environment = await apiFetch<Environment>(`/environments/${id}/promote`, {
       method: 'POST',
       body: JSON.stringify(payload),
+      // Promote may do extra work (loading a stored workspace snapshot) to
+      // preserve runtime/deploy mode and credentials behavior. Allow enough
+      // time for the control-plane to enqueue the preview.
+      timeoutMs: 60_000,
     })
-    await refresh()
+    await refresh({ soft: true })
     return environment
   }
 
@@ -165,7 +210,8 @@ export function useEnvironments() {
     const environment = await apiFetch<Environment>(`/environments/${id}/pause`, {
       method: 'POST',
     })
-    await refresh()
+    patchEnvironment(environment)
+    void refresh({ soft: true }).catch(() => undefined)
     return environment
   }
 
@@ -173,7 +219,8 @@ export function useEnvironments() {
     const environment = await apiFetch<Environment>(`/environments/${id}/resume`, {
       method: 'POST',
     })
-    await refresh()
+    patchEnvironment(environment)
+    void refresh({ soft: true }).catch(() => undefined)
     return environment
   }
 
@@ -181,7 +228,8 @@ export function useEnvironments() {
     const environment = await apiFetch<Environment>(`/environments/${id}/relaunch`, {
       method: 'POST',
     })
-    await refresh()
+    patchEnvironment(environment)
+    void refresh({ soft: true }).catch(() => undefined)
     return environment
   }
 

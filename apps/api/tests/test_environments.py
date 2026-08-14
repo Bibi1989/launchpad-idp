@@ -911,7 +911,7 @@ async def test_auto_pause_oldest_when_exceeding_max_concurrent_limit(
         org = await OrganizationService(session).ensure_personal_org(test_user)
         default_project = await ProjectService(session, get_settings()).ensure_default_project(org=org, actor=test_user)
 
-        limit = 6
+        limit = get_settings().max_concurrent_environments
         repo = EnvironmentRepository(session)
         created_envs = []
         for i in range(limit):

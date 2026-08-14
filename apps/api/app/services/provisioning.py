@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import yaml
 from fastapi import HTTPException, status
@@ -28,6 +30,7 @@ from app.schemas.cloud import (
     CloudflareResources,
     CloudCredentials,
     CloudProvider,
+    CostEstimateLineItem,
     GcpCloudConfig,
     GcpResources,
     GitHubRepoRequest,
@@ -39,6 +42,7 @@ from app.schemas.cloud import (
     LocalCloudConfig,
     LocalResources,
     ProvisioningWizardRequest,
+    ProvisioningCostEstimate,
     WorkspaceFileContent,
     WorkspaceFileNode,
     WorkspaceFormatResponse,
@@ -46,10 +50,13 @@ from app.schemas.cloud import (
     WorkspacePushRequest,
     WorkspaceTemplateApplyRequest,
     WorkspaceTemplateInfo,
+    WorkspacePromotionTarget,
+    WorkspacePromoteRequest,
     WorkspaceWizardConfig,
     WorkspaceArtifactsMode,
     WorkspaceRuntimeMode,
     GcpApiEnablementResponse,
+    RunningInstanceConfig,
 )
 from app.services.github_service import GitHubProvisioningService
 from app.services.iac_generator import IaCGenerator
@@ -63,6 +70,33 @@ from app.services.state_lock import (
 from app.services.workspace_templates import get_template, list_templates
 
 logger = get_logger(__name__)
+
+_DEFAULT_MONTH_HOURS = Decimal("730")
+_DEFAULT_GCP_COMPUTE_HOURLY = Decimal("0.19")
+_DEFAULT_AWS_COMPUTE_HOURLY = Decimal("0.21")
+_DEFAULT_AZURE_COMPUTE_HOURLY = Decimal("0.23")
+_DEFAULT_CLOUDFLARE_SERVICE_HOURLY = Decimal("0.03")
+
+_GCP_MACHINE_RATES: dict[str, Decimal] = {
+    "e2-small": Decimal("0.03"),
+    "e2-medium": Decimal("0.04"),
+    "e2-standard-2": Decimal("0.09"),
+    "e2-standard-4": Decimal("0.19"),
+    "n2-standard-2": Decimal("0.13"),
+    "n2-standard-4": Decimal("0.26"),
+}
+_AWS_INSTANCE_RATES: dict[str, Decimal] = {
+    "t3.micro": Decimal("0.0104"),
+    "t3.small": Decimal("0.0208"),
+    "t3.medium": Decimal("0.0416"),
+    "t3.large": Decimal("0.0832"),
+    "m5.large": Decimal("0.096"),
+}
+_AZURE_VM_RATES: dict[str, Decimal] = {
+    "Standard_B2s": Decimal("0.0464"),
+    "Standard_D2_v2": Decimal("0.096"),
+    "Standard_D4_v3": Decimal("0.192"),
+}
 
 
 class ProvisioningService:
@@ -94,27 +128,44 @@ class ProvisioningService:
         from app.services.projects import ProjectService
 
         orgs = OrganizationService(self._session)
-        if org_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "needs_org_setup",
-                    "message": "Create an organization before provisioning workspaces",
-                },
-            )
         resolved_org_id = org_id
-        org = await self._session.get(Organization, resolved_org_id)
-        if org is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"code": "org_not_found", "message": "Organization not found"},
+        org: Organization | None = None
+        if resolved_org_id is None:
+            org = await orgs.ensure_personal_org(owner)
+            resolved_org_id = org.id
+            await self._session.commit()
+            logger.warning(
+                "provisioning_org_context_missing_autofixed",
+                owner_id=str(owner.id),
+                resolved_org_id=str(resolved_org_id),
             )
+        if org is None:
+            org = await self._session.get(Organization, resolved_org_id)
+            if org is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "org_not_found", "message": "Organization not found"},
+                )
         await assert_can_create_workspace(self._session, org)
         org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
         project = await ProjectService(self._session).resolve_project_for_workspace(
             org=org_ctx,
             project_id=project_id,
         )
+        existing_ws = await self._session.execute(
+            select(ProvisioningWorkspace).where(
+                ProvisioningWorkspace.org_id == resolved_org_id,
+                ProvisioningWorkspace.name == request.name,
+            )
+        )
+        if existing_ws.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "workspace_exists",
+                    "message": f"Workspace '{request.name}' already exists in this organization",
+                },
+            )
         row = ProvisioningWorkspace(
             id=UUID(bundle.workspace_id),
             owner_id=owner.id,
@@ -151,6 +202,20 @@ class ProvisioningService:
             starred=False,
         )
 
+    async def fill_cloud_credentials_from_account_vault(
+        self,
+        credentials: CloudCredentials,
+        owner: User,
+        *,
+        provider: str | None = None,
+    ) -> CloudCredentials:
+        """Fill blank cloud credential fields from the user's account vault.
+
+        This is used for flows like "Deploy to cloud" where a workspace may have
+        been created without storing encrypted cloud credentials yet.
+        """
+        return await self._fill_from_account_vault(credentials, owner.id, provider=provider)
+
     async def list_workspaces(
         self,
         owner: User,
@@ -182,7 +247,7 @@ class ProvisioningService:
                 stmt = stmt.where(ProvisioningWorkspace.starred_at.is_not(None))
             result = await self._session.execute(stmt)
             rows = list(result.scalars().all())
-            return [self._to_workspace_list_item(row) for row in rows]
+            return await self._workspace_list_items(rows)
 
         if org_id is not None:
             ctx = await orgs.resolve_context(user=owner, org_id=org_id)
@@ -231,9 +296,35 @@ class ProvisioningService:
                     .limit(100)
                 )
                 rows = list(result.scalars().all())
-        return [self._to_workspace_list_item(row) for row in rows]
+        return await self._workspace_list_items(rows)
 
-    def _to_workspace_list_item(self, row: ProvisioningWorkspace) -> WorkspaceListItem:
+    async def _workspace_list_items(
+        self,
+        rows: list[ProvisioningWorkspace],
+    ) -> list[WorkspaceListItem]:
+        from app.models.domain import Project
+
+        project_ids = {row.project_id for row in rows if row.project_id}
+        project_names: dict[UUID, str] = {}
+        if project_ids:
+            result = await self._session.execute(
+                select(Project.id, Project.name).where(Project.id.in_(project_ids))
+            )
+            project_names = {pid: name for pid, name in result.all()}
+        return [
+            self._to_workspace_list_item(
+                row,
+                project_name=project_names.get(row.project_id) if row.project_id else None,
+            )
+            for row in rows
+        ]
+
+    def _to_workspace_list_item(
+        self,
+        row: ProvisioningWorkspace,
+        *,
+        project_name: str | None = None,
+    ) -> WorkspaceListItem:
         return WorkspaceListItem(
             id=row.id,
             name=row.name,
@@ -245,6 +336,8 @@ class ProvisioningService:
             root_dir=row.root_dir,
             starred=row.starred_at is not None,
             project_id=row.project_id,
+            project_name=project_name,
+            runtime_mode=self.get_workspace_runtime_mode(row),
         )
 
     async def set_workspace_starred(
@@ -260,18 +353,13 @@ class ProvisioningService:
         row.starred_at = datetime.now(UTC) if starred else None
         await self._session.commit()
         await self._session.refresh(row)
-        return WorkspaceListItem(
-            id=row.id,
-            name=row.name,
-            engine=row.engine,
-            provider=row.provider,
-            status=row.status,
-            artifact_mode=self.get_workspace_artifact_mode(row),
-            created_at=row.created_at,
-            root_dir=row.root_dir,
-            starred=row.starred_at is not None,
-            project_id=row.project_id,
-        )
+        project_name: str | None = None
+        if row.project_id:
+            from app.models.domain import Project
+
+            project = await self._session.get(Project, row.project_id)
+            project_name = project.name if project else None
+        return self._to_workspace_list_item(row, project_name=project_name)
     async def get_workspace(self, workspace_id: UUID) -> ProvisioningWorkspace:
         row = await self._session.get(ProvisioningWorkspace, workspace_id)
         if row is None:
@@ -323,6 +411,12 @@ class ProvisioningService:
                 for p in root.rglob("*")
                 if p.is_file() and not ws_files.is_denied_workspace_path(p.relative_to(root))
             )
+        project_name: str | None = None
+        if row.project_id:
+            from app.models.domain import Project
+
+            project = await self._session.get(Project, row.project_id)
+            project_name = project.name if project else None
         return IaCBundleSummary(
             workspace_id=str(row.id),
             engine=IaCEngine(row.engine),
@@ -335,6 +429,8 @@ class ProvisioningService:
             status=row.status,
             created_at=row.created_at,
             starred=row.starred_at is not None,
+            project_id=row.project_id,
+            project_name=project_name,
         )
 
     @staticmethod
@@ -458,6 +554,417 @@ class ProvisioningService:
             has_credentials=has_credentials,
             credential_label=credential_label,
         )
+
+    async def promote_workspace(
+        self,
+        source_workspace_id: UUID,
+        payload: WorkspacePromoteRequest,
+        *,
+        owner: User,
+        org_id: UUID,
+    ) -> IaCBundleSummary:
+        source = await self.get_workspace_for_owner(source_workspace_id, owner)
+        config = await self.get_wizard_config(source_workspace_id, owner)
+        target_suffix = payload.target_environment.value
+        promoted_name = payload.promoted_name or self._promoted_name(config.name, target_suffix)
+
+        credentials = CloudCredentials()
+        if source.encrypted_credentials:
+            try:
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(source.encrypted_credentials)
+                )
+            except Exception:
+                logger.warning(
+                    "workspace_promotion_credentials_unreadable",
+                    workspace_id=str(source_workspace_id),
+                )
+
+        promoted_request = ProvisioningWizardRequest(
+            name=promoted_name,
+            iac_engine=config.iac_engine,
+            cloud=config.cloud,
+            credentials=credentials,
+            run_init=config.run_init if payload.run_init is None else payload.run_init,
+            runtime_mode=config.runtime_mode,
+            running_instance=config.running_instance,
+            artifact_mode=config.artifact_mode,
+            kubernetes_packaging=config.kubernetes_packaging,
+            kubernetes_options=config.kubernetes_options,
+            cost_optimization=config.cost_optimization,
+            container_scaffold=config.container_scaffold,
+            dependencies=config.dependencies,
+            ansible=config.ansible,
+        )
+        return await self.generate_bundle(
+            promoted_request,
+            owner=owner,
+            org_id=org_id,
+            project_id=payload.project_id,
+        )
+
+    async def clone_workspace_for_cloud_promote(
+        self,
+        source_workspace_id: UUID,
+        *,
+        owner: User,
+        org_id: UUID | None,
+        target_provider: CloudProvider,
+        credentials: CloudCredentials,
+        workspace_name: str,
+        primary_service: str | None = None,
+        code_source: str | None = None,
+        region: str | None = None,
+        create_vpc: bool = False,
+        create_subnets: bool = False,
+        existing_vpc_id: str | None = None,
+        existing_security_group_id: str | None = None,
+        project_id: UUID | None = None,
+    ) -> UUID:
+        """Copy a local workspace tree and re-target wizard config for cloud serverless."""
+        from app.core.config import get_settings
+        from app.models.domain import Organization
+        from app.schemas.cloud import InstanceCodeSource
+        from app.services.cloud_promote import build_cloud_promote_wizard_request
+        from app.services.orgs import OrganizationService
+        from app.services.plans import assert_can_create_workspace
+        from app.services.projects import ProjectService
+
+        source = await self.get_workspace_for_owner(source_workspace_id, owner)
+        config = await self.get_wizard_config(source_workspace_id, owner)
+        source_root = Path(source.root_dir)
+        if not source_root.is_dir():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "workspace_source_missing",
+                    "message": "Source workspace files are missing on disk",
+                },
+            )
+
+        resolved_code: InstanceCodeSource | None = None
+        if code_source:
+            resolved_code = InstanceCodeSource(code_source)
+        request = build_cloud_promote_wizard_request(
+            config,
+            workspace_name=workspace_name,
+            provider=target_provider,
+            credentials=credentials,
+            primary_service=primary_service,
+            code_source=resolved_code,
+            region=region,
+            create_vpc=create_vpc,
+            create_subnets=create_subnets,
+            existing_vpc_id=existing_vpc_id,
+            existing_security_group_id=existing_security_group_id,
+        )
+        request = await self._with_account_credentials(request, owner)
+        request = self._with_gcp_project_from_sa(request)
+
+        new_id = uuid4()
+        settings_root = Path(get_settings().iac_workspace_root).expanduser()
+        settings_root.mkdir(parents=True, exist_ok=True)
+        dest = settings_root / f"{workspace_name}-{new_id.hex[:8]}"
+        if dest.exists():
+            dest = settings_root / f"{workspace_name}-{new_id.hex[:8]}-cloud"
+        shutil.copytree(source_root, dest, symlinks=False, ignore_dangling_symlinks=True)
+        self._iac.regenerate(dest, request)
+
+        orgs = OrganizationService(self._session)
+        resolved_org_id = org_id
+        org: Organization | None = None
+        if resolved_org_id is None:
+            org = await orgs.ensure_personal_org(owner)
+            resolved_org_id = org.id
+        if org is None:
+            org = await self._session.get(Organization, resolved_org_id)
+            if org is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "org_not_found", "message": "Organization not found"},
+                )
+        await assert_can_create_workspace(self._session, org)
+        org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
+        project = await ProjectService(self._session).resolve_project_for_workspace(
+            org=org_ctx,
+            project_id=project_id or source.project_id,
+        )
+
+        final_name = workspace_name
+        for i in range(0, 10):
+            candidate = workspace_name if i == 0 else f"{workspace_name}-{i}"[:128]
+            clash = await self._session.execute(
+                select(ProvisioningWorkspace).where(
+                    ProvisioningWorkspace.org_id == resolved_org_id,
+                    ProvisioningWorkspace.name == candidate,
+                )
+            )
+            if clash.scalar_one_or_none() is None:
+                final_name = candidate
+                break
+
+        encrypted = encrypt_secret(request.credentials.model_dump_json())
+        row = ProvisioningWorkspace(
+            id=new_id,
+            owner_id=owner.id,
+            org_id=resolved_org_id,
+            project_id=project.id,
+            name=final_name,
+            engine=request.iac_engine.value,
+            provider=target_provider.value,
+            root_dir=str(dest),
+            status="ready",
+            encrypted_credentials=encrypted,
+            wizard_config_json=self._wizard_config_json(request),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        logger.info(
+            "cloud_promote_workspace_cloned",
+            source_workspace_id=str(source_workspace_id),
+            workspace_id=str(new_id),
+            provider=target_provider.value,
+            root_dir=str(dest),
+        )
+        return new_id
+
+    async def sync_workspace_after_cloud_deploy(
+        self,
+        workspace_id: UUID,
+        *,
+        running_instance: RunningInstanceConfig,
+    ) -> None:
+        """Refresh ansible + cloud IaC on disk after a successful cloud attach deploy."""
+        row = await self.get_workspace(workspace_id)
+        snapshot = self._load_wizard_snapshot(row)
+        if snapshot is None:
+            logger.warning(
+                "cloud_deploy_workspace_sync_skipped",
+                workspace_id=str(workspace_id),
+                reason="no_wizard_snapshot",
+            )
+            return
+        try:
+            config = WorkspaceWizardConfig.model_validate(
+                {**snapshot, "has_credentials": False}
+            )
+        except Exception:
+            logger.warning(
+                "cloud_deploy_workspace_sync_skipped",
+                workspace_id=str(workspace_id),
+                reason="invalid_wizard_snapshot",
+            )
+            return
+
+        credentials = CloudCredentials()
+        if row.encrypted_credentials:
+            try:
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(row.encrypted_credentials)
+                )
+            except Exception:
+                logger.warning(
+                    "cloud_deploy_workspace_sync_credentials_unreadable",
+                    workspace_id=str(workspace_id),
+                )
+
+        config = config.model_copy(update={"running_instance": running_instance})
+        request = self._request_from_wizard_config(config, credentials)
+        request = self._with_gcp_project_from_sa(request)
+        root = self._workspace_root(row)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "cloud_deploy_workspace_sync_path_failed",
+                workspace_id=str(workspace_id),
+                error=str(exc),
+            )
+            return
+
+        files = self._iac.regenerate(root, request)
+        row.wizard_config_json = self._wizard_config_json(request)
+        row.status = "ready"
+        logger.info(
+            "cloud_deploy_workspace_synced",
+            workspace_id=str(workspace_id),
+            host=running_instance.host,
+            file_count=len(files),
+        )
+
+    @staticmethod
+    def _promoted_name(base_name: str, suffix: str) -> str:
+        normalized = base_name.strip().lower()
+        if normalized.endswith(f"-{suffix}"):
+            return normalized
+        return f"{normalized}-{suffix}"
+
+    def estimate_workspace_cost(
+        self,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        cloud = request.cloud
+        if isinstance(cloud, LocalCloudConfig):
+            return ProvisioningCostEstimate(
+                provider=CloudProvider.LOCAL,
+                hourly_usd=0.0,
+                monthly_usd=0.0,
+                assumptions=["Local provider uses operator-managed compute, no cloud bill estimate."],
+            )
+
+        if isinstance(cloud, GcpCloudConfig):
+            return self._estimate_gcp(cloud.resources, request)
+        if isinstance(cloud, AwsCloudConfig):
+            return self._estimate_aws(cloud.resources, request)
+        if isinstance(cloud, AzureCloudConfig):
+            return self._estimate_azure(cloud.resources, request)
+        if isinstance(cloud, CloudflareCloudConfig):
+            return self._estimate_cloudflare(cloud.resources, request)
+        return ProvisioningCostEstimate(
+            provider=cloud.provider,
+            hourly_usd=0.0,
+            monthly_usd=0.0,
+        )
+
+    def _monthly_hours(self) -> Decimal:
+        from app.core.config import get_settings
+
+        value = getattr(get_settings(), "cost_hours_per_month", None)
+        if isinstance(value, (int, float, Decimal)) and Decimal(value) > 0:
+            return Decimal(str(value))
+        return _DEFAULT_MONTH_HOURS
+
+    def _finalize_cost(
+        self,
+        provider: CloudProvider,
+        breakdown: list[tuple[str, str, Decimal, str | None]],
+        assumptions: list[str],
+    ) -> ProvisioningCostEstimate:
+        month_hours = self._monthly_hours()
+        line_items: list[CostEstimateLineItem] = []
+        hourly = Decimal("0")
+        for item_id, label, line_hourly, note in breakdown:
+            clamped = max(line_hourly, Decimal("0"))
+            line_items.append(
+                CostEstimateLineItem(
+                    id=item_id,
+                    label=label,
+                    hourly_usd=float(clamped.quantize(Decimal("0.0001"))),
+                    monthly_usd=float((clamped * month_hours).quantize(Decimal("0.01"))),
+                    note=note,
+                )
+            )
+            hourly += clamped
+        monthly = hourly * month_hours
+        return ProvisioningCostEstimate(
+            provider=provider,
+            hourly_usd=float(hourly.quantize(Decimal("0.0001"))),
+            monthly_usd=float(monthly.quantize(Decimal("0.01"))),
+            breakdown=line_items,
+            assumptions=assumptions,
+        )
+
+    def _compute_discount_factor(self, request: ProvisioningWizardRequest) -> Decimal:
+        cost = request.cost_optimization
+        if not cost.spot_scheduling.enabled:
+            return Decimal("1")
+        allocation = Decimal(str(cost.spot_scheduling.allocation_percent)) / Decimal("100")
+        # Approximate blended discount: up to 60% savings on spot share.
+        discount = allocation * Decimal("0.6")
+        return max(Decimal("0.2"), Decimal("1") - discount)
+
+    def _estimate_gcp(
+        self,
+        resources: GcpResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        discount = self._compute_discount_factor(request)
+        compute_rate = _GCP_MACHINE_RATES.get(resources.machine_type, _DEFAULT_GCP_COMPUTE_HOURLY)
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Rates are directional estimates, check provider calculator before production."]
+
+        if resources.gke or resources.cloud_run or resources.cloud_functions:
+            breakdown.append(
+                ("compute", f"Compute ({resources.machine_type})", compute_rate * discount, None)
+            )
+        if resources.cloud_sql:
+            breakdown.append(("cloud_sql", "Cloud SQL", Decimal("0.11"), None))
+        if resources.memorystore:
+            mem_rate = Decimal("0.05") if resources.memorystore_engine.value == "redis" else Decimal("0.04")
+            breakdown.append(("memorystore", "Memorystore", mem_rate, None))
+        if resources.artifact_registry:
+            breakdown.append(("artifact_registry", "Artifact Registry", Decimal("0.01"), None))
+        if resources.bigquery:
+            breakdown.append(("bigquery", "BigQuery baseline", Decimal("0.02"), "Storage and query volume varies"))
+        if resources.pubsub:
+            breakdown.append(("pubsub", "Pub/Sub baseline", Decimal("0.01"), "Traffic-dependent"))
+        return self._finalize_cost(CloudProvider.GCP, breakdown, assumptions)
+
+    def _estimate_aws(
+        self,
+        resources: AwsResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        discount = self._compute_discount_factor(request)
+        compute_rate = _AWS_INSTANCE_RATES.get(resources.instance_type, _DEFAULT_AWS_COMPUTE_HOURLY)
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Rates are directional estimates, check provider calculator before production."]
+
+        if resources.ec2 or resources.eks or resources.app_runner or resources.lambda_fn:
+            breakdown.append(
+                ("compute", f"Compute ({resources.instance_type})", compute_rate * discount, None)
+            )
+        if resources.rds:
+            breakdown.append(("rds", "RDS", Decimal("0.12"), None))
+        if resources.elasticache:
+            cache_rate = Decimal("0.06") if resources.elasticache_engine.value == "redis" else Decimal("0.05")
+            breakdown.append(("elasticache", "ElastiCache", cache_rate, None))
+        if resources.alb:
+            breakdown.append(("network", "NAT/ALB baseline", Decimal("0.05"), "Data transfer excluded"))
+        if resources.ecr:
+            breakdown.append(("ecr", "ECR baseline", Decimal("0.01"), None))
+        return self._finalize_cost(CloudProvider.AWS, breakdown, assumptions)
+
+    def _estimate_azure(
+        self,
+        resources: AzureResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        discount = self._compute_discount_factor(request)
+        compute_rate = _AZURE_VM_RATES.get(resources.vm_size, _DEFAULT_AZURE_COMPUTE_HOURLY)
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Rates are directional estimates, check provider calculator before production."]
+
+        if resources.aks or resources.container_apps or resources.app_service:
+            breakdown.append(("compute", f"Compute ({resources.vm_size})", compute_rate * discount, None))
+        if resources.cosmos_db:
+            breakdown.append(("cosmos_db", "Cosmos DB", Decimal("0.12"), "Provisioned RU profile"))
+        if resources.redis_cache:
+            breakdown.append(("redis", "Azure Cache for Redis", Decimal("0.06"), None))
+        if resources.log_analytics:
+            breakdown.append(("logs", "Log Analytics baseline", Decimal("0.02"), "Ingestion-dependent"))
+        return self._finalize_cost(CloudProvider.AZURE, breakdown, assumptions)
+
+    def _estimate_cloudflare(
+        self,
+        resources: CloudflareResources,
+        request: ProvisioningWizardRequest,
+    ) -> ProvisioningCostEstimate:
+        _ = request
+        breakdown: list[tuple[str, str, Decimal, str | None]] = []
+        assumptions = ["Cloudflare bills are often request-volume based, estimates are baseline only."]
+        for key, enabled, label in (
+            ("workers", resources.workers, "Workers"),
+            ("r2", resources.r2, "R2"),
+            ("pages", resources.pages, "Pages"),
+            ("d1", resources.d1, "D1"),
+            ("queues", resources.queues, "Queues"),
+            ("kv", resources.kv, "KV"),
+            ("tunnels", resources.tunnels, "Tunnel"),
+        ):
+            if enabled:
+                breakdown.append((key, label, _DEFAULT_CLOUDFLARE_SERVICE_HOURLY, "Usage-dependent"))
+        return self._finalize_cost(CloudProvider.CLOUDFLARE, breakdown, assumptions)
 
     async def enable_required_cloud_apis(
         self,
@@ -598,7 +1105,11 @@ class ProvisioningService:
             ) from exc
 
         merged = self._merge_credentials(row.encrypted_credentials, request.credentials)
-        merged = await self._fill_from_account_vault(merged, owner.id)
+        merged = await self._fill_from_account_vault(
+            merged,
+            owner.id,
+            provider=request.cloud.provider.value,
+        )
         effective = request.model_copy(update={"credentials": merged})
         effective = self._with_gcp_project_from_sa(effective)
         files = self._iac.regenerate(workspace_path, effective)
@@ -673,7 +1184,11 @@ class ProvisioningService:
         request: ProvisioningWizardRequest,
         owner: User,
     ) -> ProvisioningWizardRequest:
-        filled = await self._fill_from_account_vault(request.credentials, owner.id)
+        filled = await self._fill_from_account_vault(
+            request.credentials,
+            owner.id,
+            provider=request.cloud.provider.value,
+        )
         if filled == request.credentials:
             return request
         return request.model_copy(update={"credentials": filled})
@@ -682,8 +1197,15 @@ class ProvisioningService:
         self,
         credentials: CloudCredentials,
         user_id: UUID,
+        *,
+        provider: str | None = None,
     ) -> CloudCredentials:
-        """Fill blank credential fields from the user's account vault."""
+        """Merge account vault into workspace credentials.
+
+        Service account / WIF keys are preferred. Connect OAuth and other vault
+        fields only fill blanks. When ``provider`` is set, only that cloud's
+        vault fields are merged so a GCP Connect token cannot poison AWS deploys.
+        """
         from app.core.secrets import has_aws_auth, has_gcp_auth
         from app.services.user_credentials import UserCloudCredentialsService
 
@@ -691,6 +1213,23 @@ class ProvisioningService:
         updates: dict[str, str | None] = {}
         data = credentials.model_dump()
         vault_data = vault.model_dump()
+        provider_norm = (provider or "").strip().lower()
+
+        def _key_allowed(key: str) -> bool:
+            if not provider_norm or provider_norm == "local":
+                return True
+            if provider_norm == "gcp":
+                return key.startswith("gcp_")
+            if provider_norm == "aws":
+                return key.startswith("aws_")
+            if provider_norm == "azure":
+                return key.startswith("azure_")
+            if provider_norm == "cloudflare":
+                return key.startswith("cloudflare_")
+            return True
+
+        if vault.gcp_project_id and _key_allowed("gcp_project_id"):
+            updates["gcp_project_id"] = vault.gcp_project_id
 
         gcp_ok = has_gcp_auth(credentials)
         aws_ok = has_aws_auth(credentials)
@@ -699,11 +1238,15 @@ class ProvisioningService:
             and credentials.azure_client_secret
             and credentials.azure_tenant_id
             and credentials.azure_subscription_id
-        )
+        ) or bool(credentials.azure_oauth_token_json)
         cf_ok = bool(credentials.cloudflare_api_token)
 
         for key, value in vault_data.items():
             if not value or not str(value).strip():
+                continue
+            if key in updates:
+                continue
+            if not _key_allowed(key):
                 continue
             if key.startswith("gcp_") and gcp_ok:
                 continue
@@ -720,6 +1263,55 @@ class ProvisioningService:
     async def destroy_workspace(self, workspace_id: UUID, owner: User) -> None:
         row = await self.get_workspace_for_owner(workspace_id, owner)
         was_local = row.provider == CloudProvider.LOCAL.value
+
+        # Destroy any cloud infrastructure this workspace APPLIED (terraform/pulumi)
+        # before any local teardown so, on failure, the workspace + IaC state stay
+        # intact for retry and real cloud resources are never orphaned. Skipped for
+        # the local provider and for workspaces that were never applied (no state).
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if not was_local and settings.iac_destroy_on_workspace_delete:
+            from app.services.iac_destroy import run_workspace_iac_destroy
+
+            credentials: CloudCredentials | None = None
+            if row.encrypted_credentials:
+                try:
+                    credentials = CloudCredentials.model_validate_json(
+                        decrypt_secret(row.encrypted_credentials)
+                    )
+                except Exception:  # noqa: BLE001 - proceed without creds; destroy will skip/fail clearly
+                    logger.warning(
+                        "workspace_credentials_decrypt_failed",
+                        workspace_id=str(workspace_id),
+                    )
+            destroy_result = await asyncio.to_thread(
+                run_workspace_iac_destroy,
+                root_dir=row.root_dir,
+                engine=row.engine,
+                credentials=credentials,
+                org_id=str(row.org_id) if row.org_id else "default-org",
+                workspace_id=str(row.id),
+                settings=settings,
+            )
+            logger.info(
+                "workspace_iac_destroy",
+                workspace_id=str(workspace_id),
+                status=destroy_result.status,
+                detail=destroy_result.detail,
+            )
+            if destroy_result.status == "failed":
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={
+                        "code": "cloud_teardown_failed",
+                        "message": (
+                            f"Cloud infrastructure teardown failed ({destroy_result.detail}). "
+                            "The workspace was kept so you can retry destroy; its cloud "
+                            "resources were not deleted."
+                        ),
+                    },
+                )
 
         result = await self._session.execute(
             select(TerminalSessionRecord).where(
@@ -785,6 +1377,61 @@ class ProvisioningService:
                     workspace_id=str(workspace_id),
                 )
 
+        if not was_local and destroy_images and row.encrypted_credentials:
+            try:
+                from app.services.cloud_instance_compute import (
+                    is_cloud_registry_image,
+                    teardown_cloud_registry_images,
+                )
+
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(row.encrypted_credentials)
+                )
+                region = "us-central1"
+                snapshot = self._load_wizard_snapshot(row)
+                if snapshot:
+                    try:
+                        wiz = WorkspaceWizardConfig.model_validate(
+                            {**snapshot, "has_credentials": False}
+                        )
+                        if wiz.running_instance.region:
+                            region = wiz.running_instance.region
+                    except Exception:
+                        pass
+                cloud_images = [
+                    img for img in destroy_images if is_cloud_registry_image(img)
+                ]
+                if env_rows:
+                    for env_row in env_rows:
+                        env_images = list(cloud_images)
+                        if env_row.workload_image and is_cloud_registry_image(
+                            env_row.workload_image
+                        ):
+                            if env_row.workload_image not in env_images:
+                                env_images.append(env_row.workload_image)
+                        await asyncio.to_thread(
+                            teardown_cloud_registry_images,
+                            env_images,
+                            cloud_provider=row.provider,
+                            credentials=credentials,
+                            region=region,
+                            environment_id=str(env_row.id),
+                        )
+                elif cloud_images:
+                    await asyncio.to_thread(
+                        teardown_cloud_registry_images,
+                        cloud_images,
+                        cloud_provider=row.provider,
+                        credentials=credentials,
+                        region=region,
+                        environment_id=None,
+                    )
+            except Exception:
+                logger.exception(
+                    "workspace_cloud_registry_cleanup_failed",
+                    workspace_id=str(workspace_id),
+                )
+
         self._iac.destroy_workspace(row.root_dir)
         await self._session.delete(row)
         await self._session.commit()
@@ -816,7 +1463,10 @@ class ProvisioningService:
         if not active:
             return
         env_repo = EnvironmentRepository(self._session)
+        from app.services.teardown_context import capture_environment_teardown_context
+
         for env in active:
+            await capture_environment_teardown_context(self._session, env)
             await env_repo.update_status(env, EnvironmentStatus.TEARDOWN_PENDING)
         await self._session.commit()
         for env in active:
@@ -864,7 +1514,11 @@ class ProvisioningService:
             credentials = CloudCredentials.model_validate_json(decrypt_secret(raw))
         else:
             credentials = CloudCredentials()
-        credentials = await self._fill_from_account_vault(credentials, owner.id)
+        credentials = await self._fill_from_account_vault(
+            credentials,
+            owner.id,
+            provider=workspace.provider,
+        )
 
         workspace_path = self._iac.get_workspace(workspace.root_dir)
 

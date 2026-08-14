@@ -163,6 +163,10 @@ watch(
           </option>
         </select>
       </label>
+
+      <KubernetesImageSourcePicker
+        v-model:source="options.image_source"
+      />
     </div>
   </div>
 </template>

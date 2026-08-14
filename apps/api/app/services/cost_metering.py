@@ -144,6 +144,16 @@ def accrue_environment_cost(
     return rate
 
 
+def convert_display_cost(amount_usd: Decimal, *, settings: Settings) -> Decimal:
+    """Convert stored USD amounts for UI when ``cost_display_currency`` is EUR."""
+    base = amount_usd or Decimal("0.0000")
+    currency = (settings.cost_display_currency or "USD").strip().upper()
+    if currency == "EUR":
+        rate = settings.cost_usd_to_eur_rate or Decimal("0.92")
+        return (base * rate).quantize(Decimal("0.0001"))
+    return base.quantize(Decimal("0.0001"))
+
+
 def display_cost_accrued(
     *,
     cost_accrued: Decimal,

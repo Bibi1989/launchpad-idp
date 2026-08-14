@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -38,6 +39,7 @@ from app.schemas.cloud import (
     IaCEngine,
     KubernetesPackaging,
     ProvisioningWizardRequest,
+    WorkspaceWizardConfig,
 )
 from app.schemas.environment import (
     DeploymentLogRead,
@@ -122,6 +124,11 @@ class EnvironmentService:
         self._settings = settings or get_settings()
         self._environments = EnvironmentRepository(session)
         self._logs = DeploymentLogRepository(session)
+
+    def _plan_concurrency_cap(self, plan: OrgPlan) -> int | None:
+        if plan == OrgPlan.FREE:
+            return self._settings.max_concurrent_environments
+        return self._settings.max_concurrent_environments_pro
 
     async def _pause_expired_rows(self, rows: list) -> None:
         """Mark past-TTL environments EXPIRED (eager, no Celery required)."""
@@ -274,16 +281,19 @@ class EnvironmentService:
                 cloud_accrued += read.cost_accrued
 
         cap = self._settings.preview_soft_cost_cap
+        from app.services.cost_metering import convert_display_cost
+
+        cap_display = convert_display_cost(cap, settings=self._settings)
         total = (cloud_accrued + local_accrued).quantize(Decimal("0.0001"))
         return OrgCostSummary(
             org_id=ctx.org_id,
-            soft_cost_cap=cap,
+            soft_cost_cap=cap_display,
             active_count=active_count,
             cloud_environment_count=cloud_environment_count,
             cloud_accrued=cloud_accrued.quantize(Decimal("0.0001")),
             local_accrued=local_accrued.quantize(Decimal("0.0001")),
             total_accrued=total,
-            soft_cost_cap_exceeded=cloud_accrued >= cap and cloud_environment_count > 0,
+            soft_cost_cap_exceeded=cloud_accrued >= cap_display and cloud_environment_count > 0,
             environments=items,
         )
 
@@ -316,7 +326,7 @@ class EnvironmentService:
         template = None
         workload_image = (self._settings.default_workload_image or "").strip() or None
         if payload.workspace_id is not None:
-            git_repo_url, git_branch = self._workspace_git_source(payload.workspace_id)
+            git_repo_url, git_branch = await self._workspace_git_source(payload.workspace_id)
             template_id = None
             default_ttl = self._settings.default_ttl_hours
             cost_from_template = None
@@ -359,7 +369,11 @@ class EnvironmentService:
         ):
             workload_image = payload.workload_image
 
-        existing = await self._environments.get_by_name(payload.name)
+        if org_id is None:
+            org = await OrganizationService(self._session).ensure_personal_org(owner)
+            org_id = org.id
+
+        existing = await self._environments.get_by_name(payload.name, org_id=org_id)
         if existing is not None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -385,6 +399,14 @@ class EnvironmentService:
             workspace = await provisioning.get_workspace_for_owner(payload.workspace_id, owner)
             workspace_id = payload.workspace_id
             if not workspace.encrypted_credentials:
+                payload = payload.model_copy(
+                    update={
+                        "credentials": await provisioning.fill_cloud_credentials_from_account_vault(
+                            payload.credentials,
+                            owner,
+                        )
+                    }
+                )
                 self._require_inline_cloud_credentials(payload)
             if cost_from_template is not None:
                 cost_override = cost_from_template
@@ -404,8 +426,9 @@ class EnvironmentService:
 
         ttl_hours = payload.ttl_hours
         ttl_minutes = payload.ttl_minutes
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         if ttl_hours is None and ttl_minutes is None:
-            ttl_hours = min(default_ttl, 168)
+            ttl_hours = min(int(default_ttl), max_total_hours)
         create_payload = EnvironmentCreate(
             name=payload.name,
             git_branch=git_branch,
@@ -422,6 +445,11 @@ class EnvironmentService:
             deploy_mode=payload.deploy_mode,
             enable_postgres=payload.enable_postgres,
             enable_redis=payload.enable_redis,
+            kubernetes_image_source=(
+                payload.kubernetes_image_source.value
+                if payload.kubernetes_image_source is not None
+                else None
+            ),
         )
         result = await self.enqueue_provision(
             create_payload,
@@ -447,8 +475,6 @@ class EnvironmentService:
         org_id: UUID | None = None,
     ) -> EnvironmentRead:
         now = datetime.now(UTC)
-        existing = await self._environments.get_by_name(payload.name)
-
         if org_id is None:
             org = await OrganizationService(self._session).ensure_personal_org(owner)
             org_id = org.id
@@ -460,7 +486,9 @@ class EnvironmentService:
                     detail={"code": "org_not_found", "message": "Organization not found"},
                 )
 
-        cap: int | None = 6 if org.plan == OrgPlan.FREE else None
+        existing = await self._environments.get_by_name(payload.name, org_id=org_id)
+
+        cap = self._plan_concurrency_cap(org.plan)
 
         reuse_row = None
         if existing is not None:
@@ -504,8 +532,8 @@ class EnvironmentService:
 
         ttl_hours = payload.ttl_hours
         ttl_minutes = payload.ttl_minutes
-        # Governance policy: TTL hard max is 2 hours, regardless of .env overrides.
-        max_total_hours = min(int(self._settings.ttl_max_total_hours_from_create), 2)
+        # Governance: cannot exceed ttl_max_total_hours_from_create from create time.
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         if ttl_hours is not None:
             ttl_hours = min(ttl_hours, max_total_hours)
         if ttl_minutes is not None:
@@ -588,6 +616,7 @@ class EnvironmentService:
             environment.github_pr_url = payload.github_pr_url
             environment.deploy_mode = deploy_mode.value
             environment.manifest_packaging = manifest_packaging
+            environment.kubernetes_image_source = payload.kubernetes_image_source
             environment.enable_postgres = payload.enable_postgres
             environment.enable_redis = payload.enable_redis
             environment.ttl_expires_at = ttl_expires_at
@@ -622,6 +651,7 @@ class EnvironmentService:
                 github_pr_url=payload.github_pr_url,
                 deploy_mode=deploy_mode.value,
                 manifest_packaging=manifest_packaging,
+                kubernetes_image_source=payload.kubernetes_image_source,
                 enable_postgres=payload.enable_postgres,
                 enable_redis=payload.enable_redis,
             )
@@ -707,7 +737,8 @@ class EnvironmentService:
 
         base = max(expires, now)
         candidate = base + extend_delta
-        max_expiry = created + timedelta(hours=min(int(self._settings.ttl_max_total_hours_from_create), 2))
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
+        max_expiry = created + timedelta(hours=max_total_hours)
         if candidate > max_expiry:
             candidate = max_expiry
         if candidate <= expires:
@@ -716,22 +747,37 @@ class EnvironmentService:
                 detail={
                     "code": "ttl_max_reached",
                     "message": (
-                        "Cannot extend beyond 2h from create time"
+                        f"Cannot extend beyond {max_total_hours}h from create time"
                     ),
                 },
             )
 
         # Soft cost: refuse extend on cloud when accrued already over cap.
         if (environment.provider or "local") != "local":
-            read = self._to_read(environment)
-            if read.cost_accrued >= self._settings.preview_soft_cost_cap:
+            from app.services.cost_metering import convert_display_cost, display_cost_accrued
+
+            accrued_usd = display_cost_accrued(
+                cost_accrued=environment.cost_accrued or Decimal("0.0000"),
+                cost_estimate_hourly=environment.cost_estimate_hourly,
+                cost_sampled_at=environment.cost_sampled_at,
+                created_at=environment.created_at,
+                status=environment.status,
+            )
+            cap_display = convert_display_cost(
+                self._settings.preview_soft_cost_cap,
+                settings=self._settings,
+            )
+            accrued_display = convert_display_cost(accrued_usd, settings=self._settings)
+            if accrued_display >= cap_display:
+                currency = (self._settings.cost_display_currency or "USD").strip().upper()
+                symbol = "€" if currency == "EUR" else "$"
                 raise HTTPException(
                     status_code=status.HTTP_402_PAYMENT_REQUIRED,
                     detail={
                         "code": "soft_cost_cap_exceeded",
                         "message": (
-                            f"Cost to date (${read.cost_accrued}) meets soft cap "
-                            f"(${self._settings.preview_soft_cost_cap}). Destroy or wait."
+                            f"Cost to date ({symbol}{accrued_display}) meets soft cap "
+                            f"({symbol}{cap_display}). Destroy or wait."
                         ),
                     },
                 )
@@ -755,21 +801,160 @@ class EnvironmentService:
         *,
         owner: User,
         correlation_id: str,
+        org_id: UUID | None = None,
     ) -> EnvironmentRead:
         """Launch a new cloud preview from an existing environment's source."""
+        from app.services.cloud_promote import needs_cloud_retarget
+
         source = await self._require_owned(environment_id, owner)
+        provisioning = ProvisioningService(self._session)
+        filled_credentials = await provisioning.fill_cloud_credentials_from_account_vault(
+            payload.credentials,
+            owner,
+        )
+
+        # If credentials are still incomplete after vault-fill, fail fast with a
+        # structured 4xx instead of allowing later unhandled exceptions.
+        from app.core.secrets import validate_cloud_credentials
+
+        try:
+            validate_cloud_credentials(payload.provider.value, filled_credentials)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "credentials_required",
+                    "message": str(exc),
+                },
+            )
+
         suffix = payload.provider.value[:8]
-        name = payload.name or f"{source.name}-{suffix}"[:64]
-        if source.template_id:
+        if payload.name is not None:
+            name = payload.name
+        else:
+            # Promotion retries should be frictionless: if the user didn't
+            # provide an explicit name, pick the next available candidate to
+            # avoid environment_exists conflicts.
+            base = f"{source.name}-{suffix}"[:64]
+            name = base
+            for i in range(1, 10):
+                existing = await self._environments.get_by_name(name, org_id=org_id)
+                if existing is None:
+                    break
+                # Keep within schema max length (64) and allowed characters.
+                # Example: my-env-gcp -> my-env-gcp-1
+                suffix_part = f"-{i}"
+                name = f"{base[:64 - len(suffix_part)]}{suffix_part}"
+                if len(name) < 3:
+                    name = base[:3]
+
+        target_provider = CloudProvider(payload.provider.value)
+        retarget = needs_cloud_retarget(
+            source_provider=source.provider,
+            deploy_mode=source.deploy_mode,
+        )
+        cloud_deploy_mode = DeployMode.ATTACH if retarget else source.deploy_mode
+        workspace_id = source.workspace_id
+
+        if retarget and source.workspace_id is not None:
+            workspace_id = await provisioning.clone_workspace_for_cloud_promote(
+                source.workspace_id,
+                owner=owner,
+                org_id=org_id,
+                target_provider=target_provider,
+                credentials=filled_credentials,
+                workspace_name=name,
+                primary_service=payload.primary_service,
+                code_source=payload.code_source,
+                region=payload.region,
+                create_vpc=payload.create_vpc,
+                create_subnets=payload.create_subnets,
+                existing_vpc_id=payload.existing_vpc_id,
+                existing_security_group_id=payload.existing_security_group_id,
+                project_id=source.project_id,
+            )
+        elif retarget and source.workspace_id is None:
+            from app.schemas.cloud import (
+                InstanceCodeSource,
+                ProvisioningWizardRequest,
+                RunningInstanceKind,
+                WorkspaceRuntimeMode,
+            )
+            from app.services.cloud_promote import (
+                build_cloud_promote_wizard_request,
+                build_cloud_running_instance,
+            )
+
+            resolved_code = (
+                InstanceCodeSource(payload.code_source)
+                if payload.code_source
+                else InstanceCodeSource.SSH
+            )
+            stub = WorkspaceWizardConfig.model_validate(
+                {
+                    "name": name,
+                    "iac_engine": IaCEngine.TERRAFORM.value,
+                    "cloud": self._cloud_config_for_provider(target_provider).model_dump(
+                        mode="json",
+                    ),
+                    "credentials": {},
+                    "has_credentials": True,
+                    "runtime_mode": WorkspaceRuntimeMode.RUNNING_INSTANCE.value,
+                    "running_instance": build_cloud_running_instance(
+                        provider=target_provider,
+                        environment_name=name,
+                        primary_service=payload.primary_service,
+                        source=None,
+                        target_kind=RunningInstanceKind.VM,
+                        code_source=resolved_code,
+                        region=payload.region,
+                    ).model_dump(mode="json"),
+                }
+            )
+            bundle_req = build_cloud_promote_wizard_request(
+                stub,
+                workspace_name=name,
+                provider=target_provider,
+                credentials=filled_credentials,
+                primary_service=payload.primary_service,
+                code_source=resolved_code,
+                region=payload.region,
+                create_vpc=payload.create_vpc,
+                create_subnets=payload.create_subnets,
+                existing_vpc_id=payload.existing_vpc_id,
+                existing_security_group_id=payload.existing_security_group_id,
+            )
+            bundle = await provisioning.generate_bundle(
+                bundle_req,
+                owner=owner,
+                org_id=org_id,
+                project_id=source.project_id,
+            )
+            workspace_id = UUID(bundle.workspace_id)
+
+        if workspace_id is not None:
             launch = PreviewLaunchRequest(
                 name=name,
-                template_id=source.template_id,
                 provider=payload.provider,
-                credentials=payload.credentials,
+                credentials=filled_credentials,
                 ttl_hours=payload.ttl_hours,
                 ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
+                workspace_id=workspace_id,
+                deploy_mode=cloud_deploy_mode,
+            )
+        elif source.template_id:
+            launch = PreviewLaunchRequest(
+                name=name,
+                template_id=source.template_id,
+                provider=payload.provider,
+                credentials=filled_credentials,
+                ttl_hours=payload.ttl_hours,
+                ttl_minutes=payload.ttl_minutes,
+                github_pr_number=source.github_pr_number,
+                github_pr_url=source.github_pr_url,
+                deploy_mode=cloud_deploy_mode,
             )
         else:
             launch = PreviewLaunchRequest(
@@ -777,16 +962,18 @@ class EnvironmentService:
                 git_repo_url=source.git_repo_url,
                 git_branch=source.git_branch,
                 provider=payload.provider,
-                credentials=payload.credentials,
+                credentials=filled_credentials,
                 ttl_hours=payload.ttl_hours,
                 ttl_minutes=payload.ttl_minutes,
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
+                deploy_mode=cloud_deploy_mode,
             )
         result = await self.launch_preview(
             launch,
             owner=owner,
             correlation_id=correlation_id,
+            org_id=org_id,
         )
         await self._logs.create(
             environment_id=source.id,
@@ -1001,6 +1188,9 @@ class EnvironmentService:
             )
 
         prior_status = environment.status
+        from app.services.teardown_context import capture_environment_teardown_context
+
+        await capture_environment_teardown_context(self._session, environment)
         await self._environments.update_status(environment, EnvironmentStatus.TEARDOWN_PENDING)
         await self._logs.create(
             environment_id=environment.id,
@@ -1022,10 +1212,23 @@ class EnvironmentService:
         )
         await self._session.commit()
 
-        enqueue_teardown_environment(
-            environment_id=str(environment.id),
-            correlation_id=correlation_id,
-        )
+        try:
+            # Never let a slow Redis/Celery publish hang the HTTP delete.
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    enqueue_teardown_environment,
+                    environment_id=str(environment.id),
+                    correlation_id=correlation_id,
+                ),
+                timeout=5.0,
+            )
+        except Exception:
+            logger.exception(
+                "teardown_enqueue_failed",
+                environment_id=str(environment.id),
+                correlation_id=correlation_id,
+            )
+            # Status is already TEARDOWN_PENDING; beat/requeue will pick it up.
         return self._to_read(environment)
 
     async def list_logs(
@@ -1171,10 +1374,11 @@ class EnvironmentService:
         cap: int | None = None
         if environment.org_id is not None:
             org_row = await self._session.get(Organization, environment.org_id)
-            if org_row is not None and org_row.plan == OrgPlan.FREE:
-                cap = 6
+            if org_row is not None:
+                cap = self._plan_concurrency_cap(org_row.plan)
         if cap is None and environment.org_id is None:
-            cap = 6 if (await OrganizationService(self._session).ensure_personal_org(owner)).plan == OrgPlan.FREE else None
+            org = await OrganizationService(self._session).ensure_personal_org(owner)
+            cap = self._plan_concurrency_cap(org.plan)
         await self._auto_pause_if_needed(owner, project_id=environment.project_id, cap=cap, exclude_id=environment.id)
 
         deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
@@ -1286,11 +1490,11 @@ class EnvironmentService:
         cap: int | None = None
         if environment.org_id is not None:
             org_row = await self._session.get(Organization, environment.org_id)
-            if org_row is not None and org_row.plan == OrgPlan.FREE:
-                cap = 6
+            if org_row is not None:
+                cap = self._plan_concurrency_cap(org_row.plan)
         if cap is None and environment.org_id is None:
             org = await OrganizationService(self._session).ensure_personal_org(owner)
-            cap = 6 if org.plan == OrgPlan.FREE else None
+            cap = self._plan_concurrency_cap(org.plan)
 
         await self._auto_pause_if_needed(
             owner,
@@ -1305,8 +1509,9 @@ class EnvironmentService:
         environment.preview_endpoints_json = None
         environment.node_port = None
         environment.latest_commit_sha = None
+        max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         environment.ttl_expires_at = now + _ttl_timedelta(
-            ttl_hours=min(int(self._settings.ttl_max_total_hours_from_create), 2),
+            ttl_hours=max_total_hours,
             ttl_minutes=None,
         )
         environment.cost_accrued = Decimal("0.0000")
@@ -1317,7 +1522,7 @@ class EnvironmentService:
             environment_id=environment.id,
             message=(
                 "Relaunch queued after TTL expiry "
-                "(ttl cap 2h, "
+                f"(ttl cap {max_total_hours}h, "
                 f"correlation_id={correlation_id})"
             ),
         )
@@ -1367,7 +1572,7 @@ class EnvironmentService:
                 environment_id=oldest.id,
                 log_level=LogLevel.WARN,
                 stage=ExecutionStage.APPLY,
-                message=f"Environment auto-paused to enforce free-tier max active limit of {cap} per project.",
+                message=f"Environment auto-paused to enforce plan max active limit of {cap} per project.",
             )
             logger.info("environment_auto_paused", environment_id=str(oldest.id), cap=cap)
 
@@ -1382,6 +1587,8 @@ class EnvironmentService:
         if payload.cost_estimate_hourly is not None and payload.cost_estimate_hourly == 0:
             return
 
+        from app.services.cost_metering import display_cost_accrued
+
         rows = await self._environments.list_for_owner(owner.id)
         total = Decimal("0.0000")
         for row in rows:
@@ -1392,19 +1599,32 @@ class EnvironmentService:
                 continue
             if (row.provider or "local") == "local":
                 continue
-            total += self._to_read(row).cost_accrued
+            total += display_cost_accrued(
+                cost_accrued=row.cost_accrued or Decimal("0.0000"),
+                cost_estimate_hourly=row.cost_estimate_hourly,
+                cost_sampled_at=row.cost_sampled_at,
+                created_at=row.created_at,
+                status=row.status,
+            )
 
         cap = self._settings.preview_soft_cost_cap
         if total >= cap:
+            from app.services.cost_metering import convert_display_cost
+
+            cap_display = convert_display_cost(cap, settings=self._settings)
+            total_display = convert_display_cost(total, settings=self._settings)
+            currency = (self._settings.cost_display_currency or "USD").strip().upper()
+            symbol = "€" if currency == "EUR" else "$"
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail={
                     "code": "soft_cost_cap_exceeded",
                     "message": (
-                        f"Active cloud preview cost (${total}) meets soft cap (${cap}). "
-                        "Destroy environments or raise PREVIEW_SOFT_COST_CAP."
+                        f"Active cloud preview cost ({symbol}{total_display}) meets soft cap "
+                        f"({symbol}{cap_display}). Destroy environments or raise "
+                        "PREVIEW_SOFT_COST_CAP."
                     ),
-                    "details": {"accrued": str(total), "cap": str(cap)},
+                    "details": {"accrued": str(total_display), "cap": str(cap_display)},
                 },
             )
 
@@ -1415,6 +1635,8 @@ class EnvironmentService:
         concurrent_active_count: int | None = None,
     ) -> EnvironmentRead:
         read = EnvironmentRead.model_validate(environment)
+        from app.services.cost_metering import convert_display_cost
+
         base = self._settings.preview_public_base_url.rstrip("/")
         read.portal_url = f"{base}/p/{environment.id}"
         if environment.github_pr_number is not None:
@@ -1437,7 +1659,12 @@ class EnvironmentService:
             and environment.status == EnvironmentStatus.RUNNING
         )
         read.soft_cost_cap_exceeded = (
-            not read.is_local and read.cost_accrued >= self._settings.preview_soft_cost_cap
+            not read.is_local
+            and read.cost_accrued
+            >= convert_display_cost(
+                self._settings.preview_soft_cost_cap,
+                settings=self._settings,
+            )
         )
         read.max_concurrent_environments = self._settings.max_concurrent_environments
         read.concurrent_active_count = concurrent_active_count
@@ -1550,8 +1777,42 @@ class EnvironmentService:
             return DeployMode.MANIFEST, packaging.value
         return DeployMode.PREVIEW, packaging.value if packaging else None
 
-    def _workspace_git_source(self, workspace_id: UUID) -> tuple[str, str]:
-        return f"https://launchpad.local/workspaces/{workspace_id}", "main"
+    async def _workspace_git_source(self, workspace_id: UUID) -> tuple[str, str]:
+        """Resolve upstream repo+branch for workspace-linked previews.
+
+        GitOps rebuild matching (webhooks) relies on Environment.git_repo_url and
+        Environment.git_branch. For repo_import workspaces, those values are stored
+        in the workspace's `wizard_config_json`, so we extract them here instead of
+        hardcoding a launchpad.local URL.
+        """
+        from app.models.domain import ProvisioningWorkspace
+
+        row = await self._session.get(ProvisioningWorkspace, workspace_id)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "workspace_not_found", "message": "Workspace not found"},
+            )
+
+        try:
+            raw = row.wizard_config_json or ""
+            payload = json.loads(raw) if raw else {}
+        except Exception:
+            payload = {}
+
+        if not isinstance(payload, dict):
+            payload = {}
+
+        git_repo_url = str(payload.get("git_repo_url") or "").strip()
+        git_branch = str(payload.get("git_branch") or "").strip() or "main"
+
+        if not git_repo_url:
+            # Backward-compatible fallback: previews still deploy, but push-based
+            # webhook matching can only work when the workspace includes repo_import
+            # wizard metadata (git_repo_url/git_branch).
+            return f"https://launchpad.local/workspaces/{workspace_id}", "main"
+
+        return git_repo_url, git_branch
 
     def _require_inline_cloud_credentials(self, payload: PreviewLaunchRequest) -> None:
         from app.core.secrets import has_aws_auth, has_gcp_auth
@@ -1602,24 +1863,13 @@ class EnvironmentService:
             )
 
     def _cloud_config_for_provider(self, provider: CloudProvider):
-        if provider == CloudProvider.GCP:
-            return GcpCloudConfig(
-                provider=CloudProvider.GCP,
-                resources=GcpResources(project_id="launchpad-preview", vpc=True, subnets=True),
-            )
-        if provider == CloudProvider.AWS:
-            return AwsCloudConfig(
-                provider=CloudProvider.AWS,
-                resources=AwsResources(vpc=True, subnets=True),
-            )
-        if provider == CloudProvider.AZURE:
-            return AzureCloudConfig(
-                provider=CloudProvider.AZURE,
-                resources=AzureResources(resource_group="launchpad-preview", vnet=True, subnets=True),
-            )
-        return CloudflareCloudConfig(
-            provider=CloudProvider.CLOUDFLARE,
-            resources=CloudflareResources(account_id="00000000000000000000000000000000"),
+        from app.schemas.cloud import RunningInstanceKind
+        from app.services.cloud_promote import cloud_config_for_promote
+
+        return cloud_config_for_promote(
+            provider,
+            CloudCredentials(),
+            target_kind=RunningInstanceKind.VM,
         )
 
     async def _require_owned(self, environment_id: UUID, owner: User):

@@ -13,6 +13,7 @@ from app.services.state_lock import (
     PROVISIONING_IN_PROGRESS_MESSAGE,
     StateLockConflict,
     acquire_state_lock,
+    force_release_state_lock,
 )
 
 
@@ -53,6 +54,39 @@ async def test_acquire_state_lock_releases_in_finally() -> None:
             pass
 
     fake_lock.release.assert_awaited()
+    fake_client.aclose.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_force_release_deletes_lock_key() -> None:
+    # Destroy must be able to break a stale provision lock (dead holder / worker
+    # restart) instead of waiting out the TTL.
+    env_id = uuid4()
+    fake_client = MagicMock()
+    fake_client.delete = AsyncMock(return_value=1)
+    fake_client.aclose = AsyncMock()
+
+    with patch("app.services.state_lock.redis.from_url", return_value=fake_client):
+        removed = await force_release_state_lock(env_id, scope="environment")
+
+    assert removed is True
+    fake_client.delete.assert_awaited_once_with(
+        f"launchpad:environment:{env_id}:state_lock"
+    )
+    fake_client.aclose.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_force_release_when_no_key() -> None:
+    env_id = uuid4()
+    fake_client = MagicMock()
+    fake_client.delete = AsyncMock(return_value=0)
+    fake_client.aclose = AsyncMock()
+
+    with patch("app.services.state_lock.redis.from_url", return_value=fake_client):
+        removed = await force_release_state_lock(env_id, scope="environment")
+
+    assert removed is False
     fake_client.aclose.assert_awaited()
 
 

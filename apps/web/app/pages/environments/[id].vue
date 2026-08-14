@@ -1,10 +1,41 @@
 <script setup lang="ts">
 import type { AuditLogEntry, Environment, PreviewLaunchPayload } from '~/types/environment'
+import { ApiError } from '~/composables/useApi'
+import type { UserCloudCredentialsStatus } from '~/types/userCredentials'
 import { applyEnvStreamPatch } from '~/utils/envStreamPatch'
 import {
   resolvePreviewEndpoints,
   secondaryPreviewEndpoints,
 } from '~/utils/previewEndpoints'
+import { recommendPrimaryService } from '~/utils/cloudPromote'
+import { resolveCloudPromoteDeployTargets } from '~/utils/cloudPromoteDeployTargets'
+import type { WorkspaceRuntimeMode } from '~/types/provisioning'
+import type { ContainerServiceSpec } from '~/types/provisioning'
+import {
+  defaultRegionForProvider,
+  regionsForProvider,
+  coerceRegionForProvider,
+  isRegionForProvider,
+} from '~/utils/cloudRegions'
+import { emptyCloudCredentials } from '~/utils/cloudValidation'
+import {
+  ttlCanExtend,
+  ttlIsExpired,
+  ttlLeftSeconds,
+} from '~/utils/previewTtl'
+
+function preferredRegionForProvider(
+  provider: CloudProvider,
+  status: UserCloudCredentialsStatus | null | undefined,
+): string | null {
+  if (!status) return null
+  let raw: string | null = null
+  if (provider === 'gcp') raw = (status.gcp_region || '').trim() || null
+  else if (provider === 'aws') raw = (status.aws_region || '').trim() || null
+  else if (provider === 'azure') raw = (status.azure_location || '').trim() || null
+  if (!raw) return null
+  return isRegionForProvider(provider, raw) ? raw : null
+}
 
 type CloudProvider = Exclude<PreviewLaunchPayload['provider'], 'local'>
 
@@ -12,7 +43,8 @@ const { t } = useI18n()
 const route = useRoute()
 const id = computed(() => String(route.params.id))
 const environmentId = computed(() => id.value || null)
-const { getById, destroy, cancelProvision, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment } = useEnvironments()
+const { getById, destroy, cancelProvision, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment, relaunchEnvironment } = useEnvironments()
+const { getWizardConfig } = useProvisioning()
 const { createOrLinkJiraIssue } = useOrgIntegrations()
 const { reconcileEnvironment } = useNotifications()
 const toast = useToast()
@@ -52,26 +84,320 @@ const audits = ref<AuditLogEntry[]>([])
 const auditsLoading = ref(false)
 const actionsMenuOpen = ref(false)
 
-const promoteCredentials = reactive({
-  gcp_sa_key_json: '',
-  gcp_wif_project_number: '',
-  gcp_wif_pool_id: '',
-  gcp_wif_provider_id: '',
-  gcp_wif_target_sa_email: '',
-  aws_access_key_id: '',
-  aws_secret_access_key: '',
-  aws_session_token: '',
-  aws_role_arn: '',
-  aws_role_session_name: '',
-  azure_client_id: '',
-  azure_client_secret: '',
-  azure_tenant_id: '',
-  azure_subscription_id: '',
-  cloudflare_api_token: '',
-})
+const { getStatus: getUserCloudCredentialsStatus, listNetworks, listSecurityGroups } = useUserCloudCredentials()
+const storedCredentialsStatus = ref<UserCloudCredentialsStatus | null>(null)
+const storedCredentialsLoading = ref(false)
+const useStoredCredentials = ref(false)
+
+const promoteCredentials = reactive(emptyCloudCredentials())
 
 const promoteForm = reactive({
   provider: 'gcp' as CloudProvider,
+  code_source: 'ssh' as 'ssh' | 'github',
+  region: defaultRegionForProvider('gcp'),
+  network_mode: 'existing' as 'existing' | 'create' | 'default',
+  existing_vpc_id: '' as string,
+  security_group_mode: 'auto' as 'auto' | 'existing',
+  existing_security_group_id: '' as string,
+  create_vpc: false,
+  create_subnets: false,
+})
+
+type CloudNetworkOption = {
+  id: string
+  name: string
+  cidr?: string | null
+  is_default?: boolean
+}
+const promoteNetworks = ref<CloudNetworkOption[]>([])
+const promoteNetworksLoading = ref(false)
+const promoteNetworksError = ref<string | null>(null)
+
+type CloudSecurityGroupOption = {
+  id: string
+  name: string
+  vpc_id?: string | null
+  description?: string | null
+}
+const promoteSecurityGroups = ref<CloudSecurityGroupOption[]>([])
+const promoteSecurityGroupsLoading = ref(false)
+const promoteSecurityGroupsError = ref<string | null>(null)
+
+const promoteServices = ref<ContainerServiceSpec[]>([])
+const promotePrimaryService = ref<string | null>(null)
+const promoteServicesLoading = ref(false)
+const promoteServicesError = ref<string | null>(null)
+const promoteProcessStrategy = ref<string>('docker')
+const promoteRuntimeMode = ref<WorkspaceRuntimeMode>('kubernetes')
+
+const promoteRecommendedService = computed(() => recommendPrimaryService(promoteServices.value))
+const showPromoteServicePicker = computed(() => promoteServices.value.length > 1)
+const showPromoteCodeSource = computed(
+  () => promoteProcessStrategy.value === 'pm2' || promoteProcessStrategy.value === 'systemd',
+)
+const promoteRegionOptions = computed(() => regionsForProvider(promoteForm.provider))
+const showPromoteRegion = computed(() => promoteRegionOptions.value.length > 0)
+const showPromoteNetworking = computed(
+  () => promoteForm.provider === 'gcp' || promoteForm.provider === 'aws' || promoteForm.provider === 'azure',
+)
+
+const promoteDeployTargets = computed(() => {
+  const vpc = promoteNetworks.value.find((n) => n.id === promoteForm.existing_vpc_id)
+  const sg = promoteSecurityGroups.value.find((s) => s.id === promoteForm.existing_security_group_id)
+  return resolveCloudPromoteDeployTargets({
+    provider: promoteForm.provider,
+    runtimeMode: promoteRuntimeMode.value,
+    region: promoteForm.region,
+    networkMode: promoteForm.network_mode,
+    createSubnets: promoteForm.create_subnets,
+    existingVpcId: promoteForm.existing_vpc_id,
+    existingVpcLabel: vpc ? `${vpc.name}${vpc.cidr ? ` (${vpc.cidr})` : ''}` : null,
+    securityGroupMode: promoteForm.security_group_mode,
+    existingSecurityGroupId: promoteForm.existing_security_group_id,
+    existingSecurityGroupLabel: sg ? `${sg.name} (${sg.id})` : null,
+    processStrategy: promoteProcessStrategy.value,
+  })
+})
+
+watch(
+  () => promoteForm.create_subnets,
+  (on) => {
+    if (on) {
+      promoteForm.create_vpc = true
+      promoteForm.network_mode = 'create'
+    }
+  },
+)
+
+watch(
+  () => promoteForm.create_vpc,
+  (on) => {
+    if (!on) promoteForm.create_subnets = false
+  },
+)
+
+watch(
+  () => promoteForm.network_mode,
+  (mode) => {
+    if (mode === 'create') {
+      promoteForm.create_vpc = true
+      promoteForm.existing_vpc_id = ''
+    } else if (mode === 'existing') {
+      promoteForm.create_vpc = false
+      promoteForm.create_subnets = false
+    } else {
+      promoteForm.create_vpc = false
+      promoteForm.create_subnets = false
+      promoteForm.existing_vpc_id = ''
+    }
+  },
+)
+
+async function loadPromoteNetworks() {
+  promoteNetworksError.value = null
+  promoteNetworks.value = []
+  if (!showPromoteNetworking.value) return
+  if (promoteForm.provider === 'azure') return
+  const hasCreds =
+    useStoredCredentials.value && hasStoredCredsForProvider(promoteForm.provider)
+  if (!hasCreds && !useStoredCredentials.value) {
+    // Still try vault if user has stored creds even when checkbox off for paste mode
+  }
+  promoteNetworksLoading.value = true
+  try {
+    const region = coerceRegionForProvider(promoteForm.provider, promoteForm.region)
+    if (region !== promoteForm.region) {
+      promoteForm.region = region
+    }
+    const result = await listNetworks({
+      provider: promoteForm.provider,
+      region,
+    })
+    promoteNetworks.value = result.networks || []
+    if (
+      promoteForm.network_mode === 'existing'
+      && !promoteForm.existing_vpc_id
+      && promoteNetworks.value.length
+    ) {
+      const preferred =
+        promoteNetworks.value.find((n) => n.is_default) || promoteNetworks.value[0]
+      promoteForm.existing_vpc_id = preferred.id
+    }
+    if (!promoteNetworks.value.length && promoteForm.network_mode === 'existing') {
+      promoteForm.network_mode = 'create'
+      promoteForm.create_vpc = true
+    }
+  } catch (err) {
+    promoteNetworksError.value = err instanceof Error ? err.message : t('common.failed')
+  } finally {
+    promoteNetworksLoading.value = false
+  }
+}
+
+async function loadPromoteSecurityGroups() {
+  promoteSecurityGroupsError.value = null
+  promoteSecurityGroups.value = []
+  if (promoteForm.provider !== 'aws') return
+  promoteSecurityGroupsLoading.value = true
+  try {
+    const region = coerceRegionForProvider(promoteForm.provider, promoteForm.region)
+    const vpcId =
+      promoteForm.network_mode === 'existing' && promoteForm.existing_vpc_id
+        ? promoteForm.existing_vpc_id
+        : null
+    const result = await listSecurityGroups({
+      provider: 'aws',
+      region,
+      vpc_id: vpcId,
+    })
+    promoteSecurityGroups.value = result.security_groups || []
+    if (
+      promoteForm.security_group_mode === 'existing'
+      && !promoteForm.existing_security_group_id
+      && promoteSecurityGroups.value.length
+    ) {
+      promoteForm.existing_security_group_id = promoteSecurityGroups.value[0].id
+    }
+  } catch (err) {
+    promoteSecurityGroupsError.value = err instanceof Error ? err.message : t('common.failed')
+  } finally {
+    promoteSecurityGroupsLoading.value = false
+  }
+}
+
+watch(
+  () => [promoteForm.provider, promoteForm.region, useStoredCredentials.value, storedCredentialsStatus.value] as const,
+  () => {
+    void loadPromoteNetworks()
+  },
+)
+
+async function loadPromoteServices() {
+  promoteServicesError.value = null
+  promoteServices.value = []
+  promotePrimaryService.value = null
+  promoteProcessStrategy.value = 'docker'
+  const workspaceId = environment.value?.workspace_id
+  if (!workspaceId) return
+  promoteServicesLoading.value = true
+  try {
+    const config = await getWizardConfig(workspaceId)
+    const services = [...(config.container_scaffold?.services ?? [])]
+    promoteServices.value = services
+    promotePrimaryService.value = recommendPrimaryService(services)
+    promoteProcessStrategy.value = config.running_instance?.process_strategy || 'docker'
+    promoteRuntimeMode.value = config.runtime_mode || 'kubernetes'
+    promoteForm.code_source = (config.running_instance?.code_source as 'ssh' | 'github') || 'ssh'
+    const fromConfig = (config.running_instance?.region || '').trim()
+    const fromVault = preferredRegionForProvider(promoteForm.provider, storedCredentialsStatus.value)
+    promoteForm.region = coerceRegionForProvider(
+      promoteForm.provider,
+      fromConfig,
+      fromVault,
+    )
+  } catch (err) {
+    promoteServicesError.value = err instanceof Error ? err.message : t('common.failed')
+  } finally {
+    promoteServicesLoading.value = false
+  }
+}
+
+function clearPromoteCredentials() {
+  Object.assign(promoteCredentials, emptyCloudCredentials())
+}
+
+function promoteCredentialsEmpty() {
+  return Object.values(promoteCredentials).every((v) => !String(v ?? '').trim())
+}
+
+function hasStoredCredsForProvider(provider: CloudProvider) {
+  if (!storedCredentialsStatus.value) return false
+  if (provider === 'gcp') return storedCredentialsStatus.value.has_gcp
+  if (provider === 'aws') return storedCredentialsStatus.value.has_aws
+  if (provider === 'azure') return storedCredentialsStatus.value.has_azure
+  return storedCredentialsStatus.value.has_cloudflare
+}
+
+const storedCredsLabel = computed(() => {
+  const s = storedCredentialsStatus.value
+  if (!s) return null
+  if (promoteForm.provider === 'gcp') return s.gcp_label ?? null
+  if (promoteForm.provider === 'aws') return s.aws_label ?? null
+  if (promoteForm.provider === 'azure') return s.azure_label ?? null
+  return s.cloudflare_label ?? null
+})
+
+async function refreshStoredCredentialsForPromotion() {
+  if (!showPromote.value) return
+  storedCredentialsLoading.value = true
+  try {
+    storedCredentialsStatus.value = await getUserCloudCredentialsStatus()
+  } finally {
+    storedCredentialsLoading.value = false
+  }
+
+  // If user hasn't typed anything yet, default to the encrypted vault.
+  if (hasStoredCredsForProvider(promoteForm.provider) && promoteCredentialsEmpty()) {
+    useStoredCredentials.value = true
+    clearPromoteCredentials()
+  } else {
+    useStoredCredentials.value = false
+  }
+}
+
+watch(
+  showPromote,
+  (open) => {
+    if (open) {
+      void (async () => {
+        await refreshStoredCredentialsForPromotion()
+        await loadPromoteServices()
+      })()
+    }
+  },
+)
+
+watch(
+  () => [
+    promoteForm.provider,
+    promoteForm.region,
+    promoteForm.network_mode,
+    promoteForm.existing_vpc_id,
+    promoteForm.security_group_mode,
+  ] as const,
+  () => {
+    if (promoteForm.provider === 'aws' && promoteForm.security_group_mode === 'existing') {
+      void loadPromoteSecurityGroups()
+    } else {
+      promoteSecurityGroups.value = []
+      promoteSecurityGroupsError.value = null
+    }
+  },
+)
+
+watch(
+  () => promoteForm.provider,
+  (provider) => {
+    if (provider !== 'aws') {
+      promoteForm.security_group_mode = 'auto'
+      promoteForm.existing_security_group_id = ''
+    }
+    if (!showPromote.value) return
+    const preferred = preferredRegionForProvider(provider, storedCredentialsStatus.value)
+    promoteForm.region = coerceRegionForProvider(provider, promoteForm.region, preferred)
+    // Switching providers should reset the "use stored" toggle only when the
+    // user hasn't typed creds yet.
+    if (promoteCredentialsEmpty() && hasStoredCredsForProvider(promoteForm.provider)) {
+      useStoredCredentials.value = true
+      clearPromoteCredentials()
+    } else {
+      useStoredCredentials.value = false
+    }
+  },
+)
+
+watch(useStoredCredentials, (enabled) => {
+  if (enabled) clearPromoteCredentials()
 })
 
 const { lines, connected, done, connect } = useEnvironmentLogStream(environmentId)
@@ -98,24 +424,14 @@ useEnvironmentLiveStream(environmentId, {
 const remainingLabel = computed(() => {
   tick.value
   if (!environment.value) return '-'
-  const left = environment.value.time_remaining_seconds
-    ?? Math.max(
-      Math.floor((new Date(environment.value.ttl_expires_at).getTime() - Date.now()) / 1000),
-      0,
-    )
-  return formatDuration(left)
+  return formatDuration(ttlLeftSeconds(environment.value.ttl_expires_at))
 })
 
 const ttlExpired = computed(() => {
   tick.value
   if (!environment.value) return false
   if (environment.value.status === 'EXPIRED') return true
-  const left = environment.value.time_remaining_seconds
-    ?? Math.max(
-      Math.floor((new Date(environment.value.ttl_expires_at).getTime() - Date.now()) / 1000),
-      0,
-    )
-  return left <= 0
+  return ttlIsExpired(environment.value.ttl_expires_at)
 })
 
 const displayStatus = computed(() => {
@@ -160,12 +476,18 @@ const isProvisioning = computed(() => environment.value?.status === 'PROVISIONIN
 const isLocal = computed(() => Boolean(environment.value?.is_local))
 
 const canExtend = computed(() => {
-  const s = environment.value?.status
-  return s === 'RUNNING' || s === 'FAILED'
+  const env = environment.value
+  if (!env) return false
+  const s = env.status
+  if (s !== 'RUNNING' && s !== 'FAILED') return false
+  tick.value
+  return ttlCanExtend(env.created_at, env.ttl_expires_at)
 })
+const canRelaunch = computed(() => displayStatus.value === 'EXPIRED')
 const canPromote = computed(() => {
   if (!environment.value) return false
-  return environment.value.status === 'RUNNING' && isLocal.value
+  const status = environment.value.status
+  return (status === 'RUNNING' || status === 'FAILED') && isLocal.value
 })
 const canScanDrift = computed(() => environment.value?.status === 'RUNNING')
 const canRetry = computed(() => {
@@ -257,29 +579,38 @@ function toggleActionsMenu() {
 }
 
 const destroyAction = define(
-  () => {
-    if (environment.value?.status === 'PROVISIONING') {
-      return cancelProvision(environment.value.id)
-    }
-    return destroy(environment.value!.id, {
-      force: environment.value?.status === 'TEARDOWN_PENDING',
-    })
-  },
-  {
-  success: (env) =>
-    env.status === 'FAILED'
-      ? { title: t('environments.toasts.stopped'), message: `${env.name} stopped. No teardown was queued.` }
-      : { title: t('environments.toasts.destroyed'), message: `${env.name} is being destroyed.` },
-  error: (err) => ({
-    title:
+  () => destroy(environment.value!.id, {
+    // Force cancels in-flight provision and tears down stranded cloud/local
+    // resources. Cancel-only is a separate "Stop provisioning" action.
+    force:
       environment.value?.status === 'PROVISIONING'
-        ? t('environments.toasts.stopFailed')
-        : t('environments.toasts.destroyFailed'),
+      || environment.value?.status === 'TEARDOWN_PENDING',
+  }),
+  {
+  success: (env) => ({ title: t('environments.toasts.destroyed'), message: `${env.name} is being destroyed.` }),
+  error: (err) => ({
+    title: t('environments.toasts.destroyFailed'),
     message: toastError(err, t('common.failed')),
   }),
   onSuccess: (env) => { environment.value = env; connect(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
+
+const stopProvisionAction = define(
+  () => cancelProvision(environment.value!.id),
+  {
+    success: (env) => ({
+      title: t('environments.toasts.stopped'),
+      message: `${env.name} stopped. No teardown was queued.`,
+    }),
+    error: (err) => ({
+      title: t('environments.toasts.stopFailed'),
+      message: toastError(err, t('common.failed')),
+    }),
+    onSuccess: (env) => { environment.value = env; connect(env.id) },
+    onError: (msg) => { loadError.value = msg },
+  },
+)
 
 function requestDestroy() {
   if (!environment.value || destroyAction.pending) return
@@ -295,6 +626,13 @@ const extendAction = define(() => extendTtl(environment.value!.id, {}), {
   success: (env) => ({ title: t('environments.toasts.extended'), message: `${env.name} will live longer.` }),
   error: (err) => ({ title: t('environments.toasts.extendFailed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; loadError.value = null },
+  onError: (msg) => { loadError.value = msg },
+})
+
+const relaunchAction = define(() => relaunchEnvironment(environment.value!.id), {
+  success: (env) => ({ title: t('environments.toasts.relaunched'), message: `${env.name} is relaunching.` }),
+  error: (err) => ({ title: t('environments.toasts.relaunchFailed'), message: toastError(err, t('common.failed')) }),
+  onSuccess: (env) => { environment.value = env; loadError.value = null; connect(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
 
@@ -326,10 +664,40 @@ const promoteAction = define(
   () => promoteToCloud(environment.value!.id, {
     provider: promoteForm.provider,
     credentials: { ...promoteCredentials },
+    primary_service: promotePrimaryService.value ?? promoteRecommendedService.value,
+    code_source: showPromoteCodeSource.value ? promoteForm.code_source : null,
+    region: showPromoteRegion.value ? promoteForm.region : null,
+    create_vpc:
+      showPromoteNetworking.value && promoteForm.network_mode === 'create'
+        ? true
+        : false,
+    create_subnets:
+      showPromoteNetworking.value && promoteForm.network_mode === 'create'
+        ? promoteForm.create_subnets
+        : false,
+    existing_vpc_id:
+      showPromoteNetworking.value
+      && promoteForm.network_mode === 'existing'
+      && promoteForm.existing_vpc_id
+        ? promoteForm.existing_vpc_id
+        : null,
+    existing_security_group_id:
+      promoteForm.provider === 'aws'
+      && promoteForm.security_group_mode === 'existing'
+      && promoteForm.existing_security_group_id
+        ? promoteForm.existing_security_group_id
+        : null,
   }),
   {
     success: () => ({ title: t('environments.detail.launchCloudPreview'), message: t('environments.detail.deployingToCloud', { provider: promoteForm.provider.toUpperCase() }) }),
-    error: (err) => ({ title: t('environments.toasts.cloudFailed'), message: toastError(err, t('common.failed')) }),
+    error: (err) => {
+      if (err instanceof ApiError) {
+        const code = err.code ? ` (${err.code})` : ''
+        const corr = err.correlationId ? ` [${err.correlationId}]` : ''
+        return { title: t('environments.toasts.cloudFailed'), message: `${err.message}${code}${corr}` }
+      }
+      return { title: t('environments.toasts.cloudFailed'), message: toastError(err, t('common.failed')) }
+    },
     onSuccess: async (created) => {
       showPromote.value = false
       loadError.value = null
@@ -511,6 +879,16 @@ onUnmounted(() => {
                 {{ t('environments.actions.expired') }}
               </span>
               <button
+                v-if="canRelaunch"
+                type="button"
+                class="lp-btn-primary whitespace-nowrap"
+                :disabled="relaunchAction.pending"
+                @click="relaunchAction.run()"
+              >
+                <span class="material-symbols-outlined text-base">rocket_launch</span>
+                {{ relaunchAction.pending ? t('environments.actions.retrying') : t('environments.actions.relaunch') }}
+              </button>
+              <button
                 v-if="canRetry"
                 type="button"
                 class="lp-btn-primary whitespace-nowrap"
@@ -638,22 +1016,33 @@ onUnmounted(() => {
                   {{ t('common.status') }}
                 </a>
                 <button
+                  v-if="environment.status === 'PROVISIONING'"
+                  type="button"
+                  role="menuitem"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+                  :disabled="stopProvisionAction.pending || destroyAction.pending"
+                  @click="stopProvisionAction.run(); closeActionsMenu()"
+                >
+                  <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">stop_circle</span>
+                  {{
+                    stopProvisionAction.pending
+                      ? t('environments.actions.queuingStop')
+                      : t('environments.actions.stopProvision')
+                  }}
+                </button>
+                <button
                   v-if="environment.status !== 'DESTROYED'"
                   type="button"
                   role="menuitem"
                   class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-danger)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
-                  :disabled="destroyAction.pending"
+                  :disabled="destroyAction.pending || stopProvisionAction.pending"
                   @click="requestDestroy(); closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base">delete</span>
                   {{
                     destroyAction.pending
-                      ? (environment.status === 'PROVISIONING'
-                        ? t('environments.actions.queuingStop')
-                        : t('environments.actions.queuingTeardown'))
-                      : (environment.status === 'PROVISIONING'
-                        ? t('environments.actions.stopProvision')
-                        : t('environments.actions.destroy'))
+                      ? t('environments.actions.queuingTeardown')
+                      : t('environments.actions.destroy')
                   }}
                 </button>
               </div>
@@ -668,6 +1057,78 @@ onUnmounted(() => {
           <p class="text-sm text-[var(--lp-muted)]">
             {{ t('environments.detail.promoteBlurb') }}
           </p>
+          <div
+            v-if="showPromoteServicePicker"
+            class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-3 py-3"
+          >
+            <p class="text-sm font-medium text-[var(--lp-text)]">
+              {{ t('environments.detail.promotePrimaryService') }}
+            </p>
+            <p class="text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.promotePrimaryServiceHint') }}
+            </p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="svc in promoteServices"
+                :key="svc.name"
+                type="button"
+                class="rounded-lg border px-3 py-1.5 text-sm"
+                :class="
+                  promotePrimaryService === svc.name
+                    ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
+                    : 'border-[var(--lp-line)]'
+                "
+                @click="promotePrimaryService = svc.name"
+              >
+                {{ svc.name }}
+                <span
+                  v-if="svc.name === promoteRecommendedService"
+                  class="ml-1 text-xs text-[var(--lp-muted)]"
+                >
+                  ({{ t('environments.detail.promoteRecommended') }})
+                </span>
+              </button>
+            </div>
+          </div>
+          <p
+            v-else-if="promoteServicesLoading"
+            class="text-xs text-[var(--lp-muted)]"
+          >
+            {{ t('environments.detail.promoteServicesLoading') }}
+          </p>
+          <p
+            v-else-if="promoteServicesError"
+            class="text-xs text-[var(--lp-danger)]"
+          >
+            {{ promoteServicesError }}
+          </p>
+          <div
+            v-if="showPromoteCodeSource"
+            class="space-y-2 rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-3 py-3"
+          >
+            <p class="text-sm font-medium text-[var(--lp-text)]">
+              {{ t('environments.detail.promoteCodeSource') }}
+            </p>
+            <p class="text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.promoteCodeSourceHint') }}
+            </p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="src in (['ssh', 'github'] as const)"
+                :key="src"
+                type="button"
+                class="rounded-lg border px-3 py-1.5 text-sm"
+                :class="
+                  promoteForm.code_source === src
+                    ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
+                    : 'border-[var(--lp-line)]'
+                "
+                @click="promoteForm.code_source = src"
+              >
+                {{ t(`environments.detail.promoteCodeSources.${src}`) }}
+              </button>
+            </div>
+          </div>
           <div class="flex flex-wrap gap-2">
             <button
               v-for="p in (['gcp', 'aws', 'azure', 'cloudflare'] as CloudProvider[])"
@@ -684,10 +1145,205 @@ onUnmounted(() => {
               {{ p }}
             </button>
           </div>
-          <CloudCredentialsFields
-            v-model:credentials="promoteCredentials"
+          <CloudPromoteDeployTargets
+            :targets="promoteDeployTargets"
             :provider="promoteForm.provider"
           />
+          <label
+            v-if="showPromoteRegion"
+            class="block max-w-md space-y-2"
+          >
+            <span class="lp-label">{{ t('environments.detail.promoteRegion') }}</span>
+            <select
+              v-model="promoteForm.region"
+              class="lp-input"
+            >
+              <option
+                v-for="opt in promoteRegionOptions"
+                :key="opt.value"
+                :value="opt.value"
+              >
+                {{ opt.label }}
+              </option>
+            </select>
+            <p class="text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.promoteRegionHint') }}
+            </p>
+          </label>
+          <div
+            v-if="showPromoteNetworking"
+            class="max-w-md space-y-3 rounded-xl border border-[var(--lp-line)] p-3"
+          >
+            <p class="lp-label">{{ t('environments.detail.promoteNetworking') }}</p>
+            <div class="space-y-2 text-sm">
+              <label class="flex items-start gap-3">
+                <input
+                  v-model="promoteForm.network_mode"
+                  type="radio"
+                  value="existing"
+                  class="mt-1 accent-[var(--lp-accent)]"
+                >
+                <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteUseExistingVpc') }}</span>
+              </label>
+              <label class="flex items-start gap-3">
+                <input
+                  v-model="promoteForm.network_mode"
+                  type="radio"
+                  value="create"
+                  class="mt-1 accent-[var(--lp-accent)]"
+                >
+                <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteCreateVpc') }}</span>
+              </label>
+              <label class="flex items-start gap-3">
+                <input
+                  v-model="promoteForm.network_mode"
+                  type="radio"
+                  value="default"
+                  class="mt-1 accent-[var(--lp-accent)]"
+                >
+                <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteDefaultNetwork') }}</span>
+              </label>
+            </div>
+
+            <div v-if="promoteForm.network_mode === 'existing'" class="space-y-2">
+              <label class="block space-y-1">
+                <span class="lp-label">{{ t('environments.detail.promoteSelectVpc') }}</span>
+                <select
+                  v-model="promoteForm.existing_vpc_id"
+                  class="lp-input"
+                  :disabled="promoteNetworksLoading || !promoteNetworks.length"
+                >
+                  <option value="" disabled>
+                    {{ promoteNetworksLoading ? t('common.loading') : t('environments.detail.promoteSelectVpcPlaceholder') }}
+                  </option>
+                  <option
+                    v-for="net in promoteNetworks"
+                    :key="net.id"
+                    :value="net.id"
+                  >
+                    {{ net.name }}{{ net.cidr ? ` (${net.cidr})` : '' }}{{ net.is_default ? ' · default' : '' }}
+                  </option>
+                </select>
+              </label>
+              <p v-if="promoteNetworksError" class="text-xs text-[var(--lp-danger)]">{{ promoteNetworksError }}</p>
+              <p v-else-if="!promoteNetworksLoading && !promoteNetworks.length" class="text-xs text-[var(--lp-muted)]">
+                {{ t('environments.detail.promoteNoVpcs') }}
+              </p>
+              <button
+                type="button"
+                class="lp-btn-ghost text-xs uppercase tracking-wide"
+                :disabled="promoteNetworksLoading"
+                @click="loadPromoteNetworks"
+              >
+                {{ promoteNetworksLoading ? t('common.loading') : t('environments.detail.promoteRefreshVpcs') }}
+              </button>
+            </div>
+
+            <label
+              v-if="promoteForm.network_mode === 'create'"
+              class="flex items-start gap-3 text-sm"
+            >
+              <input
+                v-model="promoteForm.create_subnets"
+                type="checkbox"
+                class="mt-1 h-4 w-4 accent-[var(--lp-accent)]"
+              >
+              <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteCreateSubnets') }}</span>
+            </label>
+            <p class="text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.promoteNetworkingHint') }}
+            </p>
+
+            <div
+              v-if="promoteForm.provider === 'aws'"
+              class="space-y-3 border-t border-[var(--lp-line)] pt-3"
+            >
+              <p class="lp-label">{{ t('environments.detail.promoteSecurityGroup') }}</p>
+              <div class="space-y-2 text-sm">
+                <label class="flex items-start gap-3">
+                  <input
+                    v-model="promoteForm.security_group_mode"
+                    type="radio"
+                    value="auto"
+                    class="mt-1 accent-[var(--lp-accent)]"
+                  >
+                  <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteCreateSecurityGroup') }}</span>
+                </label>
+                <label class="flex items-start gap-3">
+                  <input
+                    v-model="promoteForm.security_group_mode"
+                    type="radio"
+                    value="existing"
+                    class="mt-1 accent-[var(--lp-accent)]"
+                  >
+                  <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteUseExistingSecurityGroup') }}</span>
+                </label>
+              </div>
+
+              <div v-if="promoteForm.security_group_mode === 'existing'" class="space-y-2">
+                <label class="block space-y-1">
+                  <span class="lp-label">{{ t('environments.detail.promoteSelectSecurityGroup') }}</span>
+                  <select
+                    v-model="promoteForm.existing_security_group_id"
+                    class="lp-input"
+                    :disabled="promoteSecurityGroupsLoading || !promoteSecurityGroups.length"
+                  >
+                    <option value="" disabled>
+                      {{ promoteSecurityGroupsLoading ? t('common.loading') : t('environments.detail.promoteSelectSecurityGroupPlaceholder') }}
+                    </option>
+                    <option
+                      v-for="sg in promoteSecurityGroups"
+                      :key="sg.id"
+                      :value="sg.id"
+                    >
+                      {{ sg.name }} ({{ sg.id }}){{ sg.description ? ` - ${sg.description}` : '' }}
+                    </option>
+                  </select>
+                </label>
+                <p v-if="promoteSecurityGroupsError" class="text-xs text-[var(--lp-danger)]">{{ promoteSecurityGroupsError }}</p>
+                <p v-else-if="!promoteSecurityGroupsLoading && !promoteSecurityGroups.length" class="text-xs text-[var(--lp-muted)]">
+                  {{ t('environments.detail.promoteNoSecurityGroups') }}
+                </p>
+                <button
+                  type="button"
+                  class="lp-btn-ghost text-xs uppercase tracking-wide"
+                  :disabled="promoteSecurityGroupsLoading"
+                  @click="loadPromoteSecurityGroups"
+                >
+                  {{ promoteSecurityGroupsLoading ? t('common.loading') : t('environments.detail.promoteRefreshSecurityGroups') }}
+                </button>
+              </div>
+              <p class="text-xs text-[var(--lp-muted)]">
+                {{ t('environments.detail.promoteSecurityGroupHint') }}
+              </p>
+            </div>
+          </div>
+          <div
+            v-if="hasStoredCredsForProvider(promoteForm.provider)"
+            class="rounded-lg border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-3 py-2 text-sm"
+          >
+            <label class="flex items-center gap-2">
+              <input
+                type="checkbox"
+                class="h-4 w-4 accent-[var(--lp-accent)]"
+                v-model="useStoredCredentials"
+              >
+              <span>
+                {{ t('environments.detail.useStoredCredentials') }}
+                <span v-if="storedCredsLabel" class="ml-2 font-mono text-xs text-[var(--lp-text)]">{{ storedCredsLabel }}</span>
+              </span>
+            </label>
+            <p class="mt-1 text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.useStoredCredentialsHint') }}
+            </p>
+          </div>
+
+          <template v-if="!useStoredCredentials">
+            <CloudCredentialsFields
+              v-model:credentials="promoteCredentials"
+              :provider="promoteForm.provider"
+            />
+          </template>
           <button
             type="button"
             class="lp-btn-primary"
@@ -743,10 +1399,10 @@ onUnmounted(() => {
           <div v-if="!isLocal">
             <p class="lp-label">{{ t('environments.detail.costToDate') }}</p>
             <p class="mt-1 text-lg font-semibold text-[var(--lp-accent)]">
-              ${{ environment.cost_accrued ?? '0.00' }}
+              {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_accrued) }}
             </p>
             <p class="text-xs text-[var(--lp-muted)]">
-              ${{ environment.cost_estimate_hourly }}/hr
+              {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_estimate_hourly, { decimals: 4 }) }}/hr
               <span v-if="environment.cost_source" class="ml-1 opacity-80">
                 · {{ formatCostSource(environment.cost_source) }}
               </span>
@@ -756,7 +1412,7 @@ onUnmounted(() => {
             <p class="lp-label">{{ t('environments.detail.costToDate') }}</p>
             <p class="mt-1 text-sm text-[var(--lp-muted)]">
               {{ t('environments.detail.localShadow') }}
-              <span class="font-mono"> ${{ environment.cost_accrued ?? '0.00' }}</span>
+              <span class="font-mono"> {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_accrued) }}</span>
               <span v-if="environment.cost_source" class="opacity-80">
                 · {{ formatCostSource(environment.cost_source) }}
               </span>
@@ -913,11 +1569,11 @@ onUnmounted(() => {
 
       <ConfirmDialog
         v-model:open="confirmDestroyOpen"
-        :title="environment.status === 'PROVISIONING' ? t('environments.destroy.titleStop') : t('environments.destroy.title')"
+        :title="t('environments.destroy.title')"
         :message="environment.status === 'PROVISIONING'
-          ? t('environments.destroy.messageProvisioning', { name: environment.name })
+          ? t('environments.destroy.messageForce', { name: environment.name })
           : t('environments.destroy.message', { name: environment.name })"
-        :confirm-label="environment.status === 'PROVISIONING' ? t('environments.destroy.confirmStop') : t('environments.destroy.confirm')"
+        :confirm-label="t('environments.destroy.confirm')"
         :cancel-label="t('environments.destroy.cancel')"
         :busy="destroyAction.pending"
         @confirm="onDestroy"

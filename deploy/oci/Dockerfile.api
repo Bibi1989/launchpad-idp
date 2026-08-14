@@ -19,14 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       git \
       gnupg \
+      unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# kubectl + Docker CLI + k3d (arch-aware)
+# kubectl + Docker CLI + k3d + AWS CLI (arch-aware)
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     case "$ARCH" in \
-      x86_64) KARCH=amd64; DARCH=x86_64 ;; \
-      aarch64|arm64) KARCH=arm64; DARCH=aarch64 ;; \
+      x86_64) KARCH=amd64; DARCH=x86_64; AWS_ARCH=x86_64 ;; \
+      aarch64|arm64) KARCH=arm64; DARCH=aarch64; AWS_ARCH=aarch64 ;; \
       *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
     esac; \
     KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"; \
@@ -43,10 +44,16 @@ RUN set -eux; \
     curl -fsSLo /usr/local/bin/cloudflared \
       "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${KARCH}"; \
     chmod +x /usr/local/bin/cloudflared; \
+    curl -fsSLo /tmp/awscliv2.zip \
+      "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip"; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/aws /tmp/awscliv2.zip; \
     kubectl version --client=true; \
     docker --version; \
     k3d version; \
-    cloudflared --version
+    cloudflared --version; \
+    aws --version
 
 COPY apps/api/pyproject.toml ./
 COPY apps/api/app ./app

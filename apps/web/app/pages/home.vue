@@ -14,7 +14,7 @@ const loading = ref(true)
 onMounted(async () => {
   loading.value = true
   try {
-    await refreshEnvs()
+    await refreshEnvs({ soft: environments.value.length > 0 })
     const [ws, status] = await Promise.all([
       listWorkspaces().catch(() => []),
       getStatus().catch(() => null),

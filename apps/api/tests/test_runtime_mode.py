@@ -7,6 +7,8 @@ import pytest
 from app.schemas.cloud import (
     AwsCloudConfig,
     AwsResources,
+    AzureCloudConfig,
+    AzureResources,
     ContainerScaffoldConfig,
     GcpCloudConfig,
     GcpResources,
@@ -81,15 +83,34 @@ def test_wizard_request_rejects_cloud_compose() -> None:
         )
 
 
-def test_running_instance_vm_requires_host() -> None:
-    with pytest.raises(Exception):
-        ProvisioningWizardRequest(
-            name="attach-demo",
-            cloud=LocalCloudConfig(resources=LocalResources()),
-            credentials=CloudCredentials(),
-            runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
-            running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+def test_running_instance_vm_without_host_ok_for_autocreate_providers() -> None:
+    # VM without a host no longer fails validation for providers that can supply one:
+    # local falls back to a local Docker preview; GCP/AWS auto-create the VM.
+    vm = RunningInstanceConfig(kind=RunningInstanceKind.VM)
+    for cloud in (
+        LocalCloudConfig(resources=LocalResources()),
+        GcpCloudConfig(resources=GcpResources(project_id="demo-proj")),
+        AwsCloudConfig(resources=AwsResources()),
+    ):
+        # Should not raise.
+        validate_runtime_mode(cloud, WorkspaceRuntimeMode.RUNNING_INSTANCE, vm)
+
+
+def test_running_instance_vm_requires_host_for_azure() -> None:
+    # Azure VM auto-provisioning is not implemented, so a host is still required.
+    azure = AzureCloudConfig(resources=AzureResources(resource_group="lp-rg"))
+    with pytest.raises(RuntimeModeViolation):
+        validate_runtime_mode(
+            azure,
+            WorkspaceRuntimeMode.RUNNING_INSTANCE,
+            RunningInstanceConfig(kind=RunningInstanceKind.VM),
         )
+    # With a host it passes.
+    validate_runtime_mode(
+        azure,
+        WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        RunningInstanceConfig(kind=RunningInstanceKind.VM, host="10.0.0.9"),
+    )
 
 
 def test_running_instance_local_machine_ok() -> None:
