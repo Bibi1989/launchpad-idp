@@ -142,8 +142,11 @@ def ensure_cloud_kubernetes_target(
     """Return kubeconfig + context for the cloud Kubernetes cluster.
 
     GCP: reuse a RUNNING GKE cluster (prefer ``launchpad-previews``), or create
-    an Autopilot cluster when ``create`` is True. AWS/Azure: reuse an existing
-    cluster only (do not silently fall back to local kind/k3d).
+    an Autopilot cluster when ``create`` is True.
+    AWS: reuse an ACTIVE EKS cluster (prefer ``launchpad-previews``), or create
+    an EKS Auto Mode cluster via boto3 when ``create`` is True (no aws CLI /
+    eksctl required on the worker host).
+    Azure: reuse an existing AKS cluster only for now.
     """
     raw = (provider or "").strip().lower()
     if raw == CloudProvider.GCP.value:
@@ -155,9 +158,11 @@ def ensure_cloud_kubernetes_target(
             create=create,
         )
     if raw == CloudProvider.AWS.value:
-        raise CloudInstanceComputeError(
-            "AWS Kubernetes promote needs an EKS cluster in this region. "
-            "Create an EKS cluster, then retry. Local kind/k3d is not used for cloud deploys."
+        return _ensure_eks_target(
+            credentials=credentials,
+            region=region,
+            environment_id=environment_id,
+            create=create,
         )
     if raw == CloudProvider.AZURE.value:
         raise CloudInstanceComputeError(
@@ -165,6 +170,136 @@ def ensure_cloud_kubernetes_target(
             "Create an AKS cluster, then retry. Local kind/k3d is not used for cloud deploys."
         )
     raise CloudInstanceComputeError(f"Cloud Kubernetes is not supported for provider {provider}")
+
+
+def select_eks_cluster(names: list[str], *, preferred_name: str) -> str | None:
+    """Pick an EKS cluster name: preferred shared preview, else first listed."""
+    cleaned = [str(n).strip() for n in names if str(n).strip()]
+    preferred = (preferred_name or "").strip()
+    if preferred and preferred in cleaned:
+        return preferred
+    return cleaned[0] if cleaned else None
+
+
+def _ensure_eks_target(
+    *,
+    credentials: CloudCredentials | None,
+    region: str,
+    environment_id: str,
+    create: bool,
+) -> CloudKubernetesTarget:
+    from app.services.aws_client import (
+        AwsClientError,
+        create_eks_auto_cluster,
+        ensure_eks_auto_roles,
+        ensure_eks_preview_subnets,
+        eks_cluster_status,
+        list_eks_cluster_names,
+        sts_account_id,
+        wait_eks_cluster_active,
+        write_eks_kubeconfig,
+    )
+    from app.services.cloud_networks import _normalize_aws_region
+
+    env = _credential_env(
+        credentials, environment_id=environment_id, provider=CloudProvider.AWS.value
+    )
+    resolved_region = _normalize_aws_region((region or "").strip() or "us-east-1")
+    env = {**env, "AWS_DEFAULT_REGION": resolved_region, "AWS_REGION": resolved_region}
+
+    try:
+        account_id = sts_account_id(env=env, region=resolved_region)
+        names = list_eks_cluster_names(env=env, region=resolved_region)
+    except AwsClientError as exc:
+        raise CloudInstanceComputeError(str(exc)) from exc
+
+    selected = select_eks_cluster(names, preferred_name=SHARED_PREVIEW_CLUSTER)
+    created = False
+    if selected is None:
+        if not create:
+            raise CloudInstanceComputeError(
+                f"No EKS cluster found in {resolved_region} to tear down this preview."
+            )
+        try:
+            subnet_ids = ensure_eks_preview_subnets(env=env, region=resolved_region)
+            cluster_role_arn, node_role_arn = ensure_eks_auto_roles(
+                env=env, region=resolved_region
+            )
+            create_eks_auto_cluster(
+                env=env,
+                region=resolved_region,
+                name=SHARED_PREVIEW_CLUSTER,
+                subnet_ids=subnet_ids,
+                cluster_role_arn=cluster_role_arn,
+                node_role_arn=node_role_arn,
+            )
+        except AwsClientError as exc:
+            raise CloudInstanceComputeError(str(exc)) from exc
+        selected = SHARED_PREVIEW_CLUSTER
+        created = True
+
+    try:
+        status = eks_cluster_status(env=env, region=resolved_region, name=selected)
+    except AwsClientError as exc:
+        raise CloudInstanceComputeError(str(exc)) from exc
+    if status and status not in {"ACTIVE", "CREATING", "UPDATING"}:
+        raise CloudInstanceComputeError(
+            f"EKS cluster '{selected}' is {status}. Wait until it is ACTIVE, then retry."
+        )
+    if status == "CREATING" or (created and status != "ACTIVE"):
+        try:
+            wait_eks_cluster_active(
+                env=env, region=resolved_region, name=selected, timeout_seconds=1500.0
+            )
+        except AwsClientError as exc:
+            raise CloudInstanceComputeError(str(exc)) from exc
+
+    kubeconfig = kubeconfig_path_for(
+        provider="aws",
+        project=account_id or "aws",
+        region=resolved_region,
+        cluster=selected,
+    )
+    try:
+        context = write_eks_kubeconfig(
+            env=env,
+            region=resolved_region,
+            cluster_name=selected,
+            kubeconfig_path=str(kubeconfig),
+        )
+    except AwsClientError as exc:
+        raise CloudInstanceComputeError(str(exc)) from exc
+
+    if not _kubeconfig_api_tcp_ok(kubeconfig, timeout_seconds=8.0):
+        server = _kubeconfig_server(kubeconfig) or "unknown"
+        raise CloudInstanceComputeError(
+            f"Cannot reach EKS API for cluster '{selected}' ({server}). "
+            "Confirm the cluster endpoint is public and this host can reach it, "
+            "or create/use an EKS cluster with a public endpoint. "
+            "Local kind/k3d is not used for AWS Kubernetes deploys."
+        )
+
+    context = context or (
+        _kube_context_from_config(kubeconfig)
+        or f"arn:aws:eks:{resolved_region}:{account_id or 'account'}:cluster/{selected}"
+    )
+    logger.info(
+        "cloud_kubernetes_target_ready",
+        provider="aws",
+        cluster=selected,
+        location=resolved_region,
+        context=context,
+        created=created,
+        kubeconfig=str(kubeconfig),
+    )
+    return CloudKubernetesTarget(
+        provider=CloudProvider.AWS.value,
+        cluster_name=selected,
+        region=resolved_region,
+        kubeconfig_path=str(kubeconfig),
+        context=context,
+        created=created,
+    )
 
 
 def _ensure_gke_target(

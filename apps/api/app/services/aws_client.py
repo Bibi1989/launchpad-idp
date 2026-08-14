@@ -904,3 +904,472 @@ def _instance_ids_from_response(resp: dict[str, Any]) -> list[str]:
             if iid:
                 ids.append(iid)
     return ids
+
+
+# --------------------------------------------------------------------------- #
+# EKS (boto3 - no aws CLI / eksctl on the worker host)
+# --------------------------------------------------------------------------- #
+
+_EKS_CLUSTER_ROLE_NAME = "launchpad-eks-cluster-role"
+_EKS_NODE_ROLE_NAME = "launchpad-eks-node-role"
+_EKS_CLUSTER_POLICIES = (
+    "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSComputePolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy",
+)
+_EKS_NODE_POLICIES = (
+    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy",
+    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly",
+)
+
+
+def sts_account_id(*, env: dict[str, str], region: str) -> str | None:
+    try:
+        sts = _client(env, "sts", region=region)
+        resp = sts.get_caller_identity()
+        account = str(resp.get("Account") or "").strip()
+        return account or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("aws_sts_account_failed", error=sanitize_log_message(str(exc)[:200]))
+        return None
+
+
+def list_eks_cluster_names(*, env: dict[str, str], region: str) -> list[str]:
+    try:
+        eks = _client(env, "eks", region=region)
+        names: list[str] = []
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {}
+            if token:
+                kwargs["nextToken"] = token
+            resp = eks.list_clusters(**kwargs)
+            for name in resp.get("clusters") or []:
+                if str(name).strip():
+                    names.append(str(name).strip())
+            token = resp.get("nextToken")
+            if not token:
+                break
+        return names
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "list EKS clusters") from exc
+
+
+def eks_cluster_status(*, env: dict[str, str], region: str, name: str) -> str | None:
+    try:
+        eks = _client(env, "eks", region=region)
+        resp = eks.describe_cluster(name=name)
+        status = str((resp.get("cluster") or {}).get("status") or "").strip().upper()
+        return status or None
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"ResourceNotFoundException", "ResourceNotFound"}:
+            return None
+        raise _wrap_aws_error(exc, "describe EKS cluster") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "describe EKS cluster") from exc
+
+
+def wait_eks_cluster_active(
+    *,
+    env: dict[str, str],
+    region: str,
+    name: str,
+    timeout_seconds: float = 1200.0,
+) -> None:
+    import time
+
+    deadline = time.time() + max(timeout_seconds, 30.0)
+    last = "UNKNOWN"
+    while time.time() < deadline:
+        last = eks_cluster_status(env=env, region=region, name=name) or "UNKNOWN"
+        if last == "ACTIVE":
+            return
+        if last in {"FAILED", "DELETING"}:
+            raise AwsClientError(
+                f"EKS cluster '{name}' entered {last} while waiting to become ACTIVE."
+            )
+        time.sleep(15.0)
+    raise AwsClientError(
+        f"Timed out waiting for EKS cluster '{name}' to become ACTIVE (last status={last})."
+    )
+
+
+def ensure_eks_preview_subnets(*, env: dict[str, str], region: str) -> list[str]:
+    """Return at least two subnet ids in different AZs for EKS (create VPC if needed)."""
+    try:
+        ec2 = _client(env, "ec2", region=region)
+        discovered = _discover_multi_az_public_subnets(ec2)
+        if discovered and len(discovered) >= 2:
+            return discovered[:4]
+        return _create_eks_preview_vpc(ec2, region=region)
+    except AwsClientError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "resolve EKS subnets") from exc
+
+
+def _discover_multi_az_public_subnets(ec2: Any) -> list[str]:
+    subnets = ec2.describe_subnets().get("Subnets") or []
+    public = [s for s in subnets if s.get("MapPublicIpOnLaunch")]
+    by_az: dict[str, str] = {}
+    for subnet in public or subnets:
+        az = str(subnet.get("AvailabilityZone") or "").strip()
+        sid = str(subnet.get("SubnetId") or "").strip()
+        if az and sid and az not in by_az:
+            by_az[az] = sid
+        if len(by_az) >= 2:
+            break
+    return list(by_az.values())
+
+
+def _create_eks_preview_vpc(ec2: Any, *, region: str) -> list[str]:
+    """Create a small dual-AZ public VPC dedicated to Launchpad EKS previews."""
+    azs = ec2.describe_availability_zones(
+        Filters=[{"Name": "region-name", "Values": [region]}, {"Name": "state", "Values": ["available"]}]
+    ).get("AvailabilityZones") or []
+    zone_names = [str(z.get("ZoneName") or "").strip() for z in azs if z.get("ZoneName")]
+    if len(zone_names) < 2:
+        raise AwsClientError(
+            f"Region {region} needs at least two availability zones to create an EKS cluster."
+        )
+    vpc = ec2.create_vpc(
+        CidrBlock="10.50.0.0/16",
+        TagSpecifications=[
+            {"ResourceType": "vpc", "Tags": [{"Key": "Name", "Value": "launchpad-eks-previews"}]}
+        ],
+    )
+    vpc_id = str(vpc.get("Vpc", {}).get("VpcId") or "").strip()
+    if not vpc_id:
+        raise AwsClientError("create_vpc returned empty VpcId for EKS")
+    ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsSupport={"Value": True})
+    ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
+    igw = ec2.create_internet_gateway(
+        TagSpecifications=[
+            {
+                "ResourceType": "internet-gateway",
+                "Tags": [{"Key": "Name", "Value": "launchpad-eks-previews-igw"}],
+            }
+        ]
+    )
+    igw_id = str(igw.get("InternetGateway", {}).get("InternetGatewayId") or "").strip()
+    ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+    subnet_ids: list[str] = []
+    cidrs = ("10.50.0.0/20", "10.50.16.0/20")
+    for idx, az in enumerate(zone_names[:2]):
+        subnet = ec2.create_subnet(
+            VpcId=vpc_id,
+            CidrBlock=cidrs[idx],
+            AvailabilityZone=az,
+            TagSpecifications=[
+                {
+                    "ResourceType": "subnet",
+                    "Tags": [{"Key": "Name", "Value": f"launchpad-eks-previews-{az}"}],
+                }
+            ],
+        )
+        sid = str(subnet.get("Subnet", {}).get("SubnetId") or "").strip()
+        if not sid:
+            raise AwsClientError("create_subnet returned empty SubnetId for EKS")
+        ec2.modify_subnet_attribute(SubnetId=sid, MapPublicIpOnLaunch={"Value": True})
+        # EKS / ELB discovery tags for public subnets.
+        ec2.create_tags(
+            Resources=[sid],
+            Tags=[
+                {"Key": "kubernetes.io/role/elb", "Value": "1"},
+                {"Key": "kubernetes.io/cluster/launchpad-previews", "Value": "shared"},
+            ],
+        )
+        subnet_ids.append(sid)
+    routes = ec2.describe_route_tables(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]).get(
+        "RouteTables"
+    ) or []
+    rtb_id = str((routes[0] if routes else {}).get("RouteTableId") or "").strip()
+    if not rtb_id:
+        raise AwsClientError("EKS VPC has no route table")
+    ec2.create_route(RouteTableId=rtb_id, DestinationCidrBlock="0.0.0.0/0", GatewayId=igw_id)
+    for sid in subnet_ids:
+        ec2.associate_route_table(RouteTableId=rtb_id, SubnetId=sid)
+    logger.info("aws_eks_preview_vpc_created", vpc_id=vpc_id, subnet_ids=subnet_ids, region=region)
+    return subnet_ids
+
+
+def _ensure_iam_role(
+    *,
+    env: dict[str, str],
+    region: str,
+    role_name: str,
+    trust_service: str,
+    policy_arns: tuple[str, ...],
+) -> str:
+    iam = _client(env, "iam", region=region)
+    trust = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": trust_service},
+                "Action": "sts:AssumeRole",
+            }
+        ],
+    }
+    import json
+
+    try:
+        existing = iam.get_role(RoleName=role_name)
+        role_arn = str((existing.get("Role") or {}).get("Arn") or "").strip()
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in {"NoSuchEntity", "NoSuchEntityException"}:
+            raise _wrap_aws_error(exc, f"get IAM role {role_name}") from exc
+        created = iam.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(trust),
+            Description="Launchpad EKS Auto Mode role",
+            Tags=[{"Key": "ManagedBy", "Value": "launchpad"}],
+        )
+        role_arn = str((created.get("Role") or {}).get("Arn") or "").strip()
+    if not role_arn:
+        raise AwsClientError(f"IAM role {role_name} has an empty ARN")
+    for policy in policy_arns:
+        try:
+            iam.attach_role_policy(RoleName=role_name, PolicyArn=policy)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in {"EntityAlreadyExists", "LimitExceeded"}:
+                # Already attached is fine; other errors should surface.
+                msg = str(exc.response.get("Error", {}).get("Message") or "")
+                if "already" not in msg.lower():
+                    raise _wrap_aws_error(exc, f"attach {policy} to {role_name}") from exc
+    return role_arn
+
+
+def ensure_eks_auto_roles(*, env: dict[str, str], region: str) -> tuple[str, str]:
+    """Return (cluster_role_arn, node_role_arn) for EKS Auto Mode."""
+    cluster_arn = _ensure_iam_role(
+        env=env,
+        region=region,
+        role_name=_EKS_CLUSTER_ROLE_NAME,
+        trust_service="eks.amazonaws.com",
+        policy_arns=_EKS_CLUSTER_POLICIES,
+    )
+    node_arn = _ensure_iam_role(
+        env=env,
+        region=region,
+        role_name=_EKS_NODE_ROLE_NAME,
+        trust_service="ec2.amazonaws.com",
+        policy_arns=_EKS_NODE_POLICIES,
+    )
+    return cluster_arn, node_arn
+
+
+def create_eks_auto_cluster(
+    *,
+    env: dict[str, str],
+    region: str,
+    name: str,
+    subnet_ids: list[str],
+    cluster_role_arn: str,
+    node_role_arn: str,
+) -> None:
+    """Create an EKS Auto Mode cluster via the EKS API (no eksctl)."""
+    import time
+
+    if len(subnet_ids) < 2:
+        raise AwsClientError("EKS requires at least two subnet ids in different AZs")
+    eks = _client(env, "eks", region=region)
+    logger.info("eks_auto_create_start", cluster=name, region=region)
+    try:
+        eks.create_cluster(
+            name=name,
+            version="1.31",
+            roleArn=cluster_role_arn,
+            resourcesVpcConfig={
+                "subnetIds": subnet_ids,
+                "endpointPublicAccess": True,
+                "endpointPrivateAccess": True,
+                "publicAccessCidrs": ["0.0.0.0/0"],
+            },
+            accessConfig={"authenticationMode": "API_AND_CONFIG_MAP"},
+            computeConfig={
+                "enabled": True,
+                "nodePools": ["general-purpose", "system"],
+                "nodeRoleArn": node_role_arn,
+            },
+            kubernetesNetworkConfig={"elasticLoadBalancing": {"enabled": True}},
+            storageConfig={"blockStorage": {"enabled": True}},
+            tags={"ManagedBy": "launchpad", "Name": name},
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        msg = str(exc.response.get("Error", {}).get("Message") or "")
+        if code in {"ResourceInUseException", "ResourceInUse"} or "already exists" in msg.lower():
+            return
+        raise _wrap_aws_error(exc, "create EKS Auto Mode cluster") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "create EKS Auto Mode cluster") from exc
+    # IAM role propagation can race; wait briefly then poll ACTIVE.
+    time.sleep(5.0)
+    wait_eks_cluster_active(env=env, region=region, name=name, timeout_seconds=1500.0)
+
+
+def eks_bearer_token(*, env: dict[str, str], region: str, cluster_name: str) -> str:
+    """Build a short-lived EKS auth token (same format as ``aws eks get-token``)."""
+    import base64
+    from botocore.signers import RequestSigner
+
+    session = session_from_env(env, region=region)
+    credentials = session.get_credentials()
+    if credentials is None:
+        raise AwsClientError("AWS credentials are missing for EKS token generation")
+    frozen = credentials.get_frozen_credentials()
+    # STS regional endpoint signing for GetCallerIdentity (EKS auth protocol).
+    sts = session.client("sts", region_name=region)
+    signer = RequestSigner(
+        sts.meta.service_model.service_id,
+        region,
+        "sts",
+        "v4",
+        credentials,
+        session.events,
+    )
+    params = {
+        "method": "GET",
+        "url": f"https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
+        "body": {},
+        "headers": {"x-k8s-aws-id": cluster_name},
+        "context": {},
+    }
+    signed_url = signer.generate_presigned_url(
+        params,
+        region_name=region,
+        expires_in=60,
+        operation_name="",
+    )
+    # Token format: k8s-aws-v1. + base64url(signed_url) without padding.
+    encoded = base64.urlsafe_b64encode(signed_url.encode("utf-8")).decode("utf-8").rstrip("=")
+    _ = frozen  # ensure credentials resolved
+    return f"k8s-aws-v1.{encoded}"
+
+
+def write_eks_kubeconfig(
+    *,
+    env: dict[str, str],
+    region: str,
+    cluster_name: str,
+    kubeconfig_path: str,
+) -> str:
+    """Write a kubeconfig that authenticates via Launchpad's Python EKS token helper."""
+    import json
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    eks = _client(env, "eks", region=region)
+    try:
+        described = eks.describe_cluster(name=cluster_name)
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "describe EKS cluster for kubeconfig") from exc
+    cluster = described.get("cluster") or {}
+    endpoint = str(cluster.get("endpoint") or "").strip()
+    ca = str((cluster.get("certificateAuthority") or {}).get("data") or "").strip()
+    arn = str(cluster.get("arn") or "").strip()
+    if not endpoint or not ca:
+        raise AwsClientError(f"EKS cluster '{cluster_name}' is missing endpoint or CA data")
+    context_name = arn or f"arn:aws:eks:{region}:account:cluster/{cluster_name}"
+
+    path = Path(kubeconfig_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    creds_path = path.with_suffix(path.suffix + ".awscreds")
+    access = (env.get("AWS_ACCESS_KEY_ID") or "").strip()
+    secret = (env.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+    token = (env.get("AWS_SESSION_TOKEN") or "").strip()
+    if not (access and secret):
+        raise AwsClientError(
+            "AWS access keys are required to write an EKS kubeconfig. "
+            "Save access keys in Settings (or Connect AWS SSO), then retry."
+        )
+    creds_lines = [
+        "[default]",
+        f"aws_access_key_id = {access}",
+        f"aws_secret_access_key = {secret}",
+    ]
+    if token:
+        creds_lines.append(f"aws_session_token = {token}")
+    creds_path.write_text("\n".join(creds_lines) + "\n", encoding="utf-8")
+    try:
+        creds_path.chmod(0o600)
+    except OSError:
+        pass
+
+    # exec plugin uses Launchpad's Python module so aws CLI is not required.
+    api_root = str(Path(__file__).resolve().parents[2])
+    exec_env = [
+        {"name": "AWS_SHARED_CREDENTIALS_FILE", "value": str(creds_path)},
+        {"name": "AWS_DEFAULT_REGION", "value": region},
+        {"name": "AWS_REGION", "value": region},
+        {"name": "AWS_CONFIG_FILE", "value": str(creds_path.with_suffix(".awsconfig"))},
+        {"name": "PYTHONPATH", "value": api_root},
+        {"name": "PYTHONUNBUFFERED", "value": "1"},
+    ]
+    creds_path.with_suffix(".awsconfig").write_text(
+        f"[default]\nregion = {region}\n", encoding="utf-8"
+    )
+
+    config = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [
+            {
+                "name": context_name,
+                "cluster": {
+                    "server": endpoint,
+                    "certificate-authority-data": ca,
+                },
+            }
+        ],
+        "contexts": [
+            {
+                "name": context_name,
+                "context": {"cluster": context_name, "user": context_name},
+            }
+        ],
+        "current-context": context_name,
+        "users": [
+            {
+                "name": context_name,
+                "user": {
+                    "exec": {
+                        "apiVersion": "client.authentication.k8s.io/v1beta1",
+                        "command": sys.executable,
+                        "args": [
+                            "-m",
+                            "app.services.eks_token",
+                            "--cluster-name",
+                            cluster_name,
+                            "--region",
+                            region,
+                        ],
+                        "env": exec_env,
+                        "provideClusterInfo": False,
+                    }
+                },
+            }
+        ],
+    }
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    logger.info(
+        "eks_kubeconfig_written",
+        cluster=cluster_name,
+        region=region,
+        path=str(path),
+        meta=json.dumps({"auth": "launchpad-eks-token"}),
+    )
+    return context_name
