@@ -7,8 +7,27 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app
 
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      curl \
+      unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 (EC2 VM provisioning / ECR from the control-plane worker)
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64) AWS_ARCH=x86_64 ;; \
+      aarch64|arm64) AWS_ARCH=aarch64 ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/awscliv2.zip \
+      "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip"; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/aws /tmp/awscliv2.zip; \
+    aws --version
 
 # Build context is the monorepo root so shared `pkg/` is available.
 COPY apps/api/pyproject.toml ./

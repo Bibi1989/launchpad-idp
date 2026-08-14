@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { formatCostSource, formatDuration, formatRelativeTime } from '../app/utils/formatters'
+import { COST_DISPLAY_SYMBOL, formatCostAmount, formatCostSource, formatDuration, formatRelativeTime } from '../app/utils/formatters'
+
+describe('formatCostAmount', () => {
+  it('formats numeric strings with default decimals', () => {
+    expect(formatCostAmount('1.2345')).toBe('1.23')
+    expect(COST_DISPLAY_SYMBOL).toBe('€')
+  })
+})
 
 describe('formatCostSource', () => {
   it('maps known sources to friendly labels', () => {

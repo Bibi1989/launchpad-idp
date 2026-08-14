@@ -898,6 +898,37 @@ def test_vm_ensure_host_packages_avoids_cloud_init_wait() -> None:
     assert "bash -euxo" not in wrapped
 
 
+def test_vm_ensure_host_packages_rhel_uses_dnf_not_apt() -> None:
+    from app.schemas.cloud import InstanceProcessStrategy
+    from app.services.attach_deploy import _vm_ensure_host_packages_script
+
+    script = _vm_ensure_host_packages_script(
+        strategy=InstanceProcessStrategy.PM2,
+        os_family="rhel",
+    )
+    assert "apt-get" not in script
+    assert "dnf install" in script or "sudo $PM install" in script
+    assert "rpm.nodesource.com" in script
+    assert "host packages already present; skipping package install" in script
+
+
+def test_native_bootstrap_aws_uses_rhel_packages() -> None:
+    from app.schemas.cloud import CloudProvider, InstanceProcessStrategy
+    from app.services.attach_deploy import _native_bootstrap_and_start
+
+    script = _native_bootstrap_and_start(
+        strategy=InstanceProcessStrategy.PM2,
+        app_dir="/opt/launchpad/app",
+        workdir_rel=".",
+        listen=8080,
+        unit="demo",
+        start_command="node index.js",
+        cloud_provider=CloudProvider.AWS.value,
+    )
+    assert "apt-get" not in script
+    assert "dnf install" in script or "sudo $PM install" in script
+
+
 def test_gcp_startup_marks_ready_after_docker() -> None:
     import inspect
 

@@ -33,7 +33,9 @@ export function applyPreferredCloudRegions(
   }
   if (targets.aws) {
     const current = (targets.aws.region || '').trim()
-    if (awsRegion && (overwrite || !current || current === DEFAULT_AWS_REGION)) {
+    // Ignore vault values that look like GCP regions (e.g. us-central1).
+    const awsLooksValid = /^[a-z]{2}-[a-z]+-\d+$/.test(awsRegion)
+    if (awsLooksValid && (overwrite || !current || current === DEFAULT_AWS_REGION)) {
       targets.aws.region = awsRegion
     }
   }

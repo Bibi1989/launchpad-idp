@@ -157,11 +157,11 @@ onUnmounted(() => {
           </div>
           <div class="min-w-0 overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
             <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.costToDate') }}</p>
-            <p class="mt-2 truncate font-mono text-lg text-[var(--lp-accent)]">${{ environment.cost_accrued }}</p>
+            <p class="mt-2 truncate font-mono text-lg text-[var(--lp-accent)]">{{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_accrued) }}</p>
           </div>
           <div class="min-w-0 overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-4">
             <p class="text-xs uppercase tracking-wide text-[var(--lp-muted)]">{{ t('preview.rate') }}</p>
-            <p class="mt-2 truncate font-mono text-lg">${{ environment.cost_estimate_hourly }}/hr</p>
+            <p class="mt-2 truncate font-mono text-lg">{{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_estimate_hourly, { decimals: 4 }) }}/hr</p>
           </div>
         </div>
 

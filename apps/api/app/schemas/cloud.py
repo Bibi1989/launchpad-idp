@@ -79,6 +79,13 @@ class KubernetesPackaging(str, Enum):
     KUSTOMIZE = "kustomize"
 
 
+class KubernetesImageSource(str, Enum):
+    """How Kubernetes previews resolve container images."""
+
+    EXTERNAL = "external"
+    BUILD_REGISTRY = "build_registry"
+
+
 class WorkspaceArtifactsMode(str, Enum):
     """Which artifact families Launchpad writes into a workspace."""
 
@@ -461,6 +468,8 @@ class KubernetesWorkloadOptions(BaseModel):
     network_policy: bool = False
     resource_quota: bool = False
     limit_range: bool = False
+    # Preview image strategy (external ref vs build and push to registry).
+    image_source: KubernetesImageSource = KubernetesImageSource.BUILD_REGISTRY
 
     @model_validator(mode="after")
     def ingress_nginx_requires_ingress(self) -> KubernetesWorkloadOptions:
@@ -520,6 +529,8 @@ class LocalCloudConfig(BaseModel):
 class GcpResources(BaseModel):
     vpc: bool = True
     subnets: bool = True
+    # When set, attach to this existing VPC network instead of creating one.
+    existing_vpc_id: str | None = Field(default=None, max_length=128)
     network_topology: NetworkTopology = NetworkTopology.SIMPLE
     gke: bool = False
     artifact_registry: bool = False
@@ -550,6 +561,10 @@ class GcpResources(BaseModel):
 class AwsResources(BaseModel):
     vpc: bool = True
     subnets: bool = True
+    # When set, launch into this existing VPC instead of creating one.
+    existing_vpc_id: str | None = Field(default=None, max_length=128)
+    # When set, attach this existing security group instead of creating lp-preview-sg.
+    existing_security_group_id: str | None = Field(default=None, max_length=128)
     network_topology: NetworkTopology = NetworkTopology.SIMPLE
     ec2: bool = False
     s3: bool = False
@@ -965,6 +980,8 @@ class IaCBundleSummary(BaseModel):
     status: str | None = None
     created_at: datetime | None = None
     starred: bool = False
+    project_id: UUID | None = None
+    project_name: str | None = None
 
 
 class WorkspaceWizardConfig(BaseModel):
@@ -1063,6 +1080,8 @@ class WorkspaceListItem(BaseModel):
     root_dir: str
     starred: bool = False
     project_id: UUID | None = None
+    project_name: str | None = None
+    runtime_mode: WorkspaceRuntimeMode | None = None
 
 
 class WorkspaceStarRequest(BaseModel):

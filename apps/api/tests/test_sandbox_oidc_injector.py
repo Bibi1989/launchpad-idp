@@ -277,7 +277,28 @@ def test_credentials_to_env_wif_strips_static_sa_key(monkeypatch: pytest.MonkeyP
     assert "GCP_WIF_POOL_ID" not in env
 
 
-def test_credentials_to_env_aws_role_strips_access_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_credentials_to_env_aws_role_alone_injects_web_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_key_manager()
+    monkeypatch.setattr(
+        "app.core.secrets.get_settings",
+        lambda: type("S", (), {"launchpad_oidc_issuer_url": "https://oidc.launchpad.test"})(),
+    )
+    env = credentials_to_env(
+        {
+            "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/Launchpad",
+        },
+        workspace_id="ws-aws-oidc",
+    )
+    assert env["AWS_ROLE_ARN"] == "arn:aws:iam::123456789012:role/Launchpad"
+    assert "AWS_WEB_IDENTITY_TOKEN_FILE" in env
+    assert Path(env["AWS_WEB_IDENTITY_TOKEN_FILE"]).is_file()
+
+
+def test_credentials_to_env_aws_keys_win_over_role_arn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reset_key_manager()
     monkeypatch.setattr(
         "app.core.secrets.get_settings",
@@ -289,13 +310,33 @@ def test_credentials_to_env_aws_role_strips_access_keys(monkeypatch: pytest.Monk
             "AWS_SECRET_ACCESS_KEY": "secret",
             "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/Launchpad",
         },
-        workspace_id="ws-aws-oidc",
+        workspace_id="ws-aws-keys-prefer",
     )
-    assert "AWS_ACCESS_KEY_ID" not in env
-    assert "AWS_SECRET_ACCESS_KEY" not in env
-    assert env["AWS_ROLE_ARN"] == "arn:aws:iam::123456789012:role/Launchpad"
-    assert "AWS_WEB_IDENTITY_TOKEN_FILE" in env
-    assert Path(env["AWS_WEB_IDENTITY_TOKEN_FILE"]).is_file()
+    assert env["AWS_ACCESS_KEY_ID"] == "AKIAEXAMPLE"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "secret"
+    assert "AWS_ROLE_ARN" not in env
+    assert "AWS_WEB_IDENTITY_TOKEN_FILE" not in env
+
+
+def test_credentials_to_env_ignores_invalid_aws_role_arn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_key_manager()
+    monkeypatch.setattr(
+        "app.core.secrets.get_settings",
+        lambda: type("S", (), {"launchpad_oidc_issuer_url": "https://oidc.launchpad.test"})(),
+    )
+    env = credentials_to_env(
+        {
+            "AWS_ACCESS_KEY_ID": "AKIAEXAMPLE",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "AWS_ROLE_ARN": "AdministratorAccess",
+        },
+        workspace_id="ws-aws-bad-arn",
+    )
+    assert env["AWS_ACCESS_KEY_ID"] == "AKIAEXAMPLE"
+    assert "AWS_ROLE_ARN" not in env
+    assert "AWS_WEB_IDENTITY_TOKEN_FILE" not in env
 
 
 def test_has_gcp_and_aws_auth_helpers() -> None:
@@ -316,7 +357,7 @@ def test_has_gcp_and_aws_auth_helpers() -> None:
     assert has_aws_auth(
         CloudCredentials(aws_access_key_id="AKIA", aws_secret_access_key="secret")
     )
-    assert has_aws_auth(CloudCredentials(aws_role_arn="arn:aws:iam::1:role/x"))
+    assert has_aws_auth(CloudCredentials(aws_role_arn="arn:aws:iam::123456789012:role/x"))
 
 
 def test_preview_launch_accepts_gcp_wif() -> None:

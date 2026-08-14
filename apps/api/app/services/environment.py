@@ -281,16 +281,19 @@ class EnvironmentService:
                 cloud_accrued += read.cost_accrued
 
         cap = self._settings.preview_soft_cost_cap
+        from app.services.cost_metering import convert_display_cost
+
+        cap_display = convert_display_cost(cap, settings=self._settings)
         total = (cloud_accrued + local_accrued).quantize(Decimal("0.0001"))
         return OrgCostSummary(
             org_id=ctx.org_id,
-            soft_cost_cap=cap,
+            soft_cost_cap=cap_display,
             active_count=active_count,
             cloud_environment_count=cloud_environment_count,
             cloud_accrued=cloud_accrued.quantize(Decimal("0.0001")),
             local_accrued=local_accrued.quantize(Decimal("0.0001")),
             total_accrued=total,
-            soft_cost_cap_exceeded=cloud_accrued >= cap and cloud_environment_count > 0,
+            soft_cost_cap_exceeded=cloud_accrued >= cap_display and cloud_environment_count > 0,
             environments=items,
         )
 
@@ -442,6 +445,11 @@ class EnvironmentService:
             deploy_mode=payload.deploy_mode,
             enable_postgres=payload.enable_postgres,
             enable_redis=payload.enable_redis,
+            kubernetes_image_source=(
+                payload.kubernetes_image_source.value
+                if payload.kubernetes_image_source is not None
+                else None
+            ),
         )
         result = await self.enqueue_provision(
             create_payload,
@@ -608,6 +616,7 @@ class EnvironmentService:
             environment.github_pr_url = payload.github_pr_url
             environment.deploy_mode = deploy_mode.value
             environment.manifest_packaging = manifest_packaging
+            environment.kubernetes_image_source = payload.kubernetes_image_source
             environment.enable_postgres = payload.enable_postgres
             environment.enable_redis = payload.enable_redis
             environment.ttl_expires_at = ttl_expires_at
@@ -642,6 +651,7 @@ class EnvironmentService:
                 github_pr_url=payload.github_pr_url,
                 deploy_mode=deploy_mode.value,
                 manifest_packaging=manifest_packaging,
+                kubernetes_image_source=payload.kubernetes_image_source,
                 enable_postgres=payload.enable_postgres,
                 enable_redis=payload.enable_redis,
             )
@@ -744,15 +754,30 @@ class EnvironmentService:
 
         # Soft cost: refuse extend on cloud when accrued already over cap.
         if (environment.provider or "local") != "local":
-            read = self._to_read(environment)
-            if read.cost_accrued >= self._settings.preview_soft_cost_cap:
+            from app.services.cost_metering import convert_display_cost, display_cost_accrued
+
+            accrued_usd = display_cost_accrued(
+                cost_accrued=environment.cost_accrued or Decimal("0.0000"),
+                cost_estimate_hourly=environment.cost_estimate_hourly,
+                cost_sampled_at=environment.cost_sampled_at,
+                created_at=environment.created_at,
+                status=environment.status,
+            )
+            cap_display = convert_display_cost(
+                self._settings.preview_soft_cost_cap,
+                settings=self._settings,
+            )
+            accrued_display = convert_display_cost(accrued_usd, settings=self._settings)
+            if accrued_display >= cap_display:
+                currency = (self._settings.cost_display_currency or "USD").strip().upper()
+                symbol = "€" if currency == "EUR" else "$"
                 raise HTTPException(
                     status_code=status.HTTP_402_PAYMENT_REQUIRED,
                     detail={
                         "code": "soft_cost_cap_exceeded",
                         "message": (
-                            f"Cost to date (${read.cost_accrued}) meets soft cap "
-                            f"(${self._settings.preview_soft_cost_cap}). Destroy or wait."
+                            f"Cost to date ({symbol}{accrued_display}) meets soft cap "
+                            f"({symbol}{cap_display}). Destroy or wait."
                         ),
                     },
                 )
@@ -844,6 +869,8 @@ class EnvironmentService:
                 region=payload.region,
                 create_vpc=payload.create_vpc,
                 create_subnets=payload.create_subnets,
+                existing_vpc_id=payload.existing_vpc_id,
+                existing_security_group_id=payload.existing_security_group_id,
                 project_id=source.project_id,
             )
         elif retarget and source.workspace_id is None:
@@ -894,6 +921,8 @@ class EnvironmentService:
                 region=payload.region,
                 create_vpc=payload.create_vpc,
                 create_subnets=payload.create_subnets,
+                existing_vpc_id=payload.existing_vpc_id,
+                existing_security_group_id=payload.existing_security_group_id,
             )
             bundle = await provisioning.generate_bundle(
                 bundle_req,
@@ -1558,6 +1587,8 @@ class EnvironmentService:
         if payload.cost_estimate_hourly is not None and payload.cost_estimate_hourly == 0:
             return
 
+        from app.services.cost_metering import display_cost_accrued
+
         rows = await self._environments.list_for_owner(owner.id)
         total = Decimal("0.0000")
         for row in rows:
@@ -1568,19 +1599,32 @@ class EnvironmentService:
                 continue
             if (row.provider or "local") == "local":
                 continue
-            total += self._to_read(row).cost_accrued
+            total += display_cost_accrued(
+                cost_accrued=row.cost_accrued or Decimal("0.0000"),
+                cost_estimate_hourly=row.cost_estimate_hourly,
+                cost_sampled_at=row.cost_sampled_at,
+                created_at=row.created_at,
+                status=row.status,
+            )
 
         cap = self._settings.preview_soft_cost_cap
         if total >= cap:
+            from app.services.cost_metering import convert_display_cost
+
+            cap_display = convert_display_cost(cap, settings=self._settings)
+            total_display = convert_display_cost(total, settings=self._settings)
+            currency = (self._settings.cost_display_currency or "USD").strip().upper()
+            symbol = "€" if currency == "EUR" else "$"
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail={
                     "code": "soft_cost_cap_exceeded",
                     "message": (
-                        f"Active cloud preview cost (${total}) meets soft cap (${cap}). "
-                        "Destroy environments or raise PREVIEW_SOFT_COST_CAP."
+                        f"Active cloud preview cost ({symbol}{total_display}) meets soft cap "
+                        f"({symbol}{cap_display}). Destroy environments or raise "
+                        "PREVIEW_SOFT_COST_CAP."
                     ),
-                    "details": {"accrued": str(total), "cap": str(cap)},
+                    "details": {"accrued": str(total_display), "cap": str(cap_display)},
                 },
             )
 
@@ -1591,6 +1635,8 @@ class EnvironmentService:
         concurrent_active_count: int | None = None,
     ) -> EnvironmentRead:
         read = EnvironmentRead.model_validate(environment)
+        from app.services.cost_metering import convert_display_cost
+
         base = self._settings.preview_public_base_url.rstrip("/")
         read.portal_url = f"{base}/p/{environment.id}"
         if environment.github_pr_number is not None:
@@ -1613,7 +1659,12 @@ class EnvironmentService:
             and environment.status == EnvironmentStatus.RUNNING
         )
         read.soft_cost_cap_exceeded = (
-            not read.is_local and read.cost_accrued >= self._settings.preview_soft_cost_cap
+            not read.is_local
+            and read.cost_accrued
+            >= convert_display_cost(
+                self._settings.preview_soft_cost_cap,
+                settings=self._settings,
+            )
         )
         read.max_concurrent_environments = self._settings.max_concurrent_environments
         read.concurrent_active_count = concurrent_active_count

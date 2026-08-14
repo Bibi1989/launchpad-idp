@@ -104,12 +104,16 @@ def cloud_config_for_promote(
     region: str | None = None,
     create_vpc: bool = False,
     create_subnets: bool = False,
+    existing_vpc_id: str | None = None,
+    existing_security_group_id: str | None = None,
 ) -> CloudConfig:
     """Cloud workspace stub for ephemeral previews (VM or serverless)."""
     resolved_region = (region or "").strip() or default_region(provider)
-    want_vpc = bool(create_vpc or create_subnets)
+    existing = (existing_vpc_id or "").strip() or None
+    existing_sg = (existing_security_group_id or "").strip() or None
+    want_vpc = bool(create_vpc or create_subnets) and not existing
     want_subnets = bool(create_subnets) if want_vpc else False
-    if create_subnets:
+    if create_subnets and not existing:
         want_vpc = True
         want_subnets = True
     if provider == CloudProvider.GCP:
@@ -121,6 +125,7 @@ def cloud_config_for_promote(
                 project_id=project_id,
                 vpc=want_vpc,
                 subnets=want_subnets,
+                existing_vpc_id=existing,
                 gke=False,
                 cloud_run=serverless,
                 artifact_registry=True,
@@ -134,6 +139,8 @@ def cloud_config_for_promote(
             resources=AwsResources(
                 vpc=want_vpc,
                 subnets=want_subnets,
+                existing_vpc_id=existing,
+                existing_security_group_id=existing_sg,
                 eks=False,
                 ec2=not serverless,
                 app_runner=serverless,
@@ -240,6 +247,8 @@ def build_cloud_promote_wizard_request(
     region: str | None = None,
     create_vpc: bool = False,
     create_subnets: bool = False,
+    existing_vpc_id: str | None = None,
+    existing_security_group_id: str | None = None,
 ) -> ProvisioningWizardRequest:
     target_kind = promote_runtime_target(source)
     cloud = cloud_config_for_promote(
@@ -249,6 +258,8 @@ def build_cloud_promote_wizard_request(
         region=region,
         create_vpc=create_vpc,
         create_subnets=create_subnets,
+        existing_vpc_id=existing_vpc_id,
+        existing_security_group_id=existing_security_group_id,
     )
     services = list(source.container_scaffold.services or [])
     services = apply_primary_service_selection(services, primary_service)

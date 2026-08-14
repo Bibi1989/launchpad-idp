@@ -221,6 +221,7 @@ class EnvironmentRepository:
         github_pr_url: str | None = None,
         deploy_mode: str = "preview",
         manifest_packaging: str | None = None,
+        kubernetes_image_source: str | None = None,
         enable_postgres: bool = False,
         enable_redis: bool = False,
     ) -> Environment:
@@ -245,6 +246,7 @@ class EnvironmentRepository:
             github_pr_url=github_pr_url,
             deploy_mode=deploy_mode,
             manifest_packaging=manifest_packaging,
+            kubernetes_image_source=kubernetes_image_source,
             enable_postgres=enable_postgres,
             enable_redis=enable_redis,
         )

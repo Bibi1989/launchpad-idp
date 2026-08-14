@@ -64,8 +64,8 @@ class Settings(BaseSettings):
     max_concurrent_environments_pro: int | None = None
     preview_soft_cost_cap: Decimal = Decimal("25.00")
     ttl_extend_hours_default: int = 1
-    # Warn when remaining TTL is at or below this many hours (must be < max TTL).
-    ttl_warning_hours: int = 1
+    # Warn when remaining TTL is at or below this many hours (0.5 = 30 minutes).
+    ttl_warning_hours: float = 0.5
     # Total TTL hard cap from create (TTL extension cannot push past this).
     ttl_max_total_hours_from_create: int = 2
 
@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     cost_rate_memory_gib_hour: Decimal = Decimal("0.0042")
     cost_rate_postgres_hour: Decimal = Decimal("0.0800")
     cost_rate_redis_hour: Decimal = Decimal("0.0400")
+    # Display currency for API responses (internal metering stays USD).
+    cost_display_currency: str = "EUR"
+    cost_usd_to_eur_rate: Decimal = Decimal("0.92")
 
     # Preview drift scanner (live K8s vs control-plane expectations)
     drift_scan_enabled: bool = True

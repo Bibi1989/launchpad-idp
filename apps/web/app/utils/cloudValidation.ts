@@ -175,6 +175,8 @@ export const defaultCostOptimization = (): z.infer<typeof costOptimizationSchema
   },
 })
 
+export const kubernetesImageSourceSchema = z.enum(['external', 'build_registry'])
+
 export const kubernetesWorkloadOptionsSchema = z
   .object({
     deployment: z.boolean().default(true),
@@ -199,6 +201,7 @@ export const kubernetesWorkloadOptionsSchema = z
     network_policy: z.boolean().default(false),
     resource_quota: z.boolean().default(false),
     limit_range: z.boolean().default(false),
+    image_source: kubernetesImageSourceSchema.default('build_registry'),
   })
   .superRefine((value, ctx) => {
     if (value.install_ingress_nginx && !value.ingress) {
@@ -271,6 +274,7 @@ export const defaultKubernetesWorkloadOptions = (): z.infer<
   network_policy: false,
   resource_quota: false,
   limit_range: false,
+  image_source: 'build_registry',
 })
 
 export const networkTopologySchema = z.enum(['simple', 'standard'])
@@ -283,6 +287,7 @@ export const lambdaRuntimeSchema = z.enum(['nodejs20.x', 'python3.12', 'provided
 export const gcpResourcesSchema = z.object({
   vpc: z.boolean().default(true),
   subnets: z.boolean().default(true),
+  existing_vpc_id: z.string().max(128).nullable().optional(),
   network_topology: networkTopologySchema.default('simple'),
   gke: z.boolean().default(false),
   artifact_registry: z.boolean().default(false),
@@ -317,6 +322,8 @@ export const gcpResourcesSchema = z.object({
 export const awsResourcesSchema = z.object({
   vpc: z.boolean().default(true),
   subnets: z.boolean().default(true),
+  existing_vpc_id: z.string().max(128).nullable().optional(),
+  existing_security_group_id: z.string().max(128).nullable().optional(),
   network_topology: networkTopologySchema.default('simple'),
   ec2: z.boolean().default(false),
   s3: z.boolean().default(false),

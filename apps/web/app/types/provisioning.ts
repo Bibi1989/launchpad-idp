@@ -36,6 +36,7 @@ export interface AnsibleConfig {
   vault_password_file?: string | null
 }
 export type KubernetesPackaging = 'none' | 'raw_manifests' | 'helm' | 'kustomize'
+export type KubernetesImageSource = 'external' | 'build_registry'
 export type WorkspaceArtifactsMode = 'iac_only' | 'manifest_only' | 'both'
 export type WorkspaceRuntimeMode = 'kubernetes' | 'docker_compose' | 'running_instance'
 export type RunningInstanceKind = 'serverless' | 'vm' | 'local_machine'
@@ -191,6 +192,7 @@ export interface KubernetesWorkloadOptions {
   network_policy: boolean
   resource_quota: boolean
   limit_range: boolean
+  image_source: KubernetesImageSource
 }
 
 export type DependencyPlacement = 'in_cluster' | 'managed' | 'external'
@@ -244,6 +246,8 @@ export interface IaCBundleSummary {
   status?: string | null
   created_at?: string | null
   starred?: boolean
+  project_id?: string | null
+  project_name?: string | null
 }
 
 export interface WorkspaceListItem {
@@ -257,6 +261,8 @@ export interface WorkspaceListItem {
   root_dir: string
   starred: boolean
   project_id?: string | null
+  project_name?: string | null
+  runtime_mode?: WorkspaceRuntimeMode | null
 }
 
 export interface WorkspaceWizardConfig {

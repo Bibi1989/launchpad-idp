@@ -8,10 +8,14 @@ import {
   secondaryPreviewEndpoints,
 } from '~/utils/previewEndpoints'
 import { recommendPrimaryService } from '~/utils/cloudPromote'
+import { resolveCloudPromoteDeployTargets } from '~/utils/cloudPromoteDeployTargets'
+import type { WorkspaceRuntimeMode } from '~/types/provisioning'
 import type { ContainerServiceSpec } from '~/types/provisioning'
 import {
   defaultRegionForProvider,
   regionsForProvider,
+  coerceRegionForProvider,
+  isRegionForProvider,
 } from '~/utils/cloudRegions'
 import { emptyCloudCredentials } from '~/utils/cloudValidation'
 import {
@@ -25,10 +29,12 @@ function preferredRegionForProvider(
   status: UserCloudCredentialsStatus | null | undefined,
 ): string | null {
   if (!status) return null
-  if (provider === 'gcp') return (status.gcp_region || '').trim() || null
-  if (provider === 'aws') return (status.aws_region || '').trim() || null
-  if (provider === 'azure') return (status.azure_location || '').trim() || null
-  return null
+  let raw: string | null = null
+  if (provider === 'gcp') raw = (status.gcp_region || '').trim() || null
+  else if (provider === 'aws') raw = (status.aws_region || '').trim() || null
+  else if (provider === 'azure') raw = (status.azure_location || '').trim() || null
+  if (!raw) return null
+  return isRegionForProvider(provider, raw) ? raw : null
 }
 
 type CloudProvider = Exclude<PreviewLaunchPayload['provider'], 'local'>
@@ -78,7 +84,7 @@ const audits = ref<AuditLogEntry[]>([])
 const auditsLoading = ref(false)
 const actionsMenuOpen = ref(false)
 
-const { getStatus: getUserCloudCredentialsStatus } = useUserCloudCredentials()
+const { getStatus: getUserCloudCredentialsStatus, listNetworks, listSecurityGroups } = useUserCloudCredentials()
 const storedCredentialsStatus = ref<UserCloudCredentialsStatus | null>(null)
 const storedCredentialsLoading = ref(false)
 const useStoredCredentials = ref(false)
@@ -89,15 +95,40 @@ const promoteForm = reactive({
   provider: 'gcp' as CloudProvider,
   code_source: 'ssh' as 'ssh' | 'github',
   region: defaultRegionForProvider('gcp'),
+  network_mode: 'existing' as 'existing' | 'create' | 'default',
+  existing_vpc_id: '' as string,
+  security_group_mode: 'auto' as 'auto' | 'existing',
+  existing_security_group_id: '' as string,
   create_vpc: false,
   create_subnets: false,
 })
+
+type CloudNetworkOption = {
+  id: string
+  name: string
+  cidr?: string | null
+  is_default?: boolean
+}
+const promoteNetworks = ref<CloudNetworkOption[]>([])
+const promoteNetworksLoading = ref(false)
+const promoteNetworksError = ref<string | null>(null)
+
+type CloudSecurityGroupOption = {
+  id: string
+  name: string
+  vpc_id?: string | null
+  description?: string | null
+}
+const promoteSecurityGroups = ref<CloudSecurityGroupOption[]>([])
+const promoteSecurityGroupsLoading = ref(false)
+const promoteSecurityGroupsError = ref<string | null>(null)
 
 const promoteServices = ref<ContainerServiceSpec[]>([])
 const promotePrimaryService = ref<string | null>(null)
 const promoteServicesLoading = ref(false)
 const promoteServicesError = ref<string | null>(null)
 const promoteProcessStrategy = ref<string>('docker')
+const promoteRuntimeMode = ref<WorkspaceRuntimeMode>('kubernetes')
 
 const promoteRecommendedService = computed(() => recommendPrimaryService(promoteServices.value))
 const showPromoteServicePicker = computed(() => promoteServices.value.length > 1)
@@ -110,10 +141,31 @@ const showPromoteNetworking = computed(
   () => promoteForm.provider === 'gcp' || promoteForm.provider === 'aws' || promoteForm.provider === 'azure',
 )
 
+const promoteDeployTargets = computed(() => {
+  const vpc = promoteNetworks.value.find((n) => n.id === promoteForm.existing_vpc_id)
+  const sg = promoteSecurityGroups.value.find((s) => s.id === promoteForm.existing_security_group_id)
+  return resolveCloudPromoteDeployTargets({
+    provider: promoteForm.provider,
+    runtimeMode: promoteRuntimeMode.value,
+    region: promoteForm.region,
+    networkMode: promoteForm.network_mode,
+    createSubnets: promoteForm.create_subnets,
+    existingVpcId: promoteForm.existing_vpc_id,
+    existingVpcLabel: vpc ? `${vpc.name}${vpc.cidr ? ` (${vpc.cidr})` : ''}` : null,
+    securityGroupMode: promoteForm.security_group_mode,
+    existingSecurityGroupId: promoteForm.existing_security_group_id,
+    existingSecurityGroupLabel: sg ? `${sg.name} (${sg.id})` : null,
+    processStrategy: promoteProcessStrategy.value,
+  })
+})
+
 watch(
   () => promoteForm.create_subnets,
   (on) => {
-    if (on) promoteForm.create_vpc = true
+    if (on) {
+      promoteForm.create_vpc = true
+      promoteForm.network_mode = 'create'
+    }
   },
 )
 
@@ -121,6 +173,102 @@ watch(
   () => promoteForm.create_vpc,
   (on) => {
     if (!on) promoteForm.create_subnets = false
+  },
+)
+
+watch(
+  () => promoteForm.network_mode,
+  (mode) => {
+    if (mode === 'create') {
+      promoteForm.create_vpc = true
+      promoteForm.existing_vpc_id = ''
+    } else if (mode === 'existing') {
+      promoteForm.create_vpc = false
+      promoteForm.create_subnets = false
+    } else {
+      promoteForm.create_vpc = false
+      promoteForm.create_subnets = false
+      promoteForm.existing_vpc_id = ''
+    }
+  },
+)
+
+async function loadPromoteNetworks() {
+  promoteNetworksError.value = null
+  promoteNetworks.value = []
+  if (!showPromoteNetworking.value) return
+  if (promoteForm.provider === 'azure') return
+  const hasCreds =
+    useStoredCredentials.value && hasStoredCredsForProvider(promoteForm.provider)
+  if (!hasCreds && !useStoredCredentials.value) {
+    // Still try vault if user has stored creds even when checkbox off for paste mode
+  }
+  promoteNetworksLoading.value = true
+  try {
+    const region = coerceRegionForProvider(promoteForm.provider, promoteForm.region)
+    if (region !== promoteForm.region) {
+      promoteForm.region = region
+    }
+    const result = await listNetworks({
+      provider: promoteForm.provider,
+      region,
+    })
+    promoteNetworks.value = result.networks || []
+    if (
+      promoteForm.network_mode === 'existing'
+      && !promoteForm.existing_vpc_id
+      && promoteNetworks.value.length
+    ) {
+      const preferred =
+        promoteNetworks.value.find((n) => n.is_default) || promoteNetworks.value[0]
+      promoteForm.existing_vpc_id = preferred.id
+    }
+    if (!promoteNetworks.value.length && promoteForm.network_mode === 'existing') {
+      promoteForm.network_mode = 'create'
+      promoteForm.create_vpc = true
+    }
+  } catch (err) {
+    promoteNetworksError.value = err instanceof Error ? err.message : t('common.failed')
+  } finally {
+    promoteNetworksLoading.value = false
+  }
+}
+
+async function loadPromoteSecurityGroups() {
+  promoteSecurityGroupsError.value = null
+  promoteSecurityGroups.value = []
+  if (promoteForm.provider !== 'aws') return
+  promoteSecurityGroupsLoading.value = true
+  try {
+    const region = coerceRegionForProvider(promoteForm.provider, promoteForm.region)
+    const vpcId =
+      promoteForm.network_mode === 'existing' && promoteForm.existing_vpc_id
+        ? promoteForm.existing_vpc_id
+        : null
+    const result = await listSecurityGroups({
+      provider: 'aws',
+      region,
+      vpc_id: vpcId,
+    })
+    promoteSecurityGroups.value = result.security_groups || []
+    if (
+      promoteForm.security_group_mode === 'existing'
+      && !promoteForm.existing_security_group_id
+      && promoteSecurityGroups.value.length
+    ) {
+      promoteForm.existing_security_group_id = promoteSecurityGroups.value[0].id
+    }
+  } catch (err) {
+    promoteSecurityGroupsError.value = err instanceof Error ? err.message : t('common.failed')
+  } finally {
+    promoteSecurityGroupsLoading.value = false
+  }
+}
+
+watch(
+  () => [promoteForm.provider, promoteForm.region, useStoredCredentials.value, storedCredentialsStatus.value] as const,
+  () => {
+    void loadPromoteNetworks()
   },
 )
 
@@ -138,16 +286,15 @@ async function loadPromoteServices() {
     promoteServices.value = services
     promotePrimaryService.value = recommendPrimaryService(services)
     promoteProcessStrategy.value = config.running_instance?.process_strategy || 'docker'
+    promoteRuntimeMode.value = config.runtime_mode || 'kubernetes'
     promoteForm.code_source = (config.running_instance?.code_source as 'ssh' | 'github') || 'ssh'
     const fromConfig = (config.running_instance?.region || '').trim()
     const fromVault = preferredRegionForProvider(promoteForm.provider, storedCredentialsStatus.value)
-    if (fromConfig) {
-      promoteForm.region = fromConfig
-    } else if (fromVault) {
-      promoteForm.region = fromVault
-    } else {
-      promoteForm.region = defaultRegionForProvider(promoteForm.provider)
-    }
+    promoteForm.region = coerceRegionForProvider(
+      promoteForm.provider,
+      fromConfig,
+      fromVault,
+    )
   } catch (err) {
     promoteServicesError.value = err instanceof Error ? err.message : t('common.failed')
   } finally {
@@ -211,16 +358,33 @@ watch(
 )
 
 watch(
+  () => [
+    promoteForm.provider,
+    promoteForm.region,
+    promoteForm.network_mode,
+    promoteForm.existing_vpc_id,
+    promoteForm.security_group_mode,
+  ] as const,
+  () => {
+    if (promoteForm.provider === 'aws' && promoteForm.security_group_mode === 'existing') {
+      void loadPromoteSecurityGroups()
+    } else {
+      promoteSecurityGroups.value = []
+      promoteSecurityGroupsError.value = null
+    }
+  },
+)
+
+watch(
   () => promoteForm.provider,
   (provider) => {
-    if (!showPromote.value) return
-    const options = regionsForProvider(provider)
-    const preferred = preferredRegionForProvider(provider, storedCredentialsStatus.value)
-    if (options.length && !options.some((o) => o.value === promoteForm.region)) {
-      promoteForm.region = preferred || defaultRegionForProvider(provider)
-    } else if (preferred && promoteForm.region === defaultRegionForProvider(provider)) {
-      promoteForm.region = preferred
+    if (provider !== 'aws') {
+      promoteForm.security_group_mode = 'auto'
+      promoteForm.existing_security_group_id = ''
     }
+    if (!showPromote.value) return
+    const preferred = preferredRegionForProvider(provider, storedCredentialsStatus.value)
+    promoteForm.region = coerceRegionForProvider(provider, promoteForm.region, preferred)
     // Switching providers should reset the "use stored" toggle only when the
     // user hasn't typed creds yet.
     if (promoteCredentialsEmpty() && hasStoredCredsForProvider(promoteForm.provider)) {
@@ -503,8 +667,26 @@ const promoteAction = define(
     primary_service: promotePrimaryService.value ?? promoteRecommendedService.value,
     code_source: showPromoteCodeSource.value ? promoteForm.code_source : null,
     region: showPromoteRegion.value ? promoteForm.region : null,
-    create_vpc: showPromoteNetworking.value ? promoteForm.create_vpc : false,
-    create_subnets: showPromoteNetworking.value ? promoteForm.create_subnets : false,
+    create_vpc:
+      showPromoteNetworking.value && promoteForm.network_mode === 'create'
+        ? true
+        : false,
+    create_subnets:
+      showPromoteNetworking.value && promoteForm.network_mode === 'create'
+        ? promoteForm.create_subnets
+        : false,
+    existing_vpc_id:
+      showPromoteNetworking.value
+      && promoteForm.network_mode === 'existing'
+      && promoteForm.existing_vpc_id
+        ? promoteForm.existing_vpc_id
+        : null,
+    existing_security_group_id:
+      promoteForm.provider === 'aws'
+      && promoteForm.security_group_mode === 'existing'
+      && promoteForm.existing_security_group_id
+        ? promoteForm.existing_security_group_id
+        : null,
   }),
   {
     success: () => ({ title: t('environments.detail.launchCloudPreview'), message: t('environments.detail.deployingToCloud', { provider: promoteForm.provider.toUpperCase() }) }),
@@ -963,6 +1145,10 @@ onUnmounted(() => {
               {{ p }}
             </button>
           </div>
+          <CloudPromoteDeployTargets
+            :targets="promoteDeployTargets"
+            :provider="promoteForm.provider"
+          />
           <label
             v-if="showPromoteRegion"
             class="block max-w-md space-y-2"
@@ -989,22 +1175,148 @@ onUnmounted(() => {
             class="max-w-md space-y-3 rounded-xl border border-[var(--lp-line)] p-3"
           >
             <p class="lp-label">{{ t('environments.detail.promoteNetworking') }}</p>
-            <label class="flex items-start gap-3 text-sm">
-              <input v-model="promoteForm.create_vpc" type="checkbox" class="mt-1 h-4 w-4 accent-[var(--lp-accent)]">
-              <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteCreateVpc') }}</span>
-            </label>
-            <label class="flex items-start gap-3 text-sm">
+            <div class="space-y-2 text-sm">
+              <label class="flex items-start gap-3">
+                <input
+                  v-model="promoteForm.network_mode"
+                  type="radio"
+                  value="existing"
+                  class="mt-1 accent-[var(--lp-accent)]"
+                >
+                <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteUseExistingVpc') }}</span>
+              </label>
+              <label class="flex items-start gap-3">
+                <input
+                  v-model="promoteForm.network_mode"
+                  type="radio"
+                  value="create"
+                  class="mt-1 accent-[var(--lp-accent)]"
+                >
+                <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteCreateVpc') }}</span>
+              </label>
+              <label class="flex items-start gap-3">
+                <input
+                  v-model="promoteForm.network_mode"
+                  type="radio"
+                  value="default"
+                  class="mt-1 accent-[var(--lp-accent)]"
+                >
+                <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteDefaultNetwork') }}</span>
+              </label>
+            </div>
+
+            <div v-if="promoteForm.network_mode === 'existing'" class="space-y-2">
+              <label class="block space-y-1">
+                <span class="lp-label">{{ t('environments.detail.promoteSelectVpc') }}</span>
+                <select
+                  v-model="promoteForm.existing_vpc_id"
+                  class="lp-input"
+                  :disabled="promoteNetworksLoading || !promoteNetworks.length"
+                >
+                  <option value="" disabled>
+                    {{ promoteNetworksLoading ? t('common.loading') : t('environments.detail.promoteSelectVpcPlaceholder') }}
+                  </option>
+                  <option
+                    v-for="net in promoteNetworks"
+                    :key="net.id"
+                    :value="net.id"
+                  >
+                    {{ net.name }}{{ net.cidr ? ` (${net.cidr})` : '' }}{{ net.is_default ? ' · default' : '' }}
+                  </option>
+                </select>
+              </label>
+              <p v-if="promoteNetworksError" class="text-xs text-[var(--lp-danger)]">{{ promoteNetworksError }}</p>
+              <p v-else-if="!promoteNetworksLoading && !promoteNetworks.length" class="text-xs text-[var(--lp-muted)]">
+                {{ t('environments.detail.promoteNoVpcs') }}
+              </p>
+              <button
+                type="button"
+                class="lp-btn-ghost text-xs uppercase tracking-wide"
+                :disabled="promoteNetworksLoading"
+                @click="loadPromoteNetworks"
+              >
+                {{ promoteNetworksLoading ? t('common.loading') : t('environments.detail.promoteRefreshVpcs') }}
+              </button>
+            </div>
+
+            <label
+              v-if="promoteForm.network_mode === 'create'"
+              class="flex items-start gap-3 text-sm"
+            >
               <input
                 v-model="promoteForm.create_subnets"
                 type="checkbox"
                 class="mt-1 h-4 w-4 accent-[var(--lp-accent)]"
-                :disabled="!promoteForm.create_vpc"
               >
               <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteCreateSubnets') }}</span>
             </label>
             <p class="text-xs text-[var(--lp-muted)]">
               {{ t('environments.detail.promoteNetworkingHint') }}
             </p>
+
+            <div
+              v-if="promoteForm.provider === 'aws'"
+              class="space-y-3 border-t border-[var(--lp-line)] pt-3"
+            >
+              <p class="lp-label">{{ t('environments.detail.promoteSecurityGroup') }}</p>
+              <div class="space-y-2 text-sm">
+                <label class="flex items-start gap-3">
+                  <input
+                    v-model="promoteForm.security_group_mode"
+                    type="radio"
+                    value="auto"
+                    class="mt-1 accent-[var(--lp-accent)]"
+                  >
+                  <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteCreateSecurityGroup') }}</span>
+                </label>
+                <label class="flex items-start gap-3">
+                  <input
+                    v-model="promoteForm.security_group_mode"
+                    type="radio"
+                    value="existing"
+                    class="mt-1 accent-[var(--lp-accent)]"
+                  >
+                  <span class="font-medium text-[var(--lp-text)]">{{ t('environments.detail.promoteUseExistingSecurityGroup') }}</span>
+                </label>
+              </div>
+
+              <div v-if="promoteForm.security_group_mode === 'existing'" class="space-y-2">
+                <label class="block space-y-1">
+                  <span class="lp-label">{{ t('environments.detail.promoteSelectSecurityGroup') }}</span>
+                  <select
+                    v-model="promoteForm.existing_security_group_id"
+                    class="lp-input"
+                    :disabled="promoteSecurityGroupsLoading || !promoteSecurityGroups.length"
+                  >
+                    <option value="" disabled>
+                      {{ promoteSecurityGroupsLoading ? t('common.loading') : t('environments.detail.promoteSelectSecurityGroupPlaceholder') }}
+                    </option>
+                    <option
+                      v-for="sg in promoteSecurityGroups"
+                      :key="sg.id"
+                      :value="sg.id"
+                    >
+                      {{ sg.name }} ({{ sg.id }}){{ sg.description ? ` - ${sg.description}` : '' }}
+                    </option>
+                  </select>
+                </label>
+                <p v-if="promoteSecurityGroupsError" class="text-xs text-[var(--lp-danger)]">{{ promoteSecurityGroupsError }}</p>
+                <p v-else-if="!promoteSecurityGroupsLoading && !promoteSecurityGroups.length" class="text-xs text-[var(--lp-muted)]">
+                  {{ t('environments.detail.promoteNoSecurityGroups') }}
+                </p>
+                <button
+                  type="button"
+                  class="lp-btn-ghost text-xs uppercase tracking-wide"
+                  :disabled="promoteSecurityGroupsLoading"
+                  @click="loadPromoteSecurityGroups"
+                >
+                  {{ promoteSecurityGroupsLoading ? t('common.loading') : t('environments.detail.promoteRefreshSecurityGroups') }}
+                </button>
+              </div>
+              <p class="text-xs text-[var(--lp-muted)]">
+                {{ t('environments.detail.promoteSecurityGroupHint') }}
+              </p>
+            </div>
           </div>
           <div
             v-if="hasStoredCredsForProvider(promoteForm.provider)"
@@ -1087,10 +1399,10 @@ onUnmounted(() => {
           <div v-if="!isLocal">
             <p class="lp-label">{{ t('environments.detail.costToDate') }}</p>
             <p class="mt-1 text-lg font-semibold text-[var(--lp-accent)]">
-              ${{ environment.cost_accrued ?? '0.00' }}
+              {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_accrued) }}
             </p>
             <p class="text-xs text-[var(--lp-muted)]">
-              ${{ environment.cost_estimate_hourly }}/hr
+              {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_estimate_hourly, { decimals: 4 }) }}/hr
               <span v-if="environment.cost_source" class="ml-1 opacity-80">
                 · {{ formatCostSource(environment.cost_source) }}
               </span>
@@ -1100,7 +1412,7 @@ onUnmounted(() => {
             <p class="lp-label">{{ t('environments.detail.costToDate') }}</p>
             <p class="mt-1 text-sm text-[var(--lp-muted)]">
               {{ t('environments.detail.localShadow') }}
-              <span class="font-mono"> ${{ environment.cost_accrued ?? '0.00' }}</span>
+              <span class="font-mono"> {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_accrued) }}</span>
               <span v-if="environment.cost_source" class="opacity-80">
                 · {{ formatCostSource(environment.cost_source) }}
               </span>

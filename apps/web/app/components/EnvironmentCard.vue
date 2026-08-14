@@ -264,9 +264,9 @@ function onCardKeydown(event: KeyboardEvent) {
             <p class="lp-label">
               {{ isLocal ? t('environments.detail.localShadow') : t('environments.detail.costToDate') }}
             </p>
-            <p class="font-mono text-sm">${{ costToDate }}</p>
+            <p class="font-mono text-sm">{{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(costToDate, { decimals: 4 }) }}</p>
             <p class="font-mono text-[10px] text-[var(--lp-muted)]">
-              ${{ environment.cost_estimate_hourly }}/hr
+              {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(environment.cost_estimate_hourly, { decimals: 4 }) }}/hr
               <span v-if="costSourceLabel" class="opacity-80"> · {{ costSourceLabel }}</span>
             </p>
           </div>

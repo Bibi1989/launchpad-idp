@@ -83,6 +83,7 @@ const form = reactive({
   ttl_unit: 'hours' as 'hours' | 'minutes',
   ttl_value: PREVIEW_TTL_DEFAULT_HOURS,
   workload_image: '',
+  kubernetes_image_source: 'build_registry' as 'external' | 'build_registry',
   workspace_id: null as string | null,
   git_repo_url: '',
   git_branch: 'main',
@@ -148,12 +149,21 @@ const workspaceHasManifests = computed(() => {
   )
 })
 
+const showKubernetesImageSource = computed(
+  () =>
+    usesWorkspaceSource.value
+    && (workspacePlan.value?.deploy_mode === 'manifest' || workspacePlan.value?.deploy_mode === 'preview'),
+)
+
 const showWorkloadImageInput = computed(() =>
   launchShowsWorkloadImageInput({
     usesWorkspaceSource: usesWorkspaceSource.value,
     buildsFromRepo: buildsFromRepo.value,
     workspaceHasManifests: workspaceHasManifests.value,
     deployMode: workspacePlan.value?.deploy_mode ?? null,
+    kubernetesImageSource: showKubernetesImageSource.value
+      ? form.kubernetes_image_source
+      : null,
   }),
 )
 
@@ -163,6 +173,9 @@ const requiresWorkloadImage = computed(() =>
     buildsFromRepo: buildsFromRepo.value,
     workspaceHasManifests: workspaceHasManifests.value,
     deployMode: workspacePlan.value?.deploy_mode ?? null,
+    kubernetesImageSource: showKubernetesImageSource.value
+      ? form.kubernetes_image_source
+      : null,
   }),
 )
 
@@ -617,6 +630,9 @@ async function launch() {
     if (form.workload_image.trim()) {
       payload.workload_image = form.workload_image.trim()
     }
+    if (showKubernetesImageSource.value) {
+      payload.kubernetes_image_source = form.kubernetes_image_source
+    }
     if (form.workspace_id) {
       payload.workspace_id = form.workspace_id
     } else if (form.git_repo_url.trim()) {
@@ -933,6 +949,12 @@ async function launch() {
             </select>
           </div>
         </label>
+        <KubernetesImageSourcePicker
+          v-if="showKubernetesImageSource"
+          v-model:source="form.kubernetes_image_source"
+          :cloud-provider="form.provider"
+          class="sm:col-span-2"
+        />
         <label v-if="showWorkloadImageInput" class="block space-y-2 sm:col-span-2">
           <span class="lp-label">{{ t('launch.containerImage') }}</span>
           <input
@@ -1151,6 +1173,11 @@ async function launch() {
           </select>
         </div>
       </label>
+      <KubernetesImageSourcePicker
+        v-if="showKubernetesImageSource"
+        v-model:source="form.kubernetes_image_source"
+        :cloud-provider="form.provider"
+      />
       <label
         v-if="showWorkloadImageInput"
         class="block space-y-2"

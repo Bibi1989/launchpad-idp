@@ -112,6 +112,11 @@ async function onSave() {
 }
 
 async function onClearProvider() {
+  if (!providers.value.find((p) => p.id === activeProvider.value)?.has()) return
+  const ok = window.confirm(
+    t('settings.removeKeysConfirm', { provider: activeProvider.value.toUpperCase() }),
+  )
+  if (!ok) return
   saving.value = true
   errorMessage.value = null
   successMessage.value = null
@@ -122,6 +127,8 @@ async function onClearProvider() {
       clear_azure: activeProvider.value === 'azure',
       clear_cloudflare: activeProvider.value === 'cloudflare',
     })
+    Object.assign(credentials, emptyCloudCredentials())
+    applyStatusPreferences(status.value)
     successMessage.value = t('settings.clearedProvider', { provider: activeProvider.value.toUpperCase() })
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('settings.errors.clear')
@@ -346,12 +353,22 @@ const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kind
         </button>
       </div>
 
-      <p v-if="status && providers.find((p) => p.id === activeProvider)?.has()" class="text-xs text-[var(--lp-muted)]">
-        {{ t('settings.stored') }}
-        <span class="font-mono text-[var(--lp-accent)]">
-          {{ providers.find((p) => p.id === activeProvider)?.hint() || t('settings.configured') }}
+      <p v-if="status && providers.find((p) => p.id === activeProvider)?.has()" class="flex flex-wrap items-center gap-3 text-xs text-[var(--lp-muted)]">
+        <span>
+          {{ t('settings.stored') }}
+          <span class="font-mono text-[var(--lp-accent)]">
+            {{ providers.find((p) => p.id === activeProvider)?.hint() || t('settings.configured') }}
+          </span>
+          - {{ t('settings.replaceHint') }}
         </span>
-        - {{ t('settings.replaceHint') }}
+        <button
+          type="button"
+          class="lp-btn-ghost text-xs uppercase tracking-wide text-[var(--lp-danger)]"
+          :disabled="saving || loading"
+          @click="onClearProvider"
+        >
+          {{ t('settings.clearProviderNamed', { provider: activeProvider.toUpperCase() }) }}
+        </button>
       </p>
 
       <div
@@ -429,11 +446,11 @@ const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kind
         </button>
         <button
           type="button"
-          class="lp-btn-ghost text-xs uppercase tracking-wide"
+          class="lp-btn-ghost text-xs uppercase tracking-wide text-[var(--lp-danger)]"
           :disabled="saving || !providers.find((p) => p.id === activeProvider)?.has()"
           @click="onClearProvider"
         >
-          {{ t('settings.clearProvider', { provider: activeProvider.toUpperCase() }) }}
+          {{ t('settings.clearProviderNamed', { provider: activeProvider.toUpperCase() }) }}
         </button>
       </div>
 

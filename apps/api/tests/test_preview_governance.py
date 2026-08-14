@@ -61,7 +61,8 @@ def test_governance_settings_defaults() -> None:
     assert Settings.model_fields["max_concurrent_environments"].default in (6,)
     assert Settings.model_fields["max_concurrent_environments_pro"].default is None
     assert Settings.model_fields["ttl_extend_hours_default"].default == 1
-    assert Settings.model_fields["ttl_warning_hours"].default == 1
+    assert Settings.model_fields["ttl_warning_hours"].default == 0.5
+    assert Settings.model_fields["ttl_max_total_hours_from_create"].default == 2
     cap = Settings.model_fields["preview_soft_cost_cap"].default
     assert cap is not None and Decimal(str(cap)) > 0
 

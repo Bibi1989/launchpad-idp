@@ -200,6 +200,14 @@ def is_host_port_available(port: int, *, docker_ports: set[int] | None = None) -
     occupied = docker_ports if docker_ports is not None else list_docker_published_host_ports()
     if port in occupied:
         return False
+    # Catch dev servers bound to loopback that docker publish would still collide with.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.25)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return False
+    except OSError:
+        pass
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("0.0.0.0", port))
@@ -317,6 +325,7 @@ def remap_compose_publish_ports(
     data: dict[str, Any],
     *,
     extra_busy: set[int] | None = None,
+    primary_host_preference: int | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Assign free host ports (preferred, else next) and drop fixed container names."""
     services = data.get("services")
@@ -327,6 +336,7 @@ def remap_compose_publish_ports(
     if extra_busy:
         docker_ports |= set(extra_busy)
 
+    preview_names = _compose_preview_service_names_from_data(data)
     reserved: set[int] = set()
     notes: list[str] = []
     for service_name, service in services.items():
@@ -336,14 +346,21 @@ def remap_compose_publish_ports(
         ports = service.get("ports")
         if not isinstance(ports, list):
             continue
+        is_primary = service_name.lower() in preview_names or (
+            not preview_names and service_name == next(iter(services.keys()), "")
+        )
         rewritten: list[object] = []
         for entry in ports:
             preferred, container, host_ip, proto, long_form = _parse_publish_port_entry(entry)
             if preferred is None or container is None:
                 rewritten.append(entry)
                 continue
-            # Ephemeral publish (0:container) still starts search at the container port.
-            search_from = container if preferred == 0 else preferred
+            if is_primary and primary_host_preference is not None:
+                search_from = int(primary_host_preference)
+            elif preferred == 0:
+                search_from = container
+            else:
+                search_from = preferred
             chosen = next_available_host_port(
                 search_from,
                 reserved=reserved,
@@ -354,6 +371,11 @@ def remap_compose_publish_ports(
                 notes.append(
                     f"service '{service_name}': host port {search_from} in use, "
                     f"using {chosen} instead"
+                )
+            elif is_primary and primary_host_preference is not None and chosen != preferred:
+                notes.append(
+                    f"service '{service_name}': host port {preferred} remapped to {chosen} "
+                    f"(container {container})"
                 )
             rewritten.append(
                 _format_publish_port_entry(
@@ -368,10 +390,63 @@ def remap_compose_publish_ports(
     return data, notes
 
 
+def _compose_preview_service_names_from_data(data: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    services = data.get("services")
+    if not isinstance(services, dict):
+        return names
+    for raw in _compose_preview_service_names_from_services(services):
+        names.add(raw.lower())
+    return names
+
+
+def _compose_preview_service_names_from_services(services: dict[str, Any]) -> list[str]:
+    preview: list[str] = []
+    frontends: list[str] = []
+    others: list[str] = []
+    for name, spec in services.items():
+        svc_name = str(name)
+        if svc_name.lower() in _DATASTORE_SERVICE_NAMES:
+            continue
+        if not isinstance(spec, dict):
+            others.append(svc_name)
+            continue
+        meta = spec.get("x-launchpad") if isinstance(spec.get("x-launchpad"), dict) else {}
+        labels = spec.get("labels") or []
+        label_map: dict[str, str] = {}
+        if isinstance(labels, dict):
+            label_map = {str(k): str(v) for k, v in labels.items()}
+        elif isinstance(labels, list):
+            for item in labels:
+                if isinstance(item, str) and "=" in item:
+                    key, _, value = item.partition("=")
+                    label_map[key.strip()] = value.strip()
+        app_kind = str(
+            meta.get("app_kind")
+            or label_map.get("launchpad.io/app-kind")
+            or _infer_app_kind_from_name(svc_name)
+        ).lower()
+        preview_target = str(
+            meta.get("preview_target")
+            or label_map.get("launchpad.io/preview-target")
+            or ""
+        ).lower() in {"true", "1", "yes"}
+        if preview_target:
+            preview.append(svc_name)
+        elif app_kind == "frontend":
+            frontends.append(svc_name)
+        else:
+            others.append(svc_name)
+    ordered = preview + [n for n in frontends if n not in preview]
+    ordered.extend(n for n in others if n not in ordered)
+    return ordered
+
+
 def prepare_preview_compose(
     compose_file: Path,
     *,
     extra_busy: set[int] | None = None,
+    primary_host_preference: int | None = None,
 ) -> tuple[Path, list[str]]:
     """Write a preview compose file with conflict-free host port publishes.
 
@@ -396,7 +471,11 @@ def prepare_preview_compose(
     if not isinstance(prepared_src, dict):
         raise ComposeDeployError("Compose file must be a YAML mapping with services")
 
-    prepared, notes = remap_compose_publish_ports(prepared_src, extra_busy=extra_busy)
+    prepared, notes = remap_compose_publish_ports(
+        prepared_src,
+        extra_busy=extra_busy,
+        primary_host_preference=primary_host_preference,
+    )
     dest = compose_file.parent / PREVIEW_COMPOSE_FILENAME
     try:
         dest.write_text(
@@ -489,47 +568,7 @@ def _compose_preview_service_names(compose_file: Path) -> list[str]:
     services = raw.get("services")
     if not isinstance(services, dict):
         return []
-
-    preview: list[str] = []
-    frontends: list[str] = []
-    others: list[str] = []
-    for name, spec in services.items():
-        svc_name = str(name)
-        if svc_name.lower() in _DATASTORE_SERVICE_NAMES:
-            continue
-        if not isinstance(spec, dict):
-            others.append(svc_name)
-            continue
-        meta = spec.get("x-launchpad") if isinstance(spec.get("x-launchpad"), dict) else {}
-        labels = spec.get("labels") or []
-        label_map: dict[str, str] = {}
-        if isinstance(labels, dict):
-            label_map = {str(k): str(v) for k, v in labels.items()}
-        elif isinstance(labels, list):
-            for item in labels:
-                if isinstance(item, str) and "=" in item:
-                    key, _, value = item.partition("=")
-                    label_map[key.strip()] = value.strip()
-        app_kind = str(
-            meta.get("app_kind")
-            or label_map.get("launchpad.io/app-kind")
-            or _infer_app_kind_from_name(svc_name)
-        ).lower()
-        preview_target = str(
-            meta.get("preview_target")
-            or label_map.get("launchpad.io/preview-target")
-            or ""
-        ).lower() in {"true", "1", "yes"}
-        if preview_target:
-            preview.append(svc_name)
-        elif app_kind == "frontend":
-            frontends.append(svc_name)
-        else:
-            others.append(svc_name)
-    # Prefer explicit preview targets, then frontends, then other app services.
-    ordered = preview + [n for n in frontends if n not in preview]
-    ordered.extend(n for n in others if n not in ordered)
-    return ordered
+    return _compose_preview_service_names_from_services(services)
 
 
 def _row_service_name(row: dict[str, object]) -> str:
@@ -662,6 +701,7 @@ def deploy_compose(
     name: str,
     image: str | None = None,
     settings: Settings | None = None,
+    primary_host_preference: int | None = None,
 ) -> ProvisionedResources:
     """Bring up the workspace compose stack and return preview resources."""
     cfg = settings or get_settings()
@@ -707,6 +747,7 @@ def deploy_compose(
         preview_compose, port_notes = prepare_preview_compose(
             compose_file,
             extra_busy=extra_busy or None,
+            primary_host_preference=primary_host_preference,
         )
         for note in port_notes:
             if note not in all_notes:

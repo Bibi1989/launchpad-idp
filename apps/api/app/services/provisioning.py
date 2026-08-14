@@ -56,6 +56,7 @@ from app.schemas.cloud import (
     WorkspaceArtifactsMode,
     WorkspaceRuntimeMode,
     GcpApiEnablementResponse,
+    RunningInstanceConfig,
 )
 from app.services.github_service import GitHubProvisioningService
 from app.services.iac_generator import IaCGenerator
@@ -205,13 +206,15 @@ class ProvisioningService:
         self,
         credentials: CloudCredentials,
         owner: User,
+        *,
+        provider: str | None = None,
     ) -> CloudCredentials:
         """Fill blank cloud credential fields from the user's account vault.
 
         This is used for flows like "Deploy to cloud" where a workspace may have
         been created without storing encrypted cloud credentials yet.
         """
-        return await self._fill_from_account_vault(credentials, owner.id)
+        return await self._fill_from_account_vault(credentials, owner.id, provider=provider)
 
     async def list_workspaces(
         self,
@@ -244,7 +247,7 @@ class ProvisioningService:
                 stmt = stmt.where(ProvisioningWorkspace.starred_at.is_not(None))
             result = await self._session.execute(stmt)
             rows = list(result.scalars().all())
-            return [self._to_workspace_list_item(row) for row in rows]
+            return await self._workspace_list_items(rows)
 
         if org_id is not None:
             ctx = await orgs.resolve_context(user=owner, org_id=org_id)
@@ -293,9 +296,35 @@ class ProvisioningService:
                     .limit(100)
                 )
                 rows = list(result.scalars().all())
-        return [self._to_workspace_list_item(row) for row in rows]
+        return await self._workspace_list_items(rows)
 
-    def _to_workspace_list_item(self, row: ProvisioningWorkspace) -> WorkspaceListItem:
+    async def _workspace_list_items(
+        self,
+        rows: list[ProvisioningWorkspace],
+    ) -> list[WorkspaceListItem]:
+        from app.models.domain import Project
+
+        project_ids = {row.project_id for row in rows if row.project_id}
+        project_names: dict[UUID, str] = {}
+        if project_ids:
+            result = await self._session.execute(
+                select(Project.id, Project.name).where(Project.id.in_(project_ids))
+            )
+            project_names = {pid: name for pid, name in result.all()}
+        return [
+            self._to_workspace_list_item(
+                row,
+                project_name=project_names.get(row.project_id) if row.project_id else None,
+            )
+            for row in rows
+        ]
+
+    def _to_workspace_list_item(
+        self,
+        row: ProvisioningWorkspace,
+        *,
+        project_name: str | None = None,
+    ) -> WorkspaceListItem:
         return WorkspaceListItem(
             id=row.id,
             name=row.name,
@@ -307,6 +336,8 @@ class ProvisioningService:
             root_dir=row.root_dir,
             starred=row.starred_at is not None,
             project_id=row.project_id,
+            project_name=project_name,
+            runtime_mode=self.get_workspace_runtime_mode(row),
         )
 
     async def set_workspace_starred(
@@ -322,18 +353,13 @@ class ProvisioningService:
         row.starred_at = datetime.now(UTC) if starred else None
         await self._session.commit()
         await self._session.refresh(row)
-        return WorkspaceListItem(
-            id=row.id,
-            name=row.name,
-            engine=row.engine,
-            provider=row.provider,
-            status=row.status,
-            artifact_mode=self.get_workspace_artifact_mode(row),
-            created_at=row.created_at,
-            root_dir=row.root_dir,
-            starred=row.starred_at is not None,
-            project_id=row.project_id,
-        )
+        project_name: str | None = None
+        if row.project_id:
+            from app.models.domain import Project
+
+            project = await self._session.get(Project, row.project_id)
+            project_name = project.name if project else None
+        return self._to_workspace_list_item(row, project_name=project_name)
     async def get_workspace(self, workspace_id: UUID) -> ProvisioningWorkspace:
         row = await self._session.get(ProvisioningWorkspace, workspace_id)
         if row is None:
@@ -385,6 +411,12 @@ class ProvisioningService:
                 for p in root.rglob("*")
                 if p.is_file() and not ws_files.is_denied_workspace_path(p.relative_to(root))
             )
+        project_name: str | None = None
+        if row.project_id:
+            from app.models.domain import Project
+
+            project = await self._session.get(Project, row.project_id)
+            project_name = project.name if project else None
         return IaCBundleSummary(
             workspace_id=str(row.id),
             engine=IaCEngine(row.engine),
@@ -397,6 +429,8 @@ class ProvisioningService:
             status=row.status,
             created_at=row.created_at,
             starred=row.starred_at is not None,
+            project_id=row.project_id,
+            project_name=project_name,
         )
 
     @staticmethod
@@ -583,6 +617,8 @@ class ProvisioningService:
         region: str | None = None,
         create_vpc: bool = False,
         create_subnets: bool = False,
+        existing_vpc_id: str | None = None,
+        existing_security_group_id: str | None = None,
         project_id: UUID | None = None,
     ) -> UUID:
         """Copy a local workspace tree and re-target wizard config for cloud serverless."""
@@ -619,6 +655,8 @@ class ProvisioningService:
             region=region,
             create_vpc=create_vpc,
             create_subnets=create_subnets,
+            existing_vpc_id=existing_vpc_id,
+            existing_security_group_id=existing_security_group_id,
         )
         request = await self._with_account_credentials(request, owner)
         request = self._with_gcp_project_from_sa(request)
@@ -630,6 +668,7 @@ class ProvisioningService:
         if dest.exists():
             dest = settings_root / f"{workspace_name}-{new_id.hex[:8]}-cloud"
         shutil.copytree(source_root, dest, symlinks=False, ignore_dangling_symlinks=True)
+        self._iac.regenerate(dest, request)
 
         orgs = OrganizationService(self._session)
         resolved_org_id = org_id
@@ -688,6 +727,70 @@ class ProvisioningService:
             root_dir=str(dest),
         )
         return new_id
+
+    async def sync_workspace_after_cloud_deploy(
+        self,
+        workspace_id: UUID,
+        *,
+        running_instance: RunningInstanceConfig,
+    ) -> None:
+        """Refresh ansible + cloud IaC on disk after a successful cloud attach deploy."""
+        row = await self.get_workspace(workspace_id)
+        snapshot = self._load_wizard_snapshot(row)
+        if snapshot is None:
+            logger.warning(
+                "cloud_deploy_workspace_sync_skipped",
+                workspace_id=str(workspace_id),
+                reason="no_wizard_snapshot",
+            )
+            return
+        try:
+            config = WorkspaceWizardConfig.model_validate(
+                {**snapshot, "has_credentials": False}
+            )
+        except Exception:
+            logger.warning(
+                "cloud_deploy_workspace_sync_skipped",
+                workspace_id=str(workspace_id),
+                reason="invalid_wizard_snapshot",
+            )
+            return
+
+        credentials = CloudCredentials()
+        if row.encrypted_credentials:
+            try:
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(row.encrypted_credentials)
+                )
+            except Exception:
+                logger.warning(
+                    "cloud_deploy_workspace_sync_credentials_unreadable",
+                    workspace_id=str(workspace_id),
+                )
+
+        config = config.model_copy(update={"running_instance": running_instance})
+        request = self._request_from_wizard_config(config, credentials)
+        request = self._with_gcp_project_from_sa(request)
+        root = self._workspace_root(row)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "cloud_deploy_workspace_sync_path_failed",
+                workspace_id=str(workspace_id),
+                error=str(exc),
+            )
+            return
+
+        files = self._iac.regenerate(root, request)
+        row.wizard_config_json = self._wizard_config_json(request)
+        row.status = "ready"
+        logger.info(
+            "cloud_deploy_workspace_synced",
+            workspace_id=str(workspace_id),
+            host=running_instance.host,
+            file_count=len(files),
+        )
 
     @staticmethod
     def _promoted_name(base_name: str, suffix: str) -> str:
@@ -1002,7 +1105,11 @@ class ProvisioningService:
             ) from exc
 
         merged = self._merge_credentials(row.encrypted_credentials, request.credentials)
-        merged = await self._fill_from_account_vault(merged, owner.id)
+        merged = await self._fill_from_account_vault(
+            merged,
+            owner.id,
+            provider=request.cloud.provider.value,
+        )
         effective = request.model_copy(update={"credentials": merged})
         effective = self._with_gcp_project_from_sa(effective)
         files = self._iac.regenerate(workspace_path, effective)
@@ -1077,7 +1184,11 @@ class ProvisioningService:
         request: ProvisioningWizardRequest,
         owner: User,
     ) -> ProvisioningWizardRequest:
-        filled = await self._fill_from_account_vault(request.credentials, owner.id)
+        filled = await self._fill_from_account_vault(
+            request.credentials,
+            owner.id,
+            provider=request.cloud.provider.value,
+        )
         if filled == request.credentials:
             return request
         return request.model_copy(update={"credentials": filled})
@@ -1086,12 +1197,14 @@ class ProvisioningService:
         self,
         credentials: CloudCredentials,
         user_id: UUID,
+        *,
+        provider: str | None = None,
     ) -> CloudCredentials:
         """Merge account vault into workspace credentials.
 
         Service account / WIF keys are preferred. Connect OAuth and other vault
-        fields only fill blanks. gcp_project_id from the vault always overlays
-        so Settings can set the target project without replacing keys.
+        fields only fill blanks. When ``provider`` is set, only that cloud's
+        vault fields are merged so a GCP Connect token cannot poison AWS deploys.
         """
         from app.core.secrets import has_aws_auth, has_gcp_auth
         from app.services.user_credentials import UserCloudCredentialsService
@@ -1100,8 +1213,22 @@ class ProvisioningService:
         updates: dict[str, str | None] = {}
         data = credentials.model_dump()
         vault_data = vault.model_dump()
+        provider_norm = (provider or "").strip().lower()
 
-        if vault.gcp_project_id:
+        def _key_allowed(key: str) -> bool:
+            if not provider_norm or provider_norm == "local":
+                return True
+            if provider_norm == "gcp":
+                return key.startswith("gcp_")
+            if provider_norm == "aws":
+                return key.startswith("aws_")
+            if provider_norm == "azure":
+                return key.startswith("azure_")
+            if provider_norm == "cloudflare":
+                return key.startswith("cloudflare_")
+            return True
+
+        if vault.gcp_project_id and _key_allowed("gcp_project_id"):
             updates["gcp_project_id"] = vault.gcp_project_id
 
         gcp_ok = has_gcp_auth(credentials)
@@ -1118,6 +1245,8 @@ class ProvisioningService:
             if not value or not str(value).strip():
                 continue
             if key in updates:
+                continue
+            if not _key_allowed(key):
                 continue
             if key.startswith("gcp_") and gcp_ok:
                 continue
@@ -1248,6 +1377,61 @@ class ProvisioningService:
                     workspace_id=str(workspace_id),
                 )
 
+        if not was_local and destroy_images and row.encrypted_credentials:
+            try:
+                from app.services.cloud_instance_compute import (
+                    is_cloud_registry_image,
+                    teardown_cloud_registry_images,
+                )
+
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(row.encrypted_credentials)
+                )
+                region = "us-central1"
+                snapshot = self._load_wizard_snapshot(row)
+                if snapshot:
+                    try:
+                        wiz = WorkspaceWizardConfig.model_validate(
+                            {**snapshot, "has_credentials": False}
+                        )
+                        if wiz.running_instance.region:
+                            region = wiz.running_instance.region
+                    except Exception:
+                        pass
+                cloud_images = [
+                    img for img in destroy_images if is_cloud_registry_image(img)
+                ]
+                if env_rows:
+                    for env_row in env_rows:
+                        env_images = list(cloud_images)
+                        if env_row.workload_image and is_cloud_registry_image(
+                            env_row.workload_image
+                        ):
+                            if env_row.workload_image not in env_images:
+                                env_images.append(env_row.workload_image)
+                        await asyncio.to_thread(
+                            teardown_cloud_registry_images,
+                            env_images,
+                            cloud_provider=row.provider,
+                            credentials=credentials,
+                            region=region,
+                            environment_id=str(env_row.id),
+                        )
+                elif cloud_images:
+                    await asyncio.to_thread(
+                        teardown_cloud_registry_images,
+                        cloud_images,
+                        cloud_provider=row.provider,
+                        credentials=credentials,
+                        region=region,
+                        environment_id=None,
+                    )
+            except Exception:
+                logger.exception(
+                    "workspace_cloud_registry_cleanup_failed",
+                    workspace_id=str(workspace_id),
+                )
+
         self._iac.destroy_workspace(row.root_dir)
         await self._session.delete(row)
         await self._session.commit()
@@ -1330,7 +1514,11 @@ class ProvisioningService:
             credentials = CloudCredentials.model_validate_json(decrypt_secret(raw))
         else:
             credentials = CloudCredentials()
-        credentials = await self._fill_from_account_vault(credentials, owner.id)
+        credentials = await self._fill_from_account_vault(
+            credentials,
+            owner.id,
+            provider=workspace.provider,
+        )
 
         workspace_path = self._iac.get_workspace(workspace.root_dir)
 

@@ -71,8 +71,9 @@ async def _merge_attach_credentials_from_vault(
     *,
     attach_credentials: object | None,
     owner_id: UUID | None,
+    provider: str | None = None,
 ) -> object | None:
-    """Overlay Settings → Connect vault onto workspace creds (OAuth wins)."""
+    """Overlay Settings vault onto workspace creds for the active cloud provider."""
     if owner_id is None:
         return attach_credentials
     from app.schemas.cloud import CloudCredentials
@@ -85,6 +86,7 @@ async def _merge_attach_credentials_from_vault(
     return await ProvisioningService(session).fill_cloud_credentials_from_account_vault(
         base,
         owner_row,
+        provider=provider,
     )
 
 
@@ -109,11 +111,87 @@ def _wizard_network_flags(snapshot: dict | None) -> tuple[bool, bool]:
     resources = cloud.get("resources")
     if not isinstance(resources, dict):
         return False, False
+    if str(resources.get("existing_vpc_id") or "").strip():
+        return False, False
     create_vpc = bool(resources.get("vpc") or resources.get("vnet"))
     create_subnets = bool(resources.get("subnets"))
     if create_subnets:
         create_vpc = True
     return create_vpc, create_subnets
+
+
+def _wizard_existing_vpc_id(snapshot: dict | None) -> str | None:
+    if not isinstance(snapshot, dict):
+        return None
+    cloud = snapshot.get("cloud")
+    if not isinstance(cloud, dict):
+        return None
+    resources = cloud.get("resources")
+    if not isinstance(resources, dict):
+        return None
+    raw = resources.get("existing_vpc_id")
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
+
+
+def _wizard_existing_security_group_id(snapshot: dict | None) -> str | None:
+    if not isinstance(snapshot, dict):
+        return None
+    cloud = snapshot.get("cloud")
+    if not isinstance(cloud, dict):
+        return None
+    resources = cloud.get("resources")
+    if not isinstance(resources, dict):
+        return None
+    raw = resources.get("existing_security_group_id")
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
+
+
+def _wizard_kubernetes_image_source(snapshot: dict | None) -> str | None:
+    if not isinstance(snapshot, dict):
+        return None
+    opts = snapshot.get("kubernetes_options")
+    if isinstance(opts, dict):
+        raw = opts.get("image_source")
+        if raw is not None:
+            value = str(raw).strip()
+            if value:
+                return value
+    return None
+
+
+def _resolve_k8s_image_source(
+    environment: object,
+    snapshot: dict | None,
+) -> str:
+    from app.schemas.cloud import KubernetesImageSource
+
+    env_raw = getattr(environment, "kubernetes_image_source", None)
+    if env_raw:
+        return str(env_raw).strip().lower()
+    wizard = _wizard_kubernetes_image_source(snapshot)
+    if wizard:
+        return wizard.lower()
+    return KubernetesImageSource.BUILD_REGISTRY.value
+
+
+def _compose_primary_host_preference(snapshot: dict | None) -> int | None:
+    """Host publish port from wizard running_instance.listen_port (Compose previews)."""
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        from app.schemas.cloud import WorkspaceWizardConfig
+
+        wiz = WorkspaceWizardConfig.model_validate({**snapshot, "has_credentials": False})
+        port = int(wiz.running_instance.listen_port)
+    except Exception:
+        return None
+    return port if 1 <= port <= 65535 else None
 
 
 def _wizard_gcp_project_id(snapshot: dict | None) -> str | None:
@@ -131,6 +209,41 @@ def _wizard_gcp_project_id(snapshot: dict | None) -> str | None:
         return None
     value = str(raw).strip()
     return value or None
+
+
+async def _sync_workspace_after_cloud_deploy(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID | None,
+    resources: object,
+    cloud_provider: str | None,
+) -> None:
+    """Write ansible + cloud IaC into the linked workspace after cloud attach deploy."""
+    if workspace_id is None:
+        return
+    provider = (cloud_provider or "").strip().lower()
+    if provider in {"", "local"}:
+        return
+    raw = getattr(resources, "running_instance", None)
+    if raw is None:
+        return
+    from app.schemas.cloud import RunningInstanceConfig
+
+    if isinstance(raw, RunningInstanceConfig):
+        running_instance = raw
+    else:
+        try:
+            running_instance = RunningInstanceConfig.model_validate(raw)
+        except Exception:
+            return
+    if not (running_instance.host or "").strip():
+        return
+    from app.services.provisioning import ProvisioningService
+
+    await ProvisioningService(session).sync_workspace_after_cloud_deploy(
+        workspace_id,
+        running_instance=running_instance,
+    )
 
 
 async def _effective_deploy_mode(
@@ -817,6 +930,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
 
                     current_stage = ExecutionStage.APPLY
                     workspace_root: Path | None = None
+                    wizard_snapshot: dict | None = None
+                    manifest_credentials = None
                     if workspace_id is not None:
                         workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
                         if workspace_row is not None:
@@ -827,6 +942,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 from fastapi import HTTPException
 
                                 provisioning = ProvisioningService(session)
+                                wizard_snapshot = provisioning._load_wizard_snapshot(workspace_row)
                                 try:
                                     workspace_row = await provisioning._ensure_workspace_on_disk(
                                         workspace_row,
@@ -840,6 +956,58 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                         message = str(detail)
                                     raise RuntimeError(message) from exc
                             workspace_root = Path(workspace_row.root_dir)
+                            manifest_credentials = await _merge_attach_credentials_from_vault(
+                                session,
+                                attach_credentials=None,
+                                owner_id=environment.owner_id,
+                                provider=getattr(environment, "provider", None),
+                            )
+
+                    k8s_image_source = _resolve_k8s_image_source(environment, wizard_snapshot)
+                    cloud_provider = str(getattr(environment, "provider", None) or "local").lower()
+                    from app.schemas.cloud import CloudProvider, KubernetesImageSource
+                    from app.services.cloud_promote import default_region
+
+                    def _cloud_region_for_provider(provider: str, snapshot: dict | None) -> str:
+                        try:
+                            region = default_region(CloudProvider(provider))
+                        except ValueError:
+                            region = "us-central1"
+                        if isinstance(snapshot, dict):
+                            cloud = snapshot.get("cloud")
+                            if isinstance(cloud, dict):
+                                resources_cfg = cloud.get("resources")
+                                if isinstance(resources_cfg, dict):
+                                    region = str(
+                                        resources_cfg.get("region")
+                                        or resources_cfg.get("location")
+                                        or region
+                                    )
+                        return region
+
+                    if (
+                        deploy_mode == DeployMode.PREVIEW.value
+                        and workspace_root is not None
+                        and k8s_image_source == KubernetesImageSource.BUILD_REGISTRY.value
+                        and cloud_provider != CloudProvider.LOCAL.value
+                    ):
+                        from app.services.attach_deploy import resolve_instance_image
+
+                        try:
+                            region = _cloud_region_for_provider(cloud_provider, wizard_snapshot)
+                            deploy_image = resolve_instance_image(
+                                image=environment.workload_image,
+                                workspace_root=workspace_root,
+                                environment_id=str(environment.id),
+                                settings=settings,
+                                cloud_provider=cloud_provider,
+                                credentials=manifest_credentials,
+                                region=region,
+                            )
+                            environment.workload_image = deploy_image
+                            await session.commit()
+                        except Exception as exc:  # noqa: BLE001
+                            raise RuntimeError(str(exc)) from exc
 
                     if deploy_mode == DeployMode.MANIFEST.value and workspace_root is not None:
                         from app.services.manifest_deploy import workspace_has_helm_chart
@@ -849,14 +1017,24 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             if workspace_has_helm_chart(workspace_root)
                             else ""
                         )
+                        build_note = (
+                            "build+push to registry"
+                            if k8s_image_source == KubernetesImageSource.BUILD_REGISTRY.value
+                            else "external image"
+                        )
                         await _emit_stage(
                             log_repo,
                             session,
                             environment_id=env_uuid,
                             stage=ExecutionStage.APPLY,
-                            message=f"APPLY - deploying workspace Kubernetes manifests{helm_note}",
+                            message=(
+                                f"APPLY - deploying workspace Kubernetes manifests{helm_note} "
+                                f"({build_note})"
+                            ),
                             commit_sha=commit_sha,
                         )
+
+                        region = _cloud_region_for_provider(cloud_provider, wizard_snapshot)
 
                         deployer = ManifestDeployer(settings, provisioner)
                         resources = deployer.deploy(
@@ -869,6 +1047,10 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             ttl_expires_at=environment.ttl_expires_at.isoformat(),
                             owner_label=owner_label,
                             image=manifest_image_override,
+                            cloud_provider=cloud_provider,
+                            credentials=manifest_credentials,
+                            region=region,
+                            image_source=k8s_image_source,
                         )
                     elif deploy_mode == DeployMode.COMPOSE.value:
                         from app.services.compose_deploy import ComposeDeployError, deploy_compose
@@ -894,6 +1076,9 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 name=environment.name,
                                 image=deploy_image,
                                 settings=settings,
+                                primary_host_preference=_compose_primary_host_preference(
+                                    wizard_snapshot
+                                ),
                             )
                         except ComposeDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -916,6 +1101,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         wizard_cloud_provider: str | None = None
                         create_vpc = False
                         create_subnets = False
+                        existing_vpc_id: str | None = None
+                        existing_security_group_id: str | None = None
                         gcp_project_id: str | None = None
                         attach_org_slug = await _attach_org_slug(session, environment)
                         if workspace_id is not None:
@@ -932,6 +1119,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 snapshot = provisioning._load_wizard_snapshot(workspace_row)
                                 wizard_cloud_provider = _wizard_cloud_provider(snapshot)
                                 create_vpc, create_subnets = _wizard_network_flags(snapshot)
+                                existing_vpc_id = _wizard_existing_vpc_id(snapshot)
+                                existing_security_group_id = _wizard_existing_security_group_id(snapshot)
                                 gcp_project_id = _wizard_gcp_project_id(snapshot)
                                 if snapshot is not None:
                                     try:
@@ -961,6 +1150,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             session,
                             attach_credentials=attach_credentials,
                             owner_id=environment.owner_id,
+                            provider=attach_provider,
                         )
 
                         await _emit_stage(
@@ -1000,6 +1190,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 create_vpc=create_vpc,
                                 create_subnets=create_subnets,
                                 gcp_project_id=gcp_project_id,
+                                existing_vpc_id=existing_vpc_id,
+                                existing_security_group_id=existing_security_group_id,
                             )
                         except AttachDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -1156,6 +1348,13 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         commit_sha=commit_sha,
                         detail=resources.preview_url,
                     )
+                    if deploy_mode == DeployMode.ATTACH.value:
+                        await _sync_workspace_after_cloud_deploy(
+                            session,
+                            workspace_id=workspace_id,
+                            resources=resources,
+                            cloud_provider=attach_provider,
+                        )
                     await session.commit()
 
                     if environment.github_pr_number is not None:
@@ -1507,10 +1706,16 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                     deploy_mode = await _effective_deploy_mode(session, environment)
                     await session.commit()
                     workspace_root: Path | None = None
+                    rebuild_wizard_snapshot: dict | None = None
                     if workspace_id is not None:
+                        from app.services.provisioning import ProvisioningService
+
                         workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
                         if workspace_row is not None and workspace_row.root_dir:
                             workspace_root = Path(workspace_row.root_dir)
+                            rebuild_wizard_snapshot = ProvisioningService(session)._load_wizard_snapshot(
+                                workspace_row
+                            )
 
                     if deploy_mode == DeployMode.COMPOSE.value:
                         from app.services.compose_deploy import ComposeDeployError, deploy_compose
@@ -1536,6 +1741,9 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                 name=environment.name,
                                 image=rebuild_image,
                                 settings=settings,
+                                primary_host_preference=_compose_primary_host_preference(
+                                    rebuild_wizard_snapshot
+                                ),
                             )
                         except ComposeDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -1569,6 +1777,8 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         wizard_cloud_provider: str | None = None
                         create_vpc = False
                         create_subnets = False
+                        existing_vpc_id: str | None = None
+                        existing_security_group_id: str | None = None
                         gcp_project_id: str | None = None
                         attach_org_slug = await _attach_org_slug(session, environment)
                         if workspace_id is not None:
@@ -1585,6 +1795,8 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                 snapshot = provisioning._load_wizard_snapshot(workspace_row)
                                 wizard_cloud_provider = _wizard_cloud_provider(snapshot)
                                 create_vpc, create_subnets = _wizard_network_flags(snapshot)
+                                existing_vpc_id = _wizard_existing_vpc_id(snapshot)
+                                existing_security_group_id = _wizard_existing_security_group_id(snapshot)
                                 gcp_project_id = _wizard_gcp_project_id(snapshot)
                                 if snapshot is not None:
                                     try:
@@ -1611,6 +1823,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                             session,
                             attach_credentials=attach_credentials,
                             owner_id=environment.owner_id,
+                            provider=attach_provider,
                         )
 
                         await _emit_stage(
@@ -1652,6 +1865,8 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                 create_vpc=create_vpc,
                                 create_subnets=create_subnets,
                                 gcp_project_id=gcp_project_id,
+                                existing_vpc_id=existing_vpc_id,
+                                existing_security_group_id=existing_security_group_id,
                             )
                             from app.schemas.environment import dump_preview_endpoints
 
@@ -1672,6 +1887,12 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                     if rebuild_endpoints
                                     else None
                                 ),
+                            )
+                            await _sync_workspace_after_cloud_deploy(
+                                session,
+                                workspace_id=workspace_id,
+                                resources=rebuild_resources,
+                                cloud_provider=attach_provider,
                             )
                         except AttachDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -1993,6 +2214,7 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                 session,
                                 attach_credentials=attach_credentials,
                                 owner_id=owner_for_vault,
+                                provider=attach_provider,
                             )
 
                             logger.info(
@@ -2064,7 +2286,91 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
 
                         await asyncio.to_thread(stop_preview_tunnel, str(env_uuid))
                     except Exception:
-                        logger.exception("preview_tunnel_stop_failed", environment_id=str(env_uuid))
+                        logger.exception(
+                            "preview_tunnel_stop_failed", environment_id=str(env_uuid)
+                        )
+                    # Reclaim cloud registry images (Artifact Registry / ECR).
+                    try:
+                        from app.core.secrets import decrypt_secret
+                        from app.schemas.cloud import (
+                            CloudCredentials,
+                            RunningInstanceConfig,
+                            WorkspaceWizardConfig,
+                        )
+                        from app.services.cloud_instance_compute import (
+                            is_cloud_registry_image,
+                            teardown_cloud_registry_images,
+                        )
+                        from app.services.provisioning import ProvisioningService
+                        from app.services.teardown_context import parse_teardown_context
+
+                        provider = (env_provider or "local").strip().lower()
+                        if provider != "local":
+                            teardown_creds: CloudCredentials | None = None
+                            teardown_region = "us-central1"
+                            ctx = parse_teardown_context(
+                                getattr(environment, "teardown_context_json", None)
+                            )
+                            if ctx:
+                                enc = ctx.get("encrypted_credentials")
+                                if enc:
+                                    try:
+                                        teardown_creds = CloudCredentials.model_validate_json(
+                                            decrypt_secret(str(enc))
+                                        )
+                                    except Exception:
+                                        pass
+                                ri = ctx.get("running_instance")
+                                if isinstance(ri, dict):
+                                    try:
+                                        ri_cfg = RunningInstanceConfig.model_validate(ri)
+                                        if ri_cfg.region:
+                                            teardown_region = ri_cfg.region
+                                    except Exception:
+                                        pass
+                            if workspace_id is not None and teardown_creds is None:
+                                ws_row = await session.get(
+                                    ProvisioningWorkspace, workspace_id
+                                )
+                                if ws_row is not None and ws_row.encrypted_credentials:
+                                    try:
+                                        teardown_creds = CloudCredentials.model_validate_json(
+                                            decrypt_secret(ws_row.encrypted_credentials)
+                                        )
+                                    except Exception:
+                                        pass
+                                if ws_row is not None:
+                                    snap = ProvisioningService(session)._load_wizard_snapshot(
+                                        ws_row
+                                    )
+                                    if snap:
+                                        try:
+                                            wiz = WorkspaceWizardConfig.model_validate(
+                                                {**snap, "has_credentials": False}
+                                            )
+                                            if wiz.running_instance.region:
+                                                teardown_region = wiz.running_instance.region
+                                        except Exception:
+                                            pass
+                            cloud_images = [
+                                img
+                                for img in ([workload_image] if workload_image else [])
+                                if is_cloud_registry_image(img)
+                            ]
+                            if teardown_creds and (cloud_images or str(env_uuid)):
+                                await asyncio.to_thread(
+                                    teardown_cloud_registry_images,
+                                    cloud_images,
+                                    cloud_provider=provider,
+                                    credentials=teardown_creds,
+                                    region=teardown_region,
+                                    environment_id=str(env_uuid),
+                                )
+                    except Exception:
+                        logger.exception(
+                            "teardown_cloud_registry_cleanup_failed",
+                            environment_id=environment_id,
+                        )
                     # Reclaim locally-built app images from kind/k3d + host Docker
                     # so deleted previews do not leak disk (leave shared base images).
                     try:
@@ -2351,6 +2657,7 @@ async def _reclaim_environment_runtime(
                 session,
                 attach_credentials=attach_credentials,
                 owner_id=owner_for_vault,
+                provider=attach_provider,
             )
             await asyncio.to_thread(
                 teardown_attach,

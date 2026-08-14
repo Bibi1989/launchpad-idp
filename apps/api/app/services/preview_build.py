@@ -205,7 +205,7 @@ def _clone_repository(
     return resolved_sha
 
 
-def _docker_build(*, context: Path, dockerfile: str, tag: str) -> None:
+def _docker_build(*, context: Path, dockerfile: str, tag: str, platform: str | None = None) -> None:
     import docker
 
     from app.core.config import get_settings
@@ -218,13 +218,16 @@ def _docker_build(*, context: Path, dockerfile: str, tag: str) -> None:
         )
     pull_base = bool(get_settings().preview_build_pull_base)
     try:
-        _, build_logs = client.images.build(
-            path=str(context),
-            tag=tag,
-            dockerfile=dockerfile,
-            rm=True,
-            pull=pull_base,
-        )
+        build_kwargs: dict[str, object] = {
+            "path": str(context),
+            "tag": tag,
+            "dockerfile": dockerfile,
+            "rm": True,
+            "pull": pull_base,
+        }
+        if platform:
+            build_kwargs["platform"] = platform
+        _, build_logs = client.images.build(**build_kwargs)
         for chunk in build_logs:
             if "stream" in chunk:
                 line = chunk["stream"].strip()
@@ -307,6 +310,7 @@ def build_preview_image_sync(
             context=context,
             dockerfile=cfg.preview_build_dockerfile,
             tag=tag,
+            platform="linux/amd64" if cfg.preview_image_registry else None,
         )
 
     if cfg.preview_image_registry:

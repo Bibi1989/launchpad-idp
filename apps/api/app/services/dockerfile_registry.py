@@ -108,11 +108,20 @@ def build_and_push_sync(
 
         primary = image_refs[0]
         logs.append(f"Building {primary}")
+        platform = None
+        if registry.provider in {
+            RegistryProvider.GCP_ARTIFACT_REGISTRY,
+            RegistryProvider.AWS_ECR,
+        }:
+            from app.services.cloud_instance_compute import CLOUD_CONTAINER_PLATFORM
+
+            platform = CLOUD_CONTAINER_PLATFORM
         _docker_build(
             context=work_context,
             dockerfile=dockerfile_name,
             tag=primary,
             logs=logs,
+            platform=platform,
         )
 
         for extra in image_refs[1:]:
@@ -163,6 +172,7 @@ def _docker_build(
     dockerfile: str,
     tag: str,
     logs: list[str],
+    platform: str | None = None,
 ) -> None:
     import docker
 
@@ -171,13 +181,16 @@ def _docker_build(
     client = docker.from_env()
     pull_base = bool(get_settings().preview_build_pull_base)
     try:
-        _, build_logs = client.images.build(
-            path=str(context),
-            tag=tag,
-            dockerfile=dockerfile,
-            rm=True,
-            pull=pull_base,
-        )
+        build_kwargs: dict[str, object] = {
+            "path": str(context),
+            "tag": tag,
+            "dockerfile": dockerfile,
+            "rm": True,
+            "pull": pull_base,
+        }
+        if platform:
+            build_kwargs["platform"] = platform
+        _, build_logs = client.images.build(**build_kwargs)
         for chunk in build_logs:
             if "stream" in chunk:
                 line = str(chunk["stream"]).strip()

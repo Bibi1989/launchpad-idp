@@ -61,6 +61,50 @@ export function useUserCloudCredentials() {
     })
   }
 
+  async function listNetworks(params: {
+    provider: 'gcp' | 'aws' | 'azure' | 'cloudflare'
+    region?: string | null
+  }): Promise<{
+    provider: string
+    region?: string | null
+    networks: Array<{
+      id: string
+      name: string
+      cidr?: string | null
+      is_default?: boolean
+      region?: string | null
+    }>
+  }> {
+    const query = new URLSearchParams({ provider: params.provider })
+    const region = (params.region || '').trim()
+    if (region) query.set('region', region)
+    return apiFetch(`/users/me/cloud-credentials/networks?${query.toString()}`)
+  }
+
+  async function listSecurityGroups(params: {
+    provider: 'aws'
+    region?: string | null
+    vpc_id?: string | null
+  }): Promise<{
+    provider: string
+    region?: string | null
+    vpc_id?: string | null
+    security_groups: Array<{
+      id: string
+      name: string
+      vpc_id?: string | null
+      description?: string | null
+      region?: string | null
+    }>
+  }> {
+    const query = new URLSearchParams({ provider: params.provider })
+    const region = (params.region || '').trim()
+    const vpcId = (params.vpc_id || '').trim()
+    if (region) query.set('region', region)
+    if (vpcId) query.set('vpc_id', vpcId)
+    return apiFetch(`/users/me/cloud-credentials/security-groups?${query.toString()}`)
+  }
+
   async function oauthCapabilities(): Promise<CloudOAuthCapabilities> {
     return apiFetch<CloudOAuthCapabilities>('/users/me/cloud-credentials/oauth/capabilities')
   }
@@ -98,6 +142,8 @@ export function useUserCloudCredentials() {
     getStatus,
     save,
     clearAll,
+    listNetworks,
+    listSecurityGroups,
     emptyCloudCredentials,
     oauthCapabilities,
     startOAuth,

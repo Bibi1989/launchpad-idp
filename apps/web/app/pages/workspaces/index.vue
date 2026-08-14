@@ -221,11 +221,16 @@ watch(
             <p class="mt-1 font-mono text-xs text-[var(--lp-muted)]">
               {{ workspaceStackLabel(ws) }}
             </p>
-            <p class="mt-1">
+            <div class="mt-2 flex flex-wrap items-center gap-1.5">
+              <WorkspaceRuntimeModeBadge :runtime-mode="ws.runtime_mode" />
+              <ProjectBadge
+                :project-id="ws.project_id"
+                :project-name="ws.project_name"
+              />
               <span class="rounded border border-[var(--lp-line)] px-1.5 py-0.5 font-mono text-[10px] uppercase text-[var(--lp-muted)]">
                 {{ artifactModeLabel(ws.artifact_mode) }}
               </span>
-            </p>
+            </div>
           </div>
           <button
             type="button"

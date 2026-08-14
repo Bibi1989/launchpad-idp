@@ -354,6 +354,11 @@ watch(advancedMode, async (enabled) => {
                   <h1 class="truncate text-2xl font-semibold tracking-tight md:text-3xl">
                     {{ workspace.name || workspace.workspace_id }}
                   </h1>
+                  <WorkspaceRuntimeModeBadge :runtime-mode="workspace.runtime_mode" />
+                  <ProjectBadge
+                    :project-id="workspace.project_id"
+                    :project-name="workspace.project_name"
+                  />
                   <span class="rounded-full border border-[var(--lp-line)] bg-[var(--lp-panel)] px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
                     {{ artifactModeLabel(workspace.artifact_mode) }}
                   </span>

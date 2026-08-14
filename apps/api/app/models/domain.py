@@ -511,6 +511,7 @@ class Environment(Base):
     notification_flags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     deploy_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="preview")
     manifest_packaging: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    kubernetes_image_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     enable_postgres: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     enable_redis: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ttl_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

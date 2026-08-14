@@ -17,6 +17,8 @@ logger = get_logger(__name__)
 
 _LOCAL_IMAGE_RE = re.compile(r"^lp-ws-[a-z0-9-]+(?::local)?$", re.IGNORECASE)
 _REPO_NAME = "launchpad-previews"
+# Cloud Run, App Runner, ECS/Fargate, and most managed runtimes require amd64.
+CLOUD_CONTAINER_PLATFORM = "linux/amd64"
 
 
 class CloudInstanceComputeError(RuntimeError):
@@ -73,11 +75,27 @@ _GCP_AUTH_ENV_KEYS = (
     "LAUNCHPAD_OIDC_JWT",
 )
 
+# Ambient host AWS auth must not poison control-plane provision (invalid ROLE_ARN, stale web-id).
+_AWS_AUTH_ENV_KEYS = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+    "AWS_PROFILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+)
+
 
 def _credential_env(
     credentials: CloudCredentials | None,
     *,
     environment_id: str,
+    provider: str | None = None,
 ) -> dict[str, str]:
     import os
     import tempfile
@@ -91,13 +109,15 @@ def _credential_env(
         project_id_from_gcp_sa_json,
     )
 
-    # Start from the process env, but drop ambient ADC / gcloud auth overrides so a
-    # leftover /tmp/launchpad_oidc_token.jwt (or stale WIF config) cannot win over
-    # the workspace credentials we are about to materialize.
+    provider_norm = (provider or "").strip().lower()
+
+    # Start from the process env, but drop ambient ADC / gcloud / AWS auth overrides so
+    # leftover host profiles, ROLE_ARN, or OIDC token files cannot win over vault creds.
+    drop_keys = set(_GCP_AUTH_ENV_KEYS) | set(_AWS_AUTH_ENV_KEYS)
     merged = {
         key: value
         for key, value in os.environ.items()
-        if key not in _GCP_AUTH_ENV_KEYS
+        if key not in drop_keys
     }
     for key, value in credentials_to_env(credentials, workspace_id=environment_id).items():
         if value:
@@ -126,15 +146,17 @@ def _credential_env(
                 if isinstance(cred_src, dict):
                     token_file = str(cred_src.get("file") or "").strip()
                 if token_file and not Path(token_file).is_file():
-                    raise CloudInstanceComputeError(
-                        "GCP Workload Identity token file is missing "
-                        f"({token_file}). Re-save workspace cloud credentials "
-                        "or re-run provision so Launchpad can mint a fresh OIDC JWT."
-                    )
+                    if provider_norm in ("", CloudProvider.GCP.value):
+                        raise CloudInstanceComputeError(
+                            "GCP Workload Identity token file is missing "
+                            f"({token_file}). Re-save workspace cloud credentials "
+                            "or re-run provision so Launchpad can mint a fresh OIDC JWT."
+                        )
             logger.info(
                 "gcp_auth_mode",
                 mode=str((payload or {}).get("type") or "credential_file"),
                 environment_id=environment_id,
+                provider=provider_norm or None,
             )
 
     # gcloud/ADC need a key file path, not GCP_SA_KEY inline JSON.
@@ -163,6 +185,7 @@ def _credential_env(
                 "gcp_auth_mode",
                 mode="external_account",
                 environment_id=environment_id,
+                provider=provider_norm or None,
             )
             return merged
 
@@ -186,6 +209,7 @@ def _credential_env(
             "gcp_auth_mode",
             mode="service_account",
             environment_id=environment_id,
+            provider=provider_norm or None,
         )
         return merged
 
@@ -198,16 +222,30 @@ def _credential_env(
             "gcp_auth_mode",
             mode="access_token",
             environment_id=environment_id,
+            provider=provider_norm or None,
         )
         return merged
 
+    # Stale / incomplete GCP Connect tokens must not block AWS/Azure deploys.
     if credentials.gcp_oauth_token_json:
-        raise CloudInstanceComputeError(
-            "GCP Connect token is present but Launchpad could not mint a "
-            "cloud-platform access token, and no service account / WIF key is "
-            "configured. Paste a GCP SA JSON (preferred) or set "
-            "GCP_OAUTH_CLIENT_ID/SECRET and Connect GCP again."
-        )
+        if provider_norm == CloudProvider.GCP.value:
+            raise CloudInstanceComputeError(
+                "GCP Connect token is present but Launchpad could not mint a "
+                "cloud-platform access token, and no service account / WIF key is "
+                "configured. Paste a GCP SA JSON (preferred) or set "
+                "GCP_OAUTH_CLIENT_ID/SECRET and Connect GCP again."
+            )
+        if provider_norm in ("",):
+            logger.warning(
+                "gcp_oauth_present_without_access_token",
+                environment_id=environment_id,
+            )
+        else:
+            logger.info(
+                "gcp_oauth_ignored_for_provider",
+                provider=provider_norm,
+                environment_id=environment_id,
+            )
 
     return merged
 
@@ -325,45 +363,17 @@ def _docker_auth_gcp(*, region: str, env: dict[str, str]) -> None:
 
 
 def _ensure_aws_ecr_repo(*, region: str, repo: str, env: dict[str, str]) -> str | None:
-    if shutil.which("aws") is None:
-        return None
+    from app.services.aws_client import ensure_ecr_repository
+
     env = {**env, "AWS_DEFAULT_REGION": region, "AWS_REGION": region}
-    desc = _run_cmd(
-        ["aws", "ecr", "describe-repositories", "--repository-names", repo],
-        timeout=120,
-        check=False,
-        env=env,
-    )
-    if desc.returncode != 0:
-        _run_cmd(
-            ["aws", "ecr", "create-repository", "--repository-name", repo],
-            timeout=120,
-            check=False,
-            env=env,
-        )
-    acct = _run_cmd(
-        ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"],
-        timeout=60,
-        check=False,
-        env=env,
-    )
-    account = (acct.stdout or "").strip()
-    if not account:
-        return None
-    return f"{account}.dkr.ecr.{region}.amazonaws.com/{repo}"
+    return ensure_ecr_repository(env=env, region=region, repo=repo)
 
 
 def _docker_auth_aws(*, region: str, env: dict[str, str]) -> None:
-    if shutil.which("aws") is None:
-        return
+    from app.services.aws_client import ecr_login_password
+
     env = {**env, "AWS_DEFAULT_REGION": region, "AWS_REGION": region}
-    pw = _run_cmd(
-        ["aws", "ecr", "get-login-password", "--region", region],
-        timeout=60,
-        check=False,
-        env=env,
-    )
-    password = (pw.stdout or "").strip()
+    password = ecr_login_password(env=env, region=region)
     if not password:
         return
     _run_cmd(
@@ -373,6 +383,198 @@ def _docker_auth_aws(*, region: str, env: dict[str, str]) -> None:
         env=env,
         input_text=password,
     )
+
+
+def push_local_image_to_cloud_registry(
+    *,
+    local_tag: str,
+    image_name: str,
+    cloud_provider: str,
+    credentials: CloudCredentials | None,
+    region: str,
+    environment_id: str,
+    tag: str = "latest",
+) -> str:
+    """Tag and push an already-built local image to the cloud registry."""
+    provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
+    env = _credential_env(credentials, environment_id=environment_id, provider=provider)
+    safe_name = re.sub(r"[^a-z0-9-]+", "-", (image_name or "app").lower()).strip("-") or "app"
+    slug = _env_slug(environment_id)
+
+    remote: str
+    if provider == CloudProvider.GCP.value:
+        project_id = resolve_gcp_project_id(credentials=credentials, env=env)
+        if not project_id or is_placeholder_gcp_project(project_id):
+            raise CloudInstanceComputeError(
+                "GCP project id is required to push preview images. Set your real "
+                "GCP project id in Settings → GCP project id or the workspace wizard."
+            )
+        loc = region.rsplit("-", 1)[0] if region.count("-") >= 2 else region
+        _ensure_gcp_artifact_repo(project_id=project_id, region=loc, env=env)
+        _docker_auth_gcp(region=loc, env=env)
+        remote = f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{safe_name}:{tag}"
+    elif provider == CloudProvider.AWS.value:
+        from app.services.cloud_networks import _normalize_aws_region
+
+        aws_region = _normalize_aws_region(region)
+        repo_uri = _ensure_aws_ecr_repo(region=aws_region, repo=_REPO_NAME, env=env)
+        if repo_uri is None:
+            raise CloudInstanceComputeError("AWS ECR repository setup failed")
+        _docker_auth_aws(region=aws_region, env=env)
+        remote = f"{repo_uri}:{safe_name}-{tag}"
+    elif provider == CloudProvider.AZURE.value:
+        raise CloudInstanceComputeError(
+            "Azure cloud image push is not configured yet; use an external workload_image"
+        )
+    else:
+        raise CloudInstanceComputeError(f"Cloud image push not supported for provider {provider}")
+
+    _run_cmd(["docker", "tag", local_tag, remote], timeout=60, env=env)
+    _run_cmd(["docker", "push", remote], timeout=900, env=env)
+    logger.info(
+        "cloud_workspace_image_pushed",
+        image=remote,
+        provider=provider,
+        environment_id=environment_id,
+        local_tag=local_tag,
+    )
+    _ = slug  # reserved for future per-env package naming
+    return remote
+
+
+def is_cloud_registry_image(image: str | None) -> bool:
+    """True when ``image`` is a GCP Artifact Registry or AWS ECR reference."""
+    raw = (image or "").strip().lower()
+    if not raw:
+        return False
+    return "-docker.pkg.dev/" in raw or ".dkr.ecr." in raw
+
+
+def _delete_gcp_artifact_image(*, image: str, env: dict[str, str]) -> bool:
+    if shutil.which("gcloud") is None:
+        return False
+    completed = _run_cmd(
+        [
+            "gcloud",
+            "artifacts",
+            "docker",
+            "images",
+            "delete",
+            image,
+            "--quiet",
+            "--delete-tags",
+        ],
+        timeout=180,
+        check=False,
+        env=env,
+    )
+    if completed.returncode == 0:
+        return True
+    detail = sanitize_log_message((completed.stderr or completed.stdout or "")[:300])
+    logger.info("gcp_artifact_image_delete_skipped", image=image, detail=detail)
+    return False
+
+
+def _delete_aws_ecr_image(*, image: str, env: dict[str, str]) -> bool:
+    from app.services.aws_client import delete_ecr_images
+
+    ref = image.strip()
+    if "@" in ref:
+        ref = ref.split("@", 1)[0]
+    host, _, tag_part = ref.rpartition("/")
+    if not host or ".dkr.ecr." not in host or ":" not in tag_part:
+        return False
+    repo, tag = tag_part.rsplit(":", 1)
+    if not repo or not tag:
+        return False
+    region_part = host.split(".dkr.ecr.", 1)[1]
+    region = region_part.split(".amazonaws.com", 1)[0]
+    deleted = delete_ecr_images(
+        env=env,
+        region=region,
+        repository=repo,
+        image_tags=[tag],
+    )
+    return deleted > 0
+
+
+def teardown_cloud_registry_images(
+    images: list[str] | None,
+    *,
+    cloud_provider: str,
+    credentials: CloudCredentials | None,
+    region: str | None,
+    environment_id: str | None = None,
+) -> list[str]:
+    """Best-effort delete of preview images from Artifact Registry / ECR."""
+    provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
+    if provider == CloudProvider.LOCAL.value:
+        return []
+    env = _credential_env(
+        credentials,
+        environment_id=environment_id or "teardown",
+        provider=provider,
+    )
+    resolved_region = (region or "us-central1").strip() or "us-central1"
+
+    candidates: list[str] = []
+    for image in images or []:
+        tag = (image or "").strip()
+        if tag and is_cloud_registry_image(tag) and tag not in candidates:
+            candidates.append(tag)
+
+    # Fallback: derive env-scoped package on the shared preview repo when callers
+    # only pass environment_id (older rows may lack workload_image).
+    if environment_id and provider == CloudProvider.GCP.value:
+        slug = _env_slug(environment_id)
+        project_id = resolve_gcp_project_id(credentials=credentials, env=env)
+        if project_id and not is_placeholder_gcp_project(project_id):
+            loc = (
+                resolved_region.rsplit("-", 1)[0]
+                if resolved_region.count("-") >= 2
+                else resolved_region
+            )
+            fallback = (
+                f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}:latest"
+            )
+            if fallback not in candidates:
+                candidates.append(fallback)
+    elif environment_id and provider == CloudProvider.AWS.value:
+        from app.services.cloud_networks import _normalize_aws_region
+
+        aws_region = _normalize_aws_region(resolved_region)
+        repo_uri = _ensure_aws_ecr_repo(region=aws_region, repo=_REPO_NAME, env=env)
+        if repo_uri:
+            slug = _env_slug(environment_id)
+            fallback = f"{repo_uri}:{slug}-latest"
+            if fallback not in candidates:
+                candidates.append(fallback)
+
+    removed: list[str] = []
+    for image in candidates:
+        try:
+            if provider == CloudProvider.GCP.value:
+                ok = _delete_gcp_artifact_image(image=image, env=env)
+            elif provider == CloudProvider.AWS.value:
+                ok = _delete_aws_ecr_image(image=image, env=env)
+            else:
+                ok = False
+            if ok:
+                removed.append(image)
+                logger.info(
+                    "cloud_registry_image_deleted",
+                    image=image,
+                    provider=provider,
+                    environment_id=environment_id,
+                )
+        except CloudInstanceComputeError as exc:
+            logger.info(
+                "cloud_registry_image_delete_failed",
+                image=image,
+                provider=provider,
+                detail=sanitize_log_message(str(exc)[:200]),
+            )
+    return removed
 
 
 def build_and_push_cloud_image(
@@ -393,45 +595,34 @@ def build_and_push_cloud_image(
     dockerfile, context = found
     provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
     slug = _env_slug(environment_id)
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(credentials, environment_id=environment_id, provider=provider)
 
     local_tag = f"lp-cloud-build-{slug}:{tag}"
     _run_cmd(
-        ["docker", "build", "-t", local_tag, "-f", str(dockerfile), str(context)],
+        [
+            "docker",
+            "build",
+            "--platform",
+            CLOUD_CONTAINER_PLATFORM,
+            "-t",
+            local_tag,
+            "-f",
+            str(dockerfile),
+            str(context),
+        ],
         timeout=900,
         env=env,
     )
 
-    remote: str
-    if provider == CloudProvider.GCP.value:
-        project_id = resolve_gcp_project_id(credentials=credentials, env=env)
-        if not project_id or is_placeholder_gcp_project(project_id):
-            raise CloudInstanceComputeError(
-                "GCP project id is required to push preview images. Set your real "
-                "GCP project id in Settings → GCP project id or the workspace wizard."
-            )
-        loc = region.rsplit("-", 1)[0] if region.count("-") >= 2 else region
-        _ensure_gcp_artifact_repo(project_id=project_id, region=loc, env=env)
-        _docker_auth_gcp(region=loc, env=env)
-        remote = f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}:{tag}"
-    elif provider == CloudProvider.AWS.value:
-        aws_region = region if region != "us-central1" else "us-east-1"
-        repo_uri = _ensure_aws_ecr_repo(region=aws_region, repo=_REPO_NAME, env=env)
-        if repo_uri is None:
-            raise CloudInstanceComputeError("AWS ECR repository setup failed")
-        _docker_auth_aws(region=aws_region, env=env)
-        remote = f"{repo_uri}:{tag}"
-    elif provider == CloudProvider.AZURE.value:
-        raise CloudInstanceComputeError(
-            "Azure cloud image push is not configured yet; set an external workload_image"
-        )
-    else:
-        raise CloudInstanceComputeError(f"Cloud image build not supported for provider {provider}")
-
-    _run_cmd(["docker", "tag", local_tag, remote], timeout=60, env=env)
-    _run_cmd(["docker", "push", remote], timeout=900, env=env)
-    logger.info("cloud_instance_image_pushed", image=remote, provider=provider)
-    return remote
+    return push_local_image_to_cloud_registry(
+        local_tag=local_tag,
+        image_name=slug,
+        cloud_provider=provider,
+        credentials=credentials,
+        region=region,
+        environment_id=environment_id,
+        tag=tag,
+    )
 
 
 def cloud_resource_name(
@@ -561,6 +752,8 @@ def provision_cloud_vm(
     create_vpc: bool = False,
     create_subnets: bool = False,
     gcp_project_id: str | None = None,
+    existing_vpc_id: str | None = None,
+    existing_security_group_id: str | None = None,
 ) -> RunningInstanceConfig:
     """Create a cloud VM when host is not preset. Returns config with host filled."""
     if (running_instance.host or "").strip():
@@ -575,15 +768,17 @@ def provision_cloud_vm(
     )
     region = (running_instance.region or "us-central1").strip() or "us-central1"
     provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(credentials, environment_id=environment_id, provider=provider)
     resolved_project = resolve_gcp_project_id(
         wizard_project_id=gcp_project_id,
         credentials=credentials,
         env=env,
     )
-    _apply_gcp_project(env, resolved_project)
-    want_vpc = bool(create_vpc or create_subnets)
-    want_subnets = bool(create_subnets or create_vpc)
+    if provider == CloudProvider.GCP.value:
+        _apply_gcp_project(env, resolved_project)
+    existing = (existing_vpc_id or "").strip() or None
+    want_vpc = bool(create_vpc or create_subnets) and not existing
+    want_subnets = bool(create_subnets or create_vpc) and not existing
 
     if provider == CloudProvider.GCP.value:
         _require_gcp_project_id(env)
@@ -598,9 +793,12 @@ def provision_cloud_vm(
             org_slug=org_slug,
             create_vpc=want_vpc,
             create_subnets=want_subnets,
+            existing_network=existing,
         )
     if provider == CloudProvider.AWS.value:
-        aws_region = region if region != "us-central1" else "us-east-1"
+        from app.services.cloud_networks import _normalize_aws_region
+
+        aws_region = _normalize_aws_region(region)
         return _provision_aws_vm(
             running_instance=running_instance,
             instance_name=instance_name,
@@ -610,6 +808,9 @@ def provision_cloud_vm(
             environment_id=environment_id,
             environment_name=environment_name,
             org_slug=org_slug,
+            create_vpc=want_vpc,
+            existing_vpc_id=existing,
+            existing_security_group_id=(existing_security_group_id or "").strip() or None,
         )
     if provider == CloudProvider.AZURE.value:
         raise CloudInstanceComputeError(
@@ -815,6 +1016,7 @@ def _provision_gcp_vm(
     org_slug: str | None = None,
     create_vpc: bool = False,
     create_subnets: bool = False,
+    existing_network: str | None = None,
 ) -> RunningInstanceConfig:
     if shutil.which("gcloud") is None:
         raise CloudInstanceComputeError("gcloud CLI is required for GCP VM provisioning")
@@ -871,7 +1073,48 @@ def _provision_gcp_vm(
     )
 
     nic = "network=default,network-tier=PREMIUM"
-    if create_vpc:
+    existing = (existing_network or "").strip()
+    if existing:
+        nic = f"network={existing},network-tier=PREMIUM"
+        _run_cmd(
+            [
+                "gcloud",
+                "compute",
+                "firewall-rules",
+                "create",
+                f"lp-preview-allow-app-{re.sub(r'[^a-z0-9]', '', existing.lower())[:20] or 'net'}",
+                "--network",
+                existing,
+                "--allow",
+                f"tcp:{listen_port}",
+                "--target-tags=lp-preview",
+                "--quiet",
+                *project_args,
+            ],
+            timeout=120,
+            check=False,
+            env=env,
+        )
+        _run_cmd(
+            [
+                "gcloud",
+                "compute",
+                "firewall-rules",
+                "create",
+                f"lp-preview-allow-ssh-{re.sub(r'[^a-z0-9]', '', existing.lower())[:20] or 'net'}",
+                "--network",
+                existing,
+                "--allow",
+                "tcp:22",
+                "--target-tags=lp-preview",
+                "--quiet",
+                *project_args,
+            ],
+            timeout=120,
+            check=False,
+            env=env,
+        )
+    elif create_vpc:
         # Custom-mode VPC requires a subnet for instance NICs.
         nic = _ensure_gcp_preview_network(
             environment_id=environment_id,
@@ -1219,29 +1462,9 @@ def _reuse_gcp_vm(
 
 
 def _aws_instance_public_ip(*, instance_id: str, region: str, env: dict[str, str]) -> str:
-    res = _run_cmd(
-        [
-            "aws",
-            "ec2",
-            "describe-instances",
-            "--instance-ids",
-            instance_id,
-            "--region",
-            region,
-            "--query",
-            "Reservations[0].Instances[0].PublicIpAddress",
-            "--output",
-            "text",
-        ],
-        timeout=60,
-        check=False,
-        env=env,
-    )
-    host = (res.stdout or "").strip()
-    # `--output text` prints the literal "None" for an unassigned IP.
-    if not host or host.lower() == "none":
-        return ""
-    return host
+    from app.services.aws_client import ec2_instance_public_ip
+
+    return ec2_instance_public_ip(env=env, region=region, instance_id=instance_id)
 
 
 def _wait_aws_instance_ip(
@@ -1260,6 +1483,56 @@ def _wait_aws_instance_ip(
     return ""
 
 
+def _reuse_aws_vm(
+    *,
+    running_instance: RunningInstanceConfig,
+    instance_name: str,
+    region: str,
+    environment_id: str,
+    env: dict[str, str],
+    required: bool = False,
+) -> RunningInstanceConfig | None:
+    """Locate an existing EC2 instance for this environment and return config with host."""
+    from app.services.aws_client import list_ec2_instance_ids
+
+    candidates = [instance_name]
+    svc = (running_instance.service_name or "").strip()
+    if svc and svc not in candidates:
+        candidates.append(svc)
+
+    instance_ids = list_ec2_instance_ids(
+        env=env,
+        region=region,
+        environment_id=environment_id,
+        name_candidates=candidates,
+    )
+    if not instance_ids:
+        return None
+
+    instance_id = instance_ids[0]
+    host = _wait_aws_instance_ip(
+        instance_id=instance_id,
+        region=region,
+        env=env,
+        attempts=24 if required else 6,
+    )
+    if not host:
+        return None
+
+    from app.services.preview_ssh import ensure_preview_ssh_keypair
+
+    key_path, _ = ensure_preview_ssh_keypair(environment_id)
+    return running_instance.model_copy(
+        update={
+            "host": host,
+            "service_name": instance_id,
+            "region": region,
+            "ssh_user": "ec2-user",
+            "ssh_key_path": key_path,
+        }
+    )
+
+
 def _provision_aws_vm(
     *,
     running_instance: RunningInstanceConfig,
@@ -1270,14 +1543,54 @@ def _provision_aws_vm(
     environment_id: str,
     environment_name: str,
     org_slug: str | None = None,
+    create_vpc: bool = True,
+    existing_vpc_id: str | None = None,
+    existing_security_group_id: str | None = None,
 ) -> RunningInstanceConfig:
-    if shutil.which("aws") is None:
-        raise CloudInstanceComputeError("aws CLI is required for AWS VM provisioning")
+    from app.services.aws_client import (
+        AwsClientError,
+        ensure_preview_network,
+        ensure_preview_security_group,
+        run_ec2_instance,
+        wait_ec2_instance_running,
+    )
+
     env = {**env, "AWS_DEFAULT_REGION": region, "AWS_REGION": region}
+
+    # Retry after a failed deploy: reuse the leftover EC2 instead of create.
+    existing = _reuse_aws_vm(
+        running_instance=running_instance,
+        instance_name=instance_name,
+        region=region,
+        environment_id=environment_id,
+        env=env,
+    )
+    if existing is not None:
+        from app.services.preview_ssh import ensure_preview_ssh_keypair
+
+        key_path, _ = ensure_preview_ssh_keypair(environment_id)
+        existing = existing.model_copy(update={"ssh_key_path": key_path})
+        logger.info(
+            "aws_vm_reused_before_create",
+            instance=instance_name,
+            instance_id=existing.service_name,
+            host=existing.host,
+            region=region,
+        )
+        return existing
+
+    from app.services.preview_ssh import (
+        authorized_keys_user_data_snippet,
+        ensure_preview_ssh_keypair,
+    )
+
+    key_path, public_key = ensure_preview_ssh_keypair(environment_id)
+    ssh_bootstrap = authorized_keys_user_data_snippet(public_key, user="ec2-user")
 
     user_data = (
         "#!/bin/bash\n"
         "set -euo pipefail\n"
+        f"{ssh_bootstrap}"
         "dnf install -y git curl python3 python3-pip || yum install -y git curl python3 python3-pip\n"
         "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then\n"
         "  curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -\n"
@@ -1291,101 +1604,39 @@ def _provision_aws_vm(
         "touch /var/lib/launchpad/vm-ready\n"
     )
 
-    sg = _run_cmd(
-        [
-            "aws",
-            "ec2",
-            "create-security-group",
-            "--group-name",
-            "lp-preview-sg",
-            "--description",
-            "Launchpad preview instances",
-            "--query",
-            "GroupId",
-            "--output",
-            "text",
-        ],
-        timeout=120,
-        check=False,
-        env=env,
-    )
-    sg_id = (sg.stdout or "").strip()
-    if sg_id:
-        _run_cmd(
-            [
-                "aws",
-                "ec2",
-                "authorize-security-group-ingress",
-                "--group-id",
-                sg_id,
-                "--protocol",
-                "tcp",
-                "--port",
-                str(listen_port),
-                "--cidr",
-                "0.0.0.0/0",
-            ],
-            timeout=60,
-            check=False,
+    try:
+        # Accounts without a default VPC need an explicit VPC+subnet. Wizard VPC/subnet
+        # toggles request create_vpc=True; if false we still fall back to creating one
+        # when no public subnet can be discovered.
+        vpc_id, subnet_id = ensure_preview_network(
             env=env,
+            region=region,
+            environment_id=environment_id,
+            create_vpc=create_vpc,
+            vpc_id=existing_vpc_id,
         )
-
-    run = _run_cmd(
-        [
-            "aws",
-            "ec2",
-            "run-instances",
-            "--image-id",
-            "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
-            "--instance-type",
-            "t3.small",
-            "--count",
-            "1",
-            "--tag-specifications",
-            json.dumps(
-                [
-                    {
-                        "ResourceType": "instance",
-                        "Tags": [
-                            {"Key": "Name", "Value": instance_name},
-                            {"Key": "launchpad-preview", "Value": "true"},
-                            {"Key": "launchpad-environment-id", "Value": environment_id},
-                            {
-                                "Key": "launchpad-env-name",
-                                "Value": (environment_name or "preview")[:256],
-                            },
-                            {
-                                "Key": "launchpad-org-slug",
-                                "Value": (org_slug or "none")[:256],
-                            },
-                            {"Key": "launchpad-managed", "Value": "true"},
-                        ],
-                    }
-                ]
-            ),
-            *(["--security-group-ids", sg_id] if sg_id else []),
-            "--user-data",
-            user_data,
-            "--query",
-            "Instances[0].InstanceId",
-            "--output",
-            "text",
-        ],
-        timeout=600,
-        check=False,
-        env=env,
-    )
-    instance_id = (run.stdout or "").strip()
-    if run.returncode != 0 or not instance_id:
-        detail = sanitize_log_message((run.stderr or run.stdout or "run-instances failed")[:500])
-        raise CloudInstanceComputeError(f"AWS EC2 create failed: {detail}")
-
-    _run_cmd(
-        ["aws", "ec2", "wait", "instance-running", "--instance-ids", instance_id],
-        timeout=600,
-        check=False,
-        env=env,
-    )
+        sg_id = ensure_preview_security_group(
+            env=env,
+            region=region,
+            listen_port=listen_port,
+            vpc_id=vpc_id,
+            environment_id=environment_id,
+            existing_security_group_id=existing_security_group_id,
+        )
+        instance_id = run_ec2_instance(
+            env=env,
+            region=region,
+            instance_name=instance_name,
+            environment_id=environment_id,
+            environment_name=environment_name,
+            org_slug=org_slug,
+            user_data=user_data,
+            security_group_id=sg_id,
+            subnet_id=subnet_id,
+        )
+        wait_ec2_instance_running(env=env, region=region, instance_id=instance_id)
+    except AwsClientError as exc:
+        raise CloudInstanceComputeError(str(exc)) from exc
     # The public IP is often not yet populated in describe-instances the instant the
     # instance reports "running" - poll instead of failing on the first empty read,
     # so a preview does not need to be retried by hand.
@@ -1408,6 +1659,7 @@ def _provision_aws_vm(
             "service_name": instance_id,
             "region": region,
             "ssh_user": "ec2-user",
+            "ssh_key_path": key_path,
         }
     )
 
@@ -1426,7 +1678,7 @@ def teardown_cloud_vm(
     if provider == CloudProvider.LOCAL.value:
         return
 
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(credentials, environment_id=environment_id, provider=provider)
     region = (running_instance.region or "us-central1").strip() or "us-central1"
     unique = cloud_resource_name(
         environment_id=environment_id,
@@ -1465,13 +1717,14 @@ def teardown_cloud_vm(
         )
         return
 
-    if provider == CloudProvider.AWS.value and shutil.which("aws"):
+    if provider == CloudProvider.AWS.value:
         aws_region = region if region != "us-central1" else "us-east-1"
         env = {**env, "AWS_DEFAULT_REGION": aws_region, "AWS_REGION": aws_region}
         _teardown_aws_vms(
             candidates=candidates,
             environment_id=environment_id,
             env=env,
+            region=aws_region,
         )
         return
 
@@ -1569,63 +1822,16 @@ def _teardown_aws_vms(
     candidates: list[str],
     environment_id: str,
     env: dict[str, str],
+    region: str,
 ) -> None:
-    instance_ids: list[str] = []
+    from app.services.aws_client import list_ec2_instance_ids, terminate_ec2_instances
 
-    # Tag filter first.
-    by_tag = _run_cmd(
-        [
-            "aws",
-            "ec2",
-            "describe-instances",
-            "--filters",
-            f"Name=tag:launchpad-environment-id,Values={environment_id}",
-            "Name=instance-state-name,Values=running,pending,stopping,stopped",
-            "--query",
-            "Reservations[].Instances[].InstanceId",
-            "--output",
-            "text",
-        ],
-        timeout=120,
-        check=False,
+    unique_ids = list_ec2_instance_ids(
         env=env,
+        region=region,
+        environment_id=environment_id,
+        name_candidates=candidates,
     )
-    if by_tag.returncode == 0 and (by_tag.stdout or "").strip():
-        instance_ids.extend((by_tag.stdout or "").split())
-
-    for candidate in candidates:
-        if candidate.startswith("i-"):
-            instance_ids.append(candidate)
-            continue
-        listed = _run_cmd(
-            [
-                "aws",
-                "ec2",
-                "describe-instances",
-                "--filters",
-                f"Name=tag:Name,Values={candidate}",
-                "Name=instance-state-name,Values=running,pending,stopping,stopped",
-                "--query",
-                "Reservations[].Instances[].InstanceId",
-                "--output",
-                "text",
-            ],
-            timeout=120,
-            check=False,
-            env=env,
-        )
-        if listed.returncode == 0 and (listed.stdout or "").strip():
-            instance_ids.extend((listed.stdout or "").split())
-
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    unique_ids: list[str] = []
-    for iid in instance_ids:
-        token = iid.strip()
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        unique_ids.append(token)
 
     if not unique_ids:
         logger.info(
@@ -1635,12 +1841,7 @@ def _teardown_aws_vms(
         )
         return
 
-    _run_cmd(
-        ["aws", "ec2", "terminate-instances", "--instance-ids", *unique_ids],
-        timeout=300,
-        check=False,
-        env=env,
-    )
+    terminate_ec2_instances(env=env, region=region, instance_ids=unique_ids)
     logger.info(
         "aws_vm_teardown_terminate",
         environment_id=environment_id,

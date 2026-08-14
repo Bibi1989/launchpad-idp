@@ -17,6 +17,19 @@ export function formatCostSource(source: string | null | undefined): string | nu
   return COST_SOURCE_LABELS[source] ?? source
 }
 
+/** Format API cost amounts (already in display currency, default EUR). */
+export function formatCostAmount(
+  value: string | number | null | undefined,
+  opts: { decimals?: number } = {},
+): string {
+  const decimals = opts.decimals ?? 2
+  const n = Number.parseFloat(String(value ?? '0'))
+  if (!Number.isFinite(n)) return (0).toFixed(decimals)
+  return n.toFixed(decimals)
+}
+
+export const COST_DISPLAY_SYMBOL = '€'
+
 export interface FormatDurationOptions {
   /** Zero-pad hours/minutes to two digits (e.g. "02h 05m"). */
   pad?: boolean

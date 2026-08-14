@@ -158,11 +158,16 @@ def _credential_env(
     credentials: CloudCredentials | None,
     *,
     environment_id: str,
+    provider: str | None = None,
 ) -> dict[str, str]:
     # Shared materialization (GCP SA key file + project env) for gcloud/aws CLIs.
     from app.services.cloud_instance_compute import _credential_env as _cic_credential_env
 
-    return _cic_credential_env(credentials, environment_id=environment_id)
+    return _cic_credential_env(
+        credentials,
+        environment_id=environment_id,
+        provider=provider,
+    )
 
 
 def _is_frontend_app_dir(name: str) -> bool:
@@ -323,6 +328,7 @@ def _apply_override(
     override = (running_instance.preview_url_override or "").strip()
     if override:
         resources.preview_url = override
+    resources.running_instance = running_instance
     return resources
 
 
@@ -962,6 +968,8 @@ def _deploy_vm(
     create_vpc: bool = False,
     create_subnets: bool = False,
     gcp_project_id: str | None = None,
+    existing_vpc_id: str | None = None,
+    existing_security_group_id: str | None = None,
 ) -> ProvisionedResources:
     from app.services.cloud_instance_compute import CloudInstanceComputeError, provision_cloud_vm
 
@@ -993,13 +1001,15 @@ def _deploy_vm(
                 create_vpc=create_vpc,
                 create_subnets=create_subnets,
                 gcp_project_id=gcp_project_id,
+                existing_vpc_id=existing_vpc_id,
+                existing_security_group_id=existing_security_group_id,
             )
             host = (running_instance.host or "").strip()
         except CloudInstanceComputeError as exc:
             raise AttachDeployError(str(exc)) from exc
 
     if not host and override:
-        return ProvisionedResources(
+        resources = ProvisionedResources(
             namespace=f"instance-{environment_id[:8]}",
             preview_url=override,
             created_workload=True,
@@ -1010,6 +1020,7 @@ def _deploy_vm(
                 "launchpad.io/attach-kind": RunningInstanceKind.VM.value,
             },
         )
+        return _apply_override(resources, running_instance)
     if not host:
         if provider in cloud_providers:
             raise AttachDeployError(
@@ -1093,6 +1104,65 @@ def _wrap_remote_bash(command: str) -> str:
     return f"echo {encoded} | base64 -d | bash -euo pipefail"
 
 
+def _prepare_aws_ssh_access(
+    *,
+    running_instance: RunningInstanceConfig,
+    cloud_provider: str,
+    credentials: CloudCredentials | None,
+    environment_id: str,
+) -> RunningInstanceConfig:
+    """Ensure AWS preview VMs have a local key and EC2 Instance Connect access."""
+    provider = (cloud_provider or CloudProvider.LOCAL.value).strip().lower()
+    if provider != CloudProvider.AWS.value:
+        return running_instance
+
+    from app.services.preview_ssh import ensure_preview_ssh_keypair
+
+    key_path, public_key = ensure_preview_ssh_keypair(environment_id)
+    updated = running_instance
+    if not (running_instance.ssh_key_path or "").strip():
+        updated = running_instance.model_copy(
+            update={"ssh_key_path": key_path, "ssh_user": running_instance.ssh_user or "ec2-user"}
+        )
+
+    instance_id = (updated.service_name or "").strip()
+    region = (updated.region or "").strip()
+    if not (instance_id.startswith("i-") and region and credentials):
+        return updated
+
+    from app.services.aws_client import (
+        ec2_instance_availability_zone,
+        send_ec2_instance_connect_key,
+    )
+
+    env = _credential_env(
+        credentials,
+        environment_id=environment_id,
+        provider=provider,
+    )
+    try:
+        az = ec2_instance_availability_zone(
+            env=env,
+            region=region,
+            instance_id=instance_id,
+        )
+        send_ec2_instance_connect_key(
+            env=env,
+            region=region,
+            instance_id=instance_id,
+            availability_zone=az,
+            os_user=(updated.ssh_user or "ec2-user").strip() or "ec2-user",
+            public_key=public_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "aws_ec2_instance_connect_skipped",
+            instance_id=instance_id,
+            error=sanitize_log_message(str(exc)[:200]),
+        )
+    return updated
+
+
 def _remote_shell(
     *,
     running_instance: RunningInstanceConfig,
@@ -1113,7 +1183,11 @@ def _remote_shell(
         and zone
         and shutil.which("gcloud") is not None
     ):
-        env = _credential_env(credentials, environment_id=environment_id)
+        env = _credential_env(
+            credentials,
+            environment_id=environment_id,
+            provider=provider,
+        )
         _run(
             [
                 "gcloud",
@@ -1129,6 +1203,13 @@ def _remote_shell(
             env=env,
         )
         return
+
+    running_instance = _prepare_aws_ssh_access(
+        running_instance=running_instance,
+        cloud_provider=cloud_provider,
+        credentials=credentials,
+        environment_id=environment_id,
+    )
 
     user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
     ssh_base = [
@@ -1180,16 +1261,37 @@ def _wait_for_vm_ssh(
     )
 
 
-def _wait_for_vm_host_ready(
-    *,
-    running_instance: RunningInstanceConfig,
-    host: str,
-    cloud_provider: str,
-    credentials: CloudCredentials | None,
-    environment_id: str,
-) -> None:
-    """Wait until the VM can install packages (startup done / apt free)."""
-    script = """
+def _vm_os_family(cloud_provider: str) -> str:
+    """Package-manager family for remote VM bootstrap scripts."""
+    if (cloud_provider or "").strip().lower() == CloudProvider.AWS.value:
+        return "rhel"
+    return "debian"
+
+
+def _wait_for_vm_host_ready_script(*, os_family: str) -> str:
+    if os_family == "rhel":
+        return """
+set -euo pipefail
+if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  echo "host already package-ready"
+  exit 0
+fi
+echo "waiting for launchpad vm bootstrap"
+for i in $(seq 1 72); do
+  if [ -f /var/lib/launchpad/vm-ready ]; then
+    echo "vm-ready present"
+    exit 0
+  fi
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    echo "node ready before marker"
+    exit 0
+  fi
+  sleep 5
+done
+echo "bootstrap wait timed out; continuing with best-effort package install"
+exit 0
+"""
+    return """
 set -euo pipefail
 apt_busy() {
   if command -v fuser >/dev/null 2>&1; then
@@ -1223,6 +1325,18 @@ done
 echo "bootstrap wait timed out; continuing with best-effort package install"
 exit 0
 """
+
+
+def _wait_for_vm_host_ready(
+    *,
+    running_instance: RunningInstanceConfig,
+    host: str,
+    cloud_provider: str,
+    credentials: CloudCredentials | None,
+    environment_id: str,
+) -> None:
+    """Wait until the VM can install packages (startup done / apt free)."""
+    script = _wait_for_vm_host_ready_script(os_family=_vm_os_family(cloud_provider))
     _remote_shell(
         running_instance=running_instance,
         host=host,
@@ -1306,12 +1420,19 @@ def _detect_start_command(workspace_root: Path | None, *, workdir_rel: str = "."
     return "npm start"
 
 
-def _vm_ensure_host_packages_script(*, strategy: InstanceProcessStrategy) -> str:
-    """Idempotent host bootstrap: wait for locks, retry apt, install only if missing.
+def _vm_ensure_host_packages_script(
+    *,
+    strategy: InstanceProcessStrategy,
+    os_family: str = "debian",
+) -> str:
+    """Idempotent host bootstrap: install only if missing (apt on Debian, dnf on RHEL)."""
+    if os_family == "rhel":
+        return _vm_ensure_host_packages_script_rhel(strategy=strategy)
+    return _vm_ensure_host_packages_script_debian(strategy=strategy)
 
-    Fast-path skips apt entirely when node/npm (and strategy tools) already exist.
-    That avoids racing GCP first-boot startup / unattended-upgrades locks.
-    """
+
+def _vm_ensure_host_packages_script_debian(*, strategy: InstanceProcessStrategy) -> str:
+    """Debian/Ubuntu bootstrap with apt lock handling."""
     need_docker = strategy == InstanceProcessStrategy.DOCKER
     need_pm2 = strategy == InstanceProcessStrategy.PM2
     lines = [
@@ -1421,6 +1542,78 @@ def _vm_ensure_host_packages_script(*, strategy: InstanceProcessStrategy) -> str
     return "\n".join(lines) + "\n"
 
 
+def _vm_ensure_host_packages_script_rhel(*, strategy: InstanceProcessStrategy) -> str:
+    """Amazon Linux / RHEL bootstrap with dnf/yum (no apt)."""
+    need_docker = strategy == InstanceProcessStrategy.DOCKER
+    need_pm2 = strategy == InstanceProcessStrategy.PM2
+    lines = [
+        "set -euo pipefail",
+        "export PATH=\"/usr/local/bin:$PATH\"",
+        "pkg_mgr() {",
+        "  if command -v dnf >/dev/null 2>&1; then echo dnf",
+        "  elif command -v yum >/dev/null 2>&1; then echo yum",
+        "  else echo ''",
+        "  fi",
+        "}",
+        "PM=$(pkg_mgr)",
+        "host_ready=1",
+        "command -v node >/dev/null 2>&1 || host_ready=0",
+        "command -v npm >/dev/null 2>&1 || host_ready=0",
+        "command -v git >/dev/null 2>&1 || host_ready=0",
+        "command -v curl >/dev/null 2>&1 || host_ready=0",
+        "command -v python3 >/dev/null 2>&1 || host_ready=0",
+    ]
+    if need_pm2:
+        lines.append("command -v pm2 >/dev/null 2>&1 || host_ready=0")
+    if need_docker:
+        lines.append("command -v docker >/dev/null 2>&1 || host_ready=0")
+    lines.extend(
+        [
+            "if [ \"$host_ready\" = \"1\" ]; then",
+            "  echo \"host packages already present; skipping package install\"",
+            "else",
+            "  if [ -z \"$PM\" ]; then",
+            "    echo \"no supported package manager found\" >&2",
+            "    exit 1",
+            "  fi",
+            "  sudo $PM install -y git curl python3 python3-pip gcc-c++ make || true",
+            "  if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then",
+            "    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -",
+            "    sudo $PM install -y nodejs",
+            "  fi",
+            "fi",
+            "node --version",
+            "npm --version",
+        ]
+    )
+    if need_pm2:
+        lines.extend(
+            [
+                "if ! command -v pm2 >/dev/null 2>&1; then",
+                "  sudo npm install -g pm2",
+                "fi",
+                "pm2 --version",
+            ]
+        )
+    if need_docker:
+        lines.extend(
+            [
+                "if ! command -v docker >/dev/null 2>&1; then",
+                "  curl -fsSL https://get.docker.com | sudo sh",
+                "  sudo systemctl enable --now docker || true",
+                "fi",
+                "sudo usermod -aG docker \"$(whoami)\" || true",
+            ]
+        )
+    lines.extend(
+        [
+            "sudo mkdir -p /var/lib/launchpad",
+            "sudo touch /var/lib/launchpad/vm-ready",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _vm_reverse_proxy_script(*, proxy: InstanceReverseProxy, listen: int) -> str:
     """Install and configure an nginx/Caddy edge that proxies :80 -> app listen_port.
 
@@ -1484,13 +1677,17 @@ def _native_bootstrap_and_start(
     unit: str,
     start_command: str,
     reverse_proxy: InstanceReverseProxy = InstanceReverseProxy.NONE,
+    cloud_provider: str = CloudProvider.GCP.value,
 ) -> str:
     """Shell script executed on the VM after code is present."""
     work = "." if workdir_rel in {"", "."} else workdir_rel.strip().lstrip("./")
     app_cwd = app_dir if work == "." else f"{app_dir}/{work}"
     # Expand PORT in start commands that use ${PORT}.
     start_expanded = start_command.replace("${PORT}", str(listen)).replace("$PORT", str(listen))
-    ensure = _vm_ensure_host_packages_script(strategy=strategy).replace(
+    ensure = _vm_ensure_host_packages_script(
+        strategy=strategy,
+        os_family=_vm_os_family(cloud_provider),
+    ).replace(
         "${PORT}",
         str(listen),
     )
@@ -1596,7 +1793,11 @@ def _sync_workspace_over_ssh(
         and zone
         and shutil.which("gcloud") is not None
     ):
-        env = _credential_env(credentials, environment_id=environment_id)
+        env = _credential_env(
+            credentials,
+            environment_id=environment_id,
+            provider=provider,
+        )
         # gcloud scp recursive into remote app dir
         _run(
             [
@@ -1614,6 +1815,13 @@ def _sync_workspace_over_ssh(
             env=env,
         )
         return
+
+    running_instance = _prepare_aws_ssh_access(
+        running_instance=running_instance,
+        cloud_provider=cloud_provider,
+        credentials=credentials,
+        environment_id=environment_id,
+    )
 
     user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
     if shutil.which("rsync") is not None:
@@ -1756,6 +1964,7 @@ def _deploy_vm_native(
             unit=unit,
             start_command=start_cmd,
             reverse_proxy=running_instance.reverse_proxy,
+            cloud_provider=cloud_provider,
         )
         _remote_shell(
             running_instance=running_instance,
@@ -1847,7 +2056,11 @@ def _deploy_vm_docker(
             and zone
             and shutil.which("gcloud") is not None
         ):
-            env = _credential_env(credentials, environment_id=environment_id)
+            env = _credential_env(
+                credentials,
+                environment_id=environment_id,
+                provider=provider,
+            )
             _run(
                 [
                     "gcloud",
@@ -1885,7 +2098,11 @@ def _deploy_gcp_cloud_run(
     resources: ProvisionedResources,
     credentials: CloudCredentials | None,
 ) -> ProvisionedResources:
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(
+        credentials,
+        environment_id=environment_id,
+        provider=CloudProvider.GCP.value,
+    )
     if shutil.which("gcloud") is None:
         return resources
     label_env = _SAFE_NAME.sub("-", environment_id.lower()).strip("-")[:63]
@@ -1937,7 +2154,11 @@ def _deploy_aws_app_runner(
     resources: ProvisionedResources,
     credentials: CloudCredentials | None,
 ) -> ProvisionedResources:
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(
+        credentials,
+        environment_id=environment_id,
+        provider=CloudProvider.AWS.value,
+    )
     env.setdefault("AWS_DEFAULT_REGION", region)
     env.setdefault("AWS_REGION", region)
     if shutil.which("aws") is None:
@@ -1991,7 +2212,11 @@ def _deploy_azure_container_apps(
     resources: ProvisionedResources,
     credentials: CloudCredentials | None,
 ) -> ProvisionedResources:
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(
+        credentials,
+        environment_id=environment_id,
+        provider=CloudProvider.AZURE.value,
+    )
     if shutil.which("az") is None:
         return resources
     rg = "launchpad-preview"
@@ -2052,7 +2277,11 @@ def _deploy_cloudflare_workers(
     workspace_root: Path | None,
 ) -> ProvisionedResources:
     _ = (image, region)
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(
+        credentials,
+        environment_id=environment_id,
+        provider=CloudProvider.CLOUDFLARE.value,
+    )
     if workspace_root and shutil.which("wrangler") is not None:
         wrangler_toml = workspace_root / "wrangler.toml"
         if wrangler_toml.is_file():
@@ -2249,6 +2478,8 @@ def deploy_attach(
     create_vpc: bool = False,
     create_subnets: bool = False,
     gcp_project_id: str | None = None,
+    existing_vpc_id: str | None = None,
+    existing_security_group_id: str | None = None,
 ) -> ProvisionedResources:
     """Deploy (or link) a preview onto serverless / VM / local-machine compute."""
     _ = (namespace, ttl_expires_at, owner_label, enable_postgres, enable_redis, packaging)
@@ -2333,6 +2564,8 @@ def deploy_attach(
             create_vpc=create_vpc,
             create_subnets=create_subnets,
             gcp_project_id=gcp_project_id,
+            existing_vpc_id=existing_vpc_id,
+            existing_security_group_id=existing_security_group_id,
         )
     if kind == RunningInstanceKind.SERVERLESS:
         return _deploy_serverless(
@@ -2379,7 +2612,11 @@ def _teardown_serverless(
             candidates.append(name)
     region = (running_instance.region or "us-central1").strip() or "us-central1"
     provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
-    env = _credential_env(credentials, environment_id=environment_id)
+    env = _credential_env(
+        credentials,
+        environment_id=environment_id,
+        provider=provider,
+    )
     gcp_region = region.rsplit("-", 1)[0] if region.count("-") >= 2 else region
 
     if provider == CloudProvider.GCP.value and shutil.which("gcloud"):

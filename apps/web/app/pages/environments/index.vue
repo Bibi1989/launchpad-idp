@@ -242,7 +242,7 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
       <div class="lp-glass rounded-xl border-l-2 border-l-[var(--lp-accent)] p-4">
         <p class="lp-label">{{ t('environments.index.estHourlySpend') }}</p>
         <div class="mt-2 flex items-baseline gap-1">
-          <span class="text-3xl font-bold tracking-tight text-[var(--lp-accent)]">${{ hourlySpend }}</span>
+          <span class="text-3xl font-bold tracking-tight text-[var(--lp-accent)]">{{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(hourlySpend, { decimals: 4 }) }}</span>
           <span class="text-sm text-[var(--lp-muted)]">/hr</span>
         </div>
       </div>
@@ -257,9 +257,9 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
             class="text-3xl font-bold tracking-tight"
             :class="softCapExceeded ? 'text-[var(--lp-danger)]' : 'text-[var(--lp-text)]'"
           >
-            ${{ accruedSpend }}
+            {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(accruedSpend) }}
           </span>
-          <span v-if="softCap" class="text-sm text-[var(--lp-muted)]">/ ${{ softCap }}</span>
+          <span v-if="softCap" class="text-sm text-[var(--lp-muted)]">/ {{ COST_DISPLAY_SYMBOL }}{{ formatCostAmount(softCap) }}</span>
         </div>
       </div>
 

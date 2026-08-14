@@ -13,6 +13,8 @@ from app.schemas.cloud_oauth import (
     CloudOAuthStartRequest,
 )
 from app.schemas.user_credentials import (
+    CloudNetworkListResponse,
+    CloudSecurityGroupListResponse,
     UserCloudCredentialsStatus,
     UserCloudCredentialsUpdate,
 )
@@ -57,6 +59,52 @@ async def clear_cloud_credentials(
     service: UserCloudCredentialsService = Depends(get_user_credentials_service),
 ) -> UserCloudCredentialsStatus:
     return await service.clear_all(user.id)
+
+
+@router.get("/networks", response_model=CloudNetworkListResponse)
+async def list_user_cloud_networks(
+    provider: str,
+    user: CurrentUser,
+    region: str | None = None,
+    service: UserCloudCredentialsService = Depends(get_user_credentials_service),
+) -> CloudNetworkListResponse:
+    """List VPC/networks from the cloud using vault credentials."""
+    from app.services.cloud_networks import CloudNetworkListError, list_cloud_networks
+
+    creds = await service.get_credentials(user.id)
+    try:
+        return list_cloud_networks(provider=provider, credentials=creds, region=region)
+    except CloudNetworkListError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+
+
+@router.get("/security-groups", response_model=CloudSecurityGroupListResponse)
+async def list_user_cloud_security_groups(
+    provider: str,
+    user: CurrentUser,
+    region: str | None = None,
+    vpc_id: str | None = None,
+    service: UserCloudCredentialsService = Depends(get_user_credentials_service),
+) -> CloudSecurityGroupListResponse:
+    """List AWS security groups from the cloud using vault credentials."""
+    from app.services.cloud_networks import CloudNetworkListError, list_cloud_security_groups
+
+    creds = await service.get_credentials(user.id)
+    try:
+        return list_cloud_security_groups(
+            provider=provider,
+            credentials=creds,
+            region=region,
+            vpc_id=vpc_id,
+        )
+    except CloudNetworkListError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
 
 
 @router.get("/oauth/capabilities", response_model=CloudOAuthCapabilities)

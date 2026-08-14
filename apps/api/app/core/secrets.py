@@ -249,11 +249,25 @@ def has_gcp_auth(creds: CloudCredentials) -> bool:
 
 def has_aws_auth(creds: CloudCredentials) -> bool:
     """AWS auth is satisfied by access keys, role ARN, or interactive SSO tokens."""
-    if creds.aws_role_arn:
+    if creds.aws_role_arn and _is_valid_aws_role_arn(creds.aws_role_arn):
         return True
     if creds.aws_oauth_token_json:
         return True
     return bool(creds.aws_access_key_id and creds.aws_secret_access_key)
+
+
+def _is_valid_aws_role_arn(value: str | None) -> bool:
+    """True for IAM role ARNs like arn:aws:iam::123456789012:role/Name."""
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    # Partition may be aws / aws-cn / aws-us-gov.
+    return bool(
+        re.match(
+            r"^arn:aws(?:-cn|-us-gov)?:iam::\d{12}:role/[\w+=,.@\-_/]+$",
+            raw,
+        )
+    )
 
 
 def has_azure_auth(creds: CloudCredentials) -> bool:
@@ -414,10 +428,20 @@ def credentials_to_env(
             env.pop("GCP_SA_KEY", None)
             env.pop("GOOGLE_APPLICATION_CREDENTIALS_JSON", None)
 
-    aws_role_arn = env.get("aws_role_arn") or env.get("AWS_ROLE_ARN")
+    aws_role_arn = (env.get("aws_role_arn") or env.get("AWS_ROLE_ARN") or "").strip()
     aws_role_session = env.get("aws_role_session_name") or env.get("AWS_ROLE_SESSION_NAME")
+    has_aws_keys = bool(env.get("AWS_ACCESS_KEY_ID") and env.get("AWS_SECRET_ACCESS_KEY"))
+    has_aws_oauth = bool(env.get("AWS_OAUTH_TOKEN_JSON"))
 
-    if aws_role_arn and "AWS_WEB_IDENTITY_TOKEN_FILE" not in env:
+    # Access keys and Connect SSO win over keyless OIDC. Web-identity is only for
+    # sandbox/IaC when a valid role ARN is the sole AWS auth method.
+    if (
+        aws_role_arn
+        and _is_valid_aws_role_arn(aws_role_arn)
+        and not has_aws_keys
+        and not has_aws_oauth
+        and "AWS_WEB_IDENTITY_TOKEN_FILE" not in env
+    ):
         from pkg.auth.oidc.token_engine import OidcTokenEngine
         from pkg.sandbox.exec import AwsWebIdentityConfig, CredentialInjector
 
@@ -448,6 +472,27 @@ def credentials_to_env(
                 env.pop(key, None)
             elif key.startswith("aws_"):
                 env.pop(key, None)
+    elif aws_role_arn and (has_aws_keys or has_aws_oauth):
+        # Stale / optional role ARN must not block keys or SSO Connect.
+        env.pop("AWS_ROLE_ARN", None)
+        env.pop("aws_role_arn", None)
+        env.pop("AWS_ROLE_SESSION_NAME", None)
+        env.pop("aws_role_session_name", None)
+        env.pop("AWS_WEB_IDENTITY_TOKEN_FILE", None)
+        logger.info(
+            "aws_role_arn_ignored_prefer_keys_or_sso",
+            workspace_id=workspace_id,
+            has_keys=has_aws_keys,
+            has_oauth=has_aws_oauth,
+        )
+    elif aws_role_arn and not _is_valid_aws_role_arn(aws_role_arn):
+        env.pop("AWS_ROLE_ARN", None)
+        env.pop("aws_role_arn", None)
+        logger.warning(
+            "aws_role_arn_invalid_ignored",
+            workspace_id=workspace_id,
+            role_arn_prefix=aws_role_arn[:32],
+        )
 
     # Prefer the project_id embedded in the GCP SA key over workspace form defaults.
     gcp_project = project_id_from_gcp_sa_json(env.get("GCP_SA_KEY")) or (
@@ -518,32 +563,29 @@ def _materialize_interactive_oauth_env(env: dict[str, str], *, workspace_id: str
             logger.warning("gcp_oauth_materialize_failed", error=str(exc))
 
     aws_oauth = env.pop("AWS_OAUTH_TOKEN_JSON", None)
-    account_id = env.pop("AWS_SSO_ACCOUNT_ID", None)
-    role_name = env.pop("AWS_SSO_ROLE_NAME", None)
-    if (
-        aws_oauth
-        and account_id
-        and role_name
-        and not env.get("AWS_ACCESS_KEY_ID")
-        and not env.get("AWS_ROLE_ARN")
-    ):
+    account_id = (env.pop("AWS_SSO_ACCOUNT_ID", None) or "").strip() or None
+    role_name = (env.pop("AWS_SSO_ROLE_NAME", None) or "").strip() or None
+    if aws_oauth and not env.get("AWS_ACCESS_KEY_ID") and not env.get("AWS_ROLE_ARN"):
         try:
-            from pkg.auth.oauth_loopback.models import CloudTokenSet
-
-            token_set = CloudTokenSet.model_validate_json(aws_oauth)
-            region = str((token_set.claims or {}).get("region") or "us-east-1")
-            keys = _aws_sso_get_role_credentials(
-                access_token=token_set.access_token,
+            minted = _materialize_aws_sso_keys(
+                aws_oauth=aws_oauth,
                 account_id=account_id,
                 role_name=role_name,
-                region=region,
             )
-            if keys:
-                env["AWS_ACCESS_KEY_ID"] = keys["access_key_id"]
-                env["AWS_SECRET_ACCESS_KEY"] = keys["secret_access_key"]
-                env["AWS_SESSION_TOKEN"] = keys["session_token"]
+            if minted:
+                env["AWS_ACCESS_KEY_ID"] = minted["access_key_id"]
+                env["AWS_SECRET_ACCESS_KEY"] = minted["secret_access_key"]
+                env["AWS_SESSION_TOKEN"] = minted["session_token"]
+                region = minted.get("region") or "us-east-1"
                 env.setdefault("AWS_DEFAULT_REGION", region)
                 env.setdefault("AWS_REGION", region)
+            else:
+                logger.warning(
+                    "aws_oauth_materialize_empty",
+                    workspace_id=workspace_id,
+                    has_account=bool(account_id),
+                    has_role=bool(role_name),
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("aws_oauth_materialize_failed", error=str(exc))
 
@@ -652,6 +694,136 @@ def _mint_gcp_user_access_token(
     return token
 
 
+def _materialize_aws_sso_keys(
+    *,
+    aws_oauth: str,
+    account_id: str | None,
+    role_name: str | None,
+) -> dict[str, str] | None:
+    """Turn a stored AWS SSO OAuth token into temporary access keys."""
+    from pkg.auth.oauth_loopback.models import CloudTokenSet
+    from pkg.auth.oauth_loopback.providers.aws import AwsSsoOAuthProvider
+
+    token_set = CloudTokenSet.model_validate_json(aws_oauth)
+    claims = dict(token_set.claims or {})
+    region = str(claims.get("region") or "us-east-1").strip() or "us-east-1"
+    access_token = (token_set.access_token or "").strip()
+
+    # Refresh when possible so federation/credentials does not fail on expiry.
+    start_url = str(claims.get("start_url") or "").strip()
+    client_id = str(claims.get("client_id") or "").strip()
+    client_secret = str(claims.get("client_secret") or "").strip()
+    if token_set.refresh_token and start_url and client_id and client_secret:
+        try:
+            provider = AwsSsoOAuthProvider(
+                start_url=start_url,
+                region=region,
+                client_id=client_id,
+                client_secret=client_secret,
+                token_endpoint=str(claims.get("token_endpoint") or "") or None,
+            )
+            refreshed = provider.refresh(token_set)
+            access_token = (refreshed.access_token or access_token).strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("aws_sso_refresh_failed", error=str(exc))
+
+    if not access_token:
+        return None
+
+    resolved_account = (account_id or str(claims.get("account_id") or "")).strip()
+    resolved_role = (role_name or str(claims.get("role_name") or "")).strip()
+    if not resolved_account or not resolved_role:
+        discovered = _aws_sso_discover_account_role(access_token=access_token, region=region)
+        if discovered:
+            resolved_account = resolved_account or discovered["account_id"]
+            resolved_role = resolved_role or discovered["role_name"]
+
+    if not resolved_account or not resolved_role:
+        logger.warning(
+            "aws_sso_missing_account_role",
+            has_account=bool(resolved_account),
+            has_role=bool(resolved_role),
+        )
+        return None
+
+    keys = _aws_sso_get_role_credentials(
+        access_token=access_token,
+        account_id=resolved_account,
+        role_name=resolved_role,
+        region=region,
+    )
+    if not keys:
+        return None
+    return {**keys, "region": region, "account_id": resolved_account, "role_name": resolved_role}
+
+
+def _aws_sso_discover_account_role(
+    *,
+    access_token: str,
+    region: str,
+) -> dict[str, str] | None:
+    """Pick the first (or AdministratorAccess) account/role from the SSO portal."""
+    import httpx
+
+    base = f"https://portal.sso.{region}.amazonaws.com"
+    headers = {
+        "x-amz-sso_bearer_token": access_token,
+        "x-amz-sso-bearer-token": access_token,
+        "Accept": "application/json",
+    }
+    with httpx.Client(timeout=30.0) as client:
+        accounts_resp = client.get(f"{base}/assignment/accounts", headers=headers)
+        if accounts_resp.status_code >= 400:
+            logger.warning(
+                "aws_sso_list_accounts_failed",
+                status=accounts_resp.status_code,
+                detail=accounts_resp.text[:200],
+            )
+            return None
+        accounts_body = accounts_resp.json()
+        account_list = accounts_body.get("accountList") if isinstance(accounts_body, dict) else None
+        if not isinstance(account_list, list) or not account_list:
+            return None
+        account = account_list[0] if isinstance(account_list[0], dict) else None
+        if account is None:
+            return None
+        account_id = str(account.get("accountId") or "").strip()
+        if not account_id:
+            return None
+
+        roles_resp = client.get(
+            f"{base}/assignment/accounts/{account_id}/roles",
+            headers=headers,
+        )
+        if roles_resp.status_code >= 400:
+            logger.warning(
+                "aws_sso_list_roles_failed",
+                status=roles_resp.status_code,
+                account_id=account_id,
+            )
+            return None
+        roles_body = roles_resp.json()
+        role_list = roles_body.get("roleList") if isinstance(roles_body, dict) else None
+        if not isinstance(role_list, list) or not role_list:
+            return None
+
+        preferred = None
+        for row in role_list:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("roleName") or "").strip()
+            if not name:
+                continue
+            if name.lower() in {"administratoraccess", "admin", "poweruseraccess"}:
+                preferred = name
+                break
+            if preferred is None:
+                preferred = name
+        if not preferred:
+            return None
+        return {"account_id": account_id, "role_name": preferred}
+
+
 def _aws_sso_get_role_credentials(
     *,
     access_token: str,
@@ -673,6 +845,13 @@ def _aws_sso_get_role_credentials(
             },
         )
     if resp.status_code >= 400:
+        logger.warning(
+            "aws_sso_get_role_credentials_failed",
+            status=resp.status_code,
+            account_id=account_id,
+            role_name=role_name,
+            detail=resp.text[:200],
+        )
         return None
     body = resp.json()
     role_creds = body.get("roleCredentials") if isinstance(body, dict) else None

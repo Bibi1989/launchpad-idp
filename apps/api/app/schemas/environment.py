@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models.domain import EnvironmentStatus, ExecutionStage, LogLevel
 from app.schemas.k8s import DeployMode
-from app.schemas.cloud import CloudCredentials
+from app.schemas.cloud import CloudCredentials, KubernetesImageSource
 
 
 class PreviewEndpoint(BaseModel):
@@ -91,6 +91,7 @@ class EnvironmentCreate(BaseModel):
     deploy_mode: DeployMode | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
+    kubernetes_image_source: str | None = Field(default=None, max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -159,6 +160,7 @@ class EnvironmentRead(BaseModel):
     stable_pr_url: str | None = None
     deploy_mode: DeployMode = DeployMode.PREVIEW
     manifest_packaging: str | None = None
+    kubernetes_image_source: str | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
     ttl_expires_at: datetime
@@ -201,13 +203,22 @@ class EnvironmentRead(BaseModel):
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
 
-        self.cost_accrued = display_cost_accrued(
+        from app.core.config import get_settings
+        from app.services.cost_metering import convert_display_cost
+
+        settings = get_settings()
+        accrued_usd = display_cost_accrued(
             cost_accrued=self.cost_accrued or Decimal("0.0000"),
             cost_estimate_hourly=self.cost_estimate_hourly,
             cost_sampled_at=self.cost_sampled_at,
             created_at=created,
             status=self.status,
             now=now,
+        )
+        self.cost_accrued = convert_display_cost(accrued_usd, settings=settings)
+        self.cost_estimate_hourly = convert_display_cost(
+            self.cost_estimate_hourly or Decimal("0.0000"),
+            settings=settings,
         )
         self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
         deploy_mode = (
@@ -301,6 +312,7 @@ class PreviewLaunchRequest(BaseModel):
     deploy_mode: DeployMode | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
+    kubernetes_image_source: KubernetesImageSource | None = None
 
     @field_validator("name")
     @classmethod
@@ -490,6 +502,19 @@ class EnvironmentPromoteRequest(BaseModel):
         default=False,
         description="Create subnets in the preview VPC/VNet (implies create_vpc).",
     )
+    existing_vpc_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Reuse an existing VPC/network id (AWS vpc-… or GCP network name). "
+            "When set, create_vpc is ignored."
+        ),
+    )
+    existing_security_group_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Reuse an existing AWS security group (sg-…). AWS only.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -516,8 +541,28 @@ class EnvironmentPromoteRequest(BaseModel):
         cleaned = value.strip().lower()
         return cleaned or None
 
+    @field_validator("existing_vpc_id")
+    @classmethod
+    def normalize_existing_vpc_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @field_validator("existing_security_group_id")
+    @classmethod
+    def normalize_existing_security_group_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
     @model_validator(mode="after")
     def imply_vpc_from_subnets(self) -> EnvironmentPromoteRequest:
+        if self.existing_vpc_id:
+            self.create_vpc = False
+            self.create_subnets = False
+            return self
         if self.create_subnets and not self.create_vpc:
             self.create_vpc = True
         return self

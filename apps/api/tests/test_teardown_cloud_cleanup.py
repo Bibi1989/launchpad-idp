@@ -87,6 +87,32 @@ def test_credential_env_ignores_stale_ambient_oidc_override(
     assert env.get("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE") == key_path
     assert "/tmp/launchpad_oidc_token.jwt" not in Path(key_path).read_text(encoding="utf-8")
 
+
+def test_credential_env_aws_ignores_broken_gcp_oauth(tmp_path: Path) -> None:
+    from app.services.cloud_instance_compute import CloudInstanceComputeError
+
+    creds = CloudCredentials(
+        gcp_oauth_token_json='{"provider":"gcp","refresh_token":"x"}',
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+    )
+    with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+        env = _credential_env(
+            creds,
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            provider="aws",
+        )
+    assert env.get("AWS_ACCESS_KEY_ID") == "AKIATEST"
+
+    with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+        with pytest.raises(CloudInstanceComputeError, match="GCP Connect token"):
+            _credential_env(
+                creds,
+                environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                provider="gcp",
+            )
+
+
 def test_teardown_cloud_vm_deletes_network_after_instances() -> None:
     from app.services.cloud_instance_compute import teardown_cloud_vm
     from app.schemas.cloud import RunningInstanceConfig
