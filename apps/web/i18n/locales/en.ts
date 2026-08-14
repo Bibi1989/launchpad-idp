@@ -135,7 +135,9 @@ export default {
   "landing": {
     "eyebrow": "Internal developer portal",
     "heroTitle": "Launchpad",
-    "heroBlurb": "Governed ephemeral environments and multi-cloud infrastructure from one portal - provision, ship manifests, and launch previews without leaving the control plane.",
+    "heroHeadline": "Ship governed environments across every cloud.",
+    "heroBlurb": "One control plane for ephemeral previews, multi-cloud IaC, Kubernetes workloads, and hybrid hosts - without leaving the portal your platform team already trusts.",
+    "heroTrust": "Built for platform, SRE, and application teams",
     "getStarted": "Get started",
     "readDocs": "Read the docs",
     "docs": "Docs",
@@ -143,6 +145,109 @@ export default {
     "signIn": "Sign in",
     "gettingStarted": "Getting started",
     "apiReference": "API reference",
+    "nav": {
+      "product": "Product",
+      "platforms": "Platforms",
+      "security": "Security"
+    },
+    "platforms": {
+      "eyebrow": "Works with the stack you already run",
+      "gcp": "Google Cloud",
+      "aws": "AWS",
+      "azure": "Azure",
+      "cloudflare": "Cloudflare",
+      "kubernetes": "Kubernetes",
+      "github": "GitHub",
+      "gitlab": "GitLab",
+      "terraform": "Terraform / Pulumi"
+    },
+    "capabilities": {
+      "eyebrow": "Capabilities",
+      "title": "Everything your portal needs to move code to runtime",
+      "blurb": "From catalog templates to live previews and cloud apply, Launchpad keeps provisioning, policy, and day-2 ops in one governed workflow.",
+      "previews": {
+        "title": "Ephemeral previews",
+        "blurb": "Spin up governed app environments from a repo or catalog template, then tear them down on TTL."
+      },
+      "iac": {
+        "title": "Multi-cloud IaC",
+        "blurb": "Generate Terraform or Pulumi for GCP, AWS, Azure, Cloudflare, or local Sandbox, then apply from a sandbox."
+      },
+      "k8s": {
+        "title": "Kubernetes workloads",
+        "blurb": "Edit hardened manifests, apply to your cluster, and operate pods with describe, logs, and exec."
+      },
+      "catalog": {
+        "title": "Service catalog",
+        "blurb": "Publish golden paths so teams launch the right stack the first time, with org standards baked in."
+      },
+      "hybrid": {
+        "title": "Hybrid cloud agents",
+        "blurb": "Reach private networks and on-prem hosts with outbound agents - no inbound firewall exceptions."
+      },
+      "governance": {
+        "title": "Org governance",
+        "blurb": "SSO, roles, credential vaults, and audit trails keep self-service safe for platform owners."
+      }
+    },
+    "steps": {
+      "eyebrow": "How it works",
+      "title": "From commit to running environment in three steps",
+      "blurb": "Launchpad handles the bookkeeping in the API and the heavy lifting in workers, so browsers never wait on Terraform or image builds.",
+      "connect": {
+        "title": "Connect sources",
+        "blurb": "Link GitHub or GitLab, store cloud credentials once, and pick a catalog template or existing workspace."
+      },
+      "launch": {
+        "title": "Launch or provision",
+        "blurb": "Start a preview, generate IaC, or apply manifests. Celery workers clone, build, and apply while you watch live status."
+      },
+      "operate": {
+        "title": "Operate with guardrails",
+        "blurb": "Inspect logs, exec into pods, rebuild on push, and tear down on TTL - all under org policy."
+      }
+    },
+    "security": {
+      "eyebrow": "Security & governance",
+      "title": "Self-service without giving away the keys",
+      "blurb": "Platform teams stay in control of identity, secrets, and blast radius while developers move faster inside clear guardrails.",
+      "cta": "Explore the architecture docs",
+      "points": {
+        "sso": "OIDC SSO with org role mapping for operators and developers",
+        "vault": "Encrypted credential vault for GCP, AWS, Azure, and Cloudflare",
+        "sandbox": "Sandboxed apply paths and keyless workload identity where configured",
+        "audit": "Environment lifecycle events and rebuilds you can trace end to end"
+      }
+    },
+    "stats": {
+      "clouds": {
+        "value": "4+",
+        "label": "Cloud targets in one portal"
+      },
+      "engines": {
+        "value": "3",
+        "label": "IaC engines (Terraform, OpenTofu, Pulumi)"
+      },
+      "runtime": {
+        "value": "K8s+",
+        "label": "Previews, compose, and instance modes"
+      },
+      "gitops": {
+        "value": "Push",
+        "label": "Webhook rebuilds for live branches"
+      }
+    },
+    "finalCta": {
+      "title": "Ready to run your next environment?",
+      "blurb": "Open the hub, connect a repo, and launch a governed preview - or start from the docs if you are wiring your first org."
+    },
+    "footer": {
+      "blurb": "The internal developer portal for governed previews, multi-cloud infrastructure, and hybrid operations.",
+      "product": "Product",
+      "resources": "Resources",
+      "access": "Access",
+      "rights": "Built for platform teams"
+    },
     "features": {
       "previews": {
         "title": "Ephemeral previews",
@@ -156,6 +261,26 @@ export default {
         "title": "Kubernetes workloads",
         "blurb": "Edit hardened manifests, apply to your cluster, and operate pods with describe, logs, and exec."
       }
+    },
+    "graphic": {
+      "title": "How Launchpad fits together",
+      "description": "Developers and git repositories connect to the Launchpad control plane, which launches previews, multi-cloud infrastructure, and hybrid agents.",
+      "sourceLabel": "YOU",
+      "sourceTitle": "Developers & orgs",
+      "gitLabel": "SOURCE",
+      "gitTitle": "GitHub / GitLab",
+      "hubLabel": "CONTROL PLANE",
+      "hubSubtitle": "API · workers · governance",
+      "targetPreview": "Previews",
+      "targetPreviewHint": "K8s · TTL",
+      "targetCloud": "Cloud IaC",
+      "targetCloudHint": "GCP · AWS · Azure",
+      "targetHybrid": "Hybrid",
+      "targetHybridHint": "Host agent",
+      "stepLaunch": "Launch",
+      "stepProvision": "Provision",
+      "stepPreview": "Preview",
+      "stepOperate": "Operate"
     }
   },
   "auth": {
@@ -1297,6 +1422,7 @@ export default {
     },
     "destroy": {
       "title": "Destroy workspace?",
+      "message": "Destroy workspace “{name}”? Linked environments and Launchpad-managed cloud resources are torn down. Generated files and the sandbox are removed. This cannot be undone.",
       "confirm": "Yes, destroy",
       "cancel": "No"
     },
@@ -1822,7 +1948,7 @@ export default {
       "clusterWarning": "Cluster Connection Warning",
       "aiAnalyzeFix": "AI Analyze & Fix",
       "nukeTitle": "Nuke this workspace?",
-      "nukeMessage": "This permanently destroys the workspace record and on-disk IaC/manifests. Cluster objects already applied are not automatically deleted.",
+      "nukeMessage": "This permanently destroys the workspace, tears down environments provisioned from it, and removes Launchpad-managed cloud resources (namespaces, registry images, and the shared preview cluster when unused).",
       "nukeConfirm": "Yes, nuke workspace",
       "deleteResource": "Delete resource?",
       "deleteResourceMessage": "This runs kubectl delete against namespace {namespace}. This cannot be undone.",

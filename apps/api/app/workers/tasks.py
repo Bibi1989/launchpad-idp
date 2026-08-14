@@ -243,31 +243,55 @@ async def _retarget_provisioner_for_cloud_k8s(
     commit_sha: str | None = None,
 ) -> KubernetesProvisioner:
     """Point the provisioner at GKE/EKS/AKS when this env is a cloud Kubernetes deploy."""
+    from app.core.secrets import decrypt_secret
+    from app.schemas.cloud import CloudCredentials
     from app.services.cloud_kubernetes import (
         ensure_cloud_kubernetes_target,
         is_cloud_kubernetes_deploy,
         region_from_wizard,
     )
     from app.services.provisioning import ProvisioningService
+    from app.services.teardown_context import owner_id_from_context, parse_teardown_context
 
     provider = str(getattr(environment, "provider", None) or "local").lower()
     if not is_cloud_kubernetes_deploy(provider=provider, deploy_mode=deploy_mode):
         return provisioner
 
     snapshot: dict | None = None
+    credentials_seed: CloudCredentials | None = None
+    ctx = parse_teardown_context(getattr(environment, "teardown_context_json", None))
+    if ctx:
+        enc = ctx.get("encrypted_credentials")
+        if enc:
+            try:
+                credentials_seed = CloudCredentials.model_validate_json(
+                    decrypt_secret(str(enc))
+                )
+            except Exception:
+                logger.warning(
+                    "cloud_k8s_retarget_teardown_creds_invalid",
+                    environment_id=str(getattr(environment, "id", "")),
+                )
+        ctx_region = ctx.get("region")
+        if ctx_region and str(ctx_region).strip():
+            snapshot = {"cloud": {"resources": {"region": str(ctx_region).strip()}}}
+
     workspace_id = getattr(environment, "workspace_id", None)
     if workspace_id is not None:
         workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
         if workspace_row is not None:
-            snapshot = ProvisioningService(session)._load_wizard_snapshot(workspace_row)
+            snapshot = ProvisioningService(session)._load_wizard_snapshot(workspace_row) or snapshot
 
+    owner_for_vault = owner_id_from_context(ctx) or getattr(environment, "owner_id", None)
     credentials = await _merge_attach_credentials_from_vault(
         session,
-        attach_credentials=None,
-        owner_id=environment.owner_id,
+        attach_credentials=credentials_seed,
+        owner_id=owner_for_vault,
         provider=provider,
     )
     region = region_from_wizard(provider, snapshot)
+    if ctx and ctx.get("region") and str(ctx.get("region")).strip():
+        region = str(ctx.get("region")).strip()
     if log_repo is not None and env_uuid is not None:
         await _emit_log(
             log_repo,
@@ -308,6 +332,133 @@ async def _retarget_provisioner_for_cloud_k8s(
         )
         await session.commit()
     return provisioner
+
+
+async def _maybe_teardown_shared_cloud_kubernetes(
+    session: AsyncSession,
+    *,
+    environment: Environment,
+    deploy_mode: str,
+) -> None:
+    """Delete shared launchpad-previews GKE/EKS when this owner no longer needs it."""
+    from sqlalchemy import select
+
+    from app.core.secrets import decrypt_secret
+    from app.schemas.cloud import CloudCredentials
+    from app.services.cloud_kubernetes import (
+        is_cloud_kubernetes_deploy,
+        region_from_wizard,
+        teardown_shared_preview_cluster,
+    )
+    from app.services.teardown_context import owner_id_from_context, parse_teardown_context
+
+    provider = str(getattr(environment, "provider", None) or "local").lower()
+    if not is_cloud_kubernetes_deploy(provider=provider, deploy_mode=deploy_mode):
+        return
+
+    owner_id = getattr(environment, "owner_id", None)
+    ctx = parse_teardown_context(getattr(environment, "teardown_context_json", None))
+    owner_id = owner_id_from_context(ctx) or owner_id
+    if owner_id is None:
+        return
+
+    remaining_ws = await session.execute(
+        select(ProvisioningWorkspace.id)
+        .where(
+            ProvisioningWorkspace.owner_id == owner_id,
+            ProvisioningWorkspace.provider == provider,
+        )
+        .limit(1)
+    )
+    if remaining_ws.scalar_one_or_none() is not None:
+        logger.info(
+            "shared_cloud_k8s_retained",
+            reason="other_cloud_workspaces",
+            provider=provider,
+            owner_id=str(owner_id),
+        )
+        return
+
+    remaining_envs = await session.execute(
+        select(Environment.id)
+        .where(
+            Environment.owner_id == owner_id,
+            Environment.provider == provider,
+            Environment.id != environment.id,
+            Environment.status != EnvironmentStatus.DESTROYED,
+            Environment.deploy_mode.in_(
+                [DeployMode.MANIFEST.value, DeployMode.PREVIEW.value]
+            ),
+        )
+        .limit(1)
+    )
+    if remaining_envs.scalar_one_or_none() is not None:
+        logger.info(
+            "shared_cloud_k8s_retained",
+            reason="other_cloud_k8s_environments",
+            provider=provider,
+            owner_id=str(owner_id),
+        )
+        return
+
+    credentials: CloudCredentials | None = None
+    region = region_from_wizard(provider, None)
+    if ctx:
+        enc = ctx.get("encrypted_credentials")
+        if enc:
+            try:
+                credentials = CloudCredentials.model_validate_json(decrypt_secret(str(enc)))
+            except Exception:
+                credentials = None
+        if ctx.get("region") and str(ctx.get("region")).strip():
+            region = str(ctx.get("region")).strip()
+    credentials = await _merge_attach_credentials_from_vault(
+        session,
+        attach_credentials=credentials,
+        owner_id=owner_id,
+        provider=provider,
+    )
+    if not isinstance(credentials, CloudCredentials):
+        logger.warning(
+            "shared_cloud_k8s_teardown_skipped_no_credentials",
+            provider=provider,
+            environment_id=str(environment.id),
+        )
+        return
+    from app.core.secrets import has_aws_auth, has_gcp_auth
+    from app.schemas.cloud import CloudProvider
+
+    if provider == CloudProvider.AWS.value and not has_aws_auth(credentials):
+        logger.warning(
+            "shared_cloud_k8s_teardown_skipped_no_credentials",
+            provider=provider,
+            environment_id=str(environment.id),
+        )
+        return
+    if provider == CloudProvider.GCP.value and not has_gcp_auth(credentials):
+        logger.warning(
+            "shared_cloud_k8s_teardown_skipped_no_credentials",
+            provider=provider,
+            environment_id=str(environment.id),
+        )
+        return
+
+    try:
+        await asyncio.to_thread(
+            teardown_shared_preview_cluster,
+            provider=provider,
+            credentials=credentials,
+            region=region,
+            environment_id=str(environment.id),
+            wait=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - env already torn down; log and continue
+        logger.warning(
+            "shared_cloud_k8s_teardown_failed",
+            provider=provider,
+            environment_id=str(environment.id),
+            error=sanitize_log_message(str(exc)[:400]),
+        )
 
 
 async def _sync_workspace_after_cloud_deploy(
@@ -2548,6 +2699,17 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                     except Exception:
                         logger.exception(
                             "teardown_image_cleanup_failed", environment_id=environment_id
+                        )
+                    try:
+                        await _maybe_teardown_shared_cloud_kubernetes(
+                            session,
+                            environment=environment,
+                            deploy_mode=deploy_mode,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "shared_cloud_k8s_teardown_hook_failed",
+                            environment_id=environment_id,
                         )
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     environment.teardown_context_json = None

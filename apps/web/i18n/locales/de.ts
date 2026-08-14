@@ -135,7 +135,9 @@ export default {
   "landing": {
     "eyebrow": "Internes Entwicklerportal",
     "heroTitle": "Launchpad",
-    "heroBlurb": "Gesteuerte ephemere Umgebungen und Multi-Cloud-Infrastruktur aus einem Portal – provisionieren, Manifeste ausrollen und Previews starten, ohne die Control Plane zu verlassen.",
+    "heroHeadline": "Gesteuerte Umgebungen über jede Cloud ausrollen.",
+    "heroBlurb": "Eine Control Plane für ephemere Previews, Multi-Cloud-IaC, Kubernetes-Workloads und Hybrid-Hosts - ohne das Portal zu verlassen, dem Ihr Platform-Team bereits vertraut.",
+    "heroTrust": "Für Platform-, SRE- und Application-Teams",
     "getStarted": "Loslegen",
     "readDocs": "Dokumentation lesen",
     "docs": "Doku",
@@ -143,6 +145,109 @@ export default {
     "signIn": "Anmelden",
     "gettingStarted": "Erste Schritte",
     "apiReference": "API-Referenz",
+    "nav": {
+      "product": "Produkt",
+      "platforms": "Plattformen",
+      "security": "Sicherheit"
+    },
+    "platforms": {
+      "eyebrow": "Passt zum Stack, den Sie bereits betreiben",
+      "gcp": "Google Cloud",
+      "aws": "AWS",
+      "azure": "Azure",
+      "cloudflare": "Cloudflare",
+      "kubernetes": "Kubernetes",
+      "github": "GitHub",
+      "gitlab": "GitLab",
+      "terraform": "Terraform / Pulumi"
+    },
+    "capabilities": {
+      "eyebrow": "Fähigkeiten",
+      "title": "Alles, was Ihr Portal braucht, um Code in Runtime zu bringen",
+      "blurb": "Von Katalogvorlagen bis zu Live-Previews und Cloud-Apply hält Launchpad Provisionierung, Policy und Day-2-Ops in einem gesteuerten Workflow.",
+      "previews": {
+        "title": "Ephemere Previews",
+        "blurb": "Gesteuerte App-Umgebungen aus Repo oder Katalogvorlage starten und per TTL wieder abbauen."
+      },
+      "iac": {
+        "title": "Multi-Cloud-IaC",
+        "blurb": "Terraform oder Pulumi für GCP, AWS, Azure, Cloudflare oder lokale Sandbox erzeugen und aus der Sandbox anwenden."
+      },
+      "k8s": {
+        "title": "Kubernetes-Workloads",
+        "blurb": "Gehärte Manifeste bearbeiten, auf den Cluster anwenden und Pods mit Describe, Logs und Exec betreiben."
+      },
+      "catalog": {
+        "title": "Service-Katalog",
+        "blurb": "Golden Paths veröffentlichen, damit Teams den richtigen Stack beim ersten Mal starten - mit Org-Standards."
+      },
+      "hybrid": {
+        "title": "Hybrid-Cloud-Agenten",
+        "blurb": "Private Netze und On-Prem-Hosts über ausgehende Agenten erreichen - ohne eingehende Firewall-Ausnahmen."
+      },
+      "governance": {
+        "title": "Org-Governance",
+        "blurb": "SSO, Rollen, Credential-Vaults und Audit-Trails machen Self-Service für Platform Owner sicher."
+      }
+    },
+    "steps": {
+      "eyebrow": "So funktioniert es",
+      "title": "Vom Commit zur laufenden Umgebung in drei Schritten",
+      "blurb": "Launchpad erledigt Buchhaltung in der API und schwere Arbeit in Workern, damit Browser nie auf Terraform oder Image-Builds warten.",
+      "connect": {
+        "title": "Quellen verbinden",
+        "blurb": "GitHub oder GitLab anbinden, Cloud-Credentials einmal hinterlegen und Katalogvorlage oder Workspace wählen."
+      },
+      "launch": {
+        "title": "Starten oder provisionieren",
+        "blurb": "Preview starten, IaC erzeugen oder Manifeste anwenden. Celery-Worker klonen, bauen und applyen, während Sie den Status live sehen."
+      },
+      "operate": {
+        "title": "Mit Leitplanken betreiben",
+        "blurb": "Logs prüfen, in Pods execen, bei Push neu bauen und per TTL abbauen - alles unter Org-Policy."
+      }
+    },
+    "security": {
+      "eyebrow": "Sicherheit & Governance",
+      "title": "Self-Service, ohne die Schlüssel abzugeben",
+      "blurb": "Platform-Teams behalten Kontrolle über Identität, Secrets und Blast Radius, während Entwickler innerhalb klarer Leitplanken schneller werden.",
+      "cta": "Architektur-Dokumentation öffnen",
+      "points": {
+        "sso": "OIDC-SSO mit Org-Rollenmapping für Operatoren und Entwickler",
+        "vault": "Verschlüsselter Credential-Vault für GCP, AWS, Azure und Cloudflare",
+        "sandbox": "Sandboxed Apply-Pfade und keyless Workload Identity wo konfiguriert",
+        "audit": "Environment-Lifecycle und Rebuilds lückenlos nachvollziehbar"
+      }
+    },
+    "stats": {
+      "clouds": {
+        "value": "4+",
+        "label": "Cloud-Ziele in einem Portal"
+      },
+      "engines": {
+        "value": "3",
+        "label": "IaC-Engines (Terraform, OpenTofu, Pulumi)"
+      },
+      "runtime": {
+        "value": "K8s+",
+        "label": "Previews, Compose und Instance-Modi"
+      },
+      "gitops": {
+        "value": "Push",
+        "label": "Webhook-Rebuilds für Live-Branches"
+      }
+    },
+    "finalCta": {
+      "title": "Bereit für Ihre nächste Umgebung?",
+      "blurb": "Hub öffnen, Repo verbinden und gesteuerte Preview starten - oder mit der Doku Ihre erste Org verdrahten."
+    },
+    "footer": {
+      "blurb": "Das interne Entwicklerportal für gesteuerte Previews, Multi-Cloud-Infrastruktur und Hybrid-Betrieb.",
+      "product": "Produkt",
+      "resources": "Ressourcen",
+      "access": "Zugang",
+      "rights": "Für Platform-Teams gebaut"
+    },
     "features": {
       "previews": {
         "title": "Ephemere Previews",
@@ -156,6 +261,26 @@ export default {
         "title": "Kubernetes-Workloads",
         "blurb": "Gehärte Manifeste bearbeiten, auf den Cluster anwenden und Pods mit Describe, Logs und Exec betreiben."
       }
+    },
+    "graphic": {
+      "title": "So fügt sich Launchpad zusammen",
+      "description": "Entwickler und Git-Repositories verbinden sich mit der Launchpad-Control-Plane, die Previews, Multi-Cloud-Infrastruktur und Hybrid-Agenten startet.",
+      "sourceLabel": "SIE",
+      "sourceTitle": "Entwickler & Orgs",
+      "gitLabel": "QUELLE",
+      "gitTitle": "GitHub / GitLab",
+      "hubLabel": "CONTROL PLANE",
+      "hubSubtitle": "API · Worker · Governance",
+      "targetPreview": "Previews",
+      "targetPreviewHint": "K8s · TTL",
+      "targetCloud": "Cloud-IaC",
+      "targetCloudHint": "GCP · AWS · Azure",
+      "targetHybrid": "Hybrid",
+      "targetHybridHint": "Host-Agent",
+      "stepLaunch": "Starten",
+      "stepProvision": "Provisionieren",
+      "stepPreview": "Preview",
+      "stepOperate": "Betreiben"
     }
   },
   "auth": {
@@ -1305,6 +1430,7 @@ export default {
     },
     "destroy": {
       "title": "Workspace zerstören?",
+      "message": "Workspace „{name}“ zerstören? Verknüpfte Environments und von Launchpad verwaltete Cloud-Ressourcen werden abgebaut. Generierte Dateien und die Sandbox werden entfernt. Dies kann nicht rückgängig gemacht werden.",
       "confirm": "Ja, zerstören",
       "cancel": "Nein"
     },
@@ -1822,7 +1948,7 @@ export default {
       "clusterWarning": "Cluster-Verbindungswarnung",
       "aiAnalyzeFix": "KI analysieren & beheben",
       "nukeTitle": "Diesen Workspace löschen?",
-      "nukeMessage": "Dies zerstört dauerhaft den Workspace-Datensatz und IaC/Manifeste auf der Festplatte. Bereits angewendete Cluster-Objekte werden nicht automatisch gelöscht.",
+      "nukeMessage": "Dies zerstört dauerhaft den Workspace, reißt davon bereitgestellte Environments ab und entfernt von Launchpad verwaltete Cloud-Ressourcen (Namespaces, Registry-Images und den gemeinsamen Preview-Cluster, wenn ungenutzt).",
       "nukeConfirm": "Ja, Workspace löschen",
       "deleteResource": "Ressource löschen?",
       "deleteResourceMessage": "Führt kubectl delete im Namespace {namespace} aus. Dies kann nicht rückgängig gemacht werden.",

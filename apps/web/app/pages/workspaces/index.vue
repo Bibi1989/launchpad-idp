@@ -267,7 +267,7 @@ watch(
     <ConfirmDialog
       v-model:open="confirmDestroyOpen"
       :title="t('workspaces.destroy.title')"
-      :message="`Destroy workspace “${pendingDestroyName}”? Generated files and the sandbox will be removed. This cannot be undone.`"
+      :message="t('workspaces.destroy.message', { name: pendingDestroyName })"
       :confirm-label="t('workspaces.index.destroy')"
       :busy="destroyingId !== null"
       @confirm="onDestroy"

@@ -11,6 +11,49 @@ from app.services.cloud_kubernetes import (
 )
 
 
+def test_teardown_shared_preview_cluster_aws_calls_delete() -> None:
+    from unittest.mock import patch
+
+    from app.schemas.cloud import CloudCredentials
+    from app.services.cloud_kubernetes import teardown_shared_preview_cluster
+
+    creds = CloudCredentials(aws_access_key_id="AKIATEST", aws_secret_access_key="secret")
+    with (
+        patch(
+            "app.services.cloud_kubernetes._credential_env",
+            return_value={
+                "AWS_ACCESS_KEY_ID": "AKIATEST",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+            },
+        ),
+        patch("app.services.aws_client.delete_eks_cluster") as delete_eks,
+    ):
+        assert teardown_shared_preview_cluster(
+            provider="aws",
+            credentials=creds,
+            region="eu-central-1",
+            environment_id="env-1",
+            wait=False,
+        )
+        delete_eks.assert_called_once()
+        assert delete_eks.call_args.kwargs["name"] == "launchpad-previews"
+        assert delete_eks.call_args.kwargs["region"] == "eu-central-1"
+
+
+def test_teardown_shared_preview_cluster_azure_noop() -> None:
+    from app.services.cloud_kubernetes import teardown_shared_preview_cluster
+
+    assert (
+        teardown_shared_preview_cluster(
+            provider="azure",
+            credentials=None,
+            region="eastus",
+            environment_id="env-1",
+        )
+        is False
+    )
+
+
 def test_cloud_kubernetes_provider_and_deploy_mode() -> None:
     assert is_cloud_kubernetes_provider("gcp")
     assert is_cloud_kubernetes_provider("aws")

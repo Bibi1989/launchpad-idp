@@ -148,6 +148,82 @@ async def test_estimate_cost_endpoint_returns_estimate(
 
 
 @pytest.mark.asyncio
+async def test_destroy_workspace_cascades_environment_teardown(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from app.models.domain import Environment, EnvironmentStatus
+    from app.services.orgs import OrganizationService
+
+    workspace_id = uuid4()
+    env_id = uuid4()
+    root = tmp_path / str(workspace_id)
+    root.mkdir()
+
+    async with session_factory() as session:
+        personal = await OrganizationService(session).ensure_personal_org(test_user)
+        session.add(
+            ProvisioningWorkspace(
+                id=workspace_id,
+                owner_id=test_user.id,
+                org_id=personal.id,
+                name="cascade-ws",
+                engine="terraform",
+                provider="aws",
+                root_dir=str(root),
+                status="ready",
+            )
+        )
+        session.add(
+            Environment(
+                id=env_id,
+                owner_id=test_user.id,
+                org_id=personal.id,
+                workspace_id=workspace_id,
+                name="cascade-env",
+                git_branch="main",
+                git_repo_url="https://github.com/acme/app.git",
+                namespace_name="ns-cascade-env",
+                status=EnvironmentStatus.RUNNING,
+                provider="aws",
+                deploy_mode="manifest",
+                ttl_expires_at=datetime.now(UTC) + timedelta(hours=1),
+                cost_estimate_hourly=Decimal("0.1000"),
+            )
+        )
+        await session.commit()
+
+    with (
+        patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True),
+        patch(
+            "app.workers.tasks.enqueue_teardown_environment"
+        ) as enqueue,
+        patch(
+            "app.services.provisioning.ProvisioningService._maybe_teardown_shared_cloud_kubernetes",
+            new_callable=AsyncMock,
+        ),
+    ):
+        deleted = await client.delete(
+            f"/api/v1/provisioning/workspaces/{workspace_id}",
+            headers=auth_header(test_user),
+        )
+    assert deleted.status_code == 204
+    enqueue.assert_called_once()
+    assert enqueue.call_args.kwargs["environment_id"] == str(env_id)
+
+    async with session_factory() as session:
+        env = await session.get(Environment, env_id)
+        assert env is not None
+        assert env.status == EnvironmentStatus.TEARDOWN_PENDING
+        assert env.teardown_context_json
+
+
+@pytest.mark.asyncio
 async def test_list_and_destroy_workspace(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],

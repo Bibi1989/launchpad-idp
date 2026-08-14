@@ -130,6 +130,123 @@ def kubeconfig_path_for(*, provider: str, project: str, region: str, cluster: st
     return root / f"{safe}.yaml"
 
 
+def teardown_shared_preview_cluster(
+    *,
+    provider: str,
+    credentials: CloudCredentials | None,
+    region: str,
+    environment_id: str,
+    wait: bool = True,
+) -> bool:
+    """Delete Launchpad's shared ``launchpad-previews`` GKE/EKS cluster if present.
+
+    Returns True when a delete was started (or the cluster was already gone after
+    a successful delete path). Azure is a no-op (we never create AKS).
+    """
+    raw = (provider or "").strip().lower()
+    if raw == CloudProvider.AWS.value:
+        return _teardown_shared_eks(
+            credentials=credentials,
+            region=region,
+            environment_id=environment_id,
+            wait=wait,
+        )
+    if raw == CloudProvider.GCP.value:
+        return _teardown_shared_gke(
+            credentials=credentials,
+            region=region,
+            environment_id=environment_id,
+        )
+    return False
+
+
+def _teardown_shared_eks(
+    *,
+    credentials: CloudCredentials | None,
+    region: str,
+    environment_id: str,
+    wait: bool,
+) -> bool:
+    from app.services.aws_client import AwsClientError, delete_eks_cluster
+    from app.services.cloud_networks import _normalize_aws_region
+
+    env = _credential_env(
+        credentials, environment_id=environment_id, provider=CloudProvider.AWS.value
+    )
+    resolved_region = _normalize_aws_region((region or "").strip() or "us-east-1")
+    env = {**env, "AWS_DEFAULT_REGION": resolved_region, "AWS_REGION": resolved_region}
+    try:
+        delete_eks_cluster(
+            env=env,
+            region=resolved_region,
+            name=SHARED_PREVIEW_CLUSTER,
+            wait=wait,
+            timeout_seconds=600.0,
+        )
+    except AwsClientError as exc:
+        raise CloudInstanceComputeError(str(exc)) from exc
+    logger.info(
+        "shared_eks_preview_cluster_teardown",
+        cluster=SHARED_PREVIEW_CLUSTER,
+        region=resolved_region,
+    )
+    return True
+
+
+def _teardown_shared_gke(
+    *,
+    credentials: CloudCredentials | None,
+    region: str,
+    environment_id: str,
+) -> bool:
+    env = _credential_env(
+        credentials, environment_id=environment_id, provider=CloudProvider.GCP.value
+    )
+    project_id = resolve_gcp_project_id(credentials=credentials, env=env)
+    if not project_id:
+        raise CloudInstanceComputeError(
+            "GCP project id is required to delete the shared GKE preview cluster."
+        )
+    resolved_region = (region or "").strip() or "us-central1"
+    loc_flag = "--zone" if _is_gke_zone(resolved_region) else "--region"
+    cmd = [
+        "gcloud",
+        "container",
+        "clusters",
+        "delete",
+        SHARED_PREVIEW_CLUSTER,
+        f"{loc_flag}={resolved_region}",
+        f"--project={project_id}",
+        "--quiet",
+    ]
+    logger.info(
+        "shared_gke_preview_cluster_teardown_start",
+        cluster=SHARED_PREVIEW_CLUSTER,
+        region=resolved_region,
+        project=project_id,
+    )
+    deleted = _run_cmd(cmd, timeout=720, check=False, env=env)
+    detail = (deleted.stderr or deleted.stdout or "").strip()
+    if deleted.returncode != 0:
+        lowered = detail.lower()
+        if "not found" in lowered or "was not found" in lowered:
+            logger.info(
+                "shared_gke_preview_cluster_already_gone",
+                cluster=SHARED_PREVIEW_CLUSTER,
+                region=resolved_region,
+            )
+            return True
+        raise CloudInstanceComputeError(
+            f"Failed to delete GKE cluster '{SHARED_PREVIEW_CLUSTER}': {detail[:600]}"
+        )
+    logger.info(
+        "shared_gke_preview_cluster_teardown",
+        cluster=SHARED_PREVIEW_CLUSTER,
+        region=resolved_region,
+    )
+    return True
+
+
 def ensure_cloud_kubernetes_target(
     *,
     provider: str,

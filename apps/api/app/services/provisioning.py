@@ -1350,7 +1350,7 @@ class ProvisioningService:
         # its namespace, ingress, PVCs, secrets and kind images are reclaimed
         # (the Environment.workspace_id FK is SET NULL, which would otherwise
         # orphan running preview namespaces after the workspace row is deleted).
-        await self._teardown_workspace_previews(workspace_id)
+        cascaded_envs = await self._teardown_workspace_previews(workspace_id)
 
         # Remove linked "Your services" catalog entries so they don't linger
         # after the workspace (and its golden-path scaffold) is gone.
@@ -1434,6 +1434,12 @@ class ProvisioningService:
                     workspace_id=str(workspace_id),
                 )
 
+        # No preview envs to cascade: reclaim shared GKE/EKS now (while workspace
+        # credentials still exist). When envs were cascaded, the last teardown
+        # task deletes the shared cluster after sibling namespaces are gone.
+        if not was_local and cascaded_envs == 0:
+            await self._maybe_teardown_shared_cloud_kubernetes(owner, row)
+
         self._iac.destroy_workspace(row.root_dir)
         await self._session.delete(row)
         await self._session.commit()
@@ -1442,12 +1448,14 @@ class ProvisioningService:
         if was_local:
             await self._maybe_teardown_kind(owner)
 
-    async def _teardown_workspace_previews(self, workspace_id: UUID) -> None:
+    async def _teardown_workspace_previews(self, workspace_id: UUID) -> int:
         """Force teardown of all preview environments belonging to a workspace.
 
         Each non-destroyed environment is marked TEARDOWN_PENDING (which also
         cancels any in-flight provision) and its teardown task is enqueued -
         reusing the full teardown path (namespace + kind image cleanup + audit).
+
+        Returns the number of environments cascaded.
         """
         from app.models.domain import Environment, EnvironmentStatus
         from app.repositories.environment import EnvironmentRepository
@@ -1463,7 +1471,7 @@ class ProvisioningService:
             if env.status not in {EnvironmentStatus.DESTROYED, EnvironmentStatus.TEARDOWN_PENDING}
         ]
         if not active:
-            return
+            return 0
         env_repo = EnvironmentRepository(self._session)
         from app.services.teardown_context import capture_environment_teardown_context
 
@@ -1481,6 +1489,108 @@ class ProvisioningService:
             workspace_id=str(workspace_id),
             environment_count=len(active),
         )
+        return len(active)
+
+    async def _maybe_teardown_shared_cloud_kubernetes(
+        self, owner: User, workspace: ProvisioningWorkspace
+    ) -> None:
+        """Delete shared launchpad-previews when this was the last cloud workspace."""
+        from app.models.domain import Environment, EnvironmentStatus
+        from app.schemas.k8s import DeployMode
+        from app.services.cloud_kubernetes import (
+            is_cloud_kubernetes_provider,
+            region_from_wizard,
+            teardown_shared_preview_cluster,
+        )
+
+        provider = str(workspace.provider or "").strip().lower()
+        if not is_cloud_kubernetes_provider(provider):
+            return
+
+        remaining_ws = await self._session.execute(
+            select(ProvisioningWorkspace.id)
+            .where(
+                ProvisioningWorkspace.owner_id == owner.id,
+                ProvisioningWorkspace.provider == provider,
+                ProvisioningWorkspace.id != workspace.id,
+            )
+            .limit(1)
+        )
+        if remaining_ws.scalar_one_or_none() is not None:
+            logger.info(
+                "shared_cloud_k8s_retained",
+                reason="other_cloud_workspaces",
+                provider=provider,
+            )
+            return
+
+        remaining_envs = await self._session.execute(
+            select(Environment.id)
+            .where(
+                Environment.owner_id == owner.id,
+                Environment.provider == provider,
+                Environment.status != EnvironmentStatus.DESTROYED,
+                Environment.deploy_mode.in_(
+                    [DeployMode.MANIFEST.value, DeployMode.PREVIEW.value]
+                ),
+            )
+            .limit(1)
+        )
+        if remaining_envs.scalar_one_or_none() is not None:
+            logger.info(
+                "shared_cloud_k8s_retained",
+                reason="other_cloud_k8s_environments",
+                provider=provider,
+            )
+            return
+
+        credentials: CloudCredentials | None = None
+        if workspace.encrypted_credentials:
+            try:
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(workspace.encrypted_credentials)
+                )
+            except Exception:
+                credentials = None
+        credentials = await self._fill_from_account_vault(
+            credentials or CloudCredentials(),
+            owner.id,
+            provider=provider,
+        )
+        from app.core.secrets import has_aws_auth, has_gcp_auth
+
+        if provider == CloudProvider.AWS.value and not has_aws_auth(credentials):
+            logger.warning(
+                "shared_cloud_k8s_teardown_skipped_no_credentials",
+                provider=provider,
+                workspace_id=str(workspace.id),
+            )
+            return
+        if provider == CloudProvider.GCP.value and not has_gcp_auth(credentials):
+            logger.warning(
+                "shared_cloud_k8s_teardown_skipped_no_credentials",
+                provider=provider,
+                workspace_id=str(workspace.id),
+            )
+            return
+        snapshot = self._load_wizard_snapshot(workspace)
+        region = region_from_wizard(provider, snapshot)
+        try:
+            await asyncio.to_thread(
+                teardown_shared_preview_cluster,
+                provider=provider,
+                credentials=credentials,
+                region=region,
+                environment_id=str(workspace.id),
+                wait=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "shared_cloud_k8s_teardown_on_workspace_destroy_failed",
+                workspace_id=str(workspace.id),
+                provider=provider,
+                error=str(exc)[:400],
+            )
 
     async def _maybe_teardown_kind(self, owner: User) -> None:
         """Delete the kind cluster when no Dev (kind) workspaces remain for this owner."""

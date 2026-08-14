@@ -43,3 +43,12 @@ apps/api/launchpad.db
 apps/api/MagicMock/
 **/MagicMock/
 key.json
+# Demo video build artifacts
+scripts/demo-video/node_modules/
+scripts/demo-video/out/raw/
+scripts/demo-video/out/intro.mp4
+scripts/demo-video/out/body.mp4
+scripts/demo-video/out/outro.mp4
+scripts/demo-video/out/concat.txt
+scripts/demo-video/out/launchpad-demo-raw-*.webm
+scripts/demo-video/record.log

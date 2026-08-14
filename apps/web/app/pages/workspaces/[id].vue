@@ -723,7 +723,7 @@ watch(advancedMode, async (enabled) => {
       <ConfirmDialog
         v-model:open="confirmDestroyOpen"
         :title="t('workspaces.destroy.title')"
-        :message="`Destroy IaC workspace “${workspace.name || workspace.workspace_id}”? Generated files and the sandbox will be removed. This cannot be undone.`"
+        :message="t('workspaces.destroy.message', { name: workspace.name || workspace.workspace_id })"
         :confirm-label="t('workspaces.destroy.confirm')"
         :cancel-label="t('workspaces.destroy.cancel')"
         :busy="destroying"

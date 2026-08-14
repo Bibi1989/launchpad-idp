@@ -89,6 +89,22 @@ async def capture_environment_teardown_context(
                 workspace_id=str(workspace_id),
             )
 
+    region: str | None = None
+    if isinstance(running_instance, dict):
+        raw_region = running_instance.get("region")
+        if raw_region is not None and str(raw_region).strip():
+            region = str(raw_region).strip()
+    if region is None:
+        from app.services.cloud_kubernetes import region_from_wizard
+
+        provider_for_region = (
+            (environment.provider or workspace.provider or wizard_provider or "local")
+            .strip()
+            .lower()
+        )
+        if provider_for_region and provider_for_region != "local":
+            region = region_from_wizard(provider_for_region, snapshot)
+
     payload: dict[str, Any] = {
         "workspace_id": str(workspace_id),
         "workspace_provider": workspace.provider,
@@ -96,6 +112,8 @@ async def capture_environment_teardown_context(
         "encrypted_credentials": workspace.encrypted_credentials,
         "running_instance": running_instance,
         "runtime_mode": runtime_mode,
+        "region": region,
+        "deploy_mode": getattr(environment, "deploy_mode", None),
         "create_vpc": create_vpc,
         "create_subnets": create_subnets,
         "owner_id": str(environment.owner_id),

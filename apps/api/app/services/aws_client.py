@@ -1039,6 +1039,57 @@ def wait_eks_cluster_active(
     )
 
 
+def delete_eks_cluster(
+    *,
+    env: dict[str, str],
+    region: str,
+    name: str,
+    wait: bool = True,
+    timeout_seconds: float = 600.0,
+) -> None:
+    """Delete an EKS cluster. Optionally wait until it is gone (best-effort)."""
+    import time
+
+    cluster = (name or "").strip()
+    if not cluster:
+        raise AwsClientError("EKS cluster name is required to delete")
+    try:
+        eks = _client(env, "eks", region=region)
+        status = eks_cluster_status(env=env, region=region, name=cluster)
+        if status is None:
+            logger.info("eks_cluster_already_gone", cluster=cluster, region=region)
+            return
+        if status != "DELETING":
+            eks.delete_cluster(name=cluster)
+            logger.info("eks_cluster_delete_started", cluster=cluster, region=region)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"ResourceNotFoundException", "ResourceNotFound"}:
+            return
+        raise _wrap_aws_error(exc, "delete EKS cluster") from exc
+    except AwsClientError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "delete EKS cluster") from exc
+
+    if not wait:
+        return
+    deadline = time.time() + max(timeout_seconds, 30.0)
+    last = "DELETING"
+    while time.time() < deadline:
+        last = eks_cluster_status(env=env, region=region, name=cluster) or "GONE"
+        if last == "GONE":
+            logger.info("eks_cluster_deleted", cluster=cluster, region=region)
+            return
+        time.sleep(15.0)
+    logger.warning(
+        "eks_cluster_delete_wait_timeout",
+        cluster=cluster,
+        region=region,
+        last_status=last,
+    )
+
+
 def ensure_eks_preview_subnets(*, env: dict[str, str], region: str) -> list[str]:
     """Return at least two subnet ids in different AZs for EKS (create VPC if needed)."""
     try:

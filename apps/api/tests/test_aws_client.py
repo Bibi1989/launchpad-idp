@@ -178,3 +178,43 @@ def test_discover_multi_az_public_subnets_same_vpc() -> None:
         )
     assert sg == "sg-xyz"
     assert ec2.create_security_group.call_args.kwargs["VpcId"] == "vpc-123"
+
+
+def test_delete_eks_cluster_skips_when_missing() -> None:
+    from unittest.mock import MagicMock, patch
+
+    from botocore.exceptions import ClientError
+
+    from app.services import aws_client
+
+    eks = MagicMock()
+    error = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "missing"}},
+        "DescribeCluster",
+    )
+    eks.describe_cluster.side_effect = error
+    with patch.object(aws_client, "_client", return_value=eks):
+        aws_client.delete_eks_cluster(
+            env={"AWS_ACCESS_KEY_ID": "A", "AWS_SECRET_ACCESS_KEY": "S"},
+            region="eu-central-1",
+            name="launchpad-previews",
+            wait=False,
+        )
+    eks.delete_cluster.assert_not_called()
+
+
+def test_delete_eks_cluster_invokes_api() -> None:
+    from unittest.mock import MagicMock, patch
+
+    from app.services import aws_client
+
+    eks = MagicMock()
+    eks.describe_cluster.return_value = {"cluster": {"status": "ACTIVE"}}
+    with patch.object(aws_client, "_client", return_value=eks):
+        aws_client.delete_eks_cluster(
+            env={"AWS_ACCESS_KEY_ID": "A", "AWS_SECRET_ACCESS_KEY": "S"},
+            region="eu-central-1",
+            name="launchpad-previews",
+            wait=False,
+        )
+    eks.delete_cluster.assert_called_once_with(name="launchpad-previews")
