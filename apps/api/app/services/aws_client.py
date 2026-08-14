@@ -32,6 +32,7 @@ def session_from_env(env: dict[str, str], *, region: str | None = None) -> boto3
     secret_key = (env.get("AWS_SECRET_ACCESS_KEY") or "").strip()
     session_token = (env.get("AWS_SESSION_TOKEN") or "").strip() or None
     region_name = (region or env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "").strip()
+    shared_creds = (env.get("AWS_SHARED_CREDENTIALS_FILE") or "").strip()
 
     if access_key and secret_key:
         kwargs: dict[str, str] = {
@@ -40,6 +41,43 @@ def session_from_env(env: dict[str, str], *, region: str | None = None) -> boto3
         }
         if session_token:
             kwargs["aws_session_token"] = session_token
+        if region_name:
+            kwargs["region_name"] = region_name
+        return boto3.Session(**kwargs)
+
+    # Kubeconfig exec plugin sets AWS_SHARED_CREDENTIALS_FILE (no inline keys).
+    if shared_creds:
+        from configparser import ConfigParser
+        from pathlib import Path
+
+        path = Path(shared_creds)
+        if not path.is_file():
+            raise AwsClientError(
+                f"AWS shared credentials file is missing ({shared_creds}). "
+                "Redeploy so Launchpad can rewrite the EKS kubeconfig."
+            )
+        parser = ConfigParser()
+        parser.read(path)
+        section = "default" if parser.has_section("default") else (
+            parser.sections()[0] if parser.sections() else ""
+        )
+        if not section:
+            raise AwsClientError(
+                f"AWS shared credentials file has no profiles ({shared_creds})."
+            )
+        file_access = (parser.get(section, "aws_access_key_id", fallback="") or "").strip()
+        file_secret = (parser.get(section, "aws_secret_access_key", fallback="") or "").strip()
+        file_token = (parser.get(section, "aws_session_token", fallback="") or "").strip() or None
+        if not (file_access and file_secret):
+            raise AwsClientError(
+                f"AWS shared credentials file is missing keys ({shared_creds})."
+            )
+        kwargs = {
+            "aws_access_key_id": file_access,
+            "aws_secret_access_key": file_secret,
+        }
+        if file_token:
+            kwargs["aws_session_token"] = file_token
         if region_name:
             kwargs["region_name"] = region_name
         return boto3.Session(**kwargs)
@@ -912,9 +950,13 @@ def _instance_ids_from_response(resp: dict[str, Any]) -> list[str]:
 
 _EKS_CLUSTER_ROLE_NAME = "launchpad-eks-cluster-role"
 _EKS_NODE_ROLE_NAME = "launchpad-eks-node-role"
+# Standard support (not extended). EKS upgrades one minor at a time.
+_EKS_KUBERNETES_VERSION = "1.36"
 _EKS_CLUSTER_POLICIES = (
     "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
     "arn:aws:iam::aws:policy/AmazonEKSComputePolicy",
+    # Prefer V2 when present; attach_role_policy is idempotent / skipped if missing.
+    "arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicyV2",
     "arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy",
     "arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy",
     "arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy",
@@ -1003,6 +1045,12 @@ def ensure_eks_preview_subnets(*, env: dict[str, str], region: str) -> list[str]
         ec2 = _client(env, "ec2", region=region)
         discovered = _discover_multi_az_public_subnets(ec2)
         if discovered and len(discovered) >= 2:
+            tag_eks_subnets_for_load_balancer(
+                env=env,
+                region=region,
+                subnet_ids=discovered[:4],
+                cluster_name="launchpad-previews",
+            )
             return discovered[:4]
         return _create_eks_preview_vpc(ec2, region=region)
     except AwsClientError:
@@ -1011,18 +1059,175 @@ def ensure_eks_preview_subnets(*, env: dict[str, str], region: str) -> list[str]
         raise _wrap_aws_error(exc, "resolve EKS subnets") from exc
 
 
+def tag_eks_subnets_for_load_balancer(
+    *,
+    env: dict[str, str],
+    region: str,
+    subnet_ids: list[str],
+    cluster_name: str,
+) -> None:
+    """Ensure public ELB discovery tags so Auto Mode can allocate LoadBalancers."""
+    ids = [sid.strip() for sid in subnet_ids if (sid or "").strip()]
+    if not ids:
+        return
+    ec2 = _client(env, "ec2", region=region)
+    try:
+        ec2.create_tags(
+            Resources=ids,
+            Tags=[
+                {"Key": "kubernetes.io/role/elb", "Value": "1"},
+                {"Key": f"kubernetes.io/cluster/{cluster_name}", "Value": "shared"},
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "tag EKS subnets for load balancer") from exc
+
+
+def _parse_k8s_minor(version: str) -> tuple[int, int] | None:
+    parts = (version or "").strip().split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def eks_cluster_subnet_ids(*, env: dict[str, str], region: str, name: str) -> list[str]:
+    """Return subnet ids attached to an EKS cluster VPC config."""
+    try:
+        eks = _client(env, "eks", region=region)
+        described = eks.describe_cluster(name=name)
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "describe EKS cluster subnets") from exc
+    ids = (
+        ((described.get("cluster") or {}).get("resourcesVpcConfig") or {}).get("subnetIds")
+        or []
+    )
+    return [str(sid).strip() for sid in ids if str(sid).strip()]
+
+
+def ensure_eks_cluster_version(
+    *,
+    env: dict[str, str],
+    region: str,
+    name: str,
+    target_version: str = _EKS_KUBERNETES_VERSION,
+) -> str:
+    """Upgrade an EKS control plane one minor version at a time toward ``target_version``."""
+    import time
+
+    current = eks_cluster_status(env=env, region=region, name=name)
+    if current and current not in {"ACTIVE", "UPDATING"}:
+        raise AwsClientError(
+            f"EKS cluster '{name}' is {current}; cannot upgrade Kubernetes version."
+        )
+    eks = _client(env, "eks", region=region)
+    try:
+        described = eks.describe_cluster(name=name)
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "describe EKS cluster version") from exc
+    version = str((described.get("cluster") or {}).get("version") or "").strip()
+    target = (target_version or _EKS_KUBERNETES_VERSION).strip()
+    cur = _parse_k8s_minor(version)
+    tgt = _parse_k8s_minor(target)
+    if cur is None or tgt is None:
+        return version or target
+    if cur >= tgt:
+        return version
+    # EKS allows only one minor bump per update_cluster_version call.
+    while cur < tgt:
+        next_minor = f"{cur[0]}.{cur[1] + 1}"
+        logger.info(
+            "eks_version_upgrade_start",
+            cluster=name,
+            from_version=f"{cur[0]}.{cur[1]}",
+            to_version=next_minor,
+        )
+        try:
+            eks.update_cluster_version(name=name, version=next_minor)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            msg = str(exc.response.get("Error", {}).get("Message") or "")
+            if "already" in msg.lower() or code in {"ResourceInUseException", "InvalidParameterException"}:
+                # Concurrent update or already on this minor.
+                pass
+            else:
+                raise _wrap_aws_error(exc, f"upgrade EKS to {next_minor}") from exc
+        wait_eks_cluster_active(env=env, region=region, name=name, timeout_seconds=1800.0)
+        described = eks.describe_cluster(name=name)
+        version = str((described.get("cluster") or {}).get("version") or next_minor).strip()
+        cur = _parse_k8s_minor(version) or (cur[0], cur[1] + 1)
+        time.sleep(2.0)
+    return version
+
+
 def _discover_multi_az_public_subnets(ec2: Any) -> list[str]:
+    """Pick >=2 public subnets in different AZs from a single VPC.
+
+    Prefer the Launchpad preview VPC (Name=launchpad-eks-previews*) so we never
+    mix EC2 preview subnets from another VPC (EKS CreateCluster rejects that).
+    """
     subnets = ec2.describe_subnets().get("Subnets") or []
-    public = [s for s in subnets if s.get("MapPublicIpOnLaunch")]
-    by_az: dict[str, str] = {}
-    for subnet in public or subnets:
-        az = str(subnet.get("AvailabilityZone") or "").strip()
-        sid = str(subnet.get("SubnetId") or "").strip()
-        if az and sid and az not in by_az:
-            by_az[az] = sid
+    if not subnets:
+        return []
+
+    def _tags(subnet: dict[str, Any]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for tag in subnet.get("Tags") or []:
+            key = str(tag.get("Key") or "").strip()
+            if key:
+                out[key] = str(tag.get("Value") or "")
+        return out
+
+    def _score(subnet: dict[str, Any]) -> tuple[int, int]:
+        tags = _tags(subnet)
+        name = (tags.get("Name") or "").lower()
+        score = 0
+        if name.startswith("launchpad-eks-previews"):
+            score += 100
+        if tags.get("kubernetes.io/role/elb") == "1":
+            score += 10
+        if subnet.get("MapPublicIpOnLaunch"):
+            score += 5
+        # Prefer denser VPCs slightly via later grouping; individual score first.
+        return (score, 1 if subnet.get("MapPublicIpOnLaunch") else 0)
+
+    # Group by VPC, then choose the best VPC that has >=2 AZs.
+    by_vpc: dict[str, list[dict[str, Any]]] = {}
+    for subnet in subnets:
+        vpc_id = str(subnet.get("VpcId") or "").strip()
+        if vpc_id:
+            by_vpc.setdefault(vpc_id, []).append(subnet)
+
+    ranked_vpcs: list[tuple[int, str, list[dict[str, Any]]]] = []
+    for vpc_id, members in by_vpc.items():
+        best_member_score = max((_score(s)[0] for s in members), default=0)
+        azs = {
+            str(s.get("AvailabilityZone") or "").strip()
+            for s in members
+            if s.get("AvailabilityZone")
+        }
+        if len(azs) < 2:
+            continue
+        ranked_vpcs.append((best_member_score, vpc_id, members))
+    ranked_vpcs.sort(key=lambda item: item[0], reverse=True)
+
+    for _score_v, _vpc_id, members in ranked_vpcs:
+        # Prefer public subnets inside this VPC; fall back to all members.
+        public = [s for s in members if s.get("MapPublicIpOnLaunch")]
+        pool = public if len({str(s.get("AvailabilityZone") or "") for s in public}) >= 2 else members
+        by_az: dict[str, dict[str, Any]] = {}
+        for subnet in sorted(pool, key=_score, reverse=True):
+            az = str(subnet.get("AvailabilityZone") or "").strip()
+            sid = str(subnet.get("SubnetId") or "").strip()
+            if az and sid and az not in by_az:
+                by_az[az] = subnet
+            if len(by_az) >= 2:
+                break
         if len(by_az) >= 2:
-            break
-    return list(by_az.values())
+            return [str(s["SubnetId"]) for s in list(by_az.values())[:4]]
+    return []
 
 
 def _create_eks_preview_vpc(ec2: Any, *, region: str) -> list[str]:
@@ -1103,6 +1308,7 @@ def _ensure_iam_role(
     role_name: str,
     trust_service: str,
     policy_arns: tuple[str, ...],
+    assume_actions: tuple[str, ...] = ("sts:AssumeRole",),
 ) -> str:
     iam = _client(env, "iam", region=region)
     trust = {
@@ -1111,7 +1317,7 @@ def _ensure_iam_role(
             {
                 "Effect": "Allow",
                 "Principal": {"Service": trust_service},
-                "Action": "sts:AssumeRole",
+                "Action": list(assume_actions),
             }
         ],
     }
@@ -1120,6 +1326,14 @@ def _ensure_iam_role(
     try:
         existing = iam.get_role(RoleName=role_name)
         role_arn = str((existing.get("Role") or {}).get("Arn") or "").strip()
+        # Keep trust policy current (EKS Auto Mode needs sts:TagSession on the cluster role).
+        try:
+            iam.update_assume_role_policy(
+                RoleName=role_name,
+                PolicyDocument=json.dumps(trust),
+            )
+        except ClientError as exc:
+            raise _wrap_aws_error(exc, f"update trust policy for {role_name}") from exc
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code not in {"NoSuchEntity", "NoSuchEntityException"}:
@@ -1138,11 +1352,18 @@ def _ensure_iam_role(
             iam.attach_role_policy(RoleName=role_name, PolicyArn=policy)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
-            if code not in {"EntityAlreadyExists", "LimitExceeded"}:
-                # Already attached is fine; other errors should surface.
-                msg = str(exc.response.get("Error", {}).get("Message") or "")
-                if "already" not in msg.lower():
-                    raise _wrap_aws_error(exc, f"attach {policy} to {role_name}") from exc
+            msg = str(exc.response.get("Error", {}).get("Message") or "")
+            # Skip regional/account gaps (e.g. BlockStoragePolicyV2 not yet available).
+            if code in {
+                "NoSuchEntity",
+                "NoSuchEntityException",
+                "EntityAlreadyExists",
+                "LimitExceeded",
+            }:
+                continue
+            if "already" in msg.lower() or "not exist" in msg.lower():
+                continue
+            raise _wrap_aws_error(exc, f"attach {policy} to {role_name}") from exc
     return role_arn
 
 
@@ -1154,6 +1375,8 @@ def ensure_eks_auto_roles(*, env: dict[str, str], region: str) -> tuple[str, str
         role_name=_EKS_CLUSTER_ROLE_NAME,
         trust_service="eks.amazonaws.com",
         policy_arns=_EKS_CLUSTER_POLICIES,
+        # Required so Auto Mode controllers can AssumeRole with session tags.
+        assume_actions=("sts:AssumeRole", "sts:TagSession"),
     )
     node_arn = _ensure_iam_role(
         env=env,
@@ -1184,7 +1407,7 @@ def create_eks_auto_cluster(
     try:
         eks.create_cluster(
             name=name,
-            version="1.31",
+            version=_EKS_KUBERNETES_VERSION,
             roleArn=cluster_role_arn,
             resourcesVpcConfig={
                 "subnetIds": subnet_ids,
@@ -1192,7 +1415,11 @@ def create_eks_auto_cluster(
                 "endpointPrivateAccess": True,
                 "publicAccessCidrs": ["0.0.0.0/0"],
             },
-            accessConfig={"authenticationMode": "API_AND_CONFIG_MAP"},
+            accessConfig={
+                "authenticationMode": "API_AND_CONFIG_MAP",
+                "bootstrapClusterCreatorAdminPermissions": True,
+            },
+            upgradePolicy={"supportType": "STANDARD"},
             computeConfig={
                 "enabled": True,
                 "nodePools": ["general-purpose", "system"],
@@ -1213,6 +1440,73 @@ def create_eks_auto_cluster(
     # IAM role propagation can race; wait briefly then poll ACTIVE.
     time.sleep(5.0)
     wait_eks_cluster_active(env=env, region=region, name=name, timeout_seconds=1500.0)
+    ensure_eks_cluster_admin_access(env=env, region=region, cluster_name=name)
+
+
+def _caller_principal_arn(*, env: dict[str, str], region: str) -> str:
+    """IAM principal ARN suitable for EKS access entries (user or role, not STS session)."""
+    import re
+
+    sts = _client(env, "sts", region=region)
+    try:
+        identity = sts.get_caller_identity()
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap_aws_error(exc, "get caller identity") from exc
+    arn = str(identity.get("Arn") or "").strip()
+    if not arn:
+        raise AwsClientError("STS get_caller_identity returned an empty ARN")
+    # arn:aws:sts::123:assumed-role/RoleName/session -> arn:aws:iam::123:role/RoleName
+    match = re.match(
+        r"^arn:aws(?:-cn|-us-gov)?:sts::(\d{12}):assumed-role/([^/]+)/",
+        arn,
+    )
+    if match:
+        return f"arn:aws:iam::{match.group(1)}:role/{match.group(2)}"
+    return arn
+
+
+def ensure_eks_cluster_admin_access(
+    *,
+    env: dict[str, str],
+    region: str,
+    cluster_name: str,
+) -> None:
+    """Grant the current IAM principal cluster-admin via EKS Access Entries."""
+    principal_arn = _caller_principal_arn(env=env, region=region)
+    eks = _client(env, "eks", region=region)
+    try:
+        eks.create_access_entry(
+            clusterName=cluster_name,
+            principalArn=principal_arn,
+            type="STANDARD",
+        )
+        logger.info(
+            "eks_access_entry_created",
+            cluster=cluster_name,
+            principal=principal_arn,
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        msg = str(exc.response.get("Error", {}).get("Message") or "")
+        if code not in {"ResourceInUseException", "ResourceInUse"} and "already" not in msg.lower():
+            raise _wrap_aws_error(exc, "create EKS access entry") from exc
+    try:
+        eks.associate_access_policy(
+            clusterName=cluster_name,
+            principalArn=principal_arn,
+            policyArn="arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+            accessScope={"type": "cluster"},
+        )
+        logger.info(
+            "eks_access_policy_associated",
+            cluster=cluster_name,
+            principal=principal_arn,
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        msg = str(exc.response.get("Error", {}).get("Message") or "")
+        if code not in {"ResourceInUseException", "ResourceInUse"} and "already" not in msg.lower():
+            raise _wrap_aws_error(exc, "associate EKS admin access policy") from exc
 
 
 def eks_bearer_token(*, env: dict[str, str], region: str, cluster_name: str) -> str:
@@ -1280,6 +1574,17 @@ def write_eks_kubeconfig(
     if not endpoint or not ca:
         raise AwsClientError(f"EKS cluster '{cluster_name}' is missing endpoint or CA data")
     context_name = arn or f"arn:aws:eks:{region}:account:cluster/{cluster_name}"
+
+    # Ensure this IAM principal can use the API (needed for clusters created earlier
+    # without bootstrap admin, or when creator permissions were not granted).
+    try:
+        ensure_eks_cluster_admin_access(env=env, region=region, cluster_name=cluster_name)
+    except AwsClientError as exc:
+        logger.warning(
+            "eks_access_entry_ensure_failed",
+            cluster=cluster_name,
+            error=sanitize_log_message(str(exc)[:300]),
+        )
 
     path = Path(kubeconfig_path)
     path.parent.mkdir(parents=True, exist_ok=True)

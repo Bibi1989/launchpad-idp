@@ -531,17 +531,26 @@ def _ensure_aws_ecr_repo(*, region: str, repo: str, env: dict[str, str]) -> str 
     return ensure_ecr_repository(env=env, region=region, repo=repo)
 
 
-def _docker_auth_aws(*, region: str, env: dict[str, str]) -> None:
+def _docker_auth_aws(*, region: str, env: dict[str, str], registry_host: str) -> None:
+    """Log Docker into the account-scoped ECR registry host used for push/pull."""
     from app.services.aws_client import ecr_login_password
 
+    host = (registry_host or "").strip().removeprefix("https://").split("/", 1)[0]
+    if not host or ".dkr.ecr." not in host:
+        raise CloudInstanceComputeError(
+            f"Invalid ECR registry host for docker login: {registry_host!r}"
+        )
     env = {**env, "AWS_DEFAULT_REGION": region, "AWS_REGION": region}
     password = ecr_login_password(env=env, region=region)
     if not password:
-        return
+        raise CloudInstanceComputeError(
+            "Failed to obtain an ECR authorization token. "
+            "Check AWS credentials in Settings, then retry."
+        )
     _run_cmd(
-        ["docker", "login", "--username", "AWS", "--password-stdin", f"{region}.dkr.ecr.amazonaws.com"],
+        ["docker", "login", "--username", "AWS", "--password-stdin", host],
         timeout=60,
-        check=False,
+        check=True,
         env=env,
         input_text=password,
     )
@@ -585,7 +594,8 @@ def push_local_image_to_cloud_registry(
         repo_uri = _ensure_aws_ecr_repo(region=aws_region, repo=_REPO_NAME, env=env)
         if repo_uri is None:
             raise CloudInstanceComputeError("AWS ECR repository setup failed")
-        _docker_auth_aws(region=aws_region, env=env)
+        registry_host = repo_uri.split("/", 1)[0]
+        _docker_auth_aws(region=aws_region, env=env, registry_host=registry_host)
         remote = f"{repo_uri}:{safe_name}-{tag}"
     elif provider == CloudProvider.AZURE.value:
         raise CloudInstanceComputeError(

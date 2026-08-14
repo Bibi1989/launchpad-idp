@@ -157,6 +157,32 @@ describe('previewEndpoints', () => {
     )
   })
 
+  it('keeps cloud LoadBalancer URLs for aws providers', () => {
+    vi.stubGlobal('window', {
+      location: { hostname: 'launchpad-idp.online', protocol: 'https:' },
+    })
+    const e = env({
+      provider: 'aws',
+      deploy_mode: 'manifest',
+      preview_url: 'http://a1b2c3.eu-central-1.elb.amazonaws.com',
+      node_port: null,
+    })
+    expect(resolvePreviewUrl(e)).toBe('http://a1b2c3.eu-central-1.elb.amazonaws.com')
+  })
+
+  it('does not invent ws-* URLs for aws when preview_url missing', () => {
+    vi.stubGlobal('window', {
+      location: { hostname: 'launchpad-idp.online', protocol: 'https:' },
+    })
+    const e = env({
+      provider: 'aws',
+      deploy_mode: 'manifest',
+      preview_url: null,
+      node_port: 30656,
+    })
+    expect(resolvePreviewUrl(e)).toBeNull()
+  })
+
   it('keeps trycloudflare for remote attach viewers', () => {
     vi.stubGlobal('window', {
       location: { hostname: 'launchpad-idp.online', protocol: 'https:' },

@@ -98,6 +98,22 @@ export function localizePreviewUrl(input: LocalizePreviewUrlInput): string {
   const isLocalViewer = isLoopbackHost(viewerHost)
   const provider = (input.provider || '').toLowerCase()
   const port = input.port ?? extractPort(url)
+  const isCloudProvider = provider === 'aws' || provider === 'gcp' || provider === 'azure'
+
+  // Cloud LoadBalancer / Ingress URLs must stay as-is (never rewrite to local ws-*).
+  if (isCloudProvider) {
+    try {
+      const parsed = new URL(url)
+      if (parsed.hostname.endsWith('.trycloudflare.com') && parsed.port) {
+        parsed.port = ''
+        parsed.protocol = 'https:'
+        return parsed.toString().replace(/\/$/, '')
+      }
+    } catch {
+      /* fall through */
+    }
+    return url
+  }
 
   if ((provider === 'local' || !provider) && isLocalViewer && port) {
     return `http://${viewerHost}:${port}`
@@ -149,6 +165,7 @@ export function resolvePreviewUrl(
   const host = window.location.hostname
   const isLocalViewer = isLoopbackHost(host)
   const provider = (source.provider || '').toLowerCase()
+  const isCloudProvider = provider === 'aws' || provider === 'gcp' || provider === 'azure'
 
   if (provider === 'local' && isLocalViewer && source.node_port) {
     return `http://${host}:${source.node_port}`
@@ -165,12 +182,13 @@ export function resolvePreviewUrl(
     })
   }
 
-  // Remote viewers: prefer workspace ingress over inventing apex:node_port.
-  if (source.node_port && source.id && !isLocalViewer) {
+  // Remote viewers on local previews: prefer workspace ingress over inventing apex:node_port.
+  // Cloud providers must not invent ws-* URLs (those still point at local Kubernetes).
+  if (source.node_port && source.id && !isLocalViewer && !isCloudProvider) {
     return workspaceIngressUrl(source.id, host)
   }
 
-  if (source.node_port && isLocalViewer) {
+  if (source.node_port && isLocalViewer && !isCloudProvider) {
     return `${window.location.protocol}//${host}:${source.node_port}`
   }
   return null

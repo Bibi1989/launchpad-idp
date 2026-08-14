@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from app.core.logging import get_logger
+from app.core.logging import get_logger, sanitize_log_message
 from app.schemas.cloud import CloudCredentials, CloudProvider
 from app.schemas.k8s import DeployMode
 from app.services.cloud_instance_compute import (
@@ -194,8 +194,10 @@ def _ensure_eks_target(
         ensure_eks_auto_roles,
         ensure_eks_preview_subnets,
         eks_cluster_status,
+        eks_cluster_subnet_ids,
         list_eks_cluster_names,
         sts_account_id,
+        tag_eks_subnets_for_load_balancer,
         wait_eks_cluster_active,
         write_eks_kubeconfig,
     )
@@ -215,6 +217,16 @@ def _ensure_eks_target(
 
     selected = select_eks_cluster(names, preferred_name=SHARED_PREVIEW_CLUSTER)
     created = False
+    # Always refresh Auto Mode IAM trust/policies (existing roles may lack sts:TagSession).
+    try:
+        ensure_eks_auto_roles(env=env, region=resolved_region)
+    except AwsClientError as exc:
+        if selected is None and create:
+            raise CloudInstanceComputeError(str(exc)) from exc
+        logger.warning(
+            "eks_auto_roles_refresh_failed",
+            error=sanitize_log_message(str(exc)[:300]),
+        )
     if selected is None:
         if not create:
             raise CloudInstanceComputeError(
@@ -253,6 +265,39 @@ def _ensure_eks_target(
             )
         except AwsClientError as exc:
             raise CloudInstanceComputeError(str(exc)) from exc
+    elif status == "UPDATING":
+        # A prior control-plane upgrade may still be running. Wait briefly, then
+        # continue if the API is reachable - never block Celery soft/hard limits.
+        try:
+            wait_eks_cluster_active(
+                env=env, region=resolved_region, name=selected, timeout_seconds=90.0
+            )
+        except AwsClientError as exc:
+            logger.warning(
+                "eks_cluster_still_updating",
+                cluster=selected,
+                error=sanitize_log_message(str(exc)[:300]),
+            )
+
+    # Do not call ensure_eks_cluster_version here. Multi-minor upgrades take far
+    # longer than Celery provision/teardown time limits. New clusters are created
+    # at _EKS_KUBERNETES_VERSION; existing clusters stay on their current minor.
+
+    try:
+        subnet_ids = eks_cluster_subnet_ids(env=env, region=resolved_region, name=selected)
+        if subnet_ids:
+            tag_eks_subnets_for_load_balancer(
+                env=env,
+                region=resolved_region,
+                subnet_ids=subnet_ids,
+                cluster_name=selected,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "eks_subnet_elb_tag_failed",
+            cluster=selected,
+            error=sanitize_log_message(str(exc)[:300]),
+        )
 
     kubeconfig = kubeconfig_path_for(
         provider="aws",

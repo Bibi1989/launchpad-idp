@@ -321,9 +321,16 @@ class KubernetesProvisioner:
 
     def container_build_platform(self) -> str:
         """Platform for images that this cluster will pull (not always amd64)."""
-        from app.services.cloud_instance_compute import host_container_platform
+        from app.services.cloud_instance_compute import (
+            CLOUD_CONTAINER_PLATFORM,
+            host_container_platform,
+        )
 
         detected = cluster_container_platform(self._core)
+        if self._remote_cluster:
+            # GKE/EKS preview nodes are amd64. Never fall back to the worker host
+            # arch (Apple Silicon arm64) or images fail with exec format error.
+            return detected or CLOUD_CONTAINER_PLATFORM
         return detected or host_container_platform()
 
     def _load_clients(self) -> None:
@@ -590,8 +597,9 @@ class KubernetesProvisioner:
             resources.preview_url = self.ingress_preview_url(host=host)
         elif self._remote_cluster:
             resources.preview_url = self.resolve_external_preview_url(
-                namespace, timeout_seconds=180.0
-            ) or self.portal_preview_url(environment_id=environment_id)
+                namespace,
+                timeout_seconds=float(self._settings.preview_cloud_url_timeout_seconds),
+            )
         else:
             resources.preview_url = self.node_port_preview_url(node_port=node_port)
 
@@ -1158,11 +1166,19 @@ class KubernetesProvisioner:
                     f"Provisioning of {namespace} cancelled by delete request"
                 )
 
-            pull_error = self._first_pod_image_error(namespace=namespace)
+            pull_error = self._first_pod_image_error(
+                namespace=namespace,
+                expected_image=expected_image,
+                app_label=app_label,
+            )
             if pull_error:
                 raise RuntimeError(pull_error)
 
-            crash_error = self._first_pod_crash_error(namespace=namespace)
+            crash_error = self._first_pod_crash_error(
+                namespace=namespace,
+                app_label=app_label,
+                expected_image=expected_image,
+            )
             if crash_error:
                 raise RuntimeError(crash_error)
 
@@ -1400,7 +1416,44 @@ class KubernetesProvisioner:
             )
             return False
 
-    def _first_pod_image_error(self, *, namespace: str) -> str | None:
+    def _pod_matches_wait_scope(
+        self,
+        pod: object,
+        *,
+        app_label: str | None,
+        expected_image: str | None,
+    ) -> bool:
+        """True when a pod belongs to the revision we are waiting on.
+
+        Ignores terminating pods and stale ReplicaSets that still show
+        ImagePullBackOff for short names after the Deployment was remapped to ECR.
+        """
+        from app.services.manifest_deploy import is_unqualified_local_image
+
+        meta = getattr(pod, "metadata", None)
+        if meta is not None and getattr(meta, "deletion_timestamp", None):
+            return False
+        labels = getattr(meta, "labels", None) if meta is not None else None
+        wanted = (app_label or "").strip()
+        if wanted and isinstance(labels, dict):
+            if str(labels.get("app") or "").strip() != wanted:
+                return False
+        expected = (expected_image or "").strip()
+        if expected and _is_cloud_registry_image(expected):
+            status = getattr(pod, "status", None)
+            for container in getattr(status, "container_statuses", None) or []:
+                image = str(getattr(container, "image", "") or "").strip()
+                if image and is_unqualified_local_image(image):
+                    return False
+        return True
+
+    def _first_pod_image_error(
+        self,
+        *,
+        namespace: str,
+        expected_image: str | None = None,
+        app_label: str | None = None,
+    ) -> str | None:
         if self._core is None:
             return None
         # Namespace-wide: catch pull errors on any generated workload
@@ -1412,6 +1465,10 @@ class KubernetesProvisioner:
             return None
         terminal_reasons = {"ErrImagePull", "ImagePullBackOff", "InvalidImageName"}
         for pod in pods.items or []:
+            if not self._pod_matches_wait_scope(
+                pod, app_label=app_label, expected_image=expected_image
+            ):
+                continue
             pod_name = pod.metadata.name if pod.metadata else "app"
             for status in pod.status.container_statuses or []:
                 waiting = status.state.waiting if status.state else None
@@ -1427,7 +1484,13 @@ class KubernetesProvisioner:
                 return f"Failed to pull image {image} for pod {pod_name}: {waiting.reason}"
         return None
 
-    def _first_pod_crash_error(self, *, namespace: str) -> str | None:
+    def _first_pod_crash_error(
+        self,
+        *,
+        namespace: str,
+        app_label: str | None = None,
+        expected_image: str | None = None,
+    ) -> str | None:
         """Detect terminal crash states so provisioning fails fast (not on deadline).
 
         - CreateContainer*/RunContainerError: config errors that never self-heal
@@ -1450,6 +1513,10 @@ class KubernetesProvisioner:
             "RunContainerError",
         }
         for pod in pods.items or []:
+            if not self._pod_matches_wait_scope(
+                pod, app_label=app_label, expected_image=expected_image
+            ):
+                continue
             pod_name = pod.metadata.name if pod.metadata else "app"
             for status in pod.status.container_statuses or []:
                 restarts = status.restart_count or 0
@@ -1483,12 +1550,48 @@ class KubernetesProvisioner:
                                 f"OOMKilled (exit {last.exit_code}). "
                                 "Raise the container memory limit (Node/Vite previews need >=768Mi)."
                             )
+                    if "exec format error" not in detail.lower():
+                        log_hint = self._pod_log_exec_format_hint(
+                            namespace=namespace, pod_name=pod_name
+                        )
+                        if log_hint:
+                            detail = log_hint
                     base = (
                         f"Container {status.name} in pod {pod_name} is crash-looping "
                         f"(CrashLoopBackOff after {restarts} restarts)"
                     )
                     return f"{base} - {detail}" if detail else base
         return None
+
+    def _pod_log_exec_format_hint(self, *, namespace: str, pod_name: str) -> str | None:
+        """Detect arm64-on-amd64 (or reverse) from recent container logs."""
+        if self._core is None:
+            return None
+        try:
+            raw = self._core.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=namespace,
+                tail_lines=20,
+                _request_timeout=8,
+            )
+        except Exception:
+            try:
+                raw = self._core.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    tail_lines=20,
+                    previous=True,
+                    _request_timeout=8,
+                )
+            except Exception:
+                return None
+        text = str(raw or "")
+        if "exec format error" not in text.lower():
+            return None
+        return (
+            "exec format error: image architecture does not match the node. "
+            "Rebuild/push for linux/amd64 (EKS/GKE Auto Mode)."
+        )
 
     @staticmethod
     def _oom_kill_detail(terminated: object | None) -> str | None:
@@ -1510,6 +1613,37 @@ class KubernetesProvisioner:
             return None
         for pod in pods.items or []:
             pod_name = pod.metadata.name if pod.metadata else "app"
+            phase = str(getattr(pod.status, "phase", "") or "")
+            for condition in pod.status.conditions or []:
+                ctype = str(getattr(condition, "type", "") or "")
+                cstatus = str(getattr(condition, "status", "") or "")
+                reason = str(getattr(condition, "reason", "") or "")
+                message = str(getattr(condition, "message", "") or "").strip()
+                if ctype == "PodScheduled" and cstatus == "False":
+                    detail = message or reason or "no nodes available to schedule pods"
+                    return (
+                        f"Pod {pod_name} is unschedulable ({detail}). "
+                        "EKS Auto Mode has no Ready nodes yet. Confirm the cluster IAM role "
+                        "trust policy allows sts:TagSession for eks.amazonaws.com, then retry."
+                    )
+            if phase == "Pending":
+                for status in pod.status.container_statuses or []:
+                    waiting = status.state.waiting if status.state else None
+                    if waiting and waiting.reason in {
+                        "ImagePullBackOff",
+                        "ErrImagePull",
+                        "InvalidImageName",
+                        "CreateContainerConfigError",
+                        "CreateContainerError",
+                    }:
+                        detail = (waiting.message or waiting.reason).strip()
+                        return f"Pod {pod_name} waiting: {detail}"
+                # Pending with no container statuses usually means not scheduled.
+                return (
+                    f"Pod {pod_name} is Pending with no assigned node. "
+                    "Check that the EKS cluster can provision Auto Mode nodes "
+                    "(cluster IAM role needs sts:TagSession)."
+                )
             for status in pod.status.container_statuses or []:
                 waiting = status.state.waiting if status.state else None
                 if waiting and waiting.reason:
@@ -2017,7 +2151,16 @@ class KubernetesProvisioner:
         from kubernetes.client.rest import ApiException
 
         service = client.V1Service(
-            metadata=client.V1ObjectMeta(name=service_name, namespace=namespace, labels=labels),
+            metadata=client.V1ObjectMeta(
+                name=service_name,
+                namespace=namespace,
+                labels=labels,
+                annotations={
+                    # Internet-facing NLB/CLB discovery for public preview URLs.
+                    "service.beta.kubernetes.io/aws-load-balancer-scheme": "internet-facing",
+                    "launchpad.io/preview-lb": "true",
+                },
+            ),
             spec=client.V1ServiceSpec(
                 selector=selector,
                 ports=[
@@ -2042,6 +2185,12 @@ class KubernetesProvisioner:
             and existing.spec is not None
             and existing.spec.type == "LoadBalancer"
         ):
+            # Stale LBs that never got an address (e.g. IAM trust was fixed later)
+            # need a recreate so the cloud controller rebuilds the model.
+            addr = _lb_ingress_address(getattr(existing, "status", None))
+            if not addr:
+                self.recreate_service(namespace, service, name=service_name)
+                return
             existing_meta = getattr(existing, "metadata", None)
             body_meta = getattr(service, "metadata", None)
             resource_version = getattr(existing_meta, "resource_version", None)

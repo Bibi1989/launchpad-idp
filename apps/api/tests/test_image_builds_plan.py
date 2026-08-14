@@ -90,12 +90,13 @@ def test_should_use_external_manifest_image_short_local_tag_is_buildable() -> No
     ) is False
 
 
-def test_should_use_external_manifest_image_registry_uri_is_external() -> None:
+def test_should_use_external_manifest_image_registry_uri_still_builds() -> None:
+    """Stale ECR workload_image must not skip build_registry (launch-* keep short names)."""
     assert should_use_external_manifest_image(
         image_source="build_registry",
         custom_image="123456789.dkr.ecr.us-east-1.amazonaws.com/launchpad-previews/launch-web:latest",
         default_image="",
-    ) is True
+    ) is False
 
 
 def test_should_use_external_manifest_image_explicit_external() -> None:

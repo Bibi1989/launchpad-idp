@@ -2973,9 +2973,7 @@ async def pause_expired_environment(
 STALE_PROVISIONING_SECONDS = 600
 # TEARDOWN_PENDING with no active lock older than this is re-queued (worker/beat
 # restarts drop in-flight Celery tasks and leave environments "tearing down").
-# Keep comfortably above Celery teardown time_limit, while still reducing the
-# long "stuck for hours until worker restart" window.
-STALE_TEARDOWN_SECONDS = 120
+STALE_TEARDOWN_SECONDS = 180
 
 
 async def _reap_stale_provisioning(session, env_repo, *, now: datetime) -> list[tuple]:
@@ -3168,8 +3166,9 @@ def rebuild_environment_task(
     name="launchpad.teardown_environment",
     bind=True,
     max_retries=0,
-    soft_time_limit=600,
-    time_limit=720,
+    # Cloud k8s retarget + namespace delete must finish under the hard limit.
+    soft_time_limit=900,
+    time_limit=1080,
 )
 def teardown_environment_task(self, environment_id: str, correlation_id: str) -> None:
     asyncio.run(_run_teardown(environment_id, correlation_id))
@@ -3685,7 +3684,12 @@ def _preview_url_is_local_tunnel(url: str) -> bool:
 
     from app.services.kubernetes import _is_local_preview_ingress_host
 
-    host = (urlparse(url).hostname or "").strip().lower()
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").strip().lower()
+    path = (parsed.path or "").strip().lower()
+    # Portal deep-link is not a cloud LoadBalancer URL.
+    if path.startswith("/p/"):
+        return True
     if not host:
         return False
     return _is_local_preview_ingress_host(host, settings=get_settings())

@@ -40,11 +40,20 @@ def should_use_external_manifest_image(
     custom_image: str | None,
     default_image: str | None,
 ) -> bool:
-    """Return True when deploy should skip workspace Dockerfile builds."""
+    """Return True when deploy should skip workspace Dockerfile builds.
+
+    ``build_registry`` always builds and pushes (or loads locally). A stale
+    ``workload_image`` pointing at ECR/Artifact Registry must not skip that path,
+    or launch-* Deployments keep short names like ``launch-web:latest`` and the
+    cloud kubelet pulls from Docker Hub (ErrImagePull).
+    """
     from app.schemas.cloud import KubernetesImageSource
 
-    if (image_source or "").strip().lower() == KubernetesImageSource.EXTERNAL.value:
+    source = (image_source or "").strip().lower()
+    if source == KubernetesImageSource.EXTERNAL.value:
         return True
+    if source == KubernetesImageSource.BUILD_REGISTRY.value:
+        return False
     custom = (custom_image or "").strip()
     default = (default_image or "").strip()
     if not custom or custom == default:
@@ -859,6 +868,28 @@ def remap_manifest_image_references(
                     break
 
 
+def _unqualified_deployment_images(documents: list[dict[str, Any]]) -> list[str]:
+    """Short image refs (e.g. launch-web:latest) that cloud clusters cannot pull."""
+    found: list[str] = []
+    for doc in documents:
+        if str(doc.get("kind") or "").lower() != "deployment":
+            continue
+        if _is_datastore_workload(doc):
+            continue
+        containers = (
+            ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+        ).get("containers") or []
+        if not isinstance(containers, list):
+            continue
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            image = str(container.get("image") or "").strip()
+            if image and is_unqualified_local_image(image):
+                found.append(image)
+    return found
+
+
 def attach_image_pull_secret(documents: list[dict[str, Any]], secret_name: str) -> None:
     """Add imagePullSecrets to Deployment / StatefulSet pod specs."""
     if not secret_name:
@@ -964,7 +995,15 @@ def build_and_push_workspace_images(
 
     mapping: dict[str, str] = {}
     failed_required: list[str] = []
-    build_platform = (platform or "").strip() or host_container_platform()
+    from app.services.cloud_instance_compute import CLOUD_CONTAINER_PLATFORM
+
+    provider = (cloud_provider or "").strip().lower()
+    if (platform or "").strip():
+        build_platform = platform.strip()
+    elif provider and provider != "local":
+        build_platform = CLOUD_CONTAINER_PLATFORM
+    else:
+        build_platform = host_container_platform()
 
     for (context, df), tags in groups.items():
         primary = next((t for t in tags if t in required_tags), tags[0])
@@ -1777,11 +1816,10 @@ def patch_manifest_documents(
             continue
         # Per-stack launch-* workloads carry their own built image + selector and
         # are routed by the multi-service Ingress. Stamp governance labels but
-        # never rewrite their image or force them onto the single-app selector.
-        # Their images are built and loaded straight into the local cluster, so
-        # pin imagePullPolicy=IfNotPresent - otherwise a :latest tag defaults to
-        # Always and the kubelet tries (and fails) to pull the bare name from
-        # Docker Hub (docker.io/library/launch-web:latest), causing ImagePullBackOff.
+        # never force them onto the single-app selector. Images are remapped via
+        # remap_manifest_image_references (cloud) or loaded into the local cluster;
+        # pin pull policy so :latest does not default to Always against Docker Hub
+        # for unqualified short names on kind/k3d.
         if _is_launch_workload(doc):
             meta_labels = metadata.setdefault("labels", {})
             meta_labels.update(labels)
@@ -2425,6 +2463,18 @@ class ManifestDeployer:
                 documents,
                 cluster_name=self._settings.kubernetes_context,
             )
+        if (
+            provider != CloudProvider.LOCAL.value
+            and self._settings.kubernetes_enabled
+            and not use_external
+        ):
+            remaining = _unqualified_deployment_images(documents)
+            if remaining:
+                raise RuntimeError(
+                    "Cloud Kubernetes deploy still references local-only image(s) "
+                    f"{', '.join(remaining[:5])} after registry push. "
+                    "Rebuild/push failed to remap manifests; retry provision."
+                )
         workload_image = resolve_manifest_workload_image(
             documents,
             provided_image=image if use_external else None,
@@ -2567,9 +2617,14 @@ class ManifestDeployer:
                 app_label=preview_app_label,
             )
             if self._provisioner.remote_cluster and not resources.preview_url:
+                # Never fall back to the Launchpad portal (/p/...) or local ws-* tunnel
+                # for cloud clusters: Open-app must be the cloud LoadBalancer URL only.
                 resources.preview_url = self._provisioner.resolve_external_preview_url(
-                    namespace, timeout_seconds=90.0
-                ) or self._provisioner.portal_preview_url(environment_id=environment_id)
+                    namespace,
+                    timeout_seconds=float(
+                        self._settings.preview_cloud_url_timeout_seconds
+                    ),
+                )
         except TimeoutError as exc:
             # Attach resolved resources for the worker so it can persist preview_url/node_port
             # even when readiness times out.

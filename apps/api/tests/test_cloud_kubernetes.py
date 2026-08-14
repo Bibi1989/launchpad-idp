@@ -234,6 +234,12 @@ def test_ensure_eks_reuses_existing_cluster(tmp_path, monkeypatch) -> None:
         ),
         patch("app.services.aws_client.eks_cluster_status", return_value="ACTIVE"),
         patch(
+            "app.services.aws_client.ensure_eks_auto_roles",
+            return_value=("arn:aws:iam::1:role/cluster", "arn:aws:iam::1:role/node"),
+        ),
+        patch("app.services.aws_client.eks_cluster_subnet_ids", return_value=["subnet-a", "subnet-b"]),
+        patch("app.services.aws_client.tag_eks_subnets_for_load_balancer"),
+        patch(
             "app.services.aws_client.write_eks_kubeconfig",
             return_value="arn:aws:eks:us-east-1:123456789012:cluster/launchpad-previews",
         ) as write_kc,
@@ -274,6 +280,8 @@ def test_ensure_eks_creates_when_missing(tmp_path, monkeypatch) -> None:
         ),
         patch("app.services.aws_client.create_eks_auto_cluster") as create_cluster,
         patch("app.services.aws_client.eks_cluster_status", return_value="ACTIVE"),
+        patch("app.services.aws_client.eks_cluster_subnet_ids", return_value=["subnet-a", "subnet-b"]),
+        patch("app.services.aws_client.tag_eks_subnets_for_load_balancer"),
         patch(
             "app.services.aws_client.write_eks_kubeconfig",
             return_value="arn:aws:eks:us-east-1:1:cluster/launchpad-previews",
