@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import subprocess
@@ -21,6 +22,21 @@ from app.services.k8s_spec import (
 )
 
 logger = get_logger(__name__)
+
+REGISTRY_PULL_SECRET_NAME = "launchpad-registry"
+
+
+def build_registry_dockerconfigjson(*, server: str, username: str, password: str) -> str:
+    """dockerconfigjson auths for kubelet/containerd (host and https://host)."""
+    host = (
+        server.strip()
+        .removeprefix("https://")
+        .removeprefix("http://")
+        .rstrip("/")
+    )
+    auth = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    entry = {"username": username, "password": password, "auth": auth}
+    return json.dumps({"auths": {host: entry, f"https://{host}": entry}})
 
 
 class PreviewCancelled(Exception):
@@ -45,6 +61,35 @@ _NON_HTTP_PORTS = frozenset({5672, 6379, 5432, 3306, 27017, 9092, 9200})
 
 def _is_nginx_image(image: str) -> bool:
     return "nginx" in image.lower()
+
+
+def _is_cloud_registry_image(image: str) -> bool:
+    from app.services.cloud_instance_compute import is_cloud_registry_image
+
+    return is_cloud_registry_image(image)
+
+
+def cluster_container_platform(core: object | None) -> str | None:
+    """Docker platform matching the target cluster's node architecture."""
+    if core is None:
+        return None
+    from app.services.cloud_instance_compute import normalize_node_architecture
+
+    try:
+        nodes = core.list_node(limit=8, _request_timeout=8)
+    except Exception:
+        return None
+    platforms: list[str] = []
+    for node in getattr(nodes, "items", None) or []:
+        info = getattr(getattr(node, "status", None), "node_info", None)
+        arch = getattr(info, "architecture", None)
+        mapped = normalize_node_architecture(str(arch) if arch else None)
+        if mapped:
+            platforms.append(mapped)
+    unique = set(platforms)
+    if len(unique) == 1:
+        return unique.pop()
+    return None
 
 
 def _inspect_image_exposed_ports(image: str) -> list[int]:
@@ -218,8 +263,18 @@ class ProvisionedResources:
 class KubernetesProvisioner:
     """Idempotent namespace + ResourceQuota + NetworkPolicy + workload provisioner."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        kubeconfig_path: str | None = None,
+        kube_context: str | None = None,
+        remote_cluster: bool = False,
+    ) -> None:
         self._settings = settings or get_settings()
+        self._kubeconfig_path = (kubeconfig_path or "").strip() or None
+        self._kube_context = (kube_context or "").strip() or None
+        self._remote_cluster = bool(remote_cluster)
         self._core = None
         self._networking = None
         self._apps = None
@@ -228,11 +283,23 @@ class KubernetesProvisioner:
             self._load_clients()
 
     @property
+    def remote_cluster(self) -> bool:
+        """True when this provisioner targets GKE/EKS/AKS, not local kind/k3d."""
+        return self._remote_cluster
+
+    @property
     def clients_ready(self) -> bool:
         """True when the API clients loaded (kubeconfig reachable). False when
         Kubernetes is disabled or client loading failed, so callers can skip live
         cluster reads instead of asserting/crashing."""
         return self._core is not None and self._apps is not None
+
+    def container_build_platform(self) -> str:
+        """Platform for images that this cluster will pull (not always amd64)."""
+        from app.services.cloud_instance_compute import host_container_platform
+
+        detected = cluster_container_platform(self._core)
+        return detected or host_container_platform()
 
     def _load_clients(self) -> None:
         from kubernetes import client, config
@@ -250,9 +317,12 @@ class KubernetesProvisioner:
                 return
         else:
             load_kwargs: dict[str, object] = {}
-            if self._settings.kubernetes_kubeconfig_path:
-                load_kwargs["config_file"] = self._settings.kubernetes_kubeconfig_path
-            requested_ctx = self._settings.resolved_kubernetes_context
+            config_file = self._kubeconfig_path or self._settings.kubernetes_kubeconfig_path
+            if config_file:
+                load_kwargs["config_file"] = config_file
+            requested_ctx = self._kube_context
+            if not requested_ctx and not self._remote_cluster:
+                requested_ctx = self._settings.resolved_kubernetes_context
             if requested_ctx:
                 load_kwargs["context"] = requested_ctx
             try:
@@ -292,6 +362,19 @@ class KubernetesProvisioner:
             self._apps = None
             self._autoscaling = None
 
+    def retarget(
+        self,
+        *,
+        kubeconfig_path: str,
+        kube_context: str,
+        remote_cluster: bool = True,
+    ) -> None:
+        """Point this provisioner at a cloud kubeconfig (GKE/EKS/AKS)."""
+        self._kubeconfig_path = (kubeconfig_path or "").strip() or None
+        self._kube_context = (kube_context or "").strip() or None
+        self._remote_cluster = bool(remote_cluster)
+        self.reload_clients()
+
     def assert_cluster_ready(self, *, timeout_seconds: float = 20.0) -> None:
         """Verify the configured kube-context is reachable before APPLY.
 
@@ -300,23 +383,33 @@ class KubernetesProvisioner:
         """
         if not self._settings.kubernetes_enabled:
             return
-        ctx = self._settings.resolved_kubernetes_context or "default"
+        ctx = (
+            self._kube_context
+            or self._settings.resolved_kubernetes_context
+            or "default"
+        )
         engine = self._settings.local_k8s_engine
         up_hint = f"make {engine}-up" if engine in {"k3s", "kind"} else "make k3s-up"
         if self._core is None:
+            if self._remote_cluster:
+                raise RuntimeError(
+                    f"Kubernetes client not connected to cloud cluster (context={ctx}). "
+                    "Check GCP credentials and that the GKE cluster is RUNNING."
+                )
             raise RuntimeError(
                 f"Kubernetes client not connected (context={ctx}). "
                 f"Start the local cluster with `{up_hint}` and ensure kubectl context "
                 f"'{ctx}' exists. Do not leave kubectl on a remote GKE context for local previews."
             )
         last_exc: Exception | None = None
-        for attempt in range(2):
+        attempts = 1 if self._remote_cluster else 2
+        for attempt in range(attempts):
             try:
                 self._core.list_namespace(limit=1, _request_timeout=timeout_seconds)
                 return
             except Exception as exc:
                 last_exc = exc
-                if attempt == 0:
+                if attempt == 0 and not self._remote_cluster:
                     logger.warning(
                         "kubernetes_assert_ready_retry",
                         context=ctx,
@@ -334,6 +427,11 @@ class KubernetesProvisioner:
                     self.reload_clients()
                     if self._core is None:
                         break
+        if self._remote_cluster:
+            raise RuntimeError(
+                f"Cannot reach cloud Kubernetes API for context '{ctx}' "
+                f"(timed out or refused after {timeout_seconds:.0f}s): {last_exc}."
+            ) from last_exc
         raise RuntimeError(
             f"Cannot reach Kubernetes API for context '{ctx}' "
             f"(timed out or refused after {timeout_seconds:.0f}s): {last_exc}. "
@@ -359,6 +457,9 @@ class KubernetesProvisioner:
         image: str | None = None,
         enable_postgres: bool = False,
         enable_redis: bool = False,
+        credentials: object | None = None,
+        cloud_provider: str | None = None,
+        region: str | None = None,
     ) -> ProvisionedResources:
         workload_image = image or self._settings.default_workload_image
         if not (workload_image or "").strip():
@@ -403,6 +504,20 @@ class KubernetesProvisioner:
             return resources
 
         self.apply_governance(namespace=namespace, labels=labels, resources=resources)
+        pull_secret = self.ensure_registry_pull_secret(
+            namespace=namespace,
+            image=workload_image,
+            credentials=credentials,
+            cloud_provider=cloud_provider,
+            region=region,
+            environment_id=environment_id,
+        )
+        if not pull_secret and _is_cloud_registry_image(workload_image):
+            raise RuntimeError(
+                "Cannot pull private registry image: no Artifact Registry or ECR "
+                "credentials. Save a GCP service account JSON with Artifact Registry "
+                "Reader (or AWS keys for ECR) and retry."
+            )
 
         # Ephemeral datastores (and their connection Secret) must be applied AFTER
         # the namespace/governance exist but BEFORE the app workload, so the app's
@@ -417,8 +532,6 @@ class KubernetesProvisioner:
         )
 
         used_ports = self.list_allocated_node_ports(exclude_namespace=namespace)
-        # Prefer a sticky in-range NodePort; ignore API auto-assigned ports outside the
-        # kind-mapped PREVIEW_NODE_PORT_MIN/MAX window (those are unreachable from the host).
         existing_port = self.read_namespaced_app_node_port(namespace)
         node_port = resolve_preview_node_port(
             environment_id,
@@ -426,7 +539,7 @@ class KubernetesProvisioner:
             port_min=self._settings.preview_node_port_min,
             port_max=self._settings.preview_node_port_max,
             used_ports=used_ports,
-            cluster_name=self._settings.kubernetes_context,
+            cluster_name=self._kube_context or self._settings.kubernetes_context,
         )
         node_port = self._apply_workload(
             namespace=namespace,
@@ -439,9 +552,10 @@ class KubernetesProvisioner:
             used_ports=used_ports,
             enable_postgres=enable_postgres,
             enable_redis=enable_redis,
+            image_pull_secret=pull_secret,
         )
         resources.created_workload = True
-        resources.node_port = node_port
+        resources.node_port = None if self._remote_cluster else node_port
 
         host = self.workspace_preview_host(
             name=name, environment_id=environment_id, namespace=namespace
@@ -449,6 +563,10 @@ class KubernetesProvisioner:
         if host:
             self.apply_ingress(namespace=namespace, labels=labels, host=host)
             resources.preview_url = self.ingress_preview_url(host=host)
+        elif self._remote_cluster:
+            resources.preview_url = self.resolve_external_preview_url(
+                namespace, timeout_seconds=180.0
+            ) or self.portal_preview_url(environment_id=environment_id)
         else:
             resources.preview_url = self.node_port_preview_url(node_port=node_port)
 
@@ -545,6 +663,103 @@ class KubernetesProvisioner:
             else:
                 raise
 
+    def ensure_registry_pull_secret(
+        self,
+        *,
+        namespace: str,
+        image: str | None,
+        credentials: object | None,
+        cloud_provider: str | None,
+        region: str | None,
+        environment_id: str,
+    ) -> str | None:
+        """Create a dockerconfigjson Secret so pods can pull Artifact Registry / ECR images."""
+        from app.schemas.cloud import CloudCredentials
+        from app.services.cloud_instance_compute import resolve_registry_pull_auth
+
+        if not self._settings.kubernetes_enabled or self._core is None:
+            return None
+        raw_image = (image or "").strip()
+        if not raw_image:
+            return None
+        creds = credentials if isinstance(credentials, CloudCredentials) else None
+        auth = resolve_registry_pull_auth(
+            image=raw_image,
+            cloud_provider=cloud_provider,
+            credentials=creds,
+            region=(region or "").strip() or "us-central1",
+            environment_id=environment_id,
+        )
+        if auth is None:
+            return None
+        server, username, password = auth
+        dockerconfig = build_registry_dockerconfigjson(
+            server=server, username=username, password=password
+        )
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        body = client.V1Secret(
+            api_version="v1",
+            kind="Secret",
+            metadata=client.V1ObjectMeta(
+                name=REGISTRY_PULL_SECRET_NAME,
+                namespace=namespace,
+            ),
+            type="kubernetes.io/dockerconfigjson",
+            string_data={".dockerconfigjson": dockerconfig},
+        )
+        try:
+            existing = self._core.read_namespaced_secret(REGISTRY_PULL_SECRET_NAME, namespace)
+            if (
+                body.metadata is not None
+                and existing.metadata is not None
+                and existing.metadata.resource_version
+            ):
+                body.metadata.resource_version = existing.metadata.resource_version
+            self._core.replace_namespaced_secret(REGISTRY_PULL_SECRET_NAME, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self._core.create_namespaced_secret(namespace, body)
+            else:
+                raise
+        self._patch_default_sa_image_pull_secret(namespace=namespace, secret_name=REGISTRY_PULL_SECRET_NAME)
+        logger.info(
+            "registry_pull_secret_applied",
+            namespace=namespace,
+            server=server,
+            secret=REGISTRY_PULL_SECRET_NAME,
+        )
+        return REGISTRY_PULL_SECRET_NAME
+
+    def _patch_default_sa_image_pull_secret(self, *, namespace: str, secret_name: str) -> None:
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        assert self._core is not None
+        try:
+            sa = self._core.read_namespaced_service_account("default", namespace)
+        except ApiException:
+            return
+        existing = [
+            ref.name
+            for ref in (sa.image_pull_secrets or [])
+            if getattr(ref, "name", None)
+        ]
+        if secret_name in existing:
+            return
+        existing.append(secret_name)
+        patch = client.V1ServiceAccount(
+            image_pull_secrets=[client.V1LocalObjectReference(name=name) for name in existing]
+        )
+        try:
+            self._core.patch_namespaced_service_account("default", namespace, patch)
+        except ApiException as exc:
+            logger.warning(
+                "default_sa_image_pull_secret_patch_failed",
+                namespace=namespace,
+                error=str(exc)[:200],
+            )
 
     def read_namespace_usage(self, namespace: str):
         """Return CPU/memory usage for cost metering.
@@ -1677,6 +1892,50 @@ class KubernetesProvisioner:
             return None
         return int(existing.spec.ports[0].node_port)
 
+    def apply_preview_load_balancer(
+        self,
+        *,
+        namespace: str,
+        labels: dict[str, str],
+        selector: dict[str, str],
+        listen_port: int,
+        service_name: str = "app",
+    ) -> None:
+        """Expose the preview as a cloud LoadBalancer (GKE/EKS/AKS)."""
+        if self._core is None:
+            return
+        from kubernetes import client
+        from kubernetes.client.rest import ApiException
+
+        service = client.V1Service(
+            metadata=client.V1ObjectMeta(name=service_name, namespace=namespace, labels=labels),
+            spec=client.V1ServiceSpec(
+                selector=selector,
+                ports=[
+                    client.V1ServicePort(
+                        port=80,
+                        target_port=listen_port,
+                        protocol="TCP",
+                    )
+                ],
+                type="LoadBalancer",
+            ),
+        )
+        try:
+            existing = self._core.read_namespaced_service(service_name, namespace, _request_timeout=15)
+            if existing.spec is not None and existing.spec.type == "LoadBalancer":
+                self._core.replace_namespaced_service(
+                    service_name, namespace, service, _request_timeout=15
+                )
+                return
+            _ignore_404(self._core.delete_namespaced_service, service_name, namespace)
+            self._core.create_namespaced_service(namespace, service, _request_timeout=15)
+        except ApiException as exc:
+            if exc.status == 404:
+                self._core.create_namespaced_service(namespace, service, _request_timeout=15)
+                return
+            raise
+
     # Public Service accessors so collaborators (e.g. ManifestDeployer) operate on
     # a supported surface instead of reaching into the raw ``_core`` client.
     def read_service(self, name: str, namespace: str):
@@ -1818,7 +2077,13 @@ class KubernetesProvisioner:
         container = client.V1Container(
             name="app",
             image=image,
-            image_pull_policy="IfNotPresent",
+            image_pull_policy=(
+                "IfNotPresent"
+                if "@sha256:" in image
+                else "Always"
+                if _is_cloud_registry_image(image)
+                else "IfNotPresent"
+            ),
             ports=[client.V1ContainerPort(container_port=effective_port)],
             resources=resources,
             readiness_probe=client.V1Probe(
@@ -1885,6 +2150,7 @@ class KubernetesProvisioner:
         listen_port: int,
         enable_postgres: bool = False,
         enable_redis: bool = False,
+        image_pull_secret: str | None = None,
     ) -> object:
         from kubernetes import client
 
@@ -1944,6 +2210,11 @@ class KubernetesProvisioner:
                         containers=[container],
                         volumes=volumes or None,
                         security_context=pod_security,
+                        image_pull_secrets=(
+                            [client.V1LocalObjectReference(name=image_pull_secret)]
+                            if image_pull_secret
+                            else None
+                        ),
                     ),
                 ),
             ),
@@ -1963,6 +2234,7 @@ class KubernetesProvisioner:
         environment_id: str | None = None,
         enable_postgres: bool = False,
         enable_redis: bool = False,
+        image_pull_secret: str | None = None,
     ) -> int:
         assert self._core is not None and self._apps is not None
         from kubernetes import client
@@ -1982,6 +2254,7 @@ class KubernetesProvisioner:
             listen_port=listen_port,
             enable_postgres=enable_postgres,
             enable_redis=enable_redis,
+            image_pull_secret=image_pull_secret,
         )
         selector = preview_workload_selector()
         try:
@@ -1991,6 +2264,22 @@ class KubernetesProvisioner:
             if exc.status != 404:
                 raise
             self._apps.create_namespaced_deployment(namespace, deployment)
+
+        if self._remote_cluster:
+            self.apply_preview_load_balancer(
+                namespace=namespace,
+                labels=labels,
+                selector=selector,
+                listen_port=listen_port,
+            )
+            logger.info(
+                "kubernetes_workload_applied",
+                namespace=namespace,
+                image=image,
+                git_branch=git_branch,
+                service_type="LoadBalancer",
+            )
+            return 0
 
         claimed = set(used_ports or ())
         candidates = [node_port]
@@ -2089,6 +2378,9 @@ class KubernetesProvisioner:
         image: str | None = None,
         enable_postgres: bool = False,
         enable_redis: bool = False,
+        credentials: object | None = None,
+        cloud_provider: str | None = None,
+        region: str | None = None,
     ) -> None:
         """Roll the app Deployment to a commit-tagged image annotation/env."""
         resolved_image = image or self._image_for_commit(commit_sha)
@@ -2125,6 +2417,16 @@ class KubernetesProvisioner:
             "launchpad.io/git-branch": git_branch,
             "launchpad.io/git-commit": commit_sha,
         }
+        pull_secret = self.ensure_registry_pull_secret(
+            namespace=namespace,
+            image=resolved_image,
+            credentials=credentials,
+            cloud_provider=cloud_provider,
+            region=region,
+            environment_id=environment_id,
+        )
+        if not pull_secret and _is_cloud_registry_image(resolved_image):
+            pull_secret = REGISTRY_PULL_SECRET_NAME
         deployment = self._build_app_deployment(
             namespace=namespace,
             labels=labels,
@@ -2136,6 +2438,7 @@ class KubernetesProvisioner:
             listen_port=listen_port,
             enable_postgres=enable_postgres,
             enable_redis=enable_redis,
+            image_pull_secret=pull_secret,
         )
         try:
             self._apps.read_namespaced_deployment("app", namespace)

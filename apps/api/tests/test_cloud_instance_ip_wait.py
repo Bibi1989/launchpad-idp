@@ -117,4 +117,6 @@ def test_build_and_push_cloud_image_uses_amd64_platform(tmp_path) -> None:
     build = next(c for c in build_cmds if c[:2] == ["docker", "build"])
     assert "--platform" in build
     assert cic.CLOUD_CONTAINER_PLATFORM in build
+    assert "--provenance=false" in build
+    assert "--sbom=false" in build
     assert remote.startswith("europe-west3-docker.pkg.dev/acme-prod-123/launchpad-previews/")

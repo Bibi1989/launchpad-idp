@@ -643,7 +643,7 @@ export default {
         "github": "GitHub clone"
       },
       "promoteRegion": "Region",
-      "promoteRegionHint": "Where the cloud VM or managed service is created. Pick a region with available capacity near your users.",
+      "promoteRegionHint": "Where the GKE/EKS cluster, cloud VM, or managed service is created. Pick a region with available capacity near your users.",
       "promoteNetworking": "Networking",
       "promoteCreateVpc": "Create new VPC / VNet",
       "promoteCreateSubnets": "Create subnets",
@@ -854,6 +854,10 @@ export default {
     "kubernetesBuildRegistryCloudHint": "Provisions {provider} container registry (ECR / Artifact Registry), builds workspace images, pushes, and patches Kubernetes manifests.",
     "kubernetesExternalImage": "Use an external container image",
     "kubernetesExternalImageHint": "Skip build. Deploy using a pre-built image reference (e.g. ghcr.io/org/app:tag).",
+    "imageScan": {
+      "title": "Scan image for CVEs before deploy",
+      "blurb": "Runs Trivy against the built image and can block the cloud deploy when CRITICAL or HIGH findings remain."
+    },
     "afterLaunchRebuild": "After launch: push to {branch} rebuilds the preview when a GitHub webhook is configured.",
     "yourBranch": "your branch",
     "ephemeralDatastores": "Ephemeral Datastores (opt-in)",

@@ -202,6 +202,19 @@ export const kubernetesWorkloadOptionsSchema = z
     resource_quota: z.boolean().default(false),
     limit_range: z.boolean().default(false),
     image_source: kubernetesImageSourceSchema.default('build_registry'),
+    image_scan: z
+      .object({
+        enabled: z.boolean().default(false),
+        severity_threshold: z.enum(['critical', 'critical_high']).default('critical_high'),
+        on_finding: z.enum(['block', 'warn']).default('block'),
+        tool: z.string().max(64).default('trivy-0.58.1'),
+      })
+      .default({
+        enabled: false,
+        severity_threshold: 'critical_high',
+        on_finding: 'block',
+        tool: 'trivy-0.58.1',
+      }),
   })
   .superRefine((value, ctx) => {
     if (value.install_ingress_nginx && !value.ingress) {
@@ -275,7 +288,22 @@ export const defaultKubernetesWorkloadOptions = (): z.infer<
   resource_quota: false,
   limit_range: false,
   image_source: 'build_registry',
+  image_scan: {
+    enabled: false,
+    severity_threshold: 'critical_high' as const,
+    on_finding: 'block' as const,
+    tool: 'trivy-0.58.1' as const,
+  },
 })
+
+export function defaultImageSecurityScanConfig() {
+  return {
+    enabled: false,
+    severity_threshold: 'critical_high' as const,
+    on_finding: 'block' as const,
+    tool: 'trivy-0.58.1' as const,
+  }
+}
 
 export const networkTopologySchema = z.enum(['simple', 'standard'])
 

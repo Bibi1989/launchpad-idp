@@ -17,7 +17,7 @@ import {
   coerceRegionForProvider,
   isRegionForProvider,
 } from '~/utils/cloudRegions'
-import { emptyCloudCredentials } from '~/utils/cloudValidation'
+import { emptyCloudCredentials, defaultImageSecurityScanConfig } from '~/utils/cloudValidation'
 import {
   ttlCanExtend,
   ttlIsExpired,
@@ -101,6 +101,7 @@ const promoteForm = reactive({
   existing_security_group_id: '' as string,
   create_vpc: false,
   create_subnets: false,
+  image_scan: defaultImageSecurityScanConfig(),
 })
 
 type CloudNetworkOption = {
@@ -133,7 +134,9 @@ const promoteRuntimeMode = ref<WorkspaceRuntimeMode>('kubernetes')
 const promoteRecommendedService = computed(() => recommendPrimaryService(promoteServices.value))
 const showPromoteServicePicker = computed(() => promoteServices.value.length > 1)
 const showPromoteCodeSource = computed(
-  () => promoteProcessStrategy.value === 'pm2' || promoteProcessStrategy.value === 'systemd',
+  () =>
+    promoteRuntimeMode.value !== 'kubernetes'
+    && (promoteProcessStrategy.value === 'pm2' || promoteProcessStrategy.value === 'systemd'),
 )
 const promoteRegionOptions = computed(() => regionsForProvider(promoteForm.provider))
 const showPromoteRegion = computed(() => promoteRegionOptions.value.length > 0)
@@ -687,6 +690,7 @@ const promoteAction = define(
       && promoteForm.existing_security_group_id
         ? promoteForm.existing_security_group_id
         : null,
+    kubernetes_image_scan: { ...promoteForm.image_scan },
   }),
   {
     success: () => ({ title: t('environments.detail.launchCloudPreview'), message: t('environments.detail.deployingToCloud', { provider: promoteForm.provider.toUpperCase() }) }),
@@ -1149,6 +1153,9 @@ onUnmounted(() => {
             :targets="promoteDeployTargets"
             :provider="promoteForm.provider"
           />
+          <ImageSecurityScanPicker
+            v-model:scan="promoteForm.image_scan"
+          />
           <label
             v-if="showPromoteRegion"
             class="block max-w-md space-y-2"
@@ -1255,7 +1262,7 @@ onUnmounted(() => {
             </p>
 
             <div
-              v-if="promoteForm.provider === 'aws'"
+              v-if="promoteForm.provider === 'aws' && promoteRuntimeMode !== 'kubernetes'"
               class="space-y-3 border-t border-[var(--lp-line)] pt-3"
             >
               <p class="lp-label">{{ t('environments.detail.promoteSecurityGroup') }}</p>

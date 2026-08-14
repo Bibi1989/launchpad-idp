@@ -1,6 +1,6 @@
 /** Align with API Settings: default_ttl_hours / ttl_max_total_hours_from_create. */
 export const PREVIEW_TTL_DEFAULT_HOURS = 2
-export const PREVIEW_TTL_MAX_HOURS = 2
+export const PREVIEW_TTL_MAX_HOURS = 168
 export const PREVIEW_TTL_MAX_MINUTES = PREVIEW_TTL_MAX_HOURS * 60
 
 export const PREVIEW_TTL_MAX_MS = PREVIEW_TTL_MAX_HOURS * 60 * 60 * 1000

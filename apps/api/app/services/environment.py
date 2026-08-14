@@ -450,6 +450,11 @@ class EnvironmentService:
                 if payload.kubernetes_image_source is not None
                 else None
             ),
+            kubernetes_image_scan_json=(
+                payload.kubernetes_image_scan.model_dump_json()
+                if getattr(payload, "kubernetes_image_scan", None) is not None
+                else None
+            ),
         )
         result = await self.enqueue_provision(
             create_payload,
@@ -617,6 +622,7 @@ class EnvironmentService:
             environment.deploy_mode = deploy_mode.value
             environment.manifest_packaging = manifest_packaging
             environment.kubernetes_image_source = payload.kubernetes_image_source
+            environment.kubernetes_image_scan_json = payload.kubernetes_image_scan_json
             environment.enable_postgres = payload.enable_postgres
             environment.enable_redis = payload.enable_redis
             environment.ttl_expires_at = ttl_expires_at
@@ -652,6 +658,7 @@ class EnvironmentService:
                 deploy_mode=deploy_mode.value,
                 manifest_packaging=manifest_packaging,
                 kubernetes_image_source=payload.kubernetes_image_source,
+                kubernetes_image_scan_json=payload.kubernetes_image_scan_json,
                 enable_postgres=payload.enable_postgres,
                 enable_redis=payload.enable_redis,
             )
@@ -804,7 +811,7 @@ class EnvironmentService:
         org_id: UUID | None = None,
     ) -> EnvironmentRead:
         """Launch a new cloud preview from an existing environment's source."""
-        from app.services.cloud_promote import needs_cloud_retarget
+        from app.services.cloud_promote import needs_cloud_retarget, promote_cloud_deploy_mode
 
         source = await self._require_owned(environment_id, owner)
         provisioning = ProvisioningService(self._session)
@@ -853,7 +860,10 @@ class EnvironmentService:
             source_provider=source.provider,
             deploy_mode=source.deploy_mode,
         )
-        cloud_deploy_mode = DeployMode.ATTACH if retarget else source.deploy_mode
+        cloud_deploy_mode = promote_cloud_deploy_mode(
+            source.deploy_mode,
+            retarget=retarget,
+        )
         workspace_id = source.workspace_id
 
         if retarget and source.workspace_id is not None:
@@ -872,6 +882,7 @@ class EnvironmentService:
                 existing_vpc_id=payload.existing_vpc_id,
                 existing_security_group_id=payload.existing_security_group_id,
                 project_id=source.project_id,
+                image_scan=payload.kubernetes_image_scan,
             )
         elif retarget and source.workspace_id is None:
             from app.schemas.cloud import (
@@ -923,6 +934,7 @@ class EnvironmentService:
                 create_subnets=payload.create_subnets,
                 existing_vpc_id=payload.existing_vpc_id,
                 existing_security_group_id=payload.existing_security_group_id,
+                image_scan=payload.kubernetes_image_scan,
             )
             bundle = await provisioning.generate_bundle(
                 bundle_req,
@@ -943,6 +955,8 @@ class EnvironmentService:
                 github_pr_url=source.github_pr_url,
                 workspace_id=workspace_id,
                 deploy_mode=cloud_deploy_mode,
+                kubernetes_image_source=source.kubernetes_image_source,
+                kubernetes_image_scan=payload.kubernetes_image_scan,
             )
         elif source.template_id:
             launch = PreviewLaunchRequest(
@@ -955,6 +969,7 @@ class EnvironmentService:
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
                 deploy_mode=cloud_deploy_mode,
+                kubernetes_image_scan=payload.kubernetes_image_scan,
             )
         else:
             launch = PreviewLaunchRequest(
@@ -968,6 +983,7 @@ class EnvironmentService:
                 github_pr_number=source.github_pr_number,
                 github_pr_url=source.github_pr_url,
                 deploy_mode=cloud_deploy_mode,
+                kubernetes_image_scan=payload.kubernetes_image_scan,
             )
         result = await self.launch_preview(
             launch,
@@ -1509,6 +1525,7 @@ class EnvironmentService:
         environment.preview_endpoints_json = None
         environment.node_port = None
         environment.latest_commit_sha = None
+        environment.created_at = now
         max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         environment.ttl_expires_at = now + _ttl_timedelta(
             ttl_hours=max_total_hours,

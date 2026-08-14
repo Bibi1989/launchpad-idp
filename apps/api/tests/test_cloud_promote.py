@@ -19,6 +19,7 @@ from app.services.cloud_promote import (
     build_cloud_running_instance,
     cloud_config_for_promote,
     needs_cloud_retarget,
+    promote_cloud_deploy_mode,
     promote_runtime_target,
     recommend_primary_service,
     resolve_attach_running_instance,
@@ -28,8 +29,25 @@ from app.services.cloud_promote import (
 def test_needs_cloud_retarget_local_and_attach_compose() -> None:
     assert needs_cloud_retarget(source_provider="local", deploy_mode=DeployMode.ATTACH.value)
     assert needs_cloud_retarget(source_provider="local", deploy_mode=DeployMode.COMPOSE.value)
+    assert needs_cloud_retarget(source_provider="local", deploy_mode=DeployMode.MANIFEST.value)
     assert not needs_cloud_retarget(source_provider="gcp", deploy_mode=DeployMode.PREVIEW.value)
+    assert not needs_cloud_retarget(source_provider="gcp", deploy_mode=DeployMode.MANIFEST.value)
     assert needs_cloud_retarget(source_provider="gcp", deploy_mode=DeployMode.ATTACH.value)
+
+
+def test_promote_cloud_deploy_mode_keeps_kubernetes() -> None:
+    assert promote_cloud_deploy_mode(
+        DeployMode.MANIFEST.value, retarget=True
+    ) == DeployMode.MANIFEST
+    assert promote_cloud_deploy_mode(
+        DeployMode.PREVIEW.value, retarget=True
+    ) == DeployMode.PREVIEW
+    assert promote_cloud_deploy_mode(
+        DeployMode.ATTACH.value, retarget=True
+    ) == DeployMode.ATTACH
+    assert promote_cloud_deploy_mode(
+        DeployMode.COMPOSE.value, retarget=True
+    ) == DeployMode.ATTACH
 
 
 def test_promote_runtime_target_instance_vs_compose() -> None:
@@ -203,3 +221,32 @@ def test_build_cloud_promote_wizard_request_instance_vm() -> None:
     exposed = [s for s in req.container_scaffold.services or [] if s.expose_preview]
     assert len(exposed) == 1
     assert exposed[0].name == "web"
+
+
+def test_build_cloud_promote_wizard_request_keeps_kubernetes() -> None:
+    from app.schemas.cloud import KubernetesPackaging
+    from app.services.cloud_promote import build_cloud_promote_wizard_request
+
+    source = WorkspaceWizardConfig.model_validate(
+        {
+            "name": "src",
+            "iac_engine": "terraform",
+            "cloud": {"provider": "local", "resources": {}},
+            "credentials": {},
+            "has_credentials": False,
+            "runtime_mode": WorkspaceRuntimeMode.KUBERNETES.value,
+            "artifact_mode": "manifest_only",
+            "kubernetes_packaging": KubernetesPackaging.RAW_MANIFESTS.value,
+        }
+    )
+    req = build_cloud_promote_wizard_request(
+        source,
+        workspace_name="demo-gcp",
+        provider=CloudProvider.GCP,
+        credentials=CloudCredentials(gcp_sa_key_json='{"project_id":"demo-proj"}'),
+    )
+    assert req.runtime_mode == WorkspaceRuntimeMode.KUBERNETES
+    assert req.kubernetes_packaging == KubernetesPackaging.RAW_MANIFESTS
+    assert isinstance(req.cloud, GcpCloudConfig)
+    assert req.cloud.resources.gke is True
+    assert req.cloud.resources.cloud_run is False

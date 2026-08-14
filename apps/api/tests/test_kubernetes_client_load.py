@@ -54,3 +54,38 @@ def test_assert_cluster_ready_uses_request_timeout() -> None:
     provisioner._core = core
     provisioner.assert_cluster_ready(timeout_seconds=3.0)
     core.list_namespace.assert_called_once_with(limit=1, _request_timeout=3.0)
+
+
+def test_retarget_loads_cloud_kubeconfig_not_local_context(tmp_path) -> None:
+    settings = Settings(
+        kubernetes_enabled=True,
+        kubernetes_in_cluster=False,
+        kubernetes_context="k3d-launchpad",
+        local_k8s_engine="k3s",
+        kind_cluster_name="launchpad",
+        _env_file=None,
+    )
+    kubeconfig = tmp_path / "gke.yaml"
+    kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_load(**kwargs):
+        captured.update(kwargs)
+
+    with (
+        patch("kubernetes.config.load_kube_config", side_effect=fake_load),
+        patch("kubernetes.client.Configuration.get_default_copy", return_value=MagicMock()),
+        patch("kubernetes.client.Configuration.set_default"),
+        patch("kubernetes.client.CoreV1Api", return_value=MagicMock()),
+        patch("kubernetes.client.NetworkingV1Api", return_value=MagicMock()),
+        patch("kubernetes.client.AppsV1Api", return_value=MagicMock()),
+        patch("kubernetes.client.AutoscalingV2Api", return_value=MagicMock()),
+    ):
+        provisioner = KubernetesProvisioner(settings)
+        provisioner.retarget(
+            kubeconfig_path=str(kubeconfig),
+            kube_context="gke_launchpad-504012_europe-west3_launchpad-previews",
+        )
+    assert captured.get("config_file") == str(kubeconfig)
+    assert captured.get("context") == "gke_launchpad-504012_europe-west3_launchpad-previews"
+    assert provisioner.remote_cluster is True

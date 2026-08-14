@@ -21,6 +21,168 @@ _REPO_NAME = "launchpad-previews"
 CLOUD_CONTAINER_PLATFORM = "linux/amd64"
 
 
+def host_container_platform() -> str:
+    """Docker ``--platform`` for this machine (Apple Silicon -> linux/arm64)."""
+    import platform as py_platform
+
+    machine = (py_platform.machine() or "").strip().lower()
+    if machine in {"aarch64", "arm64"}:
+        return "linux/arm64"
+    return CLOUD_CONTAINER_PLATFORM
+
+
+def docker_env_without_attestations(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Stop BuildKit from attaching provenance/SBOM indexes on build and push."""
+    import os
+
+    merged = dict(env) if env is not None else dict(os.environ)
+    merged["BUILDX_NO_DEFAULT_ATTESTATIONS"] = "1"
+    merged["DOCKER_BUILDKIT"] = "1"
+    return merged
+
+
+def docker_build_without_attestations_cmd(
+    *,
+    tag: str,
+    dockerfile: str,
+    context: str,
+    platform: str,
+    extra_args: list[str] | None = None,
+) -> list[str]:
+    """``docker build`` argv that does not emit an OCI attestation index."""
+    cmd = [
+        "docker",
+        "build",
+        "--platform",
+        platform,
+        "--provenance=false",
+        "--sbom=false",
+        "-t",
+        tag,
+        "-f",
+        dockerfile,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+    cmd.append(context)
+    return cmd
+
+
+def normalize_node_architecture(arch: str | None) -> str | None:
+    """Map Kubernetes ``node.status.nodeInfo.architecture`` to a Docker platform."""
+    raw = (arch or "").strip().lower()
+    if raw in {"amd64", "x86_64"}:
+        return "linux/amd64"
+    if raw in {"arm64", "aarch64"}:
+        return "linux/arm64"
+    return None
+
+
+def registry_repo_from_image(image: str) -> str:
+    """Strip tag or digest from a registry image reference."""
+    raw = (image or "").strip()
+    if "@" in raw:
+        return raw.split("@", 1)[0]
+    if ":" in raw:
+        name, tag = raw.rsplit(":", 1)
+        if "/" in name and tag and "/" not in tag:
+            return name
+    return raw
+
+
+def platform_digest_from_inspect(payload: dict[str, object], platform: str) -> str | None:
+    """Return the ``sha256:`` digest of ``platform`` from an OCI index inspect blob."""
+    want = (platform or "").strip().lower()
+    if not want:
+        return None
+    if "/" not in want:
+        want = f"linux/{want}"
+    want_os, _, rest = want.partition("/")
+    want_arch = rest.split("/", 1)[0]
+    manifest: object = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else payload
+    entries: object = None
+    if isinstance(manifest, dict):
+        entries = manifest.get("manifests")
+    if not isinstance(entries, list):
+        entries = payload.get("manifests")
+    if not isinstance(entries, list):
+        return None
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        plat = item.get("platform") if isinstance(item.get("platform"), dict) else {}
+        os_name = str(plat.get("os") or "").lower()
+        arch = str(plat.get("architecture") or "").lower()
+        if os_name in {"", "unknown"}:
+            continue
+        if os_name == want_os and arch == want_arch:
+            digest = str(item.get("digest") or "").strip()
+            if digest.startswith("sha256:"):
+                return digest
+    return None
+
+
+def pin_registry_image_to_platform(
+    *,
+    image: str,
+    platform: str,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Point kubelet at a single-platform manifest.
+
+    Docker BuildKit pushes an OCI index that includes ``unknown/unknown``
+    attestation manifests. k3s/containerd then fails with
+    ``no match for platform in manifest`` even when linux/arm64 is present.
+    Rewrite ``:tag`` to the matching platform digest (and flatten the tag).
+    """
+    inspect = _run_cmd(
+        ["docker", "buildx", "imagetools", "inspect", "--format", "{{json .}}", image],
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    blob = inspect.stdout or ""
+    if inspect.returncode != 0 or not blob.strip().startswith("{"):
+        raw = _run_cmd(
+            ["docker", "buildx", "imagetools", "inspect", "--raw", image],
+            timeout=60,
+            check=False,
+            env=env,
+        )
+        blob = raw.stdout or ""
+    try:
+        payload = json.loads(blob) if blob.strip().startswith("{") else None
+    except json.JSONDecodeError:
+        payload = None
+    if not isinstance(payload, dict):
+        return image
+    digest = platform_digest_from_inspect(payload, platform)
+    if not digest:
+        return image
+    repo = registry_repo_from_image(image)
+    pinned = f"{repo}@{digest}"
+    created = _run_cmd(
+        ["docker", "buildx", "imagetools", "create", "--tag", image, pinned],
+        timeout=120,
+        check=False,
+        env=env,
+    )
+    if created.returncode != 0:
+        logger.warning(
+            "registry_manifest_flatten_failed",
+            image=image,
+            platform=platform,
+            detail=sanitize_log_message((created.stderr or created.stdout or "")[:200]),
+        )
+    logger.info(
+        "registry_image_pinned_to_platform",
+        image=pinned,
+        platform=platform,
+        tag=image,
+    )
+    return pinned
+
+
 class CloudInstanceComputeError(RuntimeError):
     """Cloud VM or registry operation failed."""
 
@@ -394,10 +556,13 @@ def push_local_image_to_cloud_registry(
     region: str,
     environment_id: str,
     tag: str = "latest",
+    platform: str | None = None,
 ) -> str:
     """Tag and push an already-built local image to the cloud registry."""
     provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
-    env = _credential_env(credentials, environment_id=environment_id, provider=provider)
+    env = docker_env_without_attestations(
+        _credential_env(credentials, environment_id=environment_id, provider=provider)
+    )
     safe_name = re.sub(r"[^a-z0-9-]+", "-", (image_name or "app").lower()).strip("-") or "app"
     slug = _env_slug(environment_id)
 
@@ -431,15 +596,20 @@ def push_local_image_to_cloud_registry(
 
     _run_cmd(["docker", "tag", local_tag, remote], timeout=60, env=env)
     _run_cmd(["docker", "push", remote], timeout=900, env=env)
+    pinned = pin_registry_image_to_platform(
+        image=remote,
+        platform=(platform or "").strip() or host_container_platform(),
+        env=env,
+    )
     logger.info(
         "cloud_workspace_image_pushed",
-        image=remote,
+        image=pinned,
         provider=provider,
         environment_id=environment_id,
         local_tag=local_tag,
     )
     _ = slug  # reserved for future per-env package naming
-    return remote
+    return pinned
 
 
 def is_cloud_registry_image(image: str | None) -> bool:
@@ -448,6 +618,96 @@ def is_cloud_registry_image(image: str | None) -> bool:
     if not raw:
         return False
     return "-docker.pkg.dev/" in raw or ".dkr.ecr." in raw
+
+
+def registry_host_from_image(image: str | None) -> str | None:
+    """Registry host for a remote image (``europe-west3-docker.pkg.dev``)."""
+    raw = (image or "").strip()
+    if not raw or not is_cloud_registry_image(raw):
+        return None
+    repo = raw.split("@", 1)[0]
+    name = repo.rsplit(":", 1)[0]
+    host = name.split("/", 1)[0].strip()
+    return host or None
+
+
+def _gcp_service_account_json(raw: str | None) -> str | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("type") == "service_account" or (
+        parsed.get("private_key") and parsed.get("client_email")
+    ):
+        return text
+    return None
+
+
+def resolve_registry_pull_auth(
+    *,
+    image: str,
+    cloud_provider: str | None,
+    credentials: CloudCredentials | None,
+    region: str,
+    environment_id: str,
+) -> tuple[str, str, str] | None:
+    """Return ``(server, username, password)`` so kubelet can pull a private registry image."""
+    server = registry_host_from_image(image)
+    if not server:
+        return None
+    provider = (cloud_provider or "").strip().lower()
+    env = _credential_env(credentials, environment_id=environment_id, provider=provider or None)
+    if "-docker.pkg.dev" in server:
+        sa_json = _gcp_service_account_json(
+            (credentials.gcp_sa_key_json or "").strip() if credentials else ""
+        )
+        if not sa_json:
+            gac = (env.get("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
+            if gac:
+                try:
+                    sa_json = _gcp_service_account_json(
+                        Path(gac).read_text(encoding="utf-8")
+                    )
+                except OSError:
+                    sa_json = None
+        if sa_json:
+            return server, "_json_key", sa_json
+        access = (env.get("CLOUDSDK_AUTH_ACCESS_TOKEN") or "").strip()
+        if access:
+            return server, "oauth2accesstoken", access
+        token = _run_cmd(
+            ["gcloud", "auth", "print-access-token"],
+            timeout=30,
+            check=False,
+            env=env,
+        )
+        access = (token.stdout or "").strip()
+        if token.returncode == 0 and access:
+            return server, "oauth2accesstoken", access
+        logger.warning(
+            "gcp_registry_pull_token_failed",
+            detail=sanitize_log_message((token.stderr or "")[:200]),
+        )
+        return None
+    if ".dkr.ecr." in server:
+        from app.services.aws_client import ecr_login_password
+
+        loc = region.strip() or "us-east-1"
+        if ".dkr.ecr." in server:
+            # 123.dkr.ecr.us-east-1.amazonaws.com
+            parts = server.split(".")
+            if len(parts) >= 6 and parts[1] == "dkr" and parts[2] == "ecr":
+                loc = parts[3]
+        password = ecr_login_password(env=env, region=loc)
+        if password:
+            return server, "AWS", password
+        return None
+    return None
 
 
 def _delete_gcp_artifact_image(*, image: str, env: dict[str, str]) -> bool:
@@ -585,9 +845,12 @@ def build_and_push_cloud_image(
     credentials: CloudCredentials | None,
     region: str,
     tag: str = "latest",
+    platform: str | None = None,
+    image_scan: object | None = None,
 ) -> str:
     """Build workspace Dockerfile locally and push to the target cloud registry."""
     from app.services.attach_deploy import _find_workspace_dockerfile
+    from app.services.image_security_scan import ImageSecurityScanError, scan_local_docker_image
 
     found = _find_workspace_dockerfile(workspace_root)
     if found is None:
@@ -596,23 +859,23 @@ def build_and_push_cloud_image(
     provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
     slug = _env_slug(environment_id)
     env = _credential_env(credentials, environment_id=environment_id, provider=provider)
+    build_platform = (platform or "").strip() or CLOUD_CONTAINER_PLATFORM
 
     local_tag = f"lp-cloud-build-{slug}:{tag}"
     _run_cmd(
-        [
-            "docker",
-            "build",
-            "--platform",
-            CLOUD_CONTAINER_PLATFORM,
-            "-t",
-            local_tag,
-            "-f",
-            str(dockerfile),
-            str(context),
-        ],
+        docker_build_without_attestations_cmd(
+            tag=local_tag,
+            dockerfile=str(dockerfile),
+            context=str(context),
+            platform=build_platform,
+        ),
         timeout=900,
-        env=env,
+        env=docker_env_without_attestations(env),
     )
+    try:
+        scan_local_docker_image(image=local_tag, config=image_scan)
+    except ImageSecurityScanError as exc:
+        raise CloudInstanceComputeError(str(exc)) from exc
 
     return push_local_image_to_cloud_registry(
         local_tag=local_tag,
@@ -622,6 +885,7 @@ def build_and_push_cloud_image(
         region=region,
         environment_id=environment_id,
         tag=tag,
+        platform=build_platform,
     )
 
 

@@ -10,7 +10,7 @@ import type {
 } from '~/types/provisioning'
 import type { GitHost } from '~/types/git'
 import { githubCloneUrl } from '~/utils/githubAccount'
-import { hasAwsAuth, hasGcpAuth, emptyCloudCredentials } from '~/utils/cloudValidation'
+import { hasAwsAuth, hasGcpAuth, emptyCloudCredentials, defaultImageSecurityScanConfig } from '~/utils/cloudValidation'
 import {
   resolvePreviewDeployPlan,
   type PreviewDeployPlan,
@@ -84,6 +84,7 @@ const form = reactive({
   ttl_value: PREVIEW_TTL_DEFAULT_HOURS,
   workload_image: '',
   kubernetes_image_source: 'build_registry' as 'external' | 'build_registry',
+  kubernetes_image_scan: defaultImageSecurityScanConfig(),
   workspace_id: null as string | null,
   git_repo_url: '',
   git_branch: 'main',
@@ -632,6 +633,9 @@ async function launch() {
     }
     if (showKubernetesImageSource.value) {
       payload.kubernetes_image_source = form.kubernetes_image_source
+      if (form.provider !== 'local' && form.kubernetes_image_source === 'build_registry') {
+        payload.kubernetes_image_scan = { ...form.kubernetes_image_scan }
+      }
     }
     if (form.workspace_id) {
       payload.workspace_id = form.workspace_id
@@ -952,6 +956,7 @@ async function launch() {
         <KubernetesImageSourcePicker
           v-if="showKubernetesImageSource"
           v-model:source="form.kubernetes_image_source"
+          v-model:image-scan="form.kubernetes_image_scan"
           :cloud-provider="form.provider"
           class="sm:col-span-2"
         />
@@ -1176,6 +1181,7 @@ async function launch() {
       <KubernetesImageSourcePicker
         v-if="showKubernetesImageSource"
         v-model:source="form.kubernetes_image_source"
+        v-model:image-scan="form.kubernetes_image_scan"
         :cloud-provider="form.provider"
       />
       <label

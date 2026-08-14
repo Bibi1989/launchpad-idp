@@ -149,6 +149,8 @@ def test_provision_applies_datastores_after_namespace_exists(monkeypatch: pytest
     monkeypatch.setattr(provisioner, "list_allocated_node_ports", lambda **_: set())
     monkeypatch.setattr(provisioner, "read_namespaced_app_node_port", lambda _ns: None)
     monkeypatch.setattr(provisioner, "wait_for_workload_ready", lambda **_: None)
+    monkeypatch.setattr(provisioner, "ensure_registry_pull_secret", lambda **_: None)
+    monkeypatch.setattr(provisioner, "workspace_preview_host", lambda **_: None)
 
     def fake_apply_workload(**kwargs: object) -> int:
         manager._apply_workload(**kwargs)

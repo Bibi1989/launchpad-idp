@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { IngressClassName, KubernetesPackaging, KubernetesWorkloadOptions } from '~/types/provisioning'
+import { defaultImageSecurityScanConfig } from '~/utils/cloudValidation'
 
 const packaging = defineModel<KubernetesPackaging>('packaging', { required: true })
 const options = defineModel<KubernetesWorkloadOptions>('options', { required: true })
@@ -10,9 +11,14 @@ const props = withDefaults(
   defineProps<{
     /** When false, hide the "None" packaging option (e.g. Dev kind always needs manifests). */
     allowNone?: boolean
+    cloudProvider?: string | null
   }>(),
   { allowNone: true },
 )
+
+if (!options.value.image_scan) {
+  options.value.image_scan = defaultImageSecurityScanConfig()
+}
 
 const packagingChoices = computed(() => {
   const all = [
@@ -166,6 +172,8 @@ watch(
 
       <KubernetesImageSourcePicker
         v-model:source="options.image_source"
+        v-model:image-scan="options.image_scan"
+        :cloud-provider="props.cloudProvider"
       />
     </div>
   </div>

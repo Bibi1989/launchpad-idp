@@ -262,6 +262,8 @@ def resolve_instance_image(
     cloud_provider: str | None = None,
     credentials: CloudCredentials | None = None,
     region: str | None = None,
+    platform: str | None = None,
+    image_scan: object | None = None,
 ) -> str:
     """Resolve a container image for instance deploy.
 
@@ -296,6 +298,8 @@ def resolve_instance_image(
                 cloud_provider=provider,
                 credentials=credentials,
                 region=(region or "us-central1").strip() or "us-central1",
+                platform=platform,
+                image_scan=image_scan,
             )
         except CloudInstanceComputeError as exc:
             if custom and not is_ephemeral_local_image(custom):

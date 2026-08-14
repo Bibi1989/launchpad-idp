@@ -1,12 +1,21 @@
 <script setup lang="ts">
-import type { KubernetesImageSource } from '~/types/provisioning'
+import type { ImageSecurityScanConfig, KubernetesImageSource } from '~/types/provisioning'
 
 const source = defineModel<KubernetesImageSource>('source', { required: true })
+const imageScan = defineModel<ImageSecurityScanConfig>('imageScan')
 const { t } = useI18n()
 
-defineProps<{
+const props = defineProps<{
   cloudProvider?: string | null
 }>()
+
+const showImageScan = computed(
+  () =>
+    Boolean(imageScan.value)
+    && source.value === 'build_registry'
+    && Boolean(props.cloudProvider)
+    && props.cloudProvider !== 'local',
+)
 </script>
 
 <template>
@@ -42,5 +51,9 @@ defineProps<{
         </span>
       </label>
     </div>
+    <ImageSecurityScanPicker
+      v-if="showImageScan && imageScan"
+      v-model:scan="imageScan"
+    />
   </div>
 </template>

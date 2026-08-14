@@ -83,6 +83,14 @@ export interface CicdContainerScanConfig {
   tool: ContainerScanToolId
 }
 
+/** Deploy-time container CVE scan (Trivy) before registry push. */
+export interface ImageSecurityScanConfig {
+  enabled: boolean
+  severity_threshold: ScanSeverityThreshold
+  on_finding: ScanFindingAction
+  tool: ContainerScanToolId
+}
+
 export interface CicdSastGuardrailsConfig {
   enabled: boolean
   /** Run CodeQL / Semgrep static analysis before image build. */
@@ -193,6 +201,7 @@ export interface KubernetesWorkloadOptions {
   resource_quota: boolean
   limit_range: boolean
   image_source: KubernetesImageSource
+  image_scan: ImageSecurityScanConfig
 }
 
 export type DependencyPlacement = 'in_cluster' | 'managed' | 'external'

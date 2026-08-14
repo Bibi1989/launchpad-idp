@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models.domain import EnvironmentStatus, ExecutionStage, LogLevel
 from app.schemas.k8s import DeployMode
-from app.schemas.cloud import CloudCredentials, KubernetesImageSource
+from app.schemas.cloud import CloudCredentials, ImageSecurityScanConfig, KubernetesImageSource
 
 
 class PreviewEndpoint(BaseModel):
@@ -92,6 +92,7 @@ class EnvironmentCreate(BaseModel):
     enable_postgres: bool = False
     enable_redis: bool = False
     kubernetes_image_source: str | None = Field(default=None, max_length=32)
+    kubernetes_image_scan_json: str | None = Field(default=None)
 
     @field_validator("name")
     @classmethod
@@ -161,6 +162,7 @@ class EnvironmentRead(BaseModel):
     deploy_mode: DeployMode = DeployMode.PREVIEW
     manifest_packaging: str | None = None
     kubernetes_image_source: str | None = None
+    kubernetes_image_scan_json: str | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
     ttl_expires_at: datetime
@@ -313,6 +315,7 @@ class PreviewLaunchRequest(BaseModel):
     enable_postgres: bool = False
     enable_redis: bool = False
     kubernetes_image_source: KubernetesImageSource | None = None
+    kubernetes_image_scan: ImageSecurityScanConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -515,6 +518,7 @@ class EnvironmentPromoteRequest(BaseModel):
         max_length=128,
         description="Reuse an existing AWS security group (sg-…). AWS only.",
     )
+    kubernetes_image_scan: ImageSecurityScanConfig | None = None
 
     @field_validator("name")
     @classmethod

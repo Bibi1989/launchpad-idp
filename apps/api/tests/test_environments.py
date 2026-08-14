@@ -859,7 +859,10 @@ async def test_relaunch_environment_allows_when_ttl_expired(
         await repo.update_status(environment, EnvironmentStatus.EXPIRED)
         await session.commit()
 
-        service = EnvironmentService(session)
+        service = EnvironmentService(
+            session,
+            settings=get_settings().model_copy(update={"ttl_max_total_hours_from_create": 168}),
+        )
         with patch("app.services.environment.enqueue_provision_environment") as enqueue:
             enqueue.return_value = "celery-task-id"
             env_read = await service.relaunch_environment(
@@ -870,6 +873,8 @@ async def test_relaunch_environment_allows_when_ttl_expired(
 
         assert env_read.status == EnvironmentStatus.PROVISIONING
         assert enqueue.called
+        assert env_read.time_remaining_seconds > 160 * 3600
+        assert env_read.time_remaining_seconds <= 168 * 3600 + 60
 
 
 @pytest.mark.asyncio

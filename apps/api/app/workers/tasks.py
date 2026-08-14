@@ -180,6 +180,26 @@ def _resolve_k8s_image_source(
     return KubernetesImageSource.BUILD_REGISTRY.value
 
 
+def _wizard_image_scan_config(snapshot: dict | None) -> object | None:
+    if not isinstance(snapshot, dict):
+        return None
+    opts = snapshot.get("kubernetes_options")
+    if isinstance(opts, dict):
+        raw = opts.get("image_scan")
+        if raw is not None:
+            return raw
+    return None
+
+
+def _resolve_image_scan_config(environment: object, snapshot: dict | None) -> object:
+    from app.services.image_security_scan import parse_image_scan_config
+
+    env_raw = getattr(environment, "kubernetes_image_scan_json", None)
+    if env_raw:
+        return parse_image_scan_config(env_raw)
+    return parse_image_scan_config(_wizard_image_scan_config(snapshot))
+
+
 def _compose_primary_host_preference(snapshot: dict | None) -> int | None:
     """Host publish port from wizard running_instance.listen_port (Compose previews)."""
     if not isinstance(snapshot, dict):
@@ -209,6 +229,85 @@ def _wizard_gcp_project_id(snapshot: dict | None) -> str | None:
         return None
     value = str(raw).strip()
     return value or None
+
+
+async def _retarget_provisioner_for_cloud_k8s(
+    session: AsyncSession,
+    *,
+    environment: Environment,
+    provisioner: KubernetesProvisioner,
+    deploy_mode: str,
+    create_cluster: bool,
+    log_repo: DeploymentLogRepository | None = None,
+    env_uuid: UUID | None = None,
+    commit_sha: str | None = None,
+) -> KubernetesProvisioner:
+    """Point the provisioner at GKE/EKS/AKS when this env is a cloud Kubernetes deploy."""
+    from app.services.cloud_kubernetes import (
+        ensure_cloud_kubernetes_target,
+        is_cloud_kubernetes_deploy,
+        region_from_wizard,
+    )
+    from app.services.provisioning import ProvisioningService
+
+    provider = str(getattr(environment, "provider", None) or "local").lower()
+    if not is_cloud_kubernetes_deploy(provider=provider, deploy_mode=deploy_mode):
+        return provisioner
+
+    snapshot: dict | None = None
+    workspace_id = getattr(environment, "workspace_id", None)
+    if workspace_id is not None:
+        workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
+        if workspace_row is not None:
+            snapshot = ProvisioningService(session)._load_wizard_snapshot(workspace_row)
+
+    credentials = await _merge_attach_credentials_from_vault(
+        session,
+        attach_credentials=None,
+        owner_id=environment.owner_id,
+        provider=provider,
+    )
+    region = region_from_wizard(provider, snapshot)
+    if log_repo is not None and env_uuid is not None:
+        await _emit_log(
+            log_repo,
+            environment_id=env_uuid,
+            message=f"INIT - connecting to cloud Kubernetes ({provider.upper()} {region})",
+            status=EnvironmentStatus.PROVISIONING.value,
+            commit_sha=commit_sha,
+            stage=ExecutionStage.INIT,
+        )
+        await session.commit()
+
+    target = await asyncio.to_thread(
+        ensure_cloud_kubernetes_target,
+        provider=provider,
+        credentials=credentials,
+        region=region,
+        environment_id=str(environment.id),
+        existing_vpc_id=_wizard_existing_vpc_id(snapshot),
+        create=create_cluster,
+    )
+    provisioner.retarget(
+        kubeconfig_path=target.kubeconfig_path,
+        kube_context=target.context,
+        remote_cluster=True,
+    )
+    if log_repo is not None and env_uuid is not None:
+        created_note = "created " if target.created else "using "
+        await _emit_log(
+            log_repo,
+            environment_id=env_uuid,
+            message=(
+                f"VALIDATE - cloud Kubernetes ready "
+                f"({created_note}{target.cluster_name}, context={target.context})"
+            ),
+            status=EnvironmentStatus.PROVISIONING.value,
+            commit_sha=commit_sha,
+            stage=ExecutionStage.VALIDATE,
+        )
+        await session.commit()
+    return provisioner
 
 
 async def _sync_workspace_after_cloud_deploy(
@@ -785,30 +884,51 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             "(local Docker / VM SSH / serverless; no Kubernetes apply)"
                         )
                     elif settings.kubernetes_enabled:
+                        from app.services.cloud_kubernetes import is_cloud_kubernetes_deploy
+
                         provider = getattr(environment, "provider", None)
                         is_local = str(provider or "").lower() == "local"
                         ctx = settings.resolved_kubernetes_context or settings.kubernetes_context or "default"
-                        # Auto-start the local cluster for ANY provision whose target
-                        # context is the local kind/k3d cluster (not only provider=local
-                        # workspaces): a preview whose cluster is down should spin it up
-                        # and provision, rather than fail on a connection/read timeout.
-                        targets_local_cluster = is_local or ctx == settings.local_cluster_context
-                        if targets_local_cluster:
-                            from app.services.kind_cluster import ensure_kind_cluster
-
-                            await _emit_log(
-                                log_repo,
-                                environment_id=env_uuid,
-                                message="INIT - ensuring local Kubernetes cluster is ready",
-                                status=EnvironmentStatus.PROVISIONING.value,
+                        if is_cloud_kubernetes_deploy(
+                            provider=str(provider or ""),
+                            deploy_mode=deploy_mode,
+                        ):
+                            provisioner = await _retarget_provisioner_for_cloud_k8s(
+                                session,
+                                environment=environment,
+                                provisioner=provisioner,
+                                deploy_mode=deploy_mode,
+                                create_cluster=True,
+                                log_repo=log_repo,
+                                env_uuid=env_uuid,
                                 commit_sha=commit_sha,
-                                stage=ExecutionStage.INIT,
                             )
-                            await session.commit()
-                            await ensure_kind_cluster()
-                            provisioner.reload_clients()
-                        provisioner.assert_cluster_ready(timeout_seconds=20.0)
-                        mode_msg = f"VALIDATE - cluster reachable (context={ctx})"
+                            provisioner.assert_cluster_ready(timeout_seconds=30.0)
+                            mode_msg = (
+                                "VALIDATE - cloud Kubernetes reachable "
+                                f"(context={provisioner._kube_context or ctx})"
+                            )
+                        else:
+                            # Auto-start the local cluster for local Kubernetes previews.
+                            targets_local_cluster = (
+                                is_local or ctx == settings.local_cluster_context
+                            )
+                            if targets_local_cluster:
+                                from app.services.kind_cluster import ensure_kind_cluster
+
+                                await _emit_log(
+                                    log_repo,
+                                    environment_id=env_uuid,
+                                    message="INIT - ensuring local Kubernetes cluster is ready",
+                                    status=EnvironmentStatus.PROVISIONING.value,
+                                    commit_sha=commit_sha,
+                                    stage=ExecutionStage.INIT,
+                                )
+                                await session.commit()
+                                await ensure_kind_cluster()
+                                provisioner.reload_clients()
+                            provisioner.assert_cluster_ready(timeout_seconds=20.0)
+                            mode_msg = f"VALIDATE - cluster reachable (context={ctx})"
                     else:
                         mode_msg = (
                             "VALIDATE - simulate mode (KUBERNETES_ENABLED=false); "
@@ -964,6 +1084,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             )
 
                     k8s_image_source = _resolve_k8s_image_source(environment, wizard_snapshot)
+                    image_scan = _resolve_image_scan_config(environment, wizard_snapshot)
                     cloud_provider = str(getattr(environment, "provider", None) or "local").lower()
                     from app.schemas.cloud import CloudProvider, KubernetesImageSource
                     from app.services.cloud_promote import default_region
@@ -1003,6 +1124,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 cloud_provider=cloud_provider,
                                 credentials=manifest_credentials,
                                 region=region,
+                                platform=provisioner.container_build_platform(),
+                                image_scan=image_scan,
                             )
                             environment.workload_image = deploy_image
                             await session.commit()
@@ -1051,6 +1174,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             credentials=manifest_credentials,
                             region=region,
                             image_source=k8s_image_source,
+                            image_scan=image_scan,
                         )
                     elif deploy_mode == DeployMode.COMPOSE.value:
                         from app.services.compose_deploy import ComposeDeployError, deploy_compose
@@ -1217,6 +1341,9 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             image=deploy_image,
                             enable_postgres=getattr(environment, "enable_postgres", False),
                             enable_redis=getattr(environment, "enable_redis", False),
+                            credentials=manifest_credentials,
+                            cloud_provider=cloud_provider,
+                            region=_cloud_region_for_provider(cloud_provider, wizard_snapshot),
                         )
 
                     if resources.simulated:
@@ -1897,6 +2024,16 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         except AttachDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
                     else:
+                        provisioner = await _retarget_provisioner_for_cloud_k8s(
+                            session,
+                            environment=environment,
+                            provisioner=provisioner,
+                            deploy_mode=deploy_mode,
+                            create_cluster=False,
+                            log_repo=log_repo,
+                            env_uuid=env_uuid,
+                            commit_sha=short_sha,
+                        )
                         await _emit_stage(
                             log_repo,
                             session,
@@ -2253,6 +2390,13 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                     error=str(bridge_exc),
                                 )
                         else:
+                            provisioner = await _retarget_provisioner_for_cloud_k8s(
+                                session,
+                                environment=environment,
+                                provisioner=provisioner,
+                                deploy_mode=deploy_mode,
+                                create_cluster=False,
+                            )
                             await asyncio.wait_for(
                                 asyncio.to_thread(
                                     provisioner.teardown, namespace_name
@@ -2391,10 +2535,9 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         )
                         images = list(dict.fromkeys(preview_images))
                         if images:
-                            is_local = env_provider == "local" or (
-                                (settings.resolved_kubernetes_context or settings.kubernetes_context or "")
-                                .startswith(("kind-", "k3d-"))
-                            )
+                            from app.services.cloud_kubernetes import is_cloud_kubernetes_provider
+
+                            is_local = not is_cloud_kubernetes_provider(env_provider)
                             remove_local_docker_images(
                                 images,
                                 cluster_name=resolve_local_cluster_short_name(settings),
@@ -2688,6 +2831,13 @@ async def _reclaim_environment_runtime(
                     )
         else:
             k8s = provisioner or KubernetesProvisioner(settings=settings)
+            k8s = await _retarget_provisioner_for_cloud_k8s(
+                session,
+                environment=environment,
+                provisioner=k8s,
+                deploy_mode=deploy_mode,
+                create_cluster=False,
+            )
             await asyncio.wait_for(
                 asyncio.to_thread(k8s.teardown, environment.namespace_name),
                 timeout=45.0,
@@ -2727,10 +2877,9 @@ async def _reclaim_environment_runtime(
         # for the next provision. Workspace destroy reclaims them separately.
         images = list(dict.fromkeys(preview_images))
         if images:
-            is_local = environment.provider == "local" or (
-                (settings.resolved_kubernetes_context or settings.kubernetes_context or "")
-                .startswith(("kind-", "k3d-"))
-            )
+            from app.services.cloud_kubernetes import is_cloud_kubernetes_provider
+
+            is_local = not is_cloud_kubernetes_provider(environment.provider)
             removed = remove_local_docker_images(
                 images,
                 cluster_name=resolve_local_cluster_short_name(settings),

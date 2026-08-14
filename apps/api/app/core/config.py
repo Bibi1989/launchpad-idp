@@ -7,8 +7,30 @@ from pathlib import Path
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_API_DIR = Path(__file__).resolve().parents[2]
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+def resolve_settings_paths(here: Path | None = None) -> tuple[Path, Path]:
+    """Return ``(api_dir, repo_root)`` for ``.env`` lookup.
+
+    Monorepo: ``apps/api/app/core/config.py`` → api_dir=apps/api, repo_root=repo.
+    OCI / compose image: ``/app/app/core/config.py`` → both resolve under ``/app``
+    (``parents[4]`` does not exist and must not IndexError).
+    """
+    path = (here or Path(__file__)).resolve()
+    parents = list(path.parents)
+    api_dir = parents[2] if len(parents) > 2 else path.parent
+    repo_root: Path | None = None
+    if len(parents) > 4:
+        candidate = parents[4]
+        if (candidate / "apps").is_dir() and (
+            (candidate / "deploy").is_dir() or (candidate / "scripts").is_dir()
+        ):
+            repo_root = candidate
+    if repo_root is None:
+        repo_root = parents[2] if len(parents) > 2 else Path.cwd()
+    return api_dir, repo_root
+
+
+_API_DIR, _REPO_ROOT = resolve_settings_paths()
 _ENV_FILES = (
     str(_API_DIR / ".env"),
     str(_REPO_ROOT / ".env"),
@@ -67,7 +89,7 @@ class Settings(BaseSettings):
     # Warn when remaining TTL is at or below this many hours (0.5 = 30 minutes).
     ttl_warning_hours: float = 0.5
     # Total TTL hard cap from create (TTL extension cannot push past this).
-    ttl_max_total_hours_from_create: int = 2
+    ttl_max_total_hours_from_create: int = 168
 
     # Usage-based cost metering (ResourceQuota / pod requests × rate card)
     cost_metering_enabled: bool = True

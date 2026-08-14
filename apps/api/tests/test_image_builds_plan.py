@@ -13,6 +13,7 @@ from app.services.manifest_deploy import (
     build_and_load_kind_images,
     cluster_has_image,
     plan_workspace_image_builds,
+    should_use_external_manifest_image,
     workspace_image_fingerprint,
     _load_image_to_local_cluster,
 )
@@ -79,6 +80,30 @@ def test_plan_adds_uncovered_apps_when_image_builds_incomplete(tmp_path: Path) -
     assert "api-server:latest" in required
     assert "web-ui:latest" in required
     assert "launchpad/api-server:latest" not in tags
+
+
+def test_should_use_external_manifest_image_short_local_tag_is_buildable() -> None:
+    assert should_use_external_manifest_image(
+        image_source="build_registry",
+        custom_image="launch-web:latest",
+        default_image="",
+    ) is False
+
+
+def test_should_use_external_manifest_image_registry_uri_is_external() -> None:
+    assert should_use_external_manifest_image(
+        image_source="build_registry",
+        custom_image="123456789.dkr.ecr.us-east-1.amazonaws.com/launchpad-previews/launch-web:latest",
+        default_image="",
+    ) is True
+
+
+def test_should_use_external_manifest_image_explicit_external() -> None:
+    assert should_use_external_manifest_image(
+        image_source="external",
+        custom_image="launch-web:latest",
+        default_image="",
+    ) is True
 
 
 def test_plan_adds_launch_web_alias_when_plan_uses_short_tag(tmp_path: Path) -> None:

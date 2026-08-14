@@ -21,6 +21,7 @@ from app.schemas.cloud import (
     GcpCloudConfig,
     GcpResources,
     IaCEngine,
+    ImageSecurityScanConfig,
     InstanceCodeSource,
     InstanceProcessStrategy,
     KubernetesPackaging,
@@ -38,17 +39,37 @@ from app.services.service_kind import is_frontend_app_kind
 _SAFE = re.compile(r"[^a-z0-9-]+")
 
 
+_K8S_DEPLOY_MODES = frozenset({DeployMode.MANIFEST.value, DeployMode.PREVIEW.value})
+
+
 def needs_cloud_retarget(
     *,
     source_provider: str | None,
     deploy_mode: str | None,
 ) -> bool:
-    """True when promote must not reuse local attach/compose behavior on cloud."""
+    """True when promote must clone/re-target the workspace onto a cloud provider."""
     provider = (source_provider or "local").strip().lower()
     mode = (deploy_mode or DeployMode.PREVIEW.value).strip().lower()
     if provider == CloudProvider.LOCAL.value:
         return True
     return mode in {DeployMode.ATTACH.value, DeployMode.COMPOSE.value}
+
+
+def promote_cloud_deploy_mode(
+    source_deploy_mode: str | None,
+    *,
+    retarget: bool,
+) -> DeployMode:
+    """Keep Kubernetes deploys on manifests; only attach/compose become cloud VMs."""
+    mode = (source_deploy_mode or DeployMode.PREVIEW.value).strip().lower()
+    if mode in _K8S_DEPLOY_MODES:
+        return DeployMode(mode)
+    if retarget:
+        return DeployMode.ATTACH
+    try:
+        return DeployMode(mode)
+    except ValueError:
+        return DeployMode.ATTACH
 
 
 def promote_runtime_target(
@@ -106,8 +127,9 @@ def cloud_config_for_promote(
     create_subnets: bool = False,
     existing_vpc_id: str | None = None,
     existing_security_group_id: str | None = None,
+    kubernetes: bool = False,
 ) -> CloudConfig:
-    """Cloud workspace stub for ephemeral previews (VM or serverless)."""
+    """Cloud workspace stub for ephemeral previews (K8s cluster, VM, or serverless)."""
     resolved_region = (region or "").strip() or default_region(provider)
     existing = (existing_vpc_id or "").strip() or None
     existing_sg = (existing_security_group_id or "").strip() or None
@@ -118,7 +140,7 @@ def cloud_config_for_promote(
         want_subnets = True
     if provider == CloudProvider.GCP:
         project_id = project_id_from_gcp_sa_json(credentials.gcp_sa_key_json) or "launchpad-preview"
-        serverless = target_kind == RunningInstanceKind.SERVERLESS
+        serverless = (not kubernetes) and target_kind == RunningInstanceKind.SERVERLESS
         return GcpCloudConfig(
             provider=CloudProvider.GCP,
             resources=GcpResources(
@@ -126,14 +148,14 @@ def cloud_config_for_promote(
                 vpc=want_vpc,
                 subnets=want_subnets,
                 existing_vpc_id=existing,
-                gke=False,
+                gke=kubernetes,
                 cloud_run=serverless,
                 artifact_registry=True,
                 region=resolved_region,
             ),
         )
     if provider == CloudProvider.AWS:
-        serverless = target_kind == RunningInstanceKind.SERVERLESS
+        serverless = (not kubernetes) and target_kind == RunningInstanceKind.SERVERLESS
         return AwsCloudConfig(
             provider=CloudProvider.AWS,
             resources=AwsResources(
@@ -141,15 +163,15 @@ def cloud_config_for_promote(
                 subnets=want_subnets,
                 existing_vpc_id=existing,
                 existing_security_group_id=existing_sg,
-                eks=False,
-                ec2=not serverless,
+                eks=kubernetes,
+                ec2=(not kubernetes) and not serverless,
                 app_runner=serverless,
                 ecr=True,
                 region=resolved_region,
             ),
         )
     if provider == CloudProvider.AZURE:
-        serverless = target_kind == RunningInstanceKind.SERVERLESS
+        serverless = (not kubernetes) and target_kind == RunningInstanceKind.SERVERLESS
         rg = "launchpad-preview"
         sub = (credentials.azure_subscription_id or "").strip()
         if sub and len(sub) >= 8:
@@ -160,7 +182,7 @@ def cloud_config_for_promote(
                 resource_group=rg,
                 vnet=want_vpc,
                 subnets=want_subnets,
-                aks=False,
+                aks=kubernetes,
                 container_apps=serverless,
                 acr=True,
                 location=resolved_region,
@@ -249,7 +271,9 @@ def build_cloud_promote_wizard_request(
     create_subnets: bool = False,
     existing_vpc_id: str | None = None,
     existing_security_group_id: str | None = None,
+    image_scan: ImageSecurityScanConfig | None = None,
 ) -> ProvisioningWizardRequest:
+    kubernetes = source.runtime_mode == WorkspaceRuntimeMode.KUBERNETES
     target_kind = promote_runtime_target(source)
     cloud = cloud_config_for_promote(
         provider,
@@ -260,6 +284,7 @@ def build_cloud_promote_wizard_request(
         create_subnets=create_subnets,
         existing_vpc_id=existing_vpc_id,
         existing_security_group_id=existing_security_group_id,
+        kubernetes=kubernetes,
     )
     services = list(source.container_scaffold.services or [])
     services = apply_primary_service_selection(services, primary_service)
@@ -271,20 +296,41 @@ def build_cloud_promote_wizard_request(
             "services": services,
         },
     )
-    running_instance = build_cloud_running_instance(
-        provider=provider,
-        environment_name=workspace_name,
-        primary_service=primary_service or recommend_primary_service(services),
-        source=source.running_instance,
-        target_kind=target_kind,
-        code_source=code_source,
-        region=region,
+    running_instance = (
+        source.running_instance
+        if kubernetes
+        else build_cloud_running_instance(
+            provider=provider,
+            environment_name=workspace_name,
+            primary_service=primary_service or recommend_primary_service(services),
+            source=source.running_instance,
+            target_kind=target_kind,
+            code_source=code_source,
+            region=region,
+        )
     )
+    runtime_mode = (
+        WorkspaceRuntimeMode.KUBERNETES
+        if kubernetes
+        else WorkspaceRuntimeMode.RUNNING_INSTANCE
+    )
+    source_packaging = source.kubernetes_packaging
+    if kubernetes and source_packaging == KubernetesPackaging.NONE:
+        source_packaging = KubernetesPackaging.RAW_MANIFESTS
+    k8s_options = source.kubernetes_options
+    if image_scan is not None:
+        k8s_options = k8s_options.model_copy(update={"image_scan": image_scan})
     artifact_mode, packaging, scaffold, running_instance = normalize_artifacts_for_runtime_mode(
         cloud=cloud,
-        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
-        artifact_mode=WorkspaceArtifactsMode.IAC_ONLY,
-        kubernetes_packaging=KubernetesPackaging.NONE,
+        runtime_mode=runtime_mode,
+        artifact_mode=(
+            WorkspaceArtifactsMode.BOTH
+            if kubernetes
+            else WorkspaceArtifactsMode.IAC_ONLY
+        ),
+        kubernetes_packaging=(
+            source_packaging if kubernetes else KubernetesPackaging.NONE
+        ),
         container_scaffold=scaffold,
         running_instance=running_instance,
     )
@@ -294,11 +340,11 @@ def build_cloud_promote_wizard_request(
         cloud=cloud,
         credentials=credentials,
         run_init=False,
-        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        runtime_mode=runtime_mode,
         running_instance=running_instance,
         artifact_mode=artifact_mode,
         kubernetes_packaging=packaging,
-        kubernetes_options=source.kubernetes_options,
+        kubernetes_options=k8s_options,
         cost_optimization=source.cost_optimization,
         container_scaffold=scaffold,
         dependencies=source.dependencies,
@@ -316,6 +362,8 @@ def resolve_attach_running_instance(
     """When an env targets cloud, coerce local attach kinds to VM or serverless."""
     provider_raw = (cloud_provider or CloudProvider.LOCAL.value).strip().lower()
     if provider_raw == CloudProvider.LOCAL.value:
+        return running_instance
+    if runtime_mode == WorkspaceRuntimeMode.KUBERNETES:
         return running_instance
     if running_instance.kind in {RunningInstanceKind.SERVERLESS, RunningInstanceKind.VM}:
         if running_instance.service_name:

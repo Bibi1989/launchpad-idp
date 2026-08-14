@@ -23,6 +23,34 @@ from app.services.kubernetes import (
 
 BUILD_FINGERPRINT_LABEL = "org.launchpad.build-fingerprint"
 
+
+def is_unqualified_local_image(image: str | None) -> bool:
+    """True for short names like ``launch-web:latest`` that must be built locally."""
+    raw = (image or "").strip()
+    if not raw:
+        return False
+    repo = raw.split("@", 1)[0]
+    name_part = repo.rsplit(":", 1)[0]
+    return "/" not in name_part
+
+
+def should_use_external_manifest_image(
+    *,
+    image_source: str | None,
+    custom_image: str | None,
+    default_image: str | None,
+) -> bool:
+    """Return True when deploy should skip workspace Dockerfile builds."""
+    from app.schemas.cloud import KubernetesImageSource
+
+    if (image_source or "").strip().lower() == KubernetesImageSource.EXTERNAL.value:
+        return True
+    custom = (custom_image or "").strip()
+    default = (default_image or "").strip()
+    if not custom or custom == default:
+        return False
+    return not is_unqualified_local_image(custom)
+
 logger = get_logger(__name__)
 
 K8S_MANIFESTS_DIR = Path("infra") / "k8s" / "manifests"
@@ -816,15 +844,87 @@ def remap_manifest_image_references(
             replacement = image_map.get(current)
             if replacement:
                 container["image"] = replacement
-                container["imagePullPolicy"] = "Always"
+                container["imagePullPolicy"] = (
+                    "IfNotPresent" if "@sha256:" in replacement else "Always"
+                )
                 continue
             # Match by repository name when tags differ (launch-web:latest -> remote:tag).
             base = current.split("@", 1)[0]
             for local_tag, remote_uri in image_map.items():
                 if base.split(":")[0] == local_tag.split(":")[0]:
                     container["image"] = remote_uri
-                    container["imagePullPolicy"] = "Always"
+                    container["imagePullPolicy"] = (
+                        "IfNotPresent" if "@sha256:" in remote_uri else "Always"
+                    )
                     break
+
+
+def attach_image_pull_secret(documents: list[dict[str, Any]], secret_name: str) -> None:
+    """Add imagePullSecrets to Deployment / StatefulSet pod specs."""
+    if not secret_name:
+        return
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        if str(doc.get("kind") or "").lower() not in {
+            "deployment",
+            "statefulset",
+            "job",
+            "cronjob",
+            "daemonset",
+        }:
+            continue
+        if str(doc.get("kind") or "").lower() == "cronjob":
+            pod_spec = (
+                (((doc.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {})
+                .get("template")
+                or {}
+            ).get("spec")
+        else:
+            pod_spec = ((doc.get("spec") or {}).get("template") or {}).get("spec")
+        if not isinstance(pod_spec, dict):
+            continue
+        pulls = pod_spec.setdefault("imagePullSecrets", [])
+        if not isinstance(pulls, list):
+            pod_spec["imagePullSecrets"] = [{"name": secret_name}]
+            continue
+        if any(isinstance(item, dict) and item.get("name") == secret_name for item in pulls):
+            continue
+        pulls.append({"name": secret_name})
+
+
+def first_cloud_registry_image(
+    documents: list[dict[str, Any]], extra: str | None = None
+) -> str | None:
+    """Return the first Artifact Registry / ECR image in manifests or ``extra``."""
+    from app.services.cloud_instance_compute import is_cloud_registry_image
+
+    if is_cloud_registry_image(extra):
+        return (extra or "").strip()
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        kind = str(doc.get("kind") or "").lower()
+        if kind == "cronjob":
+            pod_spec = (
+                (((doc.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {})
+                .get("template")
+                or {}
+            ).get("spec")
+        elif kind in {"deployment", "statefulset", "job", "daemonset"}:
+            pod_spec = ((doc.get("spec") or {}).get("template") or {}).get("spec")
+        else:
+            continue
+        if not isinstance(pod_spec, dict):
+            continue
+        for group in ("initContainers", "containers"):
+            for container in pod_spec.get(group) or []:
+                if not isinstance(container, dict):
+                    continue
+                image = str(container.get("image") or "").strip()
+                if is_cloud_registry_image(image):
+                    return image
+    return None
 
 
 def build_and_push_workspace_images(
@@ -834,6 +934,8 @@ def build_and_push_workspace_images(
     cloud_provider: str,
     credentials: Any,
     region: str,
+    platform: str | None = None,
+    image_scan: Any = None,
 ) -> dict[str, str]:
     """Build workspace images and push each to the target cloud registry."""
     import shutil
@@ -841,8 +943,14 @@ def build_and_push_workspace_images(
     from app.schemas.cloud import CloudCredentials
     from app.services.cloud_instance_compute import (
         CloudInstanceComputeError,
-        CLOUD_CONTAINER_PLATFORM,
+        docker_build_without_attestations_cmd,
+        docker_env_without_attestations,
+        host_container_platform,
         push_local_image_to_cloud_registry,
+    )
+    from app.services.image_security_scan import (
+        ImageSecurityScanError,
+        scan_local_docker_image,
     )
 
     if not shutil.which("docker"):
@@ -856,6 +964,7 @@ def build_and_push_workspace_images(
 
     mapping: dict[str, str] = {}
     failed_required: list[str] = []
+    build_platform = (platform or "").strip() or host_container_platform()
 
     for (context, df), tags in groups.items():
         primary = next((t for t in tags if t in required_tags), tags[0])
@@ -869,30 +978,33 @@ def build_and_push_workspace_images(
             image=primary,
             dockerfile=str(rel),
             provider=cloud_provider,
+            platform=build_platform,
         )
         build_res = subprocess.run(
-            [
-                "docker",
-                "build",
-                "--platform",
-                CLOUD_CONTAINER_PLATFORM,
-                "-t",
-                primary,
-                "-f",
-                str(df),
-                "--label",
-                f"{BUILD_FINGERPRINT_LABEL}={fingerprint}",
-                str(context),
-            ],
+            docker_build_without_attestations_cmd(
+                tag=primary,
+                dockerfile=str(df),
+                context=str(context),
+                platform=build_platform,
+                extra_args=["--label", f"{BUILD_FINGERPRINT_LABEL}={fingerprint}"],
+            ),
             capture_output=True,
             text=True,
             timeout=900,
+            env=docker_env_without_attestations(),
         )
         if build_res.returncode != 0:
             detail = (build_res.stderr or build_res.stdout or "").strip()[-800:]
             for image_tag in tags:
                 if image_tag in required_tags:
                     failed_required.append(f"{image_tag} ({rel}): {detail[:200]}")
+            continue
+        try:
+            scan_local_docker_image(image=primary, config=image_scan)
+        except ImageSecurityScanError as exc:
+            for image_tag in tags:
+                if image_tag in required_tags:
+                    failed_required.append(f"{image_tag}: {exc}")
             continue
         try:
             remote = push_local_image_to_cloud_registry(
@@ -903,6 +1015,7 @@ def build_and_push_workspace_images(
                 region=region,
                 environment_id=environment_id,
                 tag="latest",
+                platform=build_platform,
             )
         except CloudInstanceComputeError as exc:
             for image_tag in tags:
@@ -932,9 +1045,10 @@ def ensure_local_deployment_images(
     pulls from Docker Hub when the tag is absent on the node (ErrImagePull for
     ``docker.io/library/api-server:latest``). Call after ``build_and_load_kind_images``.
     """
+    real_cluster = resolve_local_cluster_name(cluster_name)
+    build_and_load_kind_images(workspace_root, cluster_name=real_cluster)
     builds, _ = plan_workspace_image_builds(workspace_root)
     planned = {tag for _, _, tag in builds}
-    real_cluster = resolve_local_cluster_name(cluster_name)
     missing: list[str] = []
 
     for doc in documents:
@@ -1801,6 +1915,8 @@ def _pin_local_image_pull_policy(doc: dict[str, Any]) -> None:
     does not exist -> ImagePullBackOff. Only touches the pull policy; the image,
     name, selector and ports are left exactly as generated.
     """
+    from app.services.cloud_instance_compute import is_cloud_registry_image
+
     if str(doc.get("kind") or "") != "Deployment":
         return
     pod_spec = (
@@ -1809,7 +1925,13 @@ def _pin_local_image_pull_policy(doc: dict[str, Any]) -> None:
     for group in ("initContainers", "containers"):
         for container in pod_spec.get(group) or []:
             if isinstance(container, dict):
-                container["imagePullPolicy"] = "IfNotPresent"
+                image = str(container.get("image") or "")
+                if is_cloud_registry_image(image):
+                    container["imagePullPolicy"] = (
+                        "IfNotPresent" if "@sha256:" in image else "Always"
+                    )
+                else:
+                    container["imagePullPolicy"] = "IfNotPresent"
 
 
 def _harden_launch_workload(doc: dict[str, Any]) -> None:
@@ -2127,6 +2249,7 @@ class ManifestDeployer:
         credentials: object | None = None,
         region: str | None = None,
         image_source: str | None = None,
+        image_scan: object | None = None,
     ) -> ProvisionedResources:
         workload_image = image or self._settings.default_workload_image
         labels = build_preview_labels(
@@ -2190,14 +2313,14 @@ class ManifestDeployer:
             )
             return resources
 
-        from app.schemas.cloud import CloudProvider, KubernetesImageSource
+        from app.schemas.cloud import CloudProvider
 
         provider = (cloud_provider or CloudProvider.LOCAL.value).strip().lower()
-        use_external = (image_source or "").strip().lower() == KubernetesImageSource.EXTERNAL.value
-        custom_image = (image or "").strip()
-        default_image = (self._settings.default_workload_image or "").strip()
-        if not use_external and custom_image and custom_image != default_image:
-            use_external = True
+        use_external = should_use_external_manifest_image(
+            image_source=image_source,
+            custom_image=image,
+            default_image=self._settings.default_workload_image,
+        )
 
         image_map: dict[str, str] = {}
         if not use_external and self._settings.kubernetes_enabled:
@@ -2208,6 +2331,8 @@ class ManifestDeployer:
                     cloud_provider=provider,
                     credentials=credentials,
                     region=(region or "us-central1").strip() or "us-central1",
+                    platform=self._provisioner.container_build_platform(),
+                    image_scan=image_scan,
                 )
             else:
                 build_and_load_kind_images(
@@ -2261,36 +2386,42 @@ class ManifestDeployer:
             resources=resources,
             listen_ports=[listen_port],
         )
+        registry_image = first_cloud_registry_image(
+            patched,
+            extra=next(iter(image_map.values()), None) or workload_image,
+        )
+        if registry_image:
+            pull_secret = self._provisioner.ensure_registry_pull_secret(
+                namespace=namespace,
+                image=registry_image,
+                credentials=credentials,
+                cloud_provider=provider,
+                region=region,
+                environment_id=environment_id,
+            )
+            if not pull_secret:
+                raise RuntimeError(
+                    "Cannot pull private registry image: no Artifact Registry or ECR "
+                    "credentials. Save a GCP service account JSON with Artifact Registry "
+                    "Reader (or AWS keys for ECR) and retry."
+                )
+            attach_image_pull_secret(patched, pull_secret)
         self._strip_preview_incompatible_controllers(namespace=namespace)
         self._apply_documents(namespace=namespace, documents=patched)
         resources.created_workload = True
 
-        used_ports = self._provisioner.list_allocated_node_ports(exclude_namespace=namespace)
-        existing_port = self._provisioner.read_namespaced_app_node_port(namespace)
-        node_port = resolve_preview_node_port(
-            environment_id,
-            existing_port=existing_port,
-            port_min=self._settings.preview_node_port_min,
-            port_max=self._settings.preview_node_port_max,
-            used_ports=used_ports,
-            cluster_name=self._settings.kubernetes_context,
-        )
-        # Always pin the Service into the kind-mapped range (fixes auto-assigned ports).
-        node_port = self._assign_node_port(
-            namespace=namespace,
-            node_port=node_port,
-            used_ports=used_ports,
-            labels=labels,
-            target_port=listen_port,
-            selector_app=preview_app_label,
-        )
-        resources.node_port = node_port
-
-        has_workspace_ingress = any(
-            str(doc.get("kind") or "") == "Ingress" for doc in patched
-        )
-        if host:
-            if not has_workspace_ingress:
+        if self._provisioner.remote_cluster:
+            self._provisioner.apply_preview_load_balancer(
+                namespace=namespace,
+                labels=labels,
+                selector={"app": preview_app_label},
+                listen_port=listen_port,
+            )
+            resources.node_port = None
+            has_workspace_ingress = any(
+                str(doc.get("kind") or "") == "Ingress" for doc in patched
+            )
+            if host and not has_workspace_ingress:
                 backend_service, backend_port = _resolve_preview_ingress_backend(
                     patched,
                     preview_app_label=preview_app_label,
@@ -2306,21 +2437,76 @@ class ManifestDeployer:
                     )
                     resources.preview_url = self._provisioner.ingress_preview_url(host=host)
                 except Exception as exc:
-                    # Ingress controllers (or remote GKE gateways) can 504; local
-                    # previews still work via the Kind-mapped NodePort.
                     logger.warning(
-                        "manifest_ingress_apply_failed_fallback_nodeport",
+                        "manifest_ingress_apply_failed_fallback_lb",
                         namespace=namespace,
                         host=host,
                         error=str(exc)[:400],
                     )
-                    resources.preview_url = self._provisioner.node_port_preview_url(
-                        node_port=node_port
-                    )
-            else:
+                    resources.preview_url = None
+            elif host:
                 resources.preview_url = self._provisioner.ingress_preview_url(host=host)
+            if not resources.preview_url:
+                resources.preview_url = self._provisioner.resolve_external_preview_url(
+                    namespace, timeout_seconds=180.0
+                ) or self._provisioner.portal_preview_url(environment_id=environment_id)
         else:
-            resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
+            used_ports = self._provisioner.list_allocated_node_ports(exclude_namespace=namespace)
+            existing_port = self._provisioner.read_namespaced_app_node_port(namespace)
+            node_port = resolve_preview_node_port(
+                environment_id,
+                existing_port=existing_port,
+                port_min=self._settings.preview_node_port_min,
+                port_max=self._settings.preview_node_port_max,
+                used_ports=used_ports,
+                cluster_name=self._settings.kubernetes_context,
+            )
+            # Always pin the Service into the kind-mapped range (fixes auto-assigned ports).
+            node_port = self._assign_node_port(
+                namespace=namespace,
+                node_port=node_port,
+                used_ports=used_ports,
+                labels=labels,
+                target_port=listen_port,
+                selector_app=preview_app_label,
+            )
+            resources.node_port = node_port
+
+            has_workspace_ingress = any(
+                str(doc.get("kind") or "") == "Ingress" for doc in patched
+            )
+            if host:
+                if not has_workspace_ingress:
+                    backend_service, backend_port = _resolve_preview_ingress_backend(
+                        patched,
+                        preview_app_label=preview_app_label,
+                        listen_port=listen_port,
+                    )
+                    try:
+                        self._provisioner.apply_ingress(
+                            namespace=namespace,
+                            labels=labels,
+                            host=host,
+                            backend_service=backend_service,
+                            backend_port=backend_port,
+                        )
+                        resources.preview_url = self._provisioner.ingress_preview_url(host=host)
+                    except Exception as exc:
+                        # Ingress controllers (or remote GKE gateways) can 504; local
+                        # previews still work via the Kind-mapped NodePort.
+                        logger.warning(
+                            "manifest_ingress_apply_failed_fallback_nodeport",
+                            namespace=namespace,
+                            host=host,
+                            error=str(exc)[:400],
+                        )
+                        resources.preview_url = self._provisioner.node_port_preview_url(
+                            node_port=node_port
+                        )
+                else:
+                    resources.preview_url = self._provisioner.ingress_preview_url(host=host)
+            else:
+                resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
 
         ready_timeout = _workload_ready_timeout_seconds(
             image=workload_image,

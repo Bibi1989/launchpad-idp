@@ -28,19 +28,28 @@ function isServerless(runtimeMode: WorkspaceRuntimeMode): boolean {
   return runtimeMode === 'docker_compose'
 }
 
+function isKubernetes(runtimeMode: WorkspaceRuntimeMode): boolean {
+  return runtimeMode === 'kubernetes'
+}
+
 export function resolveCloudPromoteDeployTargets(
   input: CloudPromoteDeployPlanInput,
 ): CloudPromoteDeployTarget[] {
   const region = (input.region || '').trim()
   const serverless = isServerless(input.runtimeMode)
+  const kubernetes = isKubernetes(input.runtimeMode)
   const targets: CloudPromoteDeployTarget[] = []
 
   if (input.provider === 'gcp') {
     targets.push({
       id: 'compute',
       category: 'compute',
-      title: serverless ? 'Cloud Run' : 'Compute Engine (VM)',
-      detail: region ? `Region: ${region}` : undefined,
+      title: kubernetes ? 'GKE' : serverless ? 'Cloud Run' : 'Compute Engine (VM)',
+      detail: kubernetes
+        ? 'Managed Kubernetes cluster'
+        : region
+          ? `Region: ${region}`
+          : undefined,
     })
     targets.push({
       id: 'registry',
@@ -52,8 +61,12 @@ export function resolveCloudPromoteDeployTargets(
     targets.push({
       id: 'compute',
       category: 'compute',
-      title: serverless ? 'App Runner' : 'EC2',
-      detail: region ? `Region: ${region}` : undefined,
+      title: kubernetes ? 'EKS' : serverless ? 'App Runner' : 'EC2',
+      detail: kubernetes
+        ? 'Managed Kubernetes cluster'
+        : region
+          ? `Region: ${region}`
+          : undefined,
     })
     targets.push({
       id: 'registry',
@@ -65,8 +78,12 @@ export function resolveCloudPromoteDeployTargets(
     targets.push({
       id: 'compute',
       category: 'compute',
-      title: serverless ? 'Container Apps' : 'Virtual Machine',
-      detail: region ? `Location: ${region}` : undefined,
+      title: kubernetes ? 'AKS' : serverless ? 'Container Apps' : 'Virtual Machine',
+      detail: kubernetes
+        ? 'Managed Kubernetes cluster'
+        : region
+          ? `Location: ${region}`
+          : undefined,
     })
     targets.push({
       id: 'registry',
@@ -114,7 +131,7 @@ export function resolveCloudPromoteDeployTargets(
     }
   }
 
-  if (input.provider === 'aws' && !serverless) {
+  if (input.provider === 'aws' && !serverless && !kubernetes) {
     if (input.securityGroupMode === 'existing' && input.existingSecurityGroupId) {
       targets.push({
         id: 'security-group',
@@ -133,7 +150,7 @@ export function resolveCloudPromoteDeployTargets(
   }
 
   const strategy = (input.processStrategy || 'docker').trim().toLowerCase()
-  if (!serverless && strategy && strategy !== 'docker') {
+  if (!serverless && !kubernetes && strategy && strategy !== 'docker') {
     targets.push({
       id: 'runtime',
       category: 'platform',

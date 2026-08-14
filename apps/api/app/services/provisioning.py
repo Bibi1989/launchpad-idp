@@ -620,6 +620,7 @@ class ProvisioningService:
         existing_vpc_id: str | None = None,
         existing_security_group_id: str | None = None,
         project_id: UUID | None = None,
+        image_scan: object | None = None,
     ) -> UUID:
         """Copy a local workspace tree and re-target wizard config for cloud serverless."""
         from app.core.config import get_settings
@@ -657,6 +658,7 @@ class ProvisioningService:
             create_subnets=create_subnets,
             existing_vpc_id=existing_vpc_id,
             existing_security_group_id=existing_security_group_id,
+            image_scan=image_scan,
         )
         request = await self._with_account_credentials(request, owner)
         request = self._with_gcp_project_from_sa(request)

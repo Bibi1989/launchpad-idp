@@ -1762,6 +1762,7 @@ async function onPrimaryAction() {
                   v-model:packaging="form.kubernetes_packaging"
                   v-model:options="form.kubernetes_options"
                   :allow-none="false"
+                  :cloud-provider="form.provider"
                   class="mt-4"
                 />
                 <WorkloadDependenciesPicker
@@ -1858,6 +1859,7 @@ async function onPrimaryAction() {
                 v-model:packaging="form.kubernetes_packaging"
                 v-model:options="form.kubernetes_options"
                 :allow-none="false"
+                :cloud-provider="form.provider"
               />
               <WorkloadDependenciesPicker
                 v-model:dependencies="form.dependencies"
@@ -1895,6 +1897,7 @@ async function onPrimaryAction() {
                 v-model:packaging="form.kubernetes_packaging"
                 v-model:options="form.kubernetes_options"
                 :allow-none="false"
+                :cloud-provider="form.provider"
               />
               <WorkloadDependenciesPicker
                 v-model:dependencies="form.dependencies"
@@ -1921,6 +1924,7 @@ async function onPrimaryAction() {
                 v-model:packaging="form.kubernetes_packaging"
                 v-model:options="form.kubernetes_options"
                 :allow-none="false"
+                :cloud-provider="form.provider"
               />
               <WorkloadDependenciesPicker
                 v-model:dependencies="form.dependencies"

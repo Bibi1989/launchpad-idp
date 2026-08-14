@@ -86,6 +86,29 @@ class KubernetesImageSource(str, Enum):
     BUILD_REGISTRY = "build_registry"
 
 
+class ScanSeverityThreshold(str, Enum):
+    """CVE severity gate for deploy-time container scans."""
+
+    CRITICAL = "critical"
+    CRITICAL_HIGH = "critical_high"
+
+
+class ScanFindingAction(str, Enum):
+    """What to do when Trivy findings meet the severity gate."""
+
+    BLOCK = "block"
+    WARN = "warn"
+
+
+class ImageSecurityScanConfig(BaseModel):
+    """Optional Trivy scan after image build, before registry push / deploy."""
+
+    enabled: bool = False
+    severity_threshold: ScanSeverityThreshold = ScanSeverityThreshold.CRITICAL_HIGH
+    on_finding: ScanFindingAction = ScanFindingAction.BLOCK
+    tool: str = Field(default="trivy-0.58.1", max_length=64)
+
+
 class WorkspaceArtifactsMode(str, Enum):
     """Which artifact families Launchpad writes into a workspace."""
 
@@ -470,6 +493,7 @@ class KubernetesWorkloadOptions(BaseModel):
     limit_range: bool = False
     # Preview image strategy (external ref vs build and push to registry).
     image_source: KubernetesImageSource = KubernetesImageSource.BUILD_REGISTRY
+    image_scan: ImageSecurityScanConfig = Field(default_factory=ImageSecurityScanConfig)
 
     @model_validator(mode="after")
     def ingress_nginx_requires_ingress(self) -> KubernetesWorkloadOptions:

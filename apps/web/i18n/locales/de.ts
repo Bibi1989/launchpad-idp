@@ -584,7 +584,7 @@ export default {
         "github": "GitHub-Clone"
       },
       "promoteRegion": "Region",
-      "promoteRegionHint": "Wo die Cloud-VM oder der Managed Service erstellt wird. Wählen Sie eine Region mit Kapazität nahe Ihren Nutzern.",
+      "promoteRegionHint": "Wo der GKE/EKS-Cluster, die Cloud-VM oder der Managed Service erstellt wird. Wählen Sie eine Region mit Kapazität nahe Ihren Nutzern.",
       "promoteNetworking": "Netzwerk",
       "promoteCreateVpc": "Neue VPC / VNet erstellen",
       "promoteCreateSubnets": "Subnets erstellen",
@@ -795,6 +795,10 @@ export default {
     "kubernetesBuildRegistryCloudHint": "Stellt {provider} Container Registry bereit (ECR / Artifact Registry), baut Workspace-Images, pusht sie und patcht Kubernetes-Manifeste.",
     "kubernetesExternalImage": "Externes Container-Image verwenden",
     "kubernetesExternalImageHint": "Kein Build. Deploy mit einer fertigen Image-Referenz (z. B. ghcr.io/org/app:tag).",
+    "imageScan": {
+      "title": "Image vor dem Deploy auf CVEs scannen",
+      "blurb": "Führt Trivy gegen das gebaute Image aus und kann das Cloud-Deploy bei CRITICAL- oder HIGH-Funden blockieren."
+    },
     "afterLaunchRebuild": "Nach dem Start: Push auf {branch} rebuildet die Preview, wenn ein GitHub-Webhook konfiguriert ist.",
     "yourBranch": "Ihr Branch",
     "ephemeralDatastores": "Ephemere Datenspeicher (opt-in)",

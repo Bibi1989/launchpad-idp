@@ -181,6 +181,12 @@ export interface PreviewLaunchPayload {
   enable_redis?: boolean
   deploy_mode?: 'preview' | 'manifest' | 'compose' | 'attach'
   kubernetes_image_source?: 'external' | 'build_registry' | null
+  kubernetes_image_scan?: {
+    enabled: boolean
+    severity_threshold: 'critical' | 'critical_high'
+    on_finding: 'block' | 'warn'
+    tool: string
+  } | null
 }
 
 export interface EnvironmentExtendPayload {
@@ -208,6 +214,12 @@ export interface EnvironmentPromotePayload {
   existing_vpc_id?: string | null
   /** Reuse an existing AWS security group (sg-…). */
   existing_security_group_id?: string | null
+  kubernetes_image_scan?: {
+    enabled: boolean
+    severity_threshold: 'critical' | 'critical_high'
+    on_finding: 'block' | 'warn'
+    tool: string
+  } | null
 }
 
 export interface ApiErrorBody {

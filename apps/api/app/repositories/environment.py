@@ -222,6 +222,7 @@ class EnvironmentRepository:
         deploy_mode: str = "preview",
         manifest_packaging: str | None = None,
         kubernetes_image_source: str | None = None,
+        kubernetes_image_scan_json: str | None = None,
         enable_postgres: bool = False,
         enable_redis: bool = False,
     ) -> Environment:
@@ -247,6 +248,7 @@ class EnvironmentRepository:
             deploy_mode=deploy_mode,
             manifest_packaging=manifest_packaging,
             kubernetes_image_source=kubernetes_image_source,
+            kubernetes_image_scan_json=kubernetes_image_scan_json,
             enable_postgres=enable_postgres,
             enable_redis=enable_redis,
         )

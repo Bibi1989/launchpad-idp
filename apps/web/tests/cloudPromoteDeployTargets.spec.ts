@@ -30,4 +30,18 @@ describe('resolveCloudPromoteDeployTargets', () => {
     expect(targets.some((t) => t.title === 'Cloud Run')).toBe(true)
     expect(targets.some((t) => t.title === 'Artifact Registry')).toBe(true)
   })
+
+  it('maps gcp kubernetes promote to gke not a vm', () => {
+    const targets = resolveCloudPromoteDeployTargets({
+      provider: 'gcp',
+      runtimeMode: 'kubernetes',
+      region: 'europe-west3',
+      networkMode: 'existing',
+      existingVpcId: 'default',
+      existingVpcLabel: 'default (auto)',
+    })
+    expect(targets.some((t) => t.title === 'GKE')).toBe(true)
+    expect(targets.some((t) => t.title === 'Compute Engine (VM)')).toBe(false)
+    expect(targets.some((t) => t.title === 'Artifact Registry')).toBe(true)
+  })
 })
