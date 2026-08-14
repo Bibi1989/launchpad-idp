@@ -524,6 +524,30 @@ def plan_workspace_image_builds(
                 if not app_df.is_file() or app_df.resolve() in planned_dockerfiles:
                     continue
                 _add(sub, app_df, f"{sub.name.lower()}:latest", required=True)
+        # Plans often list short tags (``web:latest``) while Deployments use ``launch-*``.
+        for context, df, tag in list(builds):
+            if ":" in tag:
+                repo, tag_suffix = tag.rsplit(":", 1)
+            else:
+                repo, tag_suffix = tag, "latest"
+            if "/" in repo or repo.startswith("launch-"):
+                continue
+            _add(context, df, f"launch-{repo}:{tag_suffix}")
+            try:
+                rel = df.parent.relative_to(workspace_root / "apps")
+            except ValueError:
+                continue
+            if len(rel.parts) != 1:
+                continue
+            svc = rel.parts[0].lower()
+            if svc in {"web", "web-ui"}:
+                _add(context, df, f"launch-web:{tag_suffix}")
+                _add(context, df, f"web:{tag_suffix}")
+                _add(context, df, f"web-ui:{tag_suffix}")
+            elif svc in {"api", "api-server"}:
+                _add(context, df, f"api-server:{tag_suffix}")
+                _add(context, df, f"api:{tag_suffix}")
+                _add(context, df, f"launch-server:{tag_suffix}")
         return builds, required_tags
 
     # Also map detected-stack services when plan is missing but stack metadata exists.
@@ -662,18 +686,6 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
 
     loaded: list[str] = []
     failed_required: list[str] = []
-    loaded_ids: set[str] = set()
-
-    def _image_id(tag: str) -> str | None:
-        inspect = subprocess.run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", tag],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if inspect.returncode != 0:
-            return None
-        return (inspect.stdout or "").strip() or None
 
     for (context, df), tags in groups.items():
         try:
@@ -745,27 +757,13 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                         error=(tag_res.stderr or tag_res.stdout or "").strip()[-200:],
                     )
 
-            image_id = _image_id(primary)
-            # Prefer importing required tags; if none marked required, import all.
-            tags_to_load = [t for t in tags if t in required_tags] if required_tags else list(tags)
-            if not tags_to_load:
-                tags_to_load = [primary]
-
+            tags_to_load = list(tags)
             for image_tag in tags_to_load:
-                # Same image ID already imported under another tag this call: still
-                # import the alias name so the cluster has the exact ref pods use,
-                # but skip if we already imported this exact tag.
                 if image_tag in loaded:
-                    continue
-                if image_id and image_id in loaded_ids and image_tag not in required_tags:
-                    # Non-required alias of an already-imported image: tag locally only.
-                    loaded.append(image_tag)
                     continue
                 logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
                 if load_image_to_local_cluster_with_retry(image_tag, cluster_name=real_cluster):
                     loaded.append(image_tag)
-                    if image_id:
-                        loaded_ids.add(image_id)
                 else:
                     logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
                     if image_tag in required_tags:
@@ -955,6 +953,11 @@ def ensure_local_deployment_images(
         if "/" in name_part:
             continue
         app_dir = workspace_root / "apps" / name_part
+        if name_part.startswith("launch-"):
+            short = name_part.removeprefix("launch-")
+            alt_app = workspace_root / "apps" / short
+            if alt_app.is_dir() and (alt_app / "Dockerfile").is_file():
+                app_dir = alt_app
         in_plan = image in planned
         has_app_dockerfile = (app_dir / "Dockerfile").is_file()
         if not in_plan and not has_app_dockerfile:
@@ -963,6 +966,24 @@ def ensure_local_deployment_images(
             continue
         if load_image_to_local_cluster_with_retry(image, cluster_name=real_cluster):
             continue
+        tag_suffix = repo.rsplit(":", 1)[1] if ":" in repo else "latest"
+        sibling_repo = (
+            name_part.removeprefix("launch-")
+            if name_part.startswith("launch-")
+            else f"launch-{name_part}"
+        )
+        sibling = f"{sibling_repo}:{tag_suffix}"
+        if sibling != image and _host_docker_image_id(sibling):
+            import subprocess
+
+            subprocess.run(
+                ["docker", "tag", sibling, image],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if load_image_to_local_cluster_with_retry(image, cluster_name=real_cluster):
+                continue
         missing.append(image)
 
     if missing:

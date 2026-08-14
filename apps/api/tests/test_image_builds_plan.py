@@ -81,6 +81,65 @@ def test_plan_adds_uncovered_apps_when_image_builds_incomplete(tmp_path: Path) -
     assert "launchpad/api-server:latest" not in tags
 
 
+def test_plan_adds_launch_web_alias_when_plan_uses_short_tag(tmp_path: Path) -> None:
+    web = tmp_path / "apps" / "web"
+    web.mkdir(parents=True)
+    (web / "Dockerfile").write_text("FROM nginx:alpine\n", encoding="utf-8")
+    plan_dir = tmp_path / ".launchpad"
+    plan_dir.mkdir()
+    (plan_dir / "image-builds.json").write_text(
+        json.dumps(
+            [
+                {
+                    "service": "web",
+                    "image": "web:latest",
+                    "context": "apps/web",
+                    "dockerfile": "apps/web/Dockerfile",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    builds, required = plan_workspace_image_builds(tmp_path)
+    tags = {tag for _, _, tag in builds}
+    assert "web:latest" in tags
+    assert "launch-web:latest" in tags
+    assert required == {"web:latest"}
+
+
+def test_build_and_load_imports_all_alias_tags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    web = tmp_path / "apps" / "web"
+    web.mkdir(parents=True)
+    (web / "Dockerfile").write_text("FROM nginx:alpine\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+
+        class _R:
+            returncode = 0
+            stdout = "sha256:deadbeef"
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    with (
+        patch("app.services.manifest_deploy.subprocess.run", side_effect=fake_run),
+        patch("app.services.manifest_deploy.resolve_local_cluster_name", return_value="launchpad"),
+        patch("app.services.manifest_deploy._host_image_fingerprint", return_value=None),
+        patch("app.services.manifest_deploy._load_image_to_local_cluster", return_value=True) as load_mock,
+    ):
+        loaded = build_and_load_kind_images(tmp_path, cluster_name="launchpad")
+
+    loaded_tags = set(loaded)
+    assert "web:latest" in loaded_tags
+    assert "launch-web:latest" in loaded_tags
+    assert load_mock.call_count >= 2
+
+
 def test_build_and_load_uses_image_builds_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     web = tmp_path / "apps" / "web"
     web.mkdir(parents=True)
