@@ -192,13 +192,30 @@ def _service_expose_preview(spec: ContainerServiceSpec) -> bool:
 def _find_workspace_dockerfile(workspace_root: Path) -> tuple[Path, Path] | None:
     """Return (dockerfile_path, build_context) for a scaffolded workspace app.
 
-    Prefer a frontend app (Open-app / browser target) over alphabetical
-    ``apps/*`` order so ``api-server`` does not win over ``web-ui``.
+    Prefer a root / frontend Dockerfile (Open-app target) over Launchpad's
+    ``apps/app`` status-dashboard scaffold.
     """
+    root_df = workspace_root / "Dockerfile"
+    if root_df.is_file() and any(
+        (workspace_root / name).is_file()
+        for name in (
+            "package.json",
+            "nuxt.config.ts",
+            "nuxt.config.js",
+            "nuxt.config.mjs",
+            "next.config.js",
+            "next.config.mjs",
+            "next.config.ts",
+            "vite.config.ts",
+            "vite.config.js",
+        )
+    ):
+        return root_df, workspace_root
+
     candidates = [
-        workspace_root / "apps" / "app" / "Dockerfile",
         workspace_root / "Dockerfile",
         workspace_root / "app" / "Dockerfile",
+        workspace_root / "apps" / "app" / "Dockerfile",
     ]
     for df in candidates:
         if df.is_file():

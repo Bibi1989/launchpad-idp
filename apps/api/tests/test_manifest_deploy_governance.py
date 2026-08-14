@@ -111,6 +111,20 @@ def test_all_already_exist_detects_fail_to_create_409() -> None:
     assert _all_already_exist(FailToCreateError([exc])) is True
 
 
+def test_being_deleted_409_is_not_already_exists_replace() -> None:
+    from app.services.manifest_deploy import _is_being_deleted_conflict
+
+    exc = ApiException(status=409, reason="Conflict")
+    exc.body = (
+        '{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",'
+        '"message":"object is being deleted: services \\"app\\" already exists",'
+        '"reason":"AlreadyExists","details":{"name":"app","kind":"services"},'
+        '"code":409}'
+    )
+    assert _is_being_deleted_conflict(exc) is True
+    assert _all_already_exist(FailToCreateError([exc])) is False
+
+
 def test_all_already_exist_accepts_string_status_and_body_reason() -> None:
     exc = ApiException(status="409", reason="Conflict")
     exc.body = '{"reason":"AlreadyExists","message":"already exists","code":409}'
@@ -391,7 +405,12 @@ def test_assign_node_port_recreates_when_missing_after_delete() -> None:
     svc_existing.spec.type = "ClusterIP"
     svc_existing.spec.ports = [MagicMock(node_port=None)]
 
-    core.read_namespaced_service.side_effect = [svc_existing, missing]
+    core.read_namespaced_service.side_effect = [
+        svc_existing,
+        svc_existing,
+        missing,
+        missing,
+    ]
     core.delete_namespaced_service.return_value = None
     core.create_namespaced_service.side_effect = [
         ApiException(status=422, reason="nodePort already allocated"),

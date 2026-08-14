@@ -8,8 +8,10 @@ from app.schemas.cloud import (
     ContainerScaffoldConfig,
     ContainerServiceSpec,
     GcpCloudConfig,
+    KubernetesPackaging,
     RunningInstanceConfig,
     RunningInstanceKind,
+    WorkspaceArtifactsMode,
     WorkspaceRuntimeMode,
     WorkspaceWizardConfig,
 )
@@ -74,6 +76,15 @@ def test_recommend_primary_service_prefers_frontend() -> None:
     assert recommend_primary_service(services) == "web"
 
 
+def test_recommend_primary_service_prefers_website_over_dashboard() -> None:
+    services = [
+        ContainerServiceSpec(name="dashboard", app_kind="frontend"),
+        ContainerServiceSpec(name="website", app_kind="frontend"),
+        ContainerServiceSpec(name="api", app_kind="backend"),
+    ]
+    assert recommend_primary_service(services) == "website"
+
+
 def test_apply_primary_service_selection_exposes_only_primary() -> None:
     services = [
         ContainerServiceSpec(name="api", app_kind="backend"),
@@ -83,6 +94,17 @@ def test_apply_primary_service_selection_exposes_only_primary() -> None:
     by_name = {s.name: s for s in updated}
     assert by_name["api"].expose_preview is True
     assert by_name["web"].expose_preview is False
+
+
+def test_apply_primary_service_selection_clears_prior_true() -> None:
+    services = [
+        ContainerServiceSpec(name="dashboard", app_kind="frontend", expose_preview=True),
+        ContainerServiceSpec(name="web", app_kind="frontend", expose_preview=True),
+    ]
+    updated = apply_primary_service_selection(services, "web")
+    by_name = {s.name: s for s in updated}
+    assert by_name["web"].expose_preview is True
+    assert by_name["dashboard"].expose_preview is False
 
 
 def test_cloud_config_for_promote_vm_vs_serverless() -> None:
@@ -247,6 +269,81 @@ def test_build_cloud_promote_wizard_request_keeps_kubernetes() -> None:
     )
     assert req.runtime_mode == WorkspaceRuntimeMode.KUBERNETES
     assert req.kubernetes_packaging == KubernetesPackaging.RAW_MANIFESTS
+    assert req.container_scaffold.enabled is False
+    assert req.container_scaffold.generate_dockerfile is False
     assert isinstance(req.cloud, GcpCloudConfig)
     assert req.cloud.resources.gke is True
     assert req.cloud.resources.cloud_run is False
+
+
+def test_workspace_has_imported_app_artifacts_detects_launch_web(tmp_path) -> None:
+    from app.services.iac_generator import workspace_has_imported_app_artifacts
+
+    root = tmp_path / "ws"
+    (root / ".launchpad").mkdir(parents=True)
+    (root / ".launchpad" / "image-builds.json").write_text(
+        '[{"service":"launch-web","image":"launch-web:latest","context":".","dockerfile":"Dockerfile"}]\n',
+        encoding="utf-8",
+    )
+    (root / "Dockerfile").write_text("FROM node:22\n", encoding="utf-8")
+    (root / "package.json").write_text('{"name":"web"}\n', encoding="utf-8")
+    assert workspace_has_imported_app_artifacts(root) is True
+
+
+def test_regenerate_preserves_imported_app_package_json(tmp_path) -> None:
+    from app.schemas.cloud import (
+        CloudCredentials,
+        GcpCloudConfig,
+        GcpResources,
+        IaCEngine,
+        ProvisioningWizardRequest,
+    )
+    from app.services.iac_generator import IaCGenerator
+
+    root = tmp_path / "imported"
+    (root / ".launchpad").mkdir(parents=True)
+    (root / "infra" / "k8s" / "manifests").mkdir(parents=True)
+    (root / ".launchpad" / "image-builds.json").write_text(
+        '[{"service":"launch-web","image":"launch-web:latest","context":".","dockerfile":"Dockerfile"}]\n',
+        encoding="utf-8",
+    )
+    (root / "Dockerfile").write_text("FROM node:22-alpine\nCMD [\"node\"]\n", encoding="utf-8")
+    (root / "package.json").write_text('{"name":"coderefine-website"}\n', encoding="utf-8")
+    (root / "nuxt.config.ts").write_text("export default {}\n", encoding="utf-8")
+    (root / "infra" / "k8s" / "manifests" / "launch-web-deployment.yaml").write_text(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: launch-web\n",
+        encoding="utf-8",
+    )
+
+    req = ProvisioningWizardRequest(
+        name="coderefine-website-gcp",
+        iac_engine=IaCEngine.TERRAFORM,
+        cloud=GcpCloudConfig(
+            resources=GcpResources(
+                gke=True,
+                artifact_registry=True,
+                region="europe-west3",
+                project_id="demo",
+            )
+        ),
+        credentials=CloudCredentials(gcp_sa_key_json='{"project_id":"demo"}'),
+        runtime_mode=WorkspaceRuntimeMode.KUBERNETES,
+        artifact_mode=WorkspaceArtifactsMode.BOTH,
+        kubernetes_packaging=KubernetesPackaging.RAW_MANIFESTS,
+        container_scaffold=ContainerScaffoldConfig(
+            enabled=True,
+            generate_dockerfile=True,
+            app_name="app",
+            stack="node",
+            services=[],
+        ),
+    )
+    IaCGenerator(workspace_root=tmp_path).regenerate(root, req)
+
+    assert (root / "package.json").is_file()
+    assert (root / "package.json").read_text(encoding="utf-8").find("coderefine-website") >= 0
+    assert (root / "infra" / "k8s" / "manifests" / "launch-web-deployment.yaml").is_file()
+    assert (root / ".launchpad" / "image-builds.json").read_text(encoding="utf-8").find(
+        "launch-web"
+    ) >= 0
+    assert not (root / "apps" / "app" / "server.js").exists()

@@ -81,15 +81,43 @@ def promote_runtime_target(
     return RunningInstanceKind.VM
 
 
+_PRIMARY_PREFERRED_TOKENS = frozenset(
+    {"web", "ui", "frontend", "website", "site", "marketing", "landing", "spa", "next", "nuxt"}
+)
+_PRIMARY_DEPRIORITIZED_TOKENS = frozenset(
+    {
+        "dashboard",
+        "status",
+        "health",
+        "admin",
+        "infra",
+        "backend",
+        "api",
+        "server",
+        "worker",
+        "metrics",
+    }
+)
+
+
+def _primary_service_rank(spec: ContainerServiceSpec) -> tuple[int, int, int, str]:
+    from app.services.service_kind import service_name_tokens
+
+    name = (spec.name or "").strip().lower()
+    tokens = service_name_tokens(name)
+    is_fe = 0 if is_frontend_app_kind(spec.app_kind or "", name=spec.name) else 1
+    preferred = 0 if tokens & _PRIMARY_PREFERRED_TOKENS else 1
+    deprioritized = 1 if tokens & _PRIMARY_DEPRIORITIZED_TOKENS else 0
+    return (is_fe, deprioritized, preferred, name)
+
+
 def recommend_primary_service(
     services: list[ContainerServiceSpec],
 ) -> str | None:
     if not services:
         return None
-    for spec in services:
-        if is_frontend_app_kind(spec.app_kind or "", name=spec.name):
-            return spec.name
-    return services[0].name
+    # Prefer website/web over status-dashboard frontends when both exist.
+    return sorted(services, key=_primary_service_rank)[0].name
 
 
 def apply_primary_service_selection(
@@ -101,8 +129,8 @@ def apply_primary_service_selection(
     primary = (primary_service or recommend_primary_service(services) or services[0].name).strip()
     updated: list[ContainerServiceSpec] = []
     for spec in services:
-        is_primary = spec.name == primary
-        expose = True if is_primary else False if spec.expose_preview is None else spec.expose_preview
+        # Exactly one preview target. Prior True on a sibling must not stick.
+        expose = spec.name == primary
         updated.append(spec.model_copy(update={"expose_preview": expose}))
     return updated
 
@@ -288,12 +316,17 @@ def build_cloud_promote_wizard_request(
     )
     services = list(source.container_scaffold.services or [])
     services = apply_primary_service_selection(services, primary_service)
+    # Kubernetes promote must not rewrite imported apps into the Express
+    # status-dashboard scaffold. Instance/VM promote still scaffolds Dockerfiles.
     scaffold = source.container_scaffold.model_copy(
         update={
-            "enabled": True,
-            "generate_dockerfile": True,
             "generate_docker_compose": False,
             "services": services,
+            **(
+                {"enabled": False, "generate_dockerfile": False}
+                if kubernetes
+                else {"enabled": True, "generate_dockerfile": True}
+            ),
         },
     )
     running_instance = (

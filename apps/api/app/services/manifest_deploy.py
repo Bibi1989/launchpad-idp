@@ -1973,6 +1973,77 @@ def _has_preview_target_annotation(doc: dict[str, Any]) -> bool:
     return str(ann.get("launchpad.io/preview-target") or "").lower() == "true"
 
 
+_PREVIEW_PREFERRED_TOKENS = frozenset(
+    {"web", "ui", "frontend", "website", "site", "marketing", "landing", "spa", "next", "nuxt"}
+)
+_PREVIEW_DEPRIORITIZED_TOKENS = frozenset(
+    {
+        "dashboard",
+        "status",
+        "health",
+        "admin",
+        "infra",
+        "backend",
+        "api",
+        "server",
+        "worker",
+        "metrics",
+    }
+)
+
+
+def _preview_target_rank(doc: dict[str, Any]) -> tuple[int, int, str]:
+    """Lower rank wins when multiple Deployments claim preview-target."""
+    from app.services.service_kind import is_frontend_service_name, service_name_tokens
+
+    name = str((doc.get("metadata") or {}).get("name") or "").strip().lower()
+    spec = doc.get("spec") or {}
+    app_label = str(((spec.get("selector") or {}).get("matchLabels") or {}).get("app") or "")
+    if not app_label:
+        tmpl = ((spec.get("template") or {}).get("metadata") or {}).get("labels") or {}
+        app_label = str(tmpl.get("app") or "")
+    tokens = service_name_tokens(name) | service_name_tokens(app_label)
+    preferred = 0 if tokens & _PREVIEW_PREFERRED_TOKENS or is_frontend_service_name(name) else 1
+    deprioritized = 1 if tokens & _PREVIEW_DEPRIORITIZED_TOKENS else 0
+    # Prefer launch-web style names over launch-dashboard when both are frontends.
+    return (deprioritized, preferred, name)
+
+
+def ensure_unique_preview_target(documents: list[dict[str, Any]]) -> str | None:
+    """Keep a single ``launchpad.io/preview-target`` annotation across Deployments.
+
+    Returns the chosen ``app`` label (or None). Dual-annotated frontends (website +
+    status dashboard) previously made YAML sort order pick the wrong LoadBalancer.
+    """
+    deployments = [
+        d
+        for d in documents
+        if isinstance(d, dict) and d.get("kind") == "Deployment" and not _is_datastore_workload(d)
+    ]
+    if not deployments:
+        return None
+    annotated = [d for d in deployments if _has_preview_target_annotation(d)]
+    candidates = annotated or deployments
+    chosen = sorted(candidates, key=_preview_target_rank)[0]
+    chosen_name = str((chosen.get("metadata") or {}).get("name") or "")
+    for doc in deployments:
+        meta = doc.setdefault("metadata", {})
+        ann = meta.setdefault("annotations", {})
+        if not isinstance(ann, dict):
+            continue
+        name = str((meta.get("name") or "")).strip()
+        if name == chosen_name:
+            ann["launchpad.io/preview-target"] = "true"
+        elif "launchpad.io/preview-target" in ann:
+            ann["launchpad.io/preview-target"] = "false"
+    spec = chosen.get("spec") or {}
+    app_label = ((spec.get("selector") or {}).get("matchLabels") or {}).get("app")
+    if not app_label:
+        tmpl = ((spec.get("template") or {}).get("metadata") or {}).get("labels") or {}
+        app_label = tmpl.get("app")
+    return str(app_label).strip() if app_label else None
+
+
 def _resolve_preview_ingress_backend(
     documents: list[dict[str, Any]],
     *,
@@ -2008,8 +2079,8 @@ def _resolve_preview_target(documents: list[dict[str, Any]]) -> tuple[str, int]:
 
     Prefers the Deployment annotated ``launchpad.io/preview-target: "true"`` (the
     exposed web/frontend in a multi-stack workspace), then the single-app ``app``
-    Deployment, then the first non-datastore Deployment. The NodePort Service is
-    given this pod selector so it actually has endpoints.
+    Deployment, then the best-ranked non-datastore Deployment. When several
+    Deployments are annotated, prefer website/web over dashboard/status.
     """
     def _info(doc: dict[str, Any]) -> tuple[str | None, int | None]:
         spec = doc.get("spec") or {}
@@ -2025,21 +2096,24 @@ def _resolve_preview_target(documents: list[dict[str, Any]]) -> tuple[str, int]:
         )
         return app_label, port
 
+    ensure_unique_preview_target(documents)
     deployments = [
         d
         for d in documents
         if isinstance(d, dict) and d.get("kind") == "Deployment" and not _is_datastore_workload(d)
     ]
-    for d in deployments:
-        if _has_preview_target_annotation(d):
-            app_label, port = _info(d)
-            if app_label:
-                return app_label, port or 80
+    annotated = [d for d in deployments if _has_preview_target_annotation(d)]
+    if annotated:
+        chosen = sorted(annotated, key=_preview_target_rank)[0]
+        app_label, port = _info(chosen)
+        if app_label:
+            return app_label, port or 80
     for d in deployments:
         if str((d.get("metadata") or {}).get("name") or "") == APP_NAME:
             app_label, port = _info(d)
             return app_label or APP_NAME, port or 80
-    for d in deployments:
+    ranked = sorted(deployments, key=_preview_target_rank)
+    for d in ranked:
         app_label, port = _info(d)
         if app_label:
             return app_label, port or 80
@@ -2379,6 +2453,7 @@ class ManifestDeployer:
         # preview-target, else "app", else the first app workload) so the Service
         # selector matches real pods and the listen port is that workload's port.
         preview_app_label, listen_port = _resolve_preview_target(patched)
+        resources.app_label = preview_app_label
 
         self._provisioner.apply_governance(
             namespace=namespace,
@@ -2411,6 +2486,9 @@ class ManifestDeployer:
         resources.created_workload = True
 
         if self._provisioner.remote_cluster:
+            # Cloud K8s: expose via LoadBalancer only. Do not apply ws-* Ingress
+            # (PREVIEW_BASE_DOMAIN still tunnels to local Kubernetes).
+            self._provisioner.delete_local_preview_ingresses(namespace=namespace)
             self._provisioner.apply_preview_load_balancer(
                 namespace=namespace,
                 labels=labels,
@@ -2418,38 +2496,7 @@ class ManifestDeployer:
                 listen_port=listen_port,
             )
             resources.node_port = None
-            has_workspace_ingress = any(
-                str(doc.get("kind") or "") == "Ingress" for doc in patched
-            )
-            if host and not has_workspace_ingress:
-                backend_service, backend_port = _resolve_preview_ingress_backend(
-                    patched,
-                    preview_app_label=preview_app_label,
-                    listen_port=listen_port,
-                )
-                try:
-                    self._provisioner.apply_ingress(
-                        namespace=namespace,
-                        labels=labels,
-                        host=host,
-                        backend_service=backend_service,
-                        backend_port=backend_port,
-                    )
-                    resources.preview_url = self._provisioner.ingress_preview_url(host=host)
-                except Exception as exc:
-                    logger.warning(
-                        "manifest_ingress_apply_failed_fallback_lb",
-                        namespace=namespace,
-                        host=host,
-                        error=str(exc)[:400],
-                    )
-                    resources.preview_url = None
-            elif host:
-                resources.preview_url = self._provisioner.ingress_preview_url(host=host)
-            if not resources.preview_url:
-                resources.preview_url = self._provisioner.resolve_external_preview_url(
-                    namespace, timeout_seconds=180.0
-                ) or self._provisioner.portal_preview_url(environment_id=environment_id)
+            resources.preview_url = None
         else:
             used_ports = self._provisioner.list_allocated_node_ports(exclude_namespace=namespace)
             existing_port = self._provisioner.read_namespaced_app_node_port(namespace)
@@ -2517,7 +2564,12 @@ class ManifestDeployer:
                 namespace=namespace,
                 timeout_seconds=ready_timeout,
                 expected_image=workload_image,
+                app_label=preview_app_label,
             )
+            if self._provisioner.remote_cluster and not resources.preview_url:
+                resources.preview_url = self._provisioner.resolve_external_preview_url(
+                    namespace, timeout_seconds=90.0
+                ) or self._provisioner.portal_preview_url(environment_id=environment_id)
         except TimeoutError as exc:
             # Attach resolved resources for the worker so it can persist preview_url/node_port
             # even when readiness times out.
@@ -2572,6 +2624,13 @@ class ManifestDeployer:
                         verbose=False,
                     )
             except FailToCreateError as exc:
+                if _is_being_deleted_conflict(exc):
+                    self._retry_create_after_deletion(
+                        api_client=api_client,
+                        doc=doc,
+                        namespace=namespace,
+                    )
+                    continue
                 if not _all_already_exist(exc):
                     raise
                 self._handle_already_exists(
@@ -2580,6 +2639,13 @@ class ManifestDeployer:
                     namespace=namespace,
                 )
             except ApiException as exc:
+                if _is_being_deleted_conflict(exc):
+                    self._retry_create_after_deletion(
+                        api_client=api_client,
+                        doc=doc,
+                        namespace=namespace,
+                    )
+                    continue
                 if not _is_already_exists_status(getattr(exc, "status", None), exc):
                     raise
                 self._handle_already_exists(
@@ -2663,6 +2729,60 @@ class ManifestDeployer:
             )
             return
         self._replace_document(api_client=api_client, doc=doc, namespace=namespace)
+
+    def _retry_create_after_deletion(
+        self,
+        *,
+        api_client: object,
+        doc: dict[str, Any],
+        namespace: str,
+    ) -> None:
+        """Wait out a terminating object, then create again."""
+        from kubernetes.client.rest import ApiException
+        from kubernetes.utils import FailToCreateError, create_from_dict
+
+        kind = str(doc.get("kind") or "")
+        name = str((doc.get("metadata") or {}).get("name") or "")
+        logger.info(
+            "manifest_wait_for_deletion",
+            namespace=namespace,
+            kind=kind,
+            name=name,
+        )
+        if kind.lower() == "service" and name:
+            self._provisioner.wait_for_service_absent(name, namespace)
+        else:
+            import time
+
+            time.sleep(1.0)
+        try:
+            create_from_dict(
+                k8s_client=api_client,
+                data=doc,
+                namespace=namespace,
+                verbose=False,
+            )
+        except (FailToCreateError, ApiException) as exc:
+            if _is_being_deleted_conflict(exc):
+                if kind.lower() == "service" and name:
+                    self._provisioner.wait_for_service_absent(name, namespace)
+                create_from_dict(
+                    k8s_client=api_client,
+                    data=doc,
+                    namespace=namespace,
+                    verbose=False,
+                )
+                return
+            if _all_already_exist(exc) or _is_already_exists_status(
+                getattr(exc, "status", None), exc
+            ):
+                self._handle_already_exists(
+                    api_client=api_client,
+                    doc=doc,
+                    namespace=namespace,
+                )
+                return
+            raise
 
     def _replace_document(
         self,
@@ -2839,8 +2959,9 @@ class ManifestDeployer:
 
             try:
                 if existing is not None:
-                    self._provisioner.delete_service(APP_NAME, namespace)
-                self._provisioner.create_service(namespace, service)
+                    self._provisioner.recreate_service(namespace, service, name=APP_NAME)
+                else:
+                    self._provisioner.create_service(namespace, service)
                 return candidate
             except ApiException as exc:
                 last_error = exc
@@ -2872,6 +2993,8 @@ def _should_recreate_immutable_resource(kind: str, exc: BaseException) -> bool:
 
 def _all_already_exist(exc: Exception) -> bool:
     """True when kubernetes.utils.FailToCreateError only contains AlreadyExists (409)."""
+    if _is_being_deleted_conflict(exc):
+        return False
     api_exceptions = getattr(exc, "api_exceptions", None)
     if not api_exceptions:
         return _is_already_exists_status(None, exc)
@@ -2879,6 +3002,14 @@ def _all_already_exist(exc: Exception) -> bool:
         if not _is_already_exists_status(getattr(item, "status", None), item):
             return False
     return True
+
+
+def _is_being_deleted_conflict(exc: object) -> bool:
+    """409 while the previous object is still terminating."""
+    from app.services.kubernetes import _is_object_being_deleted_conflict
+
+    items = getattr(exc, "api_exceptions", None) or [exc]
+    return any(_is_object_being_deleted_conflict(item) for item in items)
 
 
 def _is_already_exists_status(status: object, exc: object | None = None) -> bool:

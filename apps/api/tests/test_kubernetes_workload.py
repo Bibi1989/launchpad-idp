@@ -221,6 +221,37 @@ def test_ignore_404_swallows_404_and_reraises_others() -> None:
         _ignore_404(conflict)
 
 
+def test_recreate_service_retries_being_deleted_409() -> None:
+    from kubernetes.client.rest import ApiException
+
+    from app.services.kubernetes import KubernetesProvisioner
+
+    provisioner = KubernetesProvisioner(Settings(kubernetes_enabled=False))
+    core = MagicMock()
+    provisioner._core = core
+
+    existing = MagicMock()
+    existing.spec.type = "NodePort"
+    existing.metadata.deletion_timestamp = None
+    gone = ApiException(status=404)
+    conflict = ApiException(status=409, reason="Conflict")
+    conflict.body = (
+        '{"message":"object is being deleted: services \\"app\\" already exists",'
+        '"reason":"AlreadyExists","code":409}'
+    )
+
+    core.read_namespaced_service.side_effect = [existing, gone]
+    core.create_namespaced_service.side_effect = [conflict, MagicMock()]
+
+    from unittest.mock import patch
+
+    with patch("time.sleep"):
+        provisioner.recreate_service(namespace="ns", body=MagicMock(), name="app")
+
+    assert core.delete_namespaced_service.called
+    assert core.create_namespaced_service.call_count == 2
+
+
 def test_clients_ready_false_when_kubernetes_disabled() -> None:
     provisioner = KubernetesProvisioner(Settings(kubernetes_enabled=False))
     assert provisioner.clients_ready is False

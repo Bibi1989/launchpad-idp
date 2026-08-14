@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.core.logging import get_logger
 from app.schemas.cloud import CloudCredentials, CloudProvider
@@ -65,13 +68,31 @@ def region_from_wizard(provider: str, snapshot: dict | None) -> str:
     return str(resources.get("region") or resources.get("location") or region).strip() or region
 
 
+def gke_cluster_has_public_endpoint(cluster: dict[str, object]) -> bool:
+    """True when the control plane still exposes a public API endpoint."""
+    private = cluster.get("privateClusterConfig")
+    if isinstance(private, dict):
+        # Private-endpoint-only clusters are unreachable from the Launchpad worker.
+        if bool(private.get("enablePrivateEndpoint")) and not str(
+            private.get("publicEndpoint") or ""
+        ).strip():
+            return False
+        if private.get("publicEndpoint") is False:
+            return False
+    endpoint = str(cluster.get("endpoint") or "").strip()
+    return bool(endpoint)
+
+
 def select_gke_cluster(
     clusters: list[object],
     *,
     preferred_name: str,
     region: str,
 ) -> dict[str, object] | None:
-    """Pick a RUNNING GKE cluster: preferred name, then same region, then any."""
+    """Pick a RUNNING GKE cluster: preferred name, then same region, then any.
+
+    Skips private-endpoint-only clusters that the control-plane worker cannot reach.
+    """
     running: list[dict[str, object]] = []
     for item in clusters:
         if not isinstance(item, dict):
@@ -80,7 +101,14 @@ def select_gke_cluster(
         if status and status not in {"RUNNING", "PROVISIONING", "RECONCILING"}:
             continue
         if status == "RUNNING" or not status:
-            running.append(item)
+            if gke_cluster_has_public_endpoint(item):
+                running.append(item)
+            else:
+                logger.info(
+                    "gke_cluster_skipped_private_endpoint",
+                    name=str(item.get("name") or ""),
+                    location=str(item.get("location") or ""),
+                )
     preferred = (preferred_name or "").strip()
     region_prefix = (region or "").strip()
     for item in running:
@@ -196,7 +224,8 @@ def _ensure_gke_target(
     if selected is None:
         if not create:
             raise CloudInstanceComputeError(
-                f"No GKE cluster found in project {project_id} to tear down this preview."
+                f"No publicly reachable GKE cluster found in project {project_id} "
+                "to tear down this preview."
             )
         selected = _create_gke_autopilot(
             project_id=project_id,
@@ -215,24 +244,27 @@ def _ensure_gke_target(
         cluster=cluster_name,
     )
     loc_flag = "--zone" if _is_gke_zone(location) else "--region"
-    creds = _run_cmd(
-        [
-            "gcloud",
-            "container",
-            "clusters",
-            "get-credentials",
-            cluster_name,
-            loc_flag,
-            location,
-            f"--project={project_id}",
-        ],
-        timeout=90,
-        check=False,
-        env={**env, "KUBECONFIG": str(kubeconfig)},
+    _fetch_gke_credentials(
+        cluster_name=cluster_name,
+        location=location,
+        loc_flag=loc_flag,
+        project_id=project_id,
+        kubeconfig=kubeconfig,
+        env=env,
     )
-    if creds.returncode != 0:
-        detail = (creds.stderr or creds.stdout or "get-credentials failed")[:400]
-        raise CloudInstanceComputeError(f"Failed to fetch GKE credentials: {detail}")
+
+    # Master authorized networks (or a stale private endpoint) drop packets from
+    # the Launchpad worker. Open public API access for the shared preview cluster
+    # and re-check TCP reachability before handing the kubeconfig to the client.
+    _ensure_gke_api_reachable(
+        cluster_name=cluster_name,
+        location=location,
+        loc_flag=loc_flag,
+        project_id=project_id,
+        kubeconfig=kubeconfig,
+        env=env,
+        selected=selected if isinstance(selected, dict) else {},
+    )
 
     context = _kube_context_from_config(kubeconfig) or f"gke_{project_id}_{location}_{cluster_name}"
     logger.info(
@@ -252,6 +284,253 @@ def _ensure_gke_target(
         context=context,
         created=created,
     )
+
+
+def _fetch_gke_credentials(
+    *,
+    cluster_name: str,
+    location: str,
+    loc_flag: str,
+    project_id: str,
+    kubeconfig: Path,
+    env: dict[str, str],
+    dns_endpoint: bool = False,
+) -> None:
+    cmd = [
+        "gcloud",
+        "container",
+        "clusters",
+        "get-credentials",
+        cluster_name,
+        loc_flag,
+        location,
+        f"--project={project_id}",
+    ]
+    if dns_endpoint:
+        cmd.append("--dns-endpoint")
+    creds = _run_cmd(
+        cmd,
+        timeout=90,
+        check=False,
+        env={**env, "KUBECONFIG": str(kubeconfig)},
+    )
+    if creds.returncode != 0:
+        detail = (creds.stderr or creds.stdout or "get-credentials failed")[:400]
+        raise CloudInstanceComputeError(f"Failed to fetch GKE credentials: {detail}")
+
+
+def _ensure_gke_api_reachable(
+    *,
+    cluster_name: str,
+    location: str,
+    loc_flag: str,
+    project_id: str,
+    kubeconfig: Path,
+    env: dict[str, str],
+    selected: dict[str, object],
+) -> None:
+    """Make the control plane reachable from this host, or raise a clear error."""
+    if _kubeconfig_api_tcp_ok(kubeconfig):
+        return
+
+    logger.warning(
+        "gke_api_unreachable_before_repair",
+        cluster=cluster_name,
+        location=location,
+        server=_kubeconfig_server(kubeconfig),
+    )
+
+    # Prefer opening the shared preview cluster to the public internet so local
+    # and OCI workers can apply manifests. Org policies may still block this.
+    if cluster_name == SHARED_PREVIEW_CLUSTER or not _master_authorized_allows_any(selected):
+        _open_gke_master_authorized_networks(
+            cluster_name=cluster_name,
+            location=location,
+            loc_flag=loc_flag,
+            project_id=project_id,
+            env=env,
+        )
+        # Credentials can still point at a private IP; refresh after the update.
+        _fetch_gke_credentials(
+            cluster_name=cluster_name,
+            location=location,
+            loc_flag=loc_flag,
+            project_id=project_id,
+            kubeconfig=kubeconfig,
+            env=env,
+        )
+        if _kubeconfig_api_tcp_ok(kubeconfig):
+            return
+
+    # DNS-based control plane endpoint (when enabled on the cluster).
+    try:
+        _fetch_gke_credentials(
+            cluster_name=cluster_name,
+            location=location,
+            loc_flag=loc_flag,
+            project_id=project_id,
+            kubeconfig=kubeconfig,
+            env=env,
+            dns_endpoint=True,
+        )
+        if _kubeconfig_api_tcp_ok(kubeconfig, timeout_seconds=8.0):
+            return
+    except CloudInstanceComputeError:
+        logger.info("gke_dns_endpoint_credentials_unavailable", cluster=cluster_name)
+
+    server = _kubeconfig_server(kubeconfig) or "unknown"
+    raise CloudInstanceComputeError(
+        f"Cannot reach GKE API for cluster '{cluster_name}' ({server}). "
+        "The control plane is likely private-only or Master Authorized Networks "
+        "blocks this host. For Launchpad previews, either: "
+        f"(1) run `gcloud container clusters update {cluster_name} {loc_flag} {location} "
+        "--no-enable-master-authorized-networks --project="
+        f"{project_id}`, or (2) add this machine's public IP/32 to master authorized "
+        "networks, or (3) create/use a GKE cluster with a public endpoint. "
+        "Local kind/k3d is not used for GCP Kubernetes deploys."
+    )
+
+
+def _master_authorized_allows_any(cluster: dict[str, object]) -> bool:
+    cfg = cluster.get("masterAuthorizedNetworksConfig")
+    if not isinstance(cfg, dict):
+        return True
+    if not bool(cfg.get("enabled")):
+        return True
+    return False
+
+
+def _open_gke_master_authorized_networks(
+    *,
+    cluster_name: str,
+    location: str,
+    loc_flag: str,
+    project_id: str,
+    env: dict[str, str],
+) -> None:
+    """Disable master authorized networks so the worker can reach the public API."""
+    updated = _run_cmd(
+        [
+            "gcloud",
+            "container",
+            "clusters",
+            "update",
+            cluster_name,
+            loc_flag,
+            location,
+            f"--project={project_id}",
+            "--no-enable-master-authorized-networks",
+            "--quiet",
+        ],
+        timeout=300,
+        check=False,
+        env=env,
+    )
+    if updated.returncode != 0:
+        detail = (updated.stderr or updated.stdout or "")[:300]
+        logger.warning(
+            "gke_open_master_networks_failed",
+            cluster=cluster_name,
+            detail=detail,
+        )
+        # Fallback: authorize this host's egress IP only.
+        egress = _public_egress_cidr()
+        if not egress:
+            return
+        authorize = _run_cmd(
+            [
+                "gcloud",
+                "container",
+                "clusters",
+                "update",
+                cluster_name,
+                loc_flag,
+                location,
+                f"--project={project_id}",
+                "--enable-master-authorized-networks",
+                f"--master-authorized-networks={egress}",
+                "--quiet",
+            ],
+            timeout=300,
+            check=False,
+            env=env,
+        )
+        if authorize.returncode != 0:
+            logger.warning(
+                "gke_authorize_egress_ip_failed",
+                cluster=cluster_name,
+                cidr=egress,
+                detail=(authorize.stderr or authorize.stdout or "")[:300],
+            )
+        else:
+            logger.info("gke_master_authorized_networks_set", cluster=cluster_name, cidr=egress)
+        return
+    logger.info("gke_master_authorized_networks_disabled", cluster=cluster_name)
+    # Propagate quickly; TCP probe retries if the LB is still catching up.
+    time.sleep(1.0)
+
+
+def _public_egress_cidr() -> str | None:
+    """Best-effort public IPv4 of this host as a /32 for master authorized networks."""
+    import urllib.request
+
+    for url in (
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://checkip.amazonaws.com",
+    ):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                raw = response.read().decode("utf-8", errors="ignore").strip()
+            if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", raw):
+                return f"{raw}/32"
+        except Exception:
+            continue
+    return None
+
+
+def _kubeconfig_server(path: Path) -> str | None:
+    import yaml
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    clusters = data.get("clusters")
+    if not isinstance(clusters, list) or not clusters:
+        return None
+    first = clusters[0]
+    if not isinstance(first, dict):
+        return None
+    cluster = first.get("cluster")
+    if not isinstance(cluster, dict):
+        return None
+    server = str(cluster.get("server") or "").strip()
+    return server or None
+
+
+def _kubeconfig_api_tcp_ok(path: Path, *, timeout_seconds: float = 8.0) -> bool:
+    server = _kubeconfig_server(path)
+    if not server:
+        return False
+    parsed = urlparse(server)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if not host:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return True
+    except OSError as exc:
+        logger.info(
+            "gke_api_tcp_probe_failed",
+            host=host,
+            port=port,
+            error=str(exc)[:200],
+        )
+        return False
 
 
 def _enable_container_api(*, credentials: CloudCredentials | None, project_id: str) -> None:
@@ -286,6 +565,8 @@ def _create_gke_autopilot(
         SHARED_PREVIEW_CLUSTER,
         f"--region={region}",
         f"--project={project_id}",
+        # Launchpad workers (laptop / OCI) must reach the public control plane.
+        "--no-enable-master-authorized-networks",
         "--quiet",
     ]
     network = (existing_vpc_id or "").strip()
@@ -298,7 +579,13 @@ def _create_gke_autopilot(
         if "already exists" in detail.lower():
             return {"name": SHARED_PREVIEW_CLUSTER, "location": region, "status": "RUNNING"}
         raise CloudInstanceComputeError(f"Failed to create GKE Autopilot cluster: {detail}")
-    return {"name": SHARED_PREVIEW_CLUSTER, "location": region, "status": "RUNNING"}
+    return {
+        "name": SHARED_PREVIEW_CLUSTER,
+        "location": region,
+        "status": "RUNNING",
+        "endpoint": "pending",
+        "masterAuthorizedNetworksConfig": {"enabled": False},
+    }
 
 
 def _is_gke_zone(location: str) -> bool:

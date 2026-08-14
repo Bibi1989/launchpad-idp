@@ -239,6 +239,29 @@ def _ignore_404(call, *args, **kwargs) -> None:
             raise
 
 
+def _resource_is_deleting(obj: object | None) -> bool:
+    meta = getattr(obj, "metadata", None)
+    return getattr(meta, "deletion_timestamp", None) is not None
+
+
+def _is_object_being_deleted_conflict(exc: object) -> bool:
+    """True for 409 ``object is being deleted: ... already exists``."""
+    status = getattr(exc, "status", None)
+    if status not in (409, "409"):
+        try:
+            if status is None or int(str(status)) != 409:
+                return False
+        except (TypeError, ValueError):
+            return False
+    body = getattr(exc, "body", None)
+    text = " ".join(
+        part
+        for part in (body if isinstance(body, str) else str(body or ""), str(exc))
+        if part
+    ).lower()
+    return "being deleted" in text
+
+
 @dataclass
 class ProvisionedResources:
     namespace: str
@@ -251,6 +274,8 @@ class ProvisionedResources:
     simulated: bool = False
     node_port: int | None = None
     image: str | None = None
+    # Preview Deployment ``app`` label (multi-stack cloud K8s waits only on this).
+    app_label: str | None = None
     labels: dict[str, str] = field(default_factory=dict)
     # User-facing note (e.g. Compose host port remapped because preferred was busy).
     notice: str | None = None
@@ -1048,7 +1073,13 @@ class KubernetesProvisioner:
         derives ``ws-{workspace_id}.{base_domain}`` to match the wildcard CNAME in
         Cloudflare DNS. Returns None in local offline development so the caller
         falls back to a NodePort URL.
+
+        Cloud (GKE/EKS/AKS) previews never use this host: DNS/tunnel still points at
+        the local cluster, so Open-app would show local Kubernetes instead of the
+        cloud LoadBalancer.
         """
+        if self._remote_cluster:
+            return None
         template = self._settings.preview_ingress_host_template
         if (
             not template
@@ -1103,17 +1134,12 @@ class KubernetesProvisioner:
         timeout_seconds: float,
         expected_image: str | None = None,
         cancel_check: "Callable[[], bool] | None" = None,
+        app_label: str | None = None,
     ) -> None:
         """Block until the *current* Deployment revision is Ready.
 
-        Ready replicas from a previous ReplicaSet (e.g. nginx still serving while a
-        new image is ImagePullBackOff) must not count as success.
-
-        Fails fast (``RuntimeError``) on terminal pod states - ImagePullBackOff,
-        CrashLoopBackOff, CreateContainerError - instead of spinning to the
-        deadline. If ``cancel_check`` is provided and returns True (e.g. the user
-        requested force-delete mid-provision), raises ``PreviewCancelled`` so the
-        provision task aborts immediately.
+        When ``app_label`` is set, only that Deployment must be Ready so sibling
+        stacks (dashboard, api) do not block the preview URL on cloud deploys.
         """
         if not self._settings.kubernetes_enabled:
             return
@@ -1140,7 +1166,9 @@ class KubernetesProvisioner:
             if crash_error:
                 raise RuntimeError(crash_error)
 
-            snapshot = self._deployment_ready_snapshot(namespace=namespace)
+            snapshot = self._deployment_ready_snapshot(
+                namespace=namespace, app_label=app_label
+            )
             last_desired = snapshot["desired"]
             last_ready = snapshot["ready"]
             last_updated = snapshot["updated"]
@@ -1163,14 +1191,15 @@ class KubernetesProvisioner:
                     ready_replicas=last_ready,
                     updated_replicas=last_updated,
                     image=expected_image,
+                    app_label=app_label,
                 )
                 return
             stable_ready_polls = 0
             time.sleep(self._settings.kubernetes_ready_poll_seconds)
 
-        # Final check: kind control-plane blips often flip Ready just after the
-        # deadline. Accept success if every Deployment is Ready now.
-        snapshot = self._deployment_ready_snapshot(namespace=namespace)
+        snapshot = self._deployment_ready_snapshot(
+            namespace=namespace, app_label=app_label
+        )
         if snapshot["revision_ready"]:
             logger.info(
                 "kubernetes_workload_ready_after_deadline",
@@ -1179,6 +1208,7 @@ class KubernetesProvisioner:
                 ready_replicas=snapshot["ready"],
                 updated_replicas=snapshot["updated"],
                 image=expected_image,
+                app_label=app_label,
             )
             return
 
@@ -1196,27 +1226,44 @@ class KubernetesProvisioner:
             + (f". {extras}" if extras else "")
         )
 
-    def _deployment_ready_snapshot(self, *, namespace: str) -> dict[str, object]:
-        """Aggregate rollout readiness across *all* Deployments in the namespace.
+    def _deployment_ready_snapshot(
+        self, *, namespace: str, app_label: str | None = None
+    ) -> dict[str, object]:
+        """Aggregate rollout readiness across Deployments in the namespace.
 
-        Workspaces no longer contain a single hardcoded ``app`` Deployment - they
-        may ship ``launch-web``, ``launch-server``, ``postgres``, etc. The preview
-        is Ready only when every Deployment has completed its current-revision
-        rollout (``readyReplicas >= specReplicas`` with no lingering old pods).
+        When ``app_label`` is set, only Deployments whose selector/pod label
+        ``app`` matches are required (cloud multi-stack previews).
         """
         assert self._apps is not None
-        # Bound the read: a sluggish local apiserver must not hang the poll loop on
-        # a single status fetch (connect, read) instead of urllib3's default None.
         deployments = list(
             self._apps.list_namespaced_deployment(
                 namespace, _request_timeout=(5, 15)
             ).items
             or []
         )
+        wanted = (app_label or "").strip()
+        if wanted:
+            filtered: list[object] = []
+            for dep in deployments:
+                spec = getattr(dep, "spec", None)
+                selector = getattr(spec, "selector", None) if spec else None
+                match = getattr(selector, "match_labels", None) if selector else None
+                label = None
+                if isinstance(match, dict):
+                    label = match.get("app")
+                if not label:
+                    tmpl = getattr(spec, "template", None) if spec else None
+                    meta = getattr(tmpl, "metadata", None) if tmpl else None
+                    labels = getattr(meta, "labels", None) if meta else None
+                    if isinstance(labels, dict):
+                        label = labels.get("app")
+                if str(label or "") == wanted:
+                    filtered.append(dep)
+            deployments = filtered  # type: ignore[assignment]
 
         total_desired = total_ready = total_updated = total_unavailable = 0
         pending: list[str] = []
-        all_ready = bool(deployments)  # an empty namespace is not "ready" yet
+        all_ready = bool(deployments)
 
         for dep in deployments:
             meta = dep.metadata
@@ -1236,7 +1283,6 @@ class KubernetesProvisioner:
             total_updated += updated
             total_unavailable += unavailable
 
-            # Intentionally scaled to 0 (paused) counts as complete.
             if desired == 0:
                 continue
             dep_ready = (
@@ -1244,7 +1290,6 @@ class KubernetesProvisioner:
                 and updated >= desired
                 and ready >= desired
                 and unavailable == 0
-                # No old-revision pods lingering (guards nginx-old-RS false-Ready).
                 and (total is None or total == updated)
             )
             if not dep_ready:
@@ -1607,6 +1652,49 @@ class KubernetesProvisioner:
             backend_port=port_number,
         )
 
+    def delete_local_preview_ingresses(self, *, namespace: str) -> None:
+        """Remove ws-* / PREVIEW_BASE_DOMAIN Ingresses left from a mistaken cloud apply.
+
+        Those hosts still route to local Kubernetes via the Cloudflare tunnel.
+        """
+        if self._networking is None:
+            return
+        from kubernetes.client.rest import ApiException
+
+        try:
+            listed = self._networking.list_namespaced_ingress(namespace, _request_timeout=15)
+        except ApiException:
+            return
+        for ing in getattr(listed, "items", None) or []:
+            meta = getattr(ing, "metadata", None)
+            name = getattr(meta, "name", None) if meta else None
+            if not name:
+                continue
+            hosts: list[str] = []
+            spec = getattr(ing, "spec", None)
+            for rule in (getattr(spec, "rules", None) or []):
+                host = getattr(rule, "host", None)
+                if host:
+                    hosts.append(str(host))
+            if hosts and not any(
+                _is_local_preview_ingress_host(h, settings=self._settings) for h in hosts
+            ):
+                continue
+            if not hosts and name != "app":
+                continue
+            _ignore_404(
+                self._networking.delete_namespaced_ingress,
+                name,
+                namespace,
+                _request_timeout=15,
+            )
+            logger.info(
+                "kubernetes_local_preview_ingress_deleted",
+                namespace=namespace,
+                name=name,
+                hosts=hosts,
+            )
+
     def resolve_docker_host_gateway_ip(self) -> str | None:
         """IP of the Docker host as seen from inside the local cluster (k3d/kind)."""
         import re
@@ -1825,16 +1913,16 @@ class KubernetesProvisioner:
         return used
 
     def resolve_external_preview_url(
-        self, namespace: str, *, timeout_seconds: float = 120.0
+        self, namespace: str, *, timeout_seconds: float = 90.0
     ) -> str | None:
         """Resolve a cloud/production preview's public URL from the cluster.
 
-        Reads the external address of a LoadBalancer Service (``status.loadBalancer``)
-        or an Ingress (its host rule / load-balancer address) in the namespace - e.g.
-        ``http://34.120.10.5`` or ``https://preview.example.com``. Cloud load balancers
-        take time to allocate an address, so this polls while a candidate exists but has
-        no address yet; it returns ``None`` immediately when nothing is externally
-        exposed (caller keeps its default URL) and after ``timeout_seconds`` otherwise.
+        Prefers the Launchpad synthetic Service named ``app`` (preview LoadBalancer)
+        over any other LB that may exist in the namespace.
+
+        Never returns local ``ws-*.{PREVIEW_BASE_DOMAIN}`` Ingress hosts: those DNS
+        names still point at the local tunnel/cluster, so Open-app would show local
+        Kubernetes after a GKE deploy.
         """
         if not self._settings.kubernetes_enabled or self._core is None:
             return None
@@ -1844,6 +1932,8 @@ class KubernetesProvisioner:
         deadline = _time.time() + max(timeout_seconds, 0.0)
         while True:
             saw_pending = False
+            preferred_url: str | None = None
+            other_url: str | None = None
 
             try:
                 services = self._core.list_namespaced_service(namespace)
@@ -1855,8 +1945,18 @@ class KubernetesProvisioner:
                 addr = _lb_ingress_address(svc.status)
                 if addr:
                     port = svc.spec.ports[0].port if svc.spec.ports else None
-                    return _external_url(addr, port)
-                saw_pending = True  # LB exists but address not assigned yet
+                    url = _external_url(addr, port)
+                    name = getattr(getattr(svc, "metadata", None), "name", None) or ""
+                    if name == "app":
+                        preferred_url = url
+                    elif other_url is None:
+                        other_url = url
+                else:
+                    saw_pending = True
+            if preferred_url:
+                return preferred_url
+            if other_url:
+                return other_url
 
             if self._networking is not None:
                 try:
@@ -1865,17 +1965,26 @@ class KubernetesProvisioner:
                     ingresses = None
                 for ing in (getattr(ingresses, "items", None) or []):
                     tls = bool(ing.spec and ing.spec.tls)
+                    # Prefer a real LB address on the Ingress status. Rule hosts are
+                    # only used when they are not Launchpad local-preview DNS names.
+                    status_addr = _lb_ingress_address(getattr(ing, "status", None))
+                    if status_addr:
+                        return f"{'https' if tls else 'http'}://{status_addr}"
                     host = None
                     if ing.spec and ing.spec.rules:
                         host = next((r.host for r in ing.spec.rules if r.host), None)
-                    chosen = host or _lb_ingress_address(ing.status)
-                    if chosen:
-                        return f"{'https' if tls else 'http'}://{chosen}"
-                    saw_pending = True  # Ingress exists but no host/address yet
+                    if host and _is_local_preview_ingress_host(
+                        str(host), settings=self._settings
+                    ):
+                        # Stale local-preview Ingress on a cloud namespace: ignore.
+                        continue
+                    if host:
+                        return f"{'https' if tls else 'http'}://{host}"
+                    saw_pending = True
 
             if not saw_pending or _time.time() >= deadline:
                 return None
-            _time.sleep(3.0)
+            _time.sleep(2.0)
 
     def read_namespaced_app_node_port(self, namespace: str) -> int | None:
         if not self._settings.kubernetes_enabled or self._core is None:
@@ -1921,20 +2030,99 @@ class KubernetesProvisioner:
                 type="LoadBalancer",
             ),
         )
-        try:
-            existing = self._core.read_namespaced_service(service_name, namespace, _request_timeout=15)
-            if existing.spec is not None and existing.spec.type == "LoadBalancer":
+        existing = _read_or_none(
+            self._core.read_namespaced_service,
+            service_name,
+            namespace,
+            _request_timeout=15,
+        )
+        if (
+            existing is not None
+            and not _resource_is_deleting(existing)
+            and existing.spec is not None
+            and existing.spec.type == "LoadBalancer"
+        ):
+            existing_meta = getattr(existing, "metadata", None)
+            body_meta = getattr(service, "metadata", None)
+            resource_version = getattr(existing_meta, "resource_version", None)
+            if body_meta is not None and resource_version:
+                body_meta.resource_version = resource_version
+            try:
                 self._core.replace_namespaced_service(
                     service_name, namespace, service, _request_timeout=15
                 )
                 return
-            _ignore_404(self._core.delete_namespaced_service, service_name, namespace)
-            self._core.create_namespaced_service(namespace, service, _request_timeout=15)
-        except ApiException as exc:
-            if exc.status == 404:
-                self._core.create_namespaced_service(namespace, service, _request_timeout=15)
+            except ApiException as exc:
+                if not _is_object_being_deleted_conflict(exc) and exc.status != 409:
+                    raise
+        self.recreate_service(namespace, service, name=service_name)
+
+    def wait_for_service_absent(
+        self,
+        name: str,
+        namespace: str,
+        *,
+        timeout_seconds: float = 45.0,
+    ) -> None:
+        """Block until Service ``name`` is gone (delete has finished)."""
+        if self._core is None:
+            return
+        import time
+
+        deadline = time.monotonic() + max(timeout_seconds, 1.0)
+        while time.monotonic() < deadline:
+            existing = _read_or_none(
+                self._core.read_namespaced_service,
+                name,
+                namespace,
+                _request_timeout=10,
+            )
+            if existing is None:
                 return
-            raise
+            time.sleep(0.4)
+        raise TimeoutError(
+            f"Timed out waiting for Service/{name} deletion in {namespace}"
+        )
+
+    def recreate_service(self, namespace: str, body: object, *, name: str) -> None:
+        """Delete a Service if present, wait until it is gone, then create.
+
+        Kubernetes returns 409 ``object is being deleted`` when create races a
+        terminating object. Wait out the finalizer instead of failing provision.
+        """
+        if self._core is None:
+            return
+        import time
+
+        from kubernetes.client.rest import ApiException
+
+        existing = _read_or_none(
+            self._core.read_namespaced_service, name, namespace, _request_timeout=10
+        )
+        if existing is not None:
+            _ignore_404(self._core.delete_namespaced_service, name, namespace)
+        self.wait_for_service_absent(name, namespace)
+
+        deadline = time.monotonic() + 30.0
+        last_exc: ApiException | None = None
+        while time.monotonic() < deadline:
+            try:
+                self._core.create_namespaced_service(namespace, body, _request_timeout=15)
+                return
+            except ApiException as exc:
+                last_exc = exc
+                if _is_object_being_deleted_conflict(exc):
+                    logger.info(
+                        "kubernetes_service_create_wait_deleting",
+                        name=name,
+                        namespace=namespace,
+                    )
+                    time.sleep(0.5)
+                    continue
+                raise
+        raise TimeoutError(
+            f"Timed out recreating Service/{name} in {namespace} (still deleting)"
+        ) from last_exc
 
     # Public Service accessors so collaborators (e.g. ManifestDeployer) operate on
     # a supported surface instead of reaching into the raw ``_core`` client.
@@ -2318,8 +2506,7 @@ class KubernetesProvisioner:
                 ):
                     self._core.replace_namespaced_service("app", namespace, service)
                 else:
-                    _ignore_404(self._core.delete_namespaced_service, "app", namespace)
-                    self._core.create_namespaced_service(namespace, service)
+                    self.recreate_service(namespace, service, name="app")
                 applied_port = candidate
                 last_error = None
                 break
@@ -2618,6 +2805,24 @@ def _lb_ingress_address(status: object) -> str | None:
         return None
     first = ingress[0]
     return getattr(first, "hostname", None) or getattr(first, "ip", None)
+
+
+def _is_local_preview_ingress_host(host: str, *, settings: Settings) -> bool:
+    """True when ``host`` is a Launchpad local-preview DNS name (tunnel / base domain).
+
+    Those names resolve to the local cluster via Cloudflare, not to a cloud LB.
+    """
+    value = (host or "").strip().lower().rstrip(".")
+    if not value:
+        return False
+    base = (settings.preview_base_domain or "").strip().lower().strip(".")
+    if base and (value == base or value.endswith("." + base)):
+        return True
+    template = (settings.preview_ingress_host_template or "").strip().lower()
+    if template and "{base_domain}" in template and base:
+        # e.g. ws-*.launchpad-idp.online
+        return value.endswith("." + base) or value == base
+    return False
 
 
 def _external_url(addr: str, port: int | None) -> str:

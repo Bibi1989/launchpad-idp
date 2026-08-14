@@ -1597,6 +1597,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 namespace=resources.namespace,
                                 timeout_seconds=15.0,
                                 expected_image=resources.image,
+                                app_label=resources.app_label,
                             )
                             environment = await env_repo.get_by_id(env_uuid)
                             if environment is not None:
@@ -3665,5 +3666,26 @@ async def _attach_cloud_preview_url(
         )
         if url:
             resources.preview_url = url
+            return
+        # Drop stale local-tunnel Open-app URLs if the cloud LB is not ready yet.
+        current = str(getattr(resources, "preview_url", None) or "")
+        if current and _preview_url_is_local_tunnel(current):
+            logger.warning(
+                "cloud_preview_url_cleared_local_tunnel",
+                environment_id=str(env_uuid),
+                previous=current[:120],
+            )
+            resources.preview_url = None
     except Exception:
         logger.exception("cloud_preview_url_resolve_failed", environment_id=str(env_uuid))
+
+
+def _preview_url_is_local_tunnel(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    from app.services.kubernetes import _is_local_preview_ingress_host
+
+    host = (urlparse(url).hostname or "").strip().lower()
+    if not host:
+        return False
+    return _is_local_preview_ingress_host(host, settings=get_settings())

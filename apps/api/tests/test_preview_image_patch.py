@@ -159,3 +159,58 @@ def test_resolve_preview_target_multi_service_picks_exposed() -> None:
     # NodePort must select the exposed web pods (not the alphabetically-first server),
     # otherwise the Service has no endpoints -> ERR_CONNECTION_RESET.
     assert _resolve_preview_target(docs) == ("web", 8080)
+
+
+def test_resolve_preview_target_prefers_website_over_dashboard() -> None:
+    from app.services.manifest_deploy import _resolve_preview_target
+
+    docs = [
+        {
+            "kind": "Deployment",
+            "metadata": {
+                "name": "launch-dashboard",
+                "annotations": {"launchpad.io/preview-target": "true"},
+            },
+            "spec": {
+                "selector": {"matchLabels": {"app": "dashboard"}},
+                "template": {
+                    "metadata": {"labels": {"app": "dashboard"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "image": "dashboard:latest",
+                                "ports": [{"name": "http", "containerPort": 3000}],
+                            }
+                        ]
+                    },
+                },
+            },
+        },
+        {
+            "kind": "Deployment",
+            "metadata": {
+                "name": "launch-web",
+                "annotations": {"launchpad.io/preview-target": "true"},
+            },
+            "spec": {
+                "selector": {"matchLabels": {"app": "web"}},
+                "template": {
+                    "metadata": {"labels": {"app": "web"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "image": "web:latest",
+                                "ports": [{"name": "http", "containerPort": 8080}],
+                            }
+                        ]
+                    },
+                },
+            },
+        },
+    ]
+    assert _resolve_preview_target(docs) == ("web", 8080)
+    # Dual annotations collapsed to a single preview target.
+    web = next(d for d in docs if d["metadata"]["name"] == "launch-web")
+    dash = next(d for d in docs if d["metadata"]["name"] == "launch-dashboard")
+    assert web["metadata"]["annotations"]["launchpad.io/preview-target"] == "true"
+    assert dash["metadata"]["annotations"]["launchpad.io/preview-target"] == "false"

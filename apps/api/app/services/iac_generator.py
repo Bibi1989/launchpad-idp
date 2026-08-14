@@ -472,6 +472,61 @@ def _is_multi_stack_workspace(request: ProvisioningWizardRequest) -> bool:
     return len(resolve_scaffold_stacks(stack=cfg.stack, frameworks=cfg.frameworks)) > 1
 
 
+def workspace_has_imported_app_artifacts(workspace_dir: Path) -> bool:
+    """True when the tree already has a real imported app (not Launchpad's empty scaffold).
+
+    Cloud promote copies the source workspace then calls ``regenerate``. Without this
+    guard, regenerate deletes ``package.json``, wipes ``infra/k8s``, and replaces the
+    imported website with the Express status-dashboard scaffold.
+    """
+    root = workspace_dir
+    plan_path = root / ".launchpad" / "image-builds.json"
+    if plan_path.is_file():
+        try:
+            raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raw = None
+        if isinstance(raw, list):
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                image = str(entry.get("image") or "").strip().lower()
+                context = str(entry.get("context") or ".").strip() or "."
+                dockerfile = str(entry.get("dockerfile") or "").strip().replace("\\", "/")
+                if image.startswith("launch-"):
+                    return True
+                if context in {".", ""} and dockerfile in {"Dockerfile", "./Dockerfile"}:
+                    return True
+                if dockerfile and not dockerfile.startswith("apps/app/"):
+                    return True
+                if context not in {".", "", "apps/app"} and not context.startswith("apps/app"):
+                    return True
+
+    manifests = root / "infra" / "k8s" / "manifests"
+    if manifests.is_dir():
+        if any(path.name.startswith("launch-") for path in manifests.glob("*.y*ml")):
+            return True
+
+    root_df = root / "Dockerfile"
+    if root_df.is_file() and any(
+        (root / name).is_file()
+        for name in (
+            "package.json",
+            "nuxt.config.ts",
+            "nuxt.config.js",
+            "nuxt.config.mjs",
+            "next.config.js",
+            "next.config.mjs",
+            "next.config.ts",
+            "vite.config.ts",
+            "vite.config.js",
+            "angular.json",
+        )
+    ):
+        return True
+    return False
+
+
 def _manifest_options_for(request: ProvisioningWizardRequest) -> "KubernetesWorkloadOptions":
     """Kubernetes options to pass to the generic layout writer.
 
@@ -535,29 +590,67 @@ class IaCGenerator:
         """Rewrite IaC under an existing workspace directory from an updated wizard request."""
         root = workspace_dir.resolve()
         root.mkdir(parents=True, exist_ok=True)
+        preserve_imported = workspace_has_imported_app_artifacts(root)
 
         # Clear prior generated layouts so deselected resources do not leave orphans.
-        for relative in ("infra", "dockers"):
-            target = root / relative
-            if target.exists():
-                shutil.rmtree(target)
+        # Never wipe imported ``infra/k8s`` (repo-import / launch-* manifests).
+        dockers = root / "dockers"
+        if dockers.exists():
+            shutil.rmtree(dockers)
+        infra = root / "infra"
+        if infra.exists():
+            if preserve_imported:
+                for child in list(infra.iterdir()):
+                    if child.name == "k8s":
+                        continue
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+            else:
+                shutil.rmtree(infra)
         compose_file = root / "docker-compose.yml"
-        if compose_file.is_file():
+        if compose_file.is_file() and not preserve_imported:
             compose_file.unlink()
-        for pulumi_file in (
-            "Pulumi.yaml",
-            "Pulumi.dev.yaml",
-            "package.json",
-            "tsconfig.json",
-            "index.ts",
-            ".gitignore",
-            "README.md",
-        ):
-            candidate = root / pulumi_file
-            if candidate.is_file():
-                candidate.unlink()
 
-        files = self._render_workspace(root, request)
+        # Pulumi project files live at workspace root. Only remove them when the
+        # engine is Pulumi - never delete an imported Node app's package.json.
+        if request.iac_engine == IaCEngine.PULUMI and not preserve_imported:
+            for pulumi_file in (
+                "Pulumi.yaml",
+                "Pulumi.dev.yaml",
+                "package.json",
+                "tsconfig.json",
+                "index.ts",
+            ):
+                candidate = root / pulumi_file
+                if candidate.is_file():
+                    candidate.unlink()
+        elif request.iac_engine == IaCEngine.PULUMI:
+            for pulumi_file in ("Pulumi.yaml", "Pulumi.dev.yaml", "index.ts"):
+                candidate = root / pulumi_file
+                if candidate.is_file():
+                    candidate.unlink()
+
+        effective = request
+        if preserve_imported and request.container_scaffold.enabled:
+            effective = request.model_copy(
+                update={
+                    "container_scaffold": request.container_scaffold.model_copy(
+                        update={
+                            "enabled": False,
+                            "generate_dockerfile": False,
+                        }
+                    )
+                }
+            )
+
+        files = self._render_workspace(
+            root,
+            effective,
+            skip_kubernetes_layout=preserve_imported,
+            skip_container_scaffold=preserve_imported,
+        )
         self.write_wizard_snapshot(root, request)
         logger.info(
             "iac_bundle_regenerated",
@@ -565,6 +658,7 @@ class IaCGenerator:
             root_dir=str(root),
             engine=request.iac_engine.value,
             provider=request.cloud.provider.value,
+            preserve_imported=preserve_imported,
             file_count=len(files),
         )
         return sorted(files)
@@ -573,6 +667,9 @@ class IaCGenerator:
         self,
         workspace_dir: Path,
         request: ProvisioningWizardRequest,
+        *,
+        skip_kubernetes_layout: bool = False,
+        skip_container_scaffold: bool = False,
     ) -> list[str]:
         """Write provider-specific IaC (or kind K8s-only) into ``workspace_dir``."""
         if isinstance(request.cloud, LocalCloudConfig):
@@ -629,10 +726,15 @@ class IaCGenerator:
                 )
             )
 
-        if request.artifact_mode in {
-            WorkspaceArtifactsMode.MANIFEST_ONLY,
-            WorkspaceArtifactsMode.BOTH,
-        } and request.kubernetes_packaging != KubernetesPackaging.NONE:
+        if (
+            not skip_kubernetes_layout
+            and request.artifact_mode
+            in {
+                WorkspaceArtifactsMode.MANIFEST_ONLY,
+                WorkspaceArtifactsMode.BOTH,
+            }
+            and request.kubernetes_packaging != KubernetesPackaging.NONE
+        ):
             from app.services.app_scaffold import workload_image_spec_for_request
 
             files.extend(
@@ -656,7 +758,7 @@ class IaCGenerator:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(readme, encoding="utf-8")
                 files.append("infra/MANAGED_DATASTORES.md")
-        if request.container_scaffold.enabled:
+        if request.container_scaffold.enabled and not skip_container_scaffold:
             files.extend(self._write_container_scaffold(workspace_dir, request))
 
         return files

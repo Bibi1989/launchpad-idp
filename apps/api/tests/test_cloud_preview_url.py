@@ -77,6 +77,46 @@ def test_resolves_ingress_host_https_when_tls() -> None:
     assert prov.resolve_external_preview_url("ns", timeout_seconds=0) == "https://preview.example.com"
 
 
+def test_ignores_local_preview_ingress_when_lb_pending() -> None:
+    """ws-* hosts must not win over a pending cloud LoadBalancer."""
+    prov = _provisioner_with_mocks()
+    prov._settings = Settings(
+        kubernetes_enabled=True,
+        preview_base_domain="launchpad-idp.online",
+        preview_tunnel_mode="cloudflared",
+    )
+    pending_lb = NS(
+        metadata=NS(name="app"),
+        spec=NS(type="LoadBalancer", ports=[NS(port=80)]),
+        status=NS(load_balancer=NS(ingress=None)),
+    )
+    local_ing = NS(
+        spec=NS(tls=None, rules=[NS(host="ws-abc.launchpad-idp.online")]),
+        status=NS(load_balancer=None),
+    )
+    prov._core.list_namespaced_service.return_value = NS(items=[pending_lb])
+    # Keep returning pending so the loop exits on timeout without a URL.
+    prov._networking.list_namespaced_ingress.return_value = NS(items=[local_ing])
+
+    assert prov.resolve_external_preview_url("ns", timeout_seconds=0) is None
+
+
+def test_workspace_preview_host_none_on_remote_cluster() -> None:
+    prov = KubernetesProvisioner(Settings(kubernetes_enabled=False))
+    prov._settings = Settings(
+        kubernetes_enabled=True,
+        preview_base_domain="launchpad-idp.online",
+        preview_tunnel_mode="cloudflared",
+    )
+    prov._remote_cluster = True
+    assert (
+        prov.workspace_preview_host(
+            name="demo", environment_id="abc", namespace="ns"
+        )
+        is None
+    )
+
+
 def test_returns_none_when_nothing_exposed() -> None:
     prov = _provisioner_with_mocks()
     prov._core.list_namespaced_service.return_value = NS(items=[])
