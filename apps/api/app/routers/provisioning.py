@@ -12,6 +12,7 @@ from app.deps.auth import CurrentUser
 from app.deps.org import CurrentOrg
 from app.core.config import get_settings
 from app.schemas.cloud import (
+    GitBranchListResponse,
     GitHubAppStatusResponse,
     GitHubInstallationItem,
     GitHubRepoRequest,
@@ -33,6 +34,10 @@ from app.schemas.cloud import (
     WorkspaceFileWriteRequest,
     WorkspaceFormatRequest,
     WorkspaceFormatResponse,
+    WorkspaceLinkedAppRepoRequest,
+    WorkspaceLinkedAppRepoResponse,
+    WorkspaceGitSourceRequest,
+    WorkspaceGitSourceResponse,
     WorkspaceListItem,
     WorkspaceMkdirRequest,
     WorkspacePushRequest,
@@ -53,6 +58,7 @@ from app.services.github_app import (
     is_github_app_configured,
     list_installation_repositories,
     list_installations,
+    list_repository_branches,
     search_all_repositories,
 )
 from app.services.gitlab_service import (
@@ -189,6 +195,44 @@ async def get_workspace_wizard_config(
     return await service.get_wizard_config(workspace_id, user)
 
 
+@router.get(
+    "/workspaces/{workspace_id}/linked-app-repo",
+    response_model=WorkspaceLinkedAppRepoResponse,
+)
+async def get_linked_app_repo(
+    workspace_id: UUID,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> WorkspaceLinkedAppRepoResponse:
+    return await service.get_linked_app_repo(workspace_id, user)
+
+
+@router.put(
+    "/workspaces/{workspace_id}/linked-app-repo",
+    response_model=WorkspaceLinkedAppRepoResponse,
+)
+async def set_linked_app_repo(
+    workspace_id: UUID,
+    payload: WorkspaceLinkedAppRepoRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> WorkspaceLinkedAppRepoResponse:
+    return await service.set_linked_app_repo(workspace_id, payload, owner=user)
+
+
+@router.put(
+    "/workspaces/{workspace_id}/git-source",
+    response_model=WorkspaceGitSourceResponse,
+)
+async def set_workspace_git_source(
+    workspace_id: UUID,
+    payload: WorkspaceGitSourceRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> WorkspaceGitSourceResponse:
+    return await service.set_workspace_git_source(workspace_id, payload, owner=user)
+
+
 @router.post(
     "/workspaces/{workspace_id}/promote",
     response_model=IaCBundleSummary,
@@ -257,16 +301,15 @@ async def restore_workspace_files(
 
 @router.delete(
     "/workspaces/{workspace_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    response_class=Response,
+    response_model=WorkspaceListItem,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def destroy_workspace(
     workspace_id: UUID,
     user: CurrentUser,
     service: ProvisioningService = Depends(get_provisioning_service),
-) -> Response:
-    await service.destroy_workspace(workspace_id, user)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+) -> WorkspaceListItem:
+    return await service.destroy_workspace(workspace_id, user)
 
 
 @router.post(
@@ -555,6 +598,21 @@ async def gitlab_list_projects(
     return await service.list_gitlab_projects(owner=user, search=q)
 
 
+@router.get(
+    "/gitlab/projects/branches",
+    response_model=GitBranchListResponse,
+)
+async def gitlab_project_branches(
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+    path_with_namespace: str = Query(..., min_length=3, max_length=512),
+) -> GitBranchListResponse:
+    return await service.list_gitlab_branches(
+        owner=user,
+        project_path=path_with_namespace,
+    )
+
+
 @router.post(
     "/gitlab/repositories",
     response_model=GitlabRepoResult,
@@ -710,6 +768,45 @@ async def github_search_repositories(
                 )
                 for item in items
             ]
+        )
+    except GitHubAppAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "github_app_error", "message": str(exc)},
+        ) from exc
+
+
+@router.get(
+    "/github/repositories/branches",
+    response_model=GitBranchListResponse,
+)
+async def github_repository_branches(
+    user: CurrentUser,
+    full_name: str = Query(..., min_length=3, max_length=256),
+    installation_id: int = Query(..., ge=1),
+) -> GitBranchListResponse:
+    """List branches for a GitHub App installation repository."""
+    _ = user
+    if not is_github_app_configured():
+        return GitBranchListResponse(branches=[], default_branch=None)
+    try:
+        from app.schemas.cloud import GitBranchItem
+
+        items = list_repository_branches(
+            installation_id=installation_id,
+            full_name=full_name,
+        )
+        default_branch = next((b.name for b in items if b.is_default), None)
+        return GitBranchListResponse(
+            branches=[
+                GitBranchItem(
+                    name=item.name,
+                    protected=item.protected,
+                    is_default=item.is_default,
+                )
+                for item in items
+            ],
+            default_branch=default_branch,
         )
     except GitHubAppAuthError as exc:
         raise HTTPException(

@@ -43,9 +43,15 @@ from app.schemas.cloud import (
     LocalResources,
     ProvisioningWizardRequest,
     ProvisioningCostEstimate,
+    WorkspaceCdMode,
     WorkspaceFileContent,
     WorkspaceFileNode,
     WorkspaceFormatResponse,
+    WorkspaceLinkedAppRepo,
+    WorkspaceLinkedAppRepoRequest,
+    WorkspaceLinkedAppRepoResponse,
+    WorkspaceGitSourceRequest,
+    WorkspaceGitSourceResponse,
     WorkspaceListItem,
     WorkspacePushRequest,
     WorkspaceTemplateApplyRequest,
@@ -1116,10 +1122,19 @@ class ProvisioningService:
         effective = self._with_gcp_project_from_sa(effective)
         files = self._iac.regenerate(workspace_path, effective)
 
+        preserve: dict[str, object] | None = None
+        if row.wizard_config_json:
+            try:
+                raw = json.loads(row.wizard_config_json)
+            except json.JSONDecodeError:
+                raw = None
+            if isinstance(raw, dict):
+                preserve = raw
+
         row.engine = effective.iac_engine.value
         row.provider = effective.cloud.provider.value
         row.encrypted_credentials = encrypt_secret(merged.model_dump_json())
-        row.wizard_config_json = self._wizard_config_json(effective)
+        row.wizard_config_json = self._wizard_config_json(effective, preserve=preserve)
         row.status = "ready"
         await self._session.commit()
 
@@ -1262,58 +1277,35 @@ class ProvisioningService:
                 updates[key] = value
         return credentials.model_copy(update=updates) if updates else credentials
 
-    async def destroy_workspace(self, workspace_id: UUID, owner: User) -> None:
+    async def destroy_workspace(
+        self, workspace_id: UUID, owner: User
+    ) -> WorkspaceListItem:
+        """Mark workspace deleting, cascade env teardowns, finalize in Celery.
+
+        Returns immediately with status ``deleting`` so the UI can show a
+        terminating state. Cloud IaC destroy and disk/row removal run after
+        linked environments reach DESTROYED (see finalize_workspace_destroy).
+        """
         row = await self.get_workspace_for_owner(workspace_id, owner)
-        was_local = row.provider == CloudProvider.LOCAL.value
+        if row.status in {"deleting", "destroy_failed"}:
+            # Re-enqueue finalize so a stuck ``deleting`` row (worker crash / timeout)
+            # or a prior ``destroy_failed`` can complete without a DB surgery.
+            from app.workers.tasks import enqueue_finalize_workspace_destroy
 
-        # Destroy any cloud infrastructure this workspace APPLIED (terraform/pulumi)
-        # before any local teardown so, on failure, the workspace + IaC state stay
-        # intact for retry and real cloud resources are never orphaned. Skipped for
-        # the local provider and for workspaces that were never applied (no state).
-        from app.core.config import get_settings
-
-        settings = get_settings()
-        if not was_local and settings.iac_destroy_on_workspace_delete:
-            from app.services.iac_destroy import run_workspace_iac_destroy
-
-            credentials: CloudCredentials | None = None
-            if row.encrypted_credentials:
-                try:
-                    credentials = CloudCredentials.model_validate_json(
-                        decrypt_secret(row.encrypted_credentials)
-                    )
-                except Exception:  # noqa: BLE001 - proceed without creds; destroy will skip/fail clearly
-                    logger.warning(
-                        "workspace_credentials_decrypt_failed",
-                        workspace_id=str(workspace_id),
-                    )
-            destroy_result = await asyncio.to_thread(
-                run_workspace_iac_destroy,
-                root_dir=row.root_dir,
-                engine=row.engine,
-                credentials=credentials,
-                org_id=str(row.org_id) if row.org_id else "default-org",
-                workspace_id=str(row.id),
-                settings=settings,
+            enqueue_finalize_workspace_destroy(
+                workspace_id=str(workspace_id),
+                owner_id=str(owner.id),
             )
             logger.info(
-                "workspace_iac_destroy",
+                "provisioning_workspace_delete_requeued",
                 workspace_id=str(workspace_id),
-                status=destroy_result.status,
-                detail=destroy_result.detail,
+                status=row.status,
             )
-            if destroy_result.status == "failed":
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail={
-                        "code": "cloud_teardown_failed",
-                        "message": (
-                            f"Cloud infrastructure teardown failed ({destroy_result.detail}). "
-                            "The workspace was kept so you can retry destroy; its cloud "
-                            "resources were not deleted."
-                        ),
-                    },
-                )
+            if row.status == "destroy_failed":
+                row.status = "deleting"
+                await self._session.commit()
+                await self._session.refresh(row)
+            return self._to_workspace_list_item(row)
 
         result = await self._session.execute(
             select(TerminalSessionRecord).where(
@@ -1325,9 +1317,95 @@ class ProvisioningService:
             await self._sandbox.kill(str(record.id))
             record.status = "destroyed"
 
-        # Collect Docker tags before cascading teardown / deleting the workspace
-        # tree (image-builds.json and Dockerfiles would otherwise be gone).
-        from app.models.domain import Environment
+        row.status = "deleting"
+        cascaded_envs = await self._teardown_workspace_previews(workspace_id)
+        await self._session.commit()
+        await self._session.refresh(row)
+
+        from app.workers.tasks import enqueue_finalize_workspace_destroy
+
+        enqueue_finalize_workspace_destroy(
+            workspace_id=str(workspace_id),
+            owner_id=str(owner.id),
+        )
+        logger.info(
+            "provisioning_workspace_delete_queued",
+            workspace_id=str(workspace_id),
+            cascaded_envs=cascaded_envs,
+        )
+        return self._to_workspace_list_item(row)
+
+    async def finalize_workspace_destroy(
+        self, workspace_id: UUID, owner: User
+    ) -> None:
+        """Complete workspace destroy after envs are gone (Celery / tests)."""
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        if row.status not in {"deleting", "destroy_failed"}:
+            logger.info(
+                "workspace_finalize_skipped",
+                workspace_id=str(workspace_id),
+                status=row.status,
+            )
+            return
+
+        row.status = "deleting"
+        await self._session.commit()
+
+        # Snapshot scalars before wait/expire_all so finalize never lazy-loads
+        # expired attributes in a sync helper path.
+        was_local = row.provider == CloudProvider.LOCAL.value
+        root_dir = row.root_dir
+        engine = row.engine
+        provider = row.provider
+        org_id = row.org_id
+        encrypted_credentials = row.encrypted_credentials
+
+        await self._wait_workspace_environments_destroyed(workspace_id)
+        await self._session.refresh(row)
+
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if not was_local and settings.iac_destroy_on_workspace_delete:
+            from app.services.iac_destroy import run_workspace_iac_destroy
+
+            credentials: CloudCredentials | None = None
+            if encrypted_credentials:
+                try:
+                    credentials = CloudCredentials.model_validate_json(
+                        decrypt_secret(encrypted_credentials)
+                    )
+                except Exception:  # noqa: BLE001 - proceed without creds; destroy will skip/fail clearly
+                    logger.warning(
+                        "workspace_credentials_decrypt_failed",
+                        workspace_id=str(workspace_id),
+                    )
+            destroy_result = await asyncio.to_thread(
+                run_workspace_iac_destroy,
+                root_dir=root_dir,
+                engine=engine,
+                credentials=credentials,
+                org_id=str(org_id) if org_id else "default-org",
+                workspace_id=str(row.id),
+                settings=settings,
+            )
+            logger.info(
+                "workspace_iac_destroy",
+                workspace_id=str(workspace_id),
+                status=destroy_result.status,
+                detail=destroy_result.detail,
+            )
+            if destroy_result.status == "failed":
+                row.status = "destroy_failed"
+                await self._session.commit()
+                logger.error(
+                    "workspace_iac_destroy_failed_kept",
+                    workspace_id=str(workspace_id),
+                    detail=destroy_result.detail,
+                )
+                return
+
+        from app.models.domain import Environment, EnvironmentStatus
         from app.services.image_cleanup import (
             collect_workspace_destroy_images,
             remove_local_docker_images,
@@ -1340,20 +1418,12 @@ class ProvisioningService:
             )
         ).scalars().all()
         destroy_images = collect_workspace_destroy_images(
-            row.root_dir,
+            root_dir,
             workload_images=[
                 env.workload_image for env in env_rows if env.workload_image
             ],
         )
 
-        # Cascade: force-tear-down every Launch Preview tied to this workspace so
-        # its namespace, ingress, PVCs, secrets and kind images are reclaimed
-        # (the Environment.workspace_id FK is SET NULL, which would otherwise
-        # orphan running preview namespaces after the workspace row is deleted).
-        cascaded_envs = await self._teardown_workspace_previews(workspace_id)
-
-        # Remove linked "Your services" catalog entries so they don't linger
-        # after the workspace (and its golden-path scaffold) is gone.
         from app.services.catalog import CatalogServiceManager
 
         removed = await CatalogServiceManager(self._session).delete_services_for_workspace(
@@ -1379,7 +1449,7 @@ class ProvisioningService:
                     workspace_id=str(workspace_id),
                 )
 
-        if not was_local and destroy_images and row.encrypted_credentials:
+        if not was_local and destroy_images and encrypted_credentials:
             try:
                 from app.services.cloud_instance_compute import (
                     is_cloud_registry_image,
@@ -1387,7 +1457,7 @@ class ProvisioningService:
                 )
 
                 credentials = CloudCredentials.model_validate_json(
-                    decrypt_secret(row.encrypted_credentials)
+                    decrypt_secret(encrypted_credentials)
                 )
                 region = "us-central1"
                 snapshot = self._load_wizard_snapshot(row)
@@ -1414,7 +1484,7 @@ class ProvisioningService:
                         await asyncio.to_thread(
                             teardown_cloud_registry_images,
                             env_images,
-                            cloud_provider=row.provider,
+                            cloud_provider=provider,
                             credentials=credentials,
                             region=region,
                             environment_id=str(env_row.id),
@@ -1423,7 +1493,7 @@ class ProvisioningService:
                     await asyncio.to_thread(
                         teardown_cloud_registry_images,
                         cloud_images,
-                        cloud_provider=row.provider,
+                        cloud_provider=provider,
                         credentials=credentials,
                         region=region,
                         environment_id=None,
@@ -1434,13 +1504,13 @@ class ProvisioningService:
                     workspace_id=str(workspace_id),
                 )
 
-        # No preview envs to cascade: reclaim shared GKE/EKS now (while workspace
-        # credentials still exist). When envs were cascaded, the last teardown
-        # task deletes the shared cluster after sibling namespaces are gone.
-        if not was_local and cascaded_envs == 0:
+        live_envs = sum(
+            1 for env in env_rows if env.status != EnvironmentStatus.DESTROYED
+        )
+        if not was_local and live_envs == 0:
             await self._maybe_teardown_shared_cloud_kubernetes(owner, row)
 
-        self._iac.destroy_workspace(row.root_dir)
+        self._iac.destroy_workspace(root_dir)
         await self._session.delete(row)
         await self._session.commit()
         logger.info("provisioning_workspace_destroyed", workspace_id=str(workspace_id))
@@ -1448,12 +1518,80 @@ class ProvisioningService:
         if was_local:
             await self._maybe_teardown_kind(owner)
 
+    async def _wait_workspace_environments_destroyed(
+        self,
+        workspace_id: UUID,
+        *,
+        timeout_seconds: float = 90.0,
+        poll_seconds: float = 1.0,
+    ) -> None:
+        """Block until linked environments are DESTROYED (or force after timeout).
+
+        Keep this short: Celery soft_time_limit must still leave room for IaC
+        destroy. Failed / never-provisioned envs are force-destroyed so workspace
+        delete cannot sit on ``deleting`` for tens of minutes.
+        """
+        import time
+
+        from app.models.domain import Environment, EnvironmentStatus
+        from app.repositories.environment import EnvironmentRepository
+        from app.workers.tasks import enqueue_teardown_environment
+
+        deadline = time.monotonic() + timeout_seconds
+        last_requeue = 0.0
+        while True:
+            result = await self._session.execute(
+                select(Environment)
+                .where(Environment.workspace_id == workspace_id)
+                .execution_options(populate_existing=True)
+            )
+            remaining = [
+                env
+                for env in result.scalars().all()
+                if env.status != EnvironmentStatus.DESTROYED
+            ]
+            if not remaining:
+                return
+
+            # Force-complete terminal failures quickly (nothing cloud-side to wait for).
+            force_now = all(
+                env.status == EnvironmentStatus.FAILED for env in remaining
+            )
+            if force_now or time.monotonic() >= deadline:
+                env_repo = EnvironmentRepository(self._session)
+                for env in remaining:
+                    logger.warning(
+                        "workspace_destroy_force_env_destroyed",
+                        workspace_id=str(workspace_id),
+                        environment_id=str(env.id),
+                        status=env.status.value,
+                        forced_early=force_now,
+                    )
+                    env.teardown_context_json = None
+                    await env_repo.update_status(env, EnvironmentStatus.DESTROYED)
+                await self._session.commit()
+                return
+
+            now = time.monotonic()
+            if now - last_requeue >= 15.0:
+                for env in remaining:
+                    if env.status in {
+                        EnvironmentStatus.TEARDOWN_PENDING,
+                        EnvironmentStatus.FAILED,
+                    }:
+                        enqueue_teardown_environment(
+                            environment_id=str(env.id),
+                            correlation_id=f"workspace-destroy-wait:{workspace_id}",
+                        )
+                last_requeue = now
+            await asyncio.sleep(poll_seconds)
+
     async def _teardown_workspace_previews(self, workspace_id: UUID) -> int:
         """Force teardown of all preview environments belonging to a workspace.
 
-        Each non-destroyed environment is marked TEARDOWN_PENDING (which also
+        Each non-DESTROYED environment is marked TEARDOWN_PENDING (which also
         cancels any in-flight provision) and its teardown task is enqueued -
-        reusing the full teardown path (namespace + kind image cleanup + audit).
+        including environments already TEARDOWN_PENDING (re-queue after restart).
 
         Returns the number of environments cascaded.
         """
@@ -1468,7 +1606,7 @@ class ProvisioningService:
         active = [
             env
             for env in environments
-            if env.status not in {EnvironmentStatus.DESTROYED, EnvironmentStatus.TEARDOWN_PENDING}
+            if env.status != EnvironmentStatus.DESTROYED
         ]
         if not active:
             return 0
@@ -1476,8 +1614,9 @@ class ProvisioningService:
         from app.services.teardown_context import capture_environment_teardown_context
 
         for env in active:
-            await capture_environment_teardown_context(self._session, env)
-            await env_repo.update_status(env, EnvironmentStatus.TEARDOWN_PENDING)
+            if env.status != EnvironmentStatus.TEARDOWN_PENDING:
+                await capture_environment_teardown_context(self._session, env)
+                await env_repo.update_status(env, EnvironmentStatus.TEARDOWN_PENDING)
         await self._session.commit()
         for env in active:
             enqueue_teardown_environment(
@@ -1732,6 +1871,265 @@ class ProvisioningService:
                 detail={"code": "github_provisioning_failed", "message": str(exc)},
             ) from exc
 
+    def _control_plane_url(self) -> str:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        raw = (
+            (settings.agent_control_plane_url or "").strip()
+            or (settings.preview_public_base_url or "").strip()
+            or "http://localhost:8000"
+        )
+        return raw.rstrip("/")
+
+    def _parse_wizard_dict(self, row: ProvisioningWorkspace) -> dict[str, object]:
+        try:
+            raw = json.loads(row.wizard_config_json or "") if row.wizard_config_json else {}
+        except json.JSONDecodeError:
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _linked_app_repo_from_snapshot(
+        self, snapshot: dict[str, object]
+    ) -> WorkspaceLinkedAppRepo | None:
+        raw = snapshot.get("linked_app_repo")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return WorkspaceLinkedAppRepo.model_validate(raw)
+        except Exception:
+            return None
+
+    async def get_linked_app_repo(
+        self, workspace_id: UUID, owner: User
+    ) -> WorkspaceLinkedAppRepoResponse:
+        from app.core.config import get_settings
+
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        snapshot = self._parse_wizard_dict(row)
+        linked = self._linked_app_repo_from_snapshot(snapshot)
+        settings = get_settings()
+        webhook_configured = bool((settings.webhook_secret or "").strip())
+        message = (
+            "Push to the tracked branch rebuilds active environments when the "
+            "GitHub webhook is configured."
+            if linked and linked.cd_mode == WorkspaceCdMode.WEBHOOK
+            else (
+                "GitHub Actions notifies Launchpad on push to the tracked branch."
+                if linked
+                else "No application repository linked yet."
+            )
+        )
+        return WorkspaceLinkedAppRepoResponse(
+            linked=linked,
+            webhook_configured=webhook_configured,
+            control_plane_url=self._control_plane_url(),
+            message=message,
+            workflow_path=linked.workflow_path if linked else None,
+        )
+
+    async def set_linked_app_repo(
+        self,
+        workspace_id: UUID,
+        request: WorkspaceLinkedAppRepoRequest,
+        *,
+        owner: User,
+    ) -> WorkspaceLinkedAppRepoResponse:
+        from datetime import UTC, datetime
+
+        from app.core.config import get_settings
+        from app.models.domain import Environment, EnvironmentStatus
+        from app.repositories.environment import ACTIVE_REBUILD_STATUSES
+
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        snapshot = self._parse_wizard_dict(row)
+        settings = get_settings()
+        webhook_configured = bool((settings.webhook_secret or "").strip())
+        environments_updated = 0
+        workflow_path: str | None = None
+
+        if request.clear:
+            previous = self._linked_app_repo_from_snapshot(snapshot)
+            snapshot.pop("linked_app_repo", None)
+            if previous is not None:
+                if snapshot.get("git_repo_url") == previous.git_repo_url:
+                    # Drop mirrored git fields unless this looks like a repo_import
+                    # snapshot that should keep its own source metadata.
+                    if snapshot.get("source") != "repo_import":
+                        snapshot.pop("git_repo_url", None)
+                        snapshot.pop("git_branch", None)
+            row.wizard_config_json = json.dumps(snapshot)
+            await self._session.commit()
+            return WorkspaceLinkedAppRepoResponse(
+                linked=None,
+                webhook_configured=webhook_configured,
+                control_plane_url=self._control_plane_url(),
+                message="Application repository unlinked.",
+                environments_updated=0,
+            )
+
+        assert request.installation_id is not None and request.full_name
+        full_name = request.full_name
+        git_repo_url = f"https://github.com/{full_name}.git"
+        git_branch = request.git_branch
+        cd_mode = request.cd_mode
+
+        if cd_mode == WorkspaceCdMode.GITHUB_ACTIONS:
+            cd_secret = (settings.webhook_secret or "").strip() or None
+            if not cd_secret:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "webhook_secret_required",
+                        "message": (
+                            "CD mode github_actions requires WEBHOOK_SECRET on the API "
+                            "so Launchpad can set LAUNCHPAD_CD_SECRET on the repo."
+                        ),
+                    },
+                )
+            try:
+                workflow_path = await asyncio.to_thread(
+                    self._github.ensure_app_cd_workflow,
+                    installation_id=request.installation_id,
+                    full_name=full_name,
+                    branch=git_branch,
+                    control_plane_url=self._control_plane_url(),
+                    cd_secret=cd_secret,
+                    workspace_id=str(workspace_id),
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "github_app_cd_failed",
+                        "message": str(exc),
+                    },
+                ) from exc
+
+        linked = WorkspaceLinkedAppRepo(
+            installation_id=request.installation_id,
+            full_name=full_name,
+            git_repo_url=git_repo_url,
+            git_branch=git_branch,
+            cd_mode=cd_mode,
+            workflow_path=workflow_path,
+            updated_at=datetime.now(UTC),
+        )
+        snapshot["linked_app_repo"] = linked.model_dump(mode="json")
+        snapshot["git_repo_url"] = git_repo_url
+        snapshot["git_branch"] = git_branch
+        row.wizard_config_json = json.dumps(snapshot)
+
+        env_rows = (
+            await self._session.execute(
+                select(Environment).where(
+                    Environment.workspace_id == workspace_id,
+                    Environment.status.in_(
+                        (*ACTIVE_REBUILD_STATUSES, EnvironmentStatus.PAUSED)
+                    ),
+                )
+            )
+        ).scalars().all()
+        for env in env_rows:
+            env.git_repo_url = git_repo_url
+            env.git_branch = git_branch
+            environments_updated += 1
+
+        await self._session.commit()
+        logger.info(
+            "workspace_linked_app_repo_saved",
+            workspace_id=str(workspace_id),
+            full_name=full_name,
+            git_branch=git_branch,
+            cd_mode=cd_mode.value,
+            environments_updated=environments_updated,
+            workflow_path=workflow_path,
+        )
+
+        if cd_mode == WorkspaceCdMode.WEBHOOK:
+            message = (
+                "Linked with webhook CD (default). Point GitHub at "
+                f"{self._control_plane_url()}/api/v1/webhooks/github "
+                "using WEBHOOK_SECRET. Push to the tracked branch rebuilds "
+                "matching environments."
+            )
+            if not webhook_configured:
+                message += " WEBHOOK_SECRET is not set on the API yet."
+        else:
+            message = (
+                f"Linked with GitHub Actions CD. Workflow `{workflow_path}` "
+                "notifies Launchpad on push to the tracked branch."
+            )
+
+        return WorkspaceLinkedAppRepoResponse(
+            linked=linked,
+            webhook_configured=webhook_configured,
+            control_plane_url=self._control_plane_url(),
+            message=message,
+            workflow_path=workflow_path,
+            environments_updated=environments_updated,
+        )
+
+    async def set_workspace_git_source(
+        self,
+        workspace_id: UUID,
+        request: WorkspaceGitSourceRequest,
+        *,
+        owner: User,
+    ) -> WorkspaceGitSourceResponse:
+        """Persist git_repo_url/git_branch for webhook rebuild matching (e.g. GitLab)."""
+        from app.models.domain import Environment
+
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        snapshot = self._parse_wizard_dict(row)
+        environments_updated = 0
+
+        if request.clear:
+            snapshot.pop("git_repo_url", None)
+            snapshot.pop("git_branch", None)
+            row.wizard_config_json = json.dumps(snapshot)
+            await self._session.commit()
+            return WorkspaceGitSourceResponse(
+                git_repo_url=None,
+                git_branch="main",
+                message="Git source cleared.",
+                environments_updated=0,
+            )
+
+        assert request.git_repo_url
+        git_repo_url = request.git_repo_url
+        git_branch = request.git_branch
+        snapshot["git_repo_url"] = git_repo_url
+        snapshot["git_branch"] = git_branch
+        row.wizard_config_json = json.dumps(snapshot)
+
+        env_rows = (
+            await self._session.execute(
+                select(Environment).where(Environment.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+        for env in env_rows:
+            env.git_repo_url = git_repo_url
+            env.git_branch = git_branch
+            environments_updated += 1
+
+        await self._session.commit()
+        logger.info(
+            "workspace_git_source_saved",
+            workspace_id=str(workspace_id),
+            git_branch=git_branch,
+            environments_updated=environments_updated,
+        )
+        return WorkspaceGitSourceResponse(
+            git_repo_url=git_repo_url,
+            git_branch=git_branch,
+            message=(
+                f"Tracking {git_repo_url}@{git_branch}. "
+                f"Updated {environments_updated} environment(s)."
+            ),
+            environments_updated=environments_updated,
+        )
+
     def _workspace_root(self, workspace: ProvisioningWorkspace) -> Path:
         return Path(workspace.root_dir)
 
@@ -1751,8 +2149,12 @@ class ProvisioningService:
         )
 
     @staticmethod
-    def _wizard_config_json(request: ProvisioningWizardRequest) -> str:
-        payload = {
+    def _wizard_config_json(
+        request: ProvisioningWizardRequest,
+        *,
+        preserve: dict[str, object] | None = None,
+    ) -> str:
+        payload: dict[str, object] = {
             "name": request.name,
             "iac_engine": request.iac_engine.value,
             "cloud": request.cloud.model_dump(mode="json"),
@@ -1767,6 +2169,19 @@ class ProvisioningService:
             "dependencies": request.dependencies.model_dump(mode="json"),
             "ansible": request.ansible.model_dump(mode="json"),
         }
+        if preserve:
+            for key in (
+                "git_repo_url",
+                "git_branch",
+                "linked_app_repo",
+                "source",
+                "import_id",
+                "detection",
+                "preview_service",
+                "commit_sha",
+            ):
+                if key in preserve and key not in payload:
+                    payload[key] = preserve[key]
         return json.dumps(payload)
 
     def _load_wizard_snapshot(
@@ -2307,6 +2722,39 @@ class ProvisioningService:
         except GitLabAuthError as exc:
             raise http_error_from_gitlab(exc) from exc
         return [GitlabProjectItem.model_validate(item) for item in rows]
+
+    async def list_gitlab_branches(
+        self,
+        *,
+        owner: User,
+        project_path: str,
+    ):
+        from app.schemas.cloud import GitBranchItem, GitBranchListResponse
+        from app.services.gitlab_service import (
+            GitLabAuthError,
+            GitLabProvisioningService,
+            http_error_from_gitlab,
+        )
+
+        base_url, token, token_type = await self._gitlab_credentials(owner)
+        try:
+            rows = await asyncio.to_thread(
+                GitLabProvisioningService(self._iac).list_branches,
+                base_url=base_url,
+                token=token,
+                project_path=project_path,
+                token_type=token_type,
+            )
+        except GitLabAuthError as exc:
+            raise http_error_from_gitlab(exc) from exc
+        default_branch = next(
+            (str(item["name"]) for item in rows if item.get("is_default")),
+            None,
+        )
+        return GitBranchListResponse(
+            branches=[GitBranchItem.model_validate(item) for item in rows],
+            default_branch=default_branch,
+        )
 
     async def create_gitlab_repo(self, request, *, owner: User):
         from app.schemas.cloud import GitlabRepoResult

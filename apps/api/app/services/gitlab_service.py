@@ -6,7 +6,7 @@ import base64
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from uuid import UUID
 
 import httpx
@@ -393,6 +393,61 @@ class GitLabProvisioningService:
                 if len(rows) < page_size:
                     break
         return collected
+
+    def list_branches(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        project_path: str,
+        token_type: str = "pat",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List repository branches for a GitLab project path_with_namespace."""
+        base = _normalize_base_url(base_url)
+        path = project_path.strip().strip("/")
+        if not path:
+            raise GitLabAuthError("project_path is required")
+        encoded = quote(path, safe="")
+        capped = max(1, min(int(limit), 200))
+        with httpx.Client(timeout=30.0) as client:
+            project = self._get_project(
+                client, base, token, path, token_type=token_type
+            )
+            default_branch = str(project.get("default_branch") or "main")
+            resp = client.get(
+                f"{base}/api/v4/projects/{encoded}/repository/branches",
+                headers=auth_headers(token, token_type),
+                params={"per_page": capped},
+            )
+            if resp.status_code == 401:
+                raise GitLabAuthError(
+                    "Failed to list GitLab branches (401) - token expired or invalid. "
+                    "Reconnect GitLab under Integrations."
+                )
+            if resp.status_code >= 400:
+                raise GitLabAuthError(
+                    f"Failed to list GitLab branches ({resp.status_code})"
+                )
+            rows = resp.json()
+            if not isinstance(rows, list):
+                return []
+            branches: list[dict[str, Any]] = []
+            for item in rows[:capped]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                branches.append(
+                    {
+                        "name": name,
+                        "protected": bool(item.get("protected")),
+                        "is_default": name == default_branch,
+                    }
+                )
+            branches.sort(key=lambda b: (not b["is_default"], str(b["name"]).lower()))
+            return branches
 
     def create_or_open_project(
         self,

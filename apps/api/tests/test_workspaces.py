@@ -204,6 +204,9 @@ async def test_destroy_workspace_cascades_environment_teardown(
             "app.workers.tasks.enqueue_teardown_environment"
         ) as enqueue,
         patch(
+            "app.workers.tasks.enqueue_finalize_workspace_destroy"
+        ) as enqueue_finalize,
+        patch(
             "app.services.provisioning.ProvisioningService._maybe_teardown_shared_cloud_kubernetes",
             new_callable=AsyncMock,
         ),
@@ -212,15 +215,20 @@ async def test_destroy_workspace_cascades_environment_teardown(
             f"/api/v1/provisioning/workspaces/{workspace_id}",
             headers=auth_header(test_user),
         )
-    assert deleted.status_code == 204
+    assert deleted.status_code == 202
+    assert deleted.json()["status"] == "deleting"
     enqueue.assert_called_once()
     assert enqueue.call_args.kwargs["environment_id"] == str(env_id)
+    enqueue_finalize.assert_called_once()
 
     async with session_factory() as session:
         env = await session.get(Environment, env_id)
         assert env is not None
         assert env.status == EnvironmentStatus.TEARDOWN_PENDING
         assert env.teardown_context_json
+        ws = await session.get(ProvisioningWorkspace, workspace_id)
+        assert ws is not None
+        assert ws.status == "deleting"
 
 
 @pytest.mark.asyncio
@@ -258,12 +266,25 @@ async def test_list_and_destroy_workspace(
     assert len(listed.json()) == 1
     assert listed.json()[0]["name"] == "demo-ws"
 
-    with patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True):
+    with (
+        patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True),
+        patch("app.workers.tasks.enqueue_finalize_workspace_destroy") as enqueue_finalize,
+    ):
         deleted = await client.delete(
             f"/api/v1/provisioning/workspaces/{workspace_id}",
             headers=auth_header(test_user),
         )
-    assert deleted.status_code == 204
+    assert deleted.status_code == 202
+    assert deleted.json()["status"] == "deleting"
+    enqueue_finalize.assert_called_once()
+
+    from app.services.provisioning import ProvisioningService
+
+    with patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True):
+        async with session_factory() as session:
+            await ProvisioningService(session).finalize_workspace_destroy(
+                workspace_id, test_user
+            )
 
     listed_after = await client.get(
         "/api/v1/provisioning/workspaces",
@@ -321,12 +342,24 @@ async def test_destroy_workspace_removes_catalog_service(
         )
         await session.commit()
 
-    with patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True):
+    with (
+        patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True),
+        patch("app.workers.tasks.enqueue_finalize_workspace_destroy") as enqueue_finalize,
+    ):
         deleted = await client.delete(
             f"/api/v1/provisioning/workspaces/{workspace_id}",
             headers=auth_header(test_user),
         )
-    assert deleted.status_code == 204
+    assert deleted.status_code == 202
+    enqueue_finalize.assert_called_once()
+
+    from app.services.provisioning import ProvisioningService
+
+    with patch("app.services.iac_generator.IaCGenerator.destroy_workspace", return_value=True):
+        async with session_factory() as session:
+            await ProvisioningService(session).finalize_workspace_destroy(
+                workspace_id, test_user
+            )
 
     async with session_factory() as session:
         remaining = await session.get(CatalogService, service_id)

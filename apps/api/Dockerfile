@@ -12,14 +12,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       unzip \
+      nodejs \
+      npm \
     && rm -rf /var/lib/apt/lists/*
 
 # AWS CLI v2 (EC2 VM provisioning / ECR from the control-plane worker)
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     case "$ARCH" in \
-      x86_64) AWS_ARCH=x86_64 ;; \
-      aarch64|arm64) AWS_ARCH=aarch64 ;; \
+      x86_64) AWS_ARCH=x86_64; PULUMI_ARCH=linux-x64 ;; \
+      aarch64|arm64) AWS_ARCH=aarch64; PULUMI_ARCH=linux-arm64 ;; \
       *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
     esac; \
     curl -fsSLo /tmp/awscliv2.zip \
@@ -27,7 +29,14 @@ RUN set -eux; \
     unzip -q /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install; \
     rm -rf /tmp/aws /tmp/awscliv2.zip; \
-    aws --version
+    aws --version; \
+    PULUMI_VERSION=3.143.0; \
+    curl -fsSL \
+      "https://github.com/pulumi/pulumi/releases/download/v${PULUMI_VERSION}/pulumi-v${PULUMI_VERSION}-${PULUMI_ARCH}.tar.gz" \
+      | tar -xz -C /tmp; \
+    mv /tmp/pulumi/* /usr/local/bin/; \
+    rm -rf /tmp/pulumi; \
+    pulumi version
 
 # Build context is the monorepo root so shared `pkg/` is available.
 COPY apps/api/pyproject.toml ./

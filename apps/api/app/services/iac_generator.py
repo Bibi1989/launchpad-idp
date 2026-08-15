@@ -23,6 +23,7 @@ from app.core.logging import get_logger
 from app.schemas.cloud import (
     AwsCloudConfig,
     AzureCloudConfig,
+    CacheEngine,
     CloudConfig,
     GcpCloudConfig,
     IaCBundleSummary,
@@ -31,10 +32,12 @@ from app.schemas.cloud import (
     LocalCloudConfig,
     ProvisioningWizardRequest,
     SecretBackend,
+    SqlDatabaseEngine,
     WorkspaceArtifactsMode,
     WorkspaceRuntimeMode,
 )
 from app.services.k8s_bundle import write_kubernetes_layout
+from app.services.iac_state import restore_iac_runtime_state, stash_iac_runtime_state
 from app.services.terraform_bundle import write_terraform_bundle
 from app.services.workspace_files import is_denied_workspace_path
 
@@ -92,6 +95,14 @@ def _pulumi_sanitize_helper() -> list[str]:
     ]
 
 
+def _pulumi_gcp_sql_version(engine: SqlDatabaseEngine) -> str:
+    if engine == SqlDatabaseEngine.MYSQL:
+        return "MYSQL_8_0"
+    if engine == SqlDatabaseEngine.MARIADB:
+        return "MYSQL_8_0"
+    return "POSTGRES_15"
+
+
 def _pulumi_index(name: str, cloud: CloudConfig) -> str:
     tags_obj = (
         "{ EnvironmentId: environmentName, Owner: 'launchpad', "
@@ -113,6 +124,7 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             f"const environmentName = config.get('environmentName') ?? {env_name_lit};",
             "const ttlExpiration = config.get('ttlExpiration') ?? 'unset';",
             f"const region = {json.dumps(r.region)};",
+            f"const projectId = config.get('project_id') ?? {json.dumps(r.project_id)};",
             * _pulumi_sanitize_helper(),
             "const gkeName = sanitizeDns1123(environmentName, 40, 'gke');",
             "const nodePoolName = sanitizeDns1123(environmentName, 40, 'np');",
@@ -121,12 +133,15 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             "const bucketName = sanitizeDns1123("
             "`${environmentName}-${envHash(environmentName)}`, 63, 'lp');",
             "const octet = cidrOctet(environmentName);",
+            # Provider project must match the SA / vault project or resources land wrong.
+            "const gcpProvider = new gcp.Provider('lp-gcp', { project: projectId, region });",
+            "const gcpOpts = { provider: gcpProvider };",
         ]
         if r.vpc:
             lines.append(
                 "const vpc = new gcp.compute.Network('lp-vpc', {"
                 " autoCreateSubnetworks: false,"
-                " name: `${name55}-vpc` });"
+                " name: `${name55}-vpc` }, gcpOpts);"
             )
         if r.subnets and r.vpc:
             if r.network_topology.value == "standard":
@@ -135,7 +150,7 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                     " name: `${name55}-public`,"
                     " ipCidrRange: `10.${octet}.16.0/20`,"
                     " region,"
-                    " network: vpc.id });"
+                    " network: vpc.id }, gcpOpts);"
                 )
                 lines.append(
                     "const subnet = new gcp.compute.Subnetwork('lp-subnet-private', {"
@@ -143,11 +158,11 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                     " ipCidrRange: `10.${octet}.32.0/20`,"
                     " region,"
                     " network: vpc.id,"
-                    " privateIpGoogleAccess: true });"
+                    " privateIpGoogleAccess: true }, gcpOpts);"
                 )
                 lines.append(
                     "const router = new gcp.compute.Router('lp-router', {"
-                    " name: `${name55}-router`, region, network: vpc.id });"
+                    " name: `${name55}-router`, region, network: vpc.id }, gcpOpts);"
                 )
                 lines.append(
                     "new gcp.compute.RouterNat('lp-nat', {"
@@ -155,7 +170,7 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                     " natIpAllocateOption: 'AUTO_ONLY',"
                     " sourceSubnetworkIpRangesToNat: 'LIST_OF_SUBNETWORKS',"
                     " subnetworks: [{ name: subnet.id,"
-                    " sourceIpRangesToNats: ['ALL_IP_RANGES'] }] });"
+                    " sourceIpRangesToNats: ['ALL_IP_RANGES'] }] }, gcpOpts);"
                 )
             else:
                 lines.append(
@@ -163,7 +178,7 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                     " name: `${name55}-subnet`,"
                     " ipCidrRange: `10.${octet}.0.0/20`,"
                     " region,"
-                    " network: vpc.id });"
+                    " network: vpc.id }, gcpOpts);"
                 )
         if r.artifact_registry:
             lines.append(
@@ -171,7 +186,7 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 " location: region,"
                 " repositoryId: name63,"
                 " format: 'DOCKER',"
-                f" labels: {gcp_labels_obj} }});"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
             )
         if r.gke:
             network_arg = "vpc.id" if r.vpc else "undefined"
@@ -183,7 +198,7 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 " initialNodeCount: 1,"
                 " deletionProtection: false,"
                 f" network: {network_arg},"
-                f" resourceLabels: {gcp_labels_obj} }});"
+                f" resourceLabels: {gcp_labels_obj} }}, gcpOpts);"
             )
             lines.append(
                 "new gcp.container.NodePool('lp-gke-primary', {"
@@ -193,19 +208,17 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 " nodeCount: 2,"
                 f" nodeConfig: {{ machineType: '{r.machine_type}', "
                 f"labels: {gcp_labels_obj} }} }},"
-                " { dependsOn: [cluster] });"
+                " { ...gcpOpts, dependsOn: [cluster] });"
             )
         if r.secret_backend == SecretBackend.SECRET_MANAGER:
             lines.append(
                 "new gcp.secretmanager.Secret('lp-secrets', {"
                 " secretId: `${name55}-secrets`,"
                 " replication: { auto: {} },"
-                f" labels: {gcp_labels_obj} }});"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
             )
         else:
-            lines.append(
-                "import * as k8s from '@pulumi/kubernetes';"
-            )
+            lines.append("import * as k8s from '@pulumi/kubernetes';")
             lines.append(
                 "new k8s.core.v1.Secret('lp-secrets', {"
                 " metadata: { name: `${name55}-secrets`, "
@@ -214,13 +227,15 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
             )
         if r.cloud_run:
             lines.append(
-                "new gcp.cloudrunv2.Service('lp-run', {"
+                "const cloudRun = new gcp.cloudrunv2.Service('lp-run', {"
                 " name: `${name55}-run`,"
                 " location: region,"
                 " template: { containers: [{ image: "
                 "'us-docker.pkg.dev/cloudrun/container/hello' }] },"
-                f" labels: {gcp_labels_obj} }});"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
             )
+            lines.append("export const cloud_run_url = cloudRun.uri;")
+            lines.append("export const preview_url = cloudRun.uri;")
         if r.cloud_functions:
             lines.append(
                 "new gcp.cloudfunctionsv2.Function('lp-fn', {"
@@ -230,10 +245,141 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 "source: { storageSource: { bucket: "
                 "`${bucketName}-fn`, object: 'function-source.zip' } } },"
                 " serviceConfig: { maxInstanceCount: 3, availableMemory: '256M' },"
-                f" labels: {gcp_labels_obj} }});"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
             )
+        if r.cloud_sql:
+            db_version = _pulumi_gcp_sql_version(r.cloud_sql_engine)
+            lines.append(
+                "new gcp.sql.DatabaseInstance('lp-sql', {"
+                " name: `${name55}-sql`,"
+                " region,"
+                f" databaseVersion: {json.dumps(db_version)},"
+                " deletionProtection: false,"
+                f" settings: {{ tier: 'db-f1-micro', userLabels: {gcp_labels_obj} }} "
+                "}, gcpOpts);"
+            )
+        if r.cloud_storage:
+            lines.append(
+                "new gcp.storage.Bucket('lp-data', {"
+                " name: bucketName,"
+                " location: region,"
+                " uniformBucketLevelAccess: true,"
+                " forceDestroy: true,"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
+            )
+        if r.pubsub:
+            lines.append(
+                "new gcp.pubsub.Topic('lp-events', {"
+                " name: `${name55}-events`,"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
+            )
+        if r.memorystore:
+            if r.memorystore_engine == CacheEngine.MEMCACHED:
+                lines.append(
+                    "new gcp.memcache.Instance('lp-memcache', {"
+                    " name: `${name55}-memcache`,"
+                    " region,"
+                    " nodeCount: 1,"
+                    " nodeConfig: { cpuCount: 1, memorySizeMb: 1024 },"
+                    f" labels: {gcp_labels_obj} }}, gcpOpts);"
+                )
+            else:
+                lines.append(
+                    "new gcp.redis.Instance('lp-redis', {"
+                    " name: `${name55}-redis`,"
+                    " region,"
+                    " tier: 'BASIC',"
+                    " memorySizeGb: 1,"
+                    " redisVersion: 'REDIS_7_0',"
+                    f" labels: {gcp_labels_obj} }}, gcpOpts);"
+                )
+        if r.bigquery:
+            lines.append(
+                "new gcp.bigquery.Dataset('lp-analytics', {"
+                " datasetId: name63.replace(/-/g, '_'),"
+                " location: region,"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
+            )
+        if getattr(r, "compute_instance", False):
+            lines.append(
+                "const appListenPort = config.getNumber('app_listen_port') ?? 8080;"
+            )
+            lines.append("const sshPublicKey = config.get('ssh_public_key') ?? '';")
+            lines.append(f"const machineType = {json.dumps(r.machine_type)};")
+            lines.append(
+                "const ubuntuImage = gcp.compute.getImageOutput({"
+                " family: 'ubuntu-2204-lts', project: 'ubuntu-os-cloud' },"
+                " { provider: gcpProvider });"
+            )
+            if r.vpc:
+                lines.append("const vmNetwork = vpc.id;")
+                if r.subnets:
+                    lines.append("const vmSubnetwork = subnet.id;")
+                else:
+                    lines.append(
+                        "const vmSubnetwork: pulumi.Input<string> | undefined = undefined;"
+                    )
+            else:
+                lines.append("const vmNetwork = 'default';")
+                lines.append(
+                    "const vmSubnetwork: pulumi.Input<string> | undefined = undefined;"
+                )
+            lines.append(
+                "new gcp.compute.Firewall('lp-vm-fw', {"
+                " name: `${name55}-vm-fw`,"
+                " network: vmNetwork,"
+                " allows: [{ protocol: 'tcp', ports: ['22', String(appListenPort), '80', '443'] }],"
+                " sourceRanges: ['0.0.0.0/0'],"
+                " targetTags: ['launchpad-vm'] }, gcpOpts);"
+            )
+            lines.append(
+                "const startupScript = ["
+                "  '#!/bin/bash',"
+                "  'set -euo pipefail',"
+                "  'export DEBIAN_FRONTEND=noninteractive',"
+                "  'apt-get update -y',"
+                "  'apt-get install -y curl ca-certificates gnupg git',"
+                "  ...(sshPublicKey ? ["
+                "    'install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh',"
+                "    `grep -qxF \"${sshPublicKey}\" /home/ubuntu/.ssh/authorized_keys 2>/dev/null "
+                "|| printf \"%s\\n\" \"${sshPublicKey}\" >> /home/ubuntu/.ssh/authorized_keys`,"
+                "    'chown -R ubuntu:ubuntu /home/ubuntu/.ssh',"
+                "    'chmod 600 /home/ubuntu/.ssh/authorized_keys',"
+                "  ] : []),"
+                "].join('\\n');"
+            )
+            lines.append(
+                "const vm = new gcp.compute.Instance('lp-vm', {"
+                " name: `${name55}-vm`,"
+                " machineType,"
+                " zone: `${region}-a`,"
+                " tags: ['launchpad-vm'],"
+                " bootDisk: { initializeParams: { image: ubuntuImage.selfLink, size: 20 } },"
+                " networkInterfaces: [{"
+                " network: vmNetwork,"
+                " subnetwork: vmSubnetwork,"
+                " accessConfigs: [{}] }],"
+                " metadataStartupScript: startupScript,"
+                " metadata: {"
+                " 'enable-oslogin': 'FALSE',"
+                " ...(sshPublicKey"
+                " ? { 'ssh-keys': `ubuntu:${sshPublicKey}` }"
+                " : {}) },"
+                f" labels: {gcp_labels_obj} }}, gcpOpts);"
+            )
+            lines.append(
+                "export const public_ip = vm.networkInterfaces.apply("
+                " (nis) => (nis[0]?.accessConfigs && nis[0].accessConfigs[0]?.natIp) || '');"
+            )
+            lines.append(
+                "export const preview_url = pulumi.interpolate"
+                "`http://${public_ip}:${appListenPort}`;"
+            )
+            lines.append("export const compute_instance_id = vm.id;")
+            lines.append("export const app_listen_port = String(appListenPort);")
         lines.append("export const environment = environmentName;")
         lines.append("export const gkeClusterName = gkeName;")
+        lines.append("export const project_id = projectId;")
         return "\n".join(lines) + "\n"
 
     if isinstance(cloud, AwsCloudConfig):
@@ -287,11 +433,22 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
                 " filters: [{ name: 'name', values: ['al2023-ami-*-x86_64'] }] });"
             )
             lines.append(
-                "new aws.ec2.Instance('lp-ec2', {"
+                "const appListenPort = config.getNumber('app_listen_port') ?? 8080;"
+            )
+            lines.append(
+                "const ec2 = new aws.ec2.Instance('lp-ec2', {"
                 " ami: ami.id,"
                 f" instanceType: '{r.instance_type}',"
+                " associatePublicIpAddress: true,"
                 f" tags: {tags_obj} }});"
             )
+            lines.append("export const public_ip = ec2.publicIp;")
+            lines.append(
+                "export const preview_url = pulumi.interpolate"
+                "`http://${ec2.publicIp}:${appListenPort}`;"
+            )
+            lines.append("export const ec2_instance_id = ec2.id;")
+            lines.append("export const app_listen_port = String(appListenPort);")
         if r.s3:
             lines.append(
                 "new aws.s3.Bucket('lp-data', {"
@@ -594,11 +751,15 @@ class IaCGenerator:
 
         # Clear prior generated layouts so deselected resources do not leave orphans.
         # Never wipe imported ``infra/k8s`` (repo-import / launch-* manifests).
+        # Stash terraform/pulumi local state so retry provision updates in place
+        # instead of create → 409 Conflict on existing cloud resources.
         dockers = root / "dockers"
         if dockers.exists():
             shutil.rmtree(dockers)
         infra = root / "infra"
+        state_stash: Path | None = None
         if infra.exists():
+            state_stash = stash_iac_runtime_state(infra)
             if preserve_imported:
                 for child in list(infra.iterdir()):
                     if child.name == "k8s":
@@ -651,6 +812,7 @@ class IaCGenerator:
             skip_kubernetes_layout=preserve_imported,
             skip_container_scaffold=preserve_imported,
         )
+        restore_iac_runtime_state(root / "infra", state_stash)
         self.write_wizard_snapshot(root, request)
         logger.info(
             "iac_bundle_regenerated",
@@ -660,6 +822,7 @@ class IaCGenerator:
             provider=request.cloud.provider.value,
             preserve_imported=preserve_imported,
             file_count=len(files),
+            state_restored=state_stash is not None,
         )
         return sorted(files)
 
@@ -705,16 +868,26 @@ class IaCGenerator:
 
         # Ansible under infra/ansible whenever the checkbox/engine asks for it,
         # including manifest-only workspaces (not gated on Terraform/Pulumi mode).
+        # Cloud VM running-instance always gets playbooks (auto-enabled in validator).
         ansible_already = any(path.startswith("infra/ansible/") for path in files)
         ansible_wanted = (
             request.iac_engine == IaCEngine.ANSIBLE or request.ansible.enabled
         )
+        if (
+            not ansible_wanted
+            and request.runtime_mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
+            and request.running_instance.kind.value == "vm"
+        ):
+            ansible_wanted = True
         if ansible_wanted and not ansible_already:
             from app.services.local_runtime_iac import write_local_runtime_iac
+            from app.services.scaffold_cloud_deploy import ansible_config_for_runtime
 
-            ansible_cfg = request.ansible
-            if not ansible_cfg.enabled:
-                ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+            ansible_cfg = ansible_config_for_runtime(
+                source=request.ansible,
+                runtime_mode=request.runtime_mode,
+                running_instance=request.running_instance,
+            )
             files.extend(
                 write_local_runtime_iac(
                     workspace_dir,
@@ -760,6 +933,22 @@ class IaCGenerator:
                 files.append("infra/MANAGED_DATASTORES.md")
         if request.container_scaffold.enabled and not skip_container_scaffold:
             files.extend(self._write_container_scaffold(workspace_dir, request))
+
+        if (
+            request.artifact_mode
+            in {
+                WorkspaceArtifactsMode.IAC_ONLY,
+                WorkspaceArtifactsMode.BOTH,
+            }
+            and request.iac_engine
+            in {IaCEngine.TERRAFORM, IaCEngine.OPENTOFU, IaCEngine.PULUMI}
+            and not isinstance(request.cloud, LocalCloudConfig)
+        ):
+            from app.services.cloud_deploy_makefile import write_cloud_deploy_makefile
+
+            files.extend(
+                write_cloud_deploy_makefile(workspace_dir, engine=request.iac_engine)
+            )
 
         return files
 
@@ -964,12 +1153,19 @@ class IaCGenerator:
             scaffold_dockerfile,
         )
 
+        c_cfg = request.container_scaffold
+        if (
+            not c_cfg.services
+            and not c_cfg.generate_dockerfile
+            and not c_cfg.generate_docker_compose
+        ):
+            return []
+
         core = resolve_core_scaffold(request)
         if core is not None:
             return self._write_core_app_scaffold(workspace_dir, request, core)
 
         written: list[str] = []
-        c_cfg = request.container_scaffold
         app_name = c_cfg.app_name or request.name
         compose_services: list[dict[str, object]] = []
 
@@ -1405,12 +1601,13 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
         if (
             mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
             and request.running_instance.kind.value == "vm"
-            and request.running_instance.host
         ):
             ansible_cfg = ansible_cfg.model_copy(
                 update={
                     "enabled": True,
-                    "hosts": request.running_instance.host or ansible_cfg.hosts,
+                    "hosts": request.running_instance.host
+                    or ansible_cfg.hosts
+                    or "127.0.0.1",
                     "ssh_user": request.running_instance.ssh_user
                     or ansible_cfg.ssh_user,
                     "ssh_port": request.running_instance.ssh_port,
@@ -1579,24 +1776,31 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
     def _write_pulumi(
         self, workspace_dir: Path, request: ProvisioningWizardRequest
     ) -> list[str]:
+        """Write Pulumi TypeScript program under ``infra/pulumi/`` (matches apply path)."""
         cloud = request.cloud
         written: list[str] = []
+        pulumi_dir = workspace_dir / "infra" / "pulumi"
+        pulumi_dir.mkdir(parents=True, exist_ok=True)
+
+        def _write(rel: str, content: str) -> None:
+            path = pulumi_dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            written.append(f"infra/pulumi/{rel}")
 
         project_yaml = (
             "name: " + request.name + "\n"
             "runtime: nodejs\n"
             "description: Launchpad ephemeral environment for " + request.name + "\n"
         )
-        (workspace_dir / "Pulumi.yaml").write_text(project_yaml, encoding="utf-8")
-        written.append("Pulumi.yaml")
+        _write("Pulumi.yaml", project_yaml)
 
         stack_yaml = (
             "config:\n"
             "  environmentName: " + request.name + "\n"
             "  ttlExpiration: unset\n"
         )
-        (workspace_dir / "Pulumi.dev.yaml").write_text(stack_yaml, encoding="utf-8")
-        written.append("Pulumi.dev.yaml")
+        _write("Pulumi.dev.yaml", stack_yaml)
 
         package_json = json.dumps(
             {
@@ -1610,8 +1814,7 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
             },
             indent=2,
         )
-        (workspace_dir / "package.json").write_text(package_json + "\n", encoding="utf-8")
-        written.append("package.json")
+        _write("package.json", package_json + "\n")
 
         tsconfig_json = json.dumps(
             {
@@ -1633,17 +1836,8 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
             },
             indent=2,
         )
-        (workspace_dir / "tsconfig.json").write_text(tsconfig_json + "\n", encoding="utf-8")
-        written.append("tsconfig.json")
-
-        (workspace_dir / "index.ts").write_text(
-            _pulumi_index(request.name, cloud), encoding="utf-8"
-        )
-        written.append("index.ts")
-
-        (workspace_dir / ".gitignore").write_text(
-            "node_modules/\nbin/\n*.tsbuildinfo\n", encoding="utf-8"
-        )
-        written.append(".gitignore")
+        _write("tsconfig.json", tsconfig_json + "\n")
+        _write("index.ts", _pulumi_index(request.name, cloud))
+        _write(".gitignore", "node_modules/\nbin/\n*.tsbuildinfo\n")
 
         return written

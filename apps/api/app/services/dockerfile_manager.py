@@ -263,7 +263,17 @@ def _commit_scaffold_bundle(
 
     target_branch = (branch or repo.default_branch or "main").strip()
     try:
-        ref = repo.get_git_ref(f"heads/{target_branch}")
+        try:
+            ref = repo.get_git_ref(f"heads/{target_branch}")
+        except GithubException as missing:
+            if getattr(missing, "status", None) != 404:
+                raise
+            default_branch = str(repo.default_branch or "main")
+            if target_branch == default_branch:
+                raise
+            base_ref = repo.get_git_ref(f"heads/{default_branch}")
+            repo.create_git_ref(f"refs/heads/{target_branch}", base_ref.object.sha)
+            ref = repo.get_git_ref(f"heads/{target_branch}")
         base_sha = ref.object.sha
         base_tree = repo.get_git_tree(base_sha)
         elements: list[InputGitTreeElement] = []
@@ -320,7 +330,17 @@ def _commit_dockerfile(
 
     target_branch = (branch or repo.default_branch or "main").strip()
     try:
-        ref = repo.get_git_ref(f"heads/{target_branch}")
+        try:
+            ref = repo.get_git_ref(f"heads/{target_branch}")
+        except GithubException as missing:
+            if getattr(missing, "status", None) != 404:
+                raise
+            default_branch = str(repo.default_branch or "main")
+            if target_branch == default_branch:
+                raise
+            base_ref = repo.get_git_ref(f"heads/{default_branch}")
+            repo.create_git_ref(f"refs/heads/{target_branch}", base_ref.object.sha)
+            ref = repo.get_git_ref(f"heads/{target_branch}")
         base_sha = ref.object.sha
         base_tree = repo.get_git_tree(base_sha)
         blob = repo.create_git_blob(content, "utf-8")

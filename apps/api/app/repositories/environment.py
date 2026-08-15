@@ -415,6 +415,22 @@ class EnvironmentRepository:
         )
         return list(result.scalars().all())
 
+    async def count_non_destroyed_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        exclude_environment_id: UUID | None = None,
+    ) -> int:
+        """Environments still linked to a workspace (not DESTROYED)."""
+        stmt = select(Environment).where(
+            Environment.workspace_id == workspace_id,
+            Environment.status != EnvironmentStatus.DESTROYED,
+        )
+        if exclude_environment_id is not None:
+            stmt = stmt.where(Environment.id != exclude_environment_id)
+        result = await self._session.execute(stmt)
+        return len(list(result.scalars().all()))
+
 
 class DeploymentLogRepository:
     def __init__(self, session: AsyncSession) -> None:

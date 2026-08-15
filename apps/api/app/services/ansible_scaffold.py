@@ -27,6 +27,16 @@ def write_ansible_scaffold(
     cfg = config
     if listen_port and listen_port != cfg.app_listen_port:
         cfg = cfg.model_copy(update={"app_listen_port": listen_port})
+    # Host firewall must allow the app listen port (GCP firewall alone is not enough).
+    ufw_ports = sorted(
+        {
+            int(p)
+            for p in (*cfg.ufw_allow_ports, 22, int(cfg.app_listen_port))
+            if 1 <= int(p) <= 65535
+        }
+    )
+    if ufw_ports != sorted(cfg.ufw_allow_ports):
+        cfg = cfg.model_copy(update={"ufw_allow_ports": ufw_ports})
 
     hosts = _parse_hosts(cfg.hosts)
     if not hosts:
@@ -72,6 +82,11 @@ def write_ansible_scaffold(
         "\n"
         "[ssh_connection]\n"
         "pipelining = True\n"
+        "retries = 3\n"
+        "timeout = 60\n"
+        "ssh_args = -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
+        "-o ServerAliveInterval=30 -o ServerAliveCountMax=10 "
+        "-o TCPKeepAlive=yes -o ConnectTimeout=20\n"
         "control_path = %(directory)s/%%h-%%r\n",
     )
 
@@ -375,6 +390,19 @@ def _write_role_app(write) -> None:
         "    owner: \"{{ deploy_user | default('root') }}\"\n"
         "    mode: preserve\n"
         "  when: sync_workspace | bool\n"
+        "  tags: [app]\n\n"
+        "- name: Ensure git is installed\n"
+        "  ansible.builtin.package:\n"
+        "    name: git\n"
+        "    state: present\n"
+        "  tags: [app, common]\n\n"
+        "- name: Ensure Node.js is present for PM2 stacks\n"
+        "  ansible.builtin.package:\n"
+        "    name:\n"
+        "      - nodejs\n"
+        "      - npm\n"
+        "    state: present\n"
+        "  when: app_deploy_mode == 'pm2'\n"
         "  tags: [app]\n\n"
         "- name: Build application image\n"
         "  community.docker.docker_image:\n"

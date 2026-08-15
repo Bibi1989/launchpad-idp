@@ -90,6 +90,72 @@ async def github_webhook(
     )
 
 
+@router.post("/github-actions-cd", response_model=WebhookAcceptResponse)
+async def github_actions_cd_notify(
+    request: Request,
+    service: GitHubWebhookService = Depends(get_webhook_service),
+    x_launchpad_cd_secret: str | None = Header(
+        default=None, alias="X-Launchpad-Cd-Secret"
+    ),
+) -> WebhookAcceptResponse:
+    """Option B: GitHub Actions notifies Launchpad to rebuild matching envs."""
+    settings = get_settings()
+    secret = (settings.webhook_secret or "").strip()
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "webhook_not_configured",
+                "message": "WEBHOOK_SECRET is not configured on the API",
+            },
+        )
+    provided = (x_launchpad_cd_secret or "").strip()
+    if not provided or not hmac_compare(provided, secret):
+        logger.warning(
+            "github_actions_cd_secret_rejected",
+            has_secret=bool(provided),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "invalid_cd_secret",
+                "message": "Invalid X-Launchpad-Cd-Secret",
+            },
+        )
+
+    try:
+        payload: dict[str, Any] = json.loads((await request.body()).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "invalid_webhook_payload",
+                "message": "Request body must be valid JSON",
+            },
+        ) from exc
+
+    correlation_id = getattr(request.state, "correlation_id", "github-actions-cd")
+    result = await service.process_actions_cd_notify(
+        repository_full_name=str(payload.get("repository_full_name") or ""),
+        branch=str(payload.get("branch") or ""),
+        commit_sha=str(payload.get("commit_sha") or ""),
+        workspace_id=str(payload.get("workspace_id") or "") or None,
+        correlation_id=correlation_id,
+    )
+    return WebhookAcceptResponse(
+        accepted=result.accepted,
+        event=result.event,
+        matched_environments=[str(env_id) for env_id in result.matched_environment_ids],
+        message=result.message,
+    )
+
+
+def hmac_compare(provided: str, expected: str) -> bool:
+    import hmac
+
+    return hmac.compare_digest(provided, expected)
+
+
 @router.post("/gitlab", response_model=WebhookAcceptResponse)
 async def gitlab_webhook(
     request: Request,

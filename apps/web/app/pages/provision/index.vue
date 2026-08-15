@@ -7,6 +7,8 @@ import {
   defaultAnsibleConfig,
   defaultWorkloadDependencies,
   workloadDependenciesSchema,
+  runningInstanceSchema,
+  ansibleConfigSchema,
   emptyCloudCredentials,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
@@ -32,6 +34,8 @@ import type {
   WorkspaceWizardConfig,
   WorkloadDependenciesConfig,
 } from '~/types/provisioning'
+import type { PendingWorkspaceRepoLink } from '~/types/workspaceRepo'
+import type { UserCloudCredentialsStatus } from '~/types/userCredentials'
 import { defaultKubernetesWorkloadOptions } from '~/utils/cloudValidation'
 import {
   applyCostOptimizationToWorkloadOptions,
@@ -84,6 +88,8 @@ const {
   writeWorkspaceFile,
   deleteWorkspacePath,
   analyzeWorkspaceFile,
+  setLinkedAppRepo,
+  setWorkspaceGitSource,
 } = useProvisioning()
 const { t } = useI18n()
 const route = useRoute()
@@ -99,7 +105,10 @@ const existingWorkspaces = ref<WorkspaceListItem[]>([])
 const selectedWorkspaceId = ref<string>(NEW_WORKSPACE)
 /** Workspace created in this browser session; retries update it instead of creating again. */
 const sessionCreatedWorkspaceId = ref<string | null>(null)
+/** Repo link chosen before workspace exists; applied after create/update. */
+const pendingRepoLink = ref<PendingWorkspaceRepoLink | null>(null)
 const hasStoredCredentials = ref(false)
+const credentialStatus = ref<UserCloudCredentialsStatus | null>(null)
 const loadingConfig = ref(false)
 
 const infraGeneration = ref<InfraGenerationConfig>(defaultInfraGenerationConfig({ isLocal: true }))
@@ -252,6 +261,11 @@ const githubResult = ref<GitHubRepoResult | null>(null)
 const githubApp = ref<GitHubAppStatus | null>(null)
 
 const isNewWorkspace = computed(() => selectedWorkspaceId.value === NEW_WORKSPACE)
+const repoWorkspaceId = computed(() => {
+  if (sessionCreatedWorkspaceId.value) return sessionCreatedWorkspaceId.value
+  if (!isNewWorkspace.value) return selectedWorkspaceId.value
+  return null
+})
 const selectedExisting = computed(() =>
   existingWorkspaces.value.find((ws) => ws.id === selectedWorkspaceId.value) ?? null,
 )
@@ -418,6 +432,7 @@ watch(
     if (provider === 'local') {
       infraGeneration.value = defaultInfraGenerationConfig({ isLocal: true })
       form.github.set_cloud_secrets = false
+      hasStoredCredentials.value = false
       return
     }
     if (!infraGeneration.value.provision.enabled && !infraGeneration.value.kubernetes.enabled) {
@@ -428,6 +443,7 @@ watch(
         provision: { ...infraGeneration.value.provision, enabled: true },
       }
     }
+    void refreshCredentialDetection()
   },
 )
 
@@ -462,13 +478,7 @@ onMounted(async () => {
     }
   }
   try {
-    const credStatus = await getCloudCredentialStatus()
-    applyPreferredCloudRegions(credStatus, {
-      gcp: form.gcp,
-      aws: form.aws,
-      azure: form.azure,
-      running_instance: form.running_instance,
-    }, { overwrite: true })
+    await refreshCredentialDetection({ overwriteRegions: true })
   } catch {
     // Vault preferences are optional
   }
@@ -487,6 +497,37 @@ function applyGithubDefaults(status: GitHubAppStatus) {
     form.github.installation_id = defaultId
   } else if (status.installations.length === 1 && !form.github.installation_id) {
     form.github.installation_id = status.installations[0]!.id
+  }
+}
+
+function providerHasStoredCredentials(provider: CloudProvider): boolean {
+  const status = credentialStatus.value
+  if (!status || provider === 'local') return false
+  if (provider === 'gcp') return Boolean(status.has_gcp)
+  if (provider === 'aws') return Boolean(status.has_aws)
+  if (provider === 'azure') return Boolean(status.has_azure)
+  if (provider === 'cloudflare') return Boolean(status.has_cloudflare)
+  return false
+}
+
+async function refreshCredentialDetection(opts?: { overwriteRegions?: boolean }) {
+  try {
+    const status = await getCloudCredentialStatus()
+    credentialStatus.value = status
+    applyPreferredCloudRegions(
+      status,
+      {
+        gcp: form.gcp,
+        aws: form.aws,
+        azure: form.azure,
+        running_instance: form.running_instance,
+      },
+      { overwrite: opts?.overwriteRegions === true },
+    )
+    hasStoredCredentials.value = providerHasStoredCredentials(form.provider)
+  } catch {
+    credentialStatus.value = null
+    if (isNewWorkspace.value) hasStoredCredentials.value = false
   }
 }
 
@@ -736,6 +777,7 @@ watch(selectedWorkspaceId, async (id) => {
     workspaceConfigLoadSeq += 1
     loadingConfig.value = false
     sessionCreatedWorkspaceId.value = null
+    pendingRepoLink.value = null
     hasStoredCredentials.value = false
     promoteFromExisting.value = false
     promotedWorkspaceName.value = ''
@@ -799,18 +841,22 @@ function buildWizardPayload(): ProvisioningWizardInput {
     credentials: form.credentials,
     run_init: form.run_init,
     runtime_mode: form.runtime_mode,
-    running_instance: form.running_instance,
+    running_instance: runningInstanceSchema.parse(form.running_instance),
     kubernetes_packaging: form.kubernetes_packaging,
     kubernetes_options: syncedOptions,
     cost_optimization: form.cost_optimization,
     container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
     dependencies: workloadDependenciesSchema.parse(form.dependencies),
-    ansible: {
+    ansible: ansibleConfigSchema.parse({
       ...form.ansible,
       enabled:
         form.ansible.enabled
         || form.iac_engine === 'ansible'
-        || infraGeneration.value.provision.engine === 'ansible',
+        || infraGeneration.value.provision.engine === 'ansible'
+        || (
+          form.runtime_mode === 'running_instance'
+          && form.running_instance.kind === 'vm'
+        ),
       hosts:
         form.ansible.hosts
         || form.running_instance.host
@@ -819,8 +865,9 @@ function buildWizardPayload(): ProvisioningWizardInput {
       ssh_port: form.running_instance.ssh_port || form.ansible.ssh_port,
       ssh_private_key_path:
         form.running_instance.ssh_key_path || form.ansible.ssh_private_key_path,
-      app_listen_port: form.running_instance.listen_port || form.ansible.app_listen_port,
-    },
+      app_listen_port: form.running_instance.listen_port || form.ansible.app_listen_port || 8080,
+      reverse_proxy: form.ansible.reverse_proxy || 'none',
+    }),
   }
   if (form.provider === 'local') {
     const isK8s = form.runtime_mode === 'kubernetes'
@@ -1060,7 +1107,14 @@ async function scaffoldCiCdFiles(workspaceId: string) {
 }
 
 async function scaffoldAnsibleFiles(workspaceId: string) {
-  if (!form.ansible.enabled && form.iac_engine !== 'ansible') return
+  const ansibleWanted =
+    form.ansible.enabled
+    || form.iac_engine === 'ansible'
+    || (
+      form.runtime_mode === 'running_instance'
+      && form.running_instance.kind === 'vm'
+    )
+  if (!ansibleWanted) return
   const targets =
     ansibleConfiguratorRef.value?.buildWritableFiles()
     ?? buildAnsibleScaffold(form.name || 'launchpad-workspace', {
@@ -1131,6 +1185,29 @@ async function recoverCreatedWorkspaceByName(name: string): Promise<string | nul
     return match.id
   } catch {
     return null
+  }
+}
+
+async function applyPendingRepoLink(workspaceId: string) {
+  const pending = pendingRepoLink.value
+  if (!pending) return
+  try {
+    if (pending.kind === 'github') {
+      await setLinkedAppRepo(workspaceId, {
+        installation_id: pending.installation_id,
+        full_name: pending.full_name,
+        git_branch: pending.git_branch,
+        cd_mode: pending.cd_mode,
+      })
+    } else {
+      await setWorkspaceGitSource(workspaceId, {
+        git_repo_url: pending.git_repo_url,
+        git_branch: pending.git_branch,
+      })
+    }
+    pendingRepoLink.value = null
+  } catch {
+    // Keep pending so the user can retry from Services after create.
   }
 }
 
@@ -1237,6 +1314,7 @@ async function onGenerate() {
     if (gitHost.value === 'gitlab' && shouldPushGitlab()) {
       await pushGitlabBootstrap(workspaceId)
     }
+    await applyPendingRepoLink(workspaceId)
     hasStoredCredentials.value = true
     clearCredentials()
 
@@ -1457,30 +1535,6 @@ async function onPrimaryAction() {
                 </NuxtLink>
               </p>
             </label>
-            <label class="block space-y-2">
-              <span class="lp-label">{{ t('provision.iacEngine') }}</span>
-              <select
-                v-model="form.iac_engine"
-                class="lp-input"
-                :disabled="loadingConfig || (isLocalProvider && form.runtime_mode === 'kubernetes')"
-              >
-                <option value="terraform">Terraform</option>
-                <option value="opentofu">OpenTofu</option>
-                <option value="pulumi">Pulumi</option>
-              </select>
-              <p
-                v-if="isLocalProvider && form.runtime_mode === 'kubernetes'"
-                class="text-xs text-[var(--lp-muted)]"
-              >
-                {{ t('provision.iacEngineLocalHint') }}
-              </p>
-              <p
-                v-else-if="isLocalProvider"
-                class="text-xs text-[var(--lp-muted)]"
-              >
-                {{ t('provision.iacEngineLocalRuntimeHint') }}
-              </p>
-            </label>
           </div>
 
           <div
@@ -1551,6 +1605,31 @@ async function onPrimaryAction() {
             </button>
           </div>
 
+          <label class="block space-y-2">
+              <span class="lp-label">{{ t('provision.iacEngine') }}</span>
+              <select
+                v-model="form.iac_engine"
+                class="lp-input"
+                :disabled="loadingConfig || (isLocalProvider && form.runtime_mode === 'kubernetes')"
+              >
+                <option value="terraform">Terraform</option>
+                <option value="opentofu">OpenTofu</option>
+                <option value="pulumi">Pulumi</option>
+              </select>
+              <p
+                v-if="isLocalProvider && form.runtime_mode === 'kubernetes'"
+                class="text-xs text-[var(--lp-muted)]"
+              >
+                {{ t('provision.iacEngineLocalHint') }}
+              </p>
+              <p
+                v-else-if="isLocalProvider"
+                class="text-xs text-[var(--lp-muted)]"
+              >
+                {{ t('provision.iacEngineLocalRuntimeHint') }}
+              </p>
+            </label>
+
           <WorkspaceRuntimeModePicker
             v-model:mode="form.runtime_mode"
             v-model:running-instance="form.running_instance"
@@ -1564,9 +1643,23 @@ async function onPrimaryAction() {
         <div v-if="currentStep === 2" class="space-y-4">
           <div
             v-if="hasStoredCredentials && !isLocalProvider"
-            class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)]/50 p-4 text-sm text-[var(--lp-muted)]"
+            class="rounded-xl border border-[var(--lp-accent)]/30 bg-[var(--lp-accent)]/5 p-4 text-sm text-[var(--lp-muted)]"
           >
-            {{ t('provision.credentialsStored') }}
+            <p class="font-medium text-[var(--lp-text)]">
+              {{ t('provision.credentialsDetectedTitle') }}
+            </p>
+            <p class="mt-1">
+              {{ t('provision.credentialsStored') }}
+            </p>
+            <p
+              v-if="credentialStatus && form.provider === 'gcp' && credentialStatus.gcp_label"
+              class="mt-1 font-mono text-xs text-[var(--lp-accent)]"
+            >
+              {{ credentialStatus.gcp_label }}
+              <template v-if="credentialStatus.gcp_project_id">
+                · {{ credentialStatus.gcp_project_id }}
+              </template>
+            </p>
           </div>
 
           <template v-if="form.provider === 'gcp'">
@@ -1711,13 +1804,26 @@ async function onPrimaryAction() {
               :kubernetes-disabled="!hasKubernetesRuntime"
               :disabled="loadingConfig"
             />
+            <ContainerScaffoldCard
+              v-if="form.container_scaffold.enabled"
+              v-model="form.container_scaffold"
+              v-model:pending-repo-link="pendingRepoLink"
+              class="mt-4"
+              :workspace-id="repoWorkspaceId"
+              :launchpad-project-id="launchpadProjectId"
+              :disabled="loadingConfig"
+            />
+            <AnsibleConfigurator
+              v-if="form.runtime_mode === 'running_instance' && form.running_instance.kind === 'vm'"
+              ref="ansibleConfiguratorRef"
+              v-model="form.ansible"
+              class="mt-4"
+              :cloud-provider="form.provider"
+              :running-instance="form.running_instance"
+              :workspace-name="form.name || 'launchpad-workspace'"
+              :disabled="loadingConfig"
+            />
           </div>
-
-          <ContainerScaffoldCard
-            v-if="form.container_scaffold.enabled && !isLocalProvider"
-            v-model="form.container_scaffold"
-            :disabled="loadingConfig"
-          />
 
           <template v-if="isLocalProvider">
             <template v-if="form.runtime_mode === 'kubernetes'">
@@ -1755,7 +1861,10 @@ async function onPrimaryAction() {
                 <ContainerScaffoldCard
                   v-if="form.container_scaffold.enabled"
                   v-model="form.container_scaffold"
+                  v-model:pending-repo-link="pendingRepoLink"
                   class="mt-4"
+                  :workspace-id="repoWorkspaceId"
+                  :launchpad-project-id="launchpadProjectId"
                   :disabled="loadingConfig"
                 />
                 <KubernetesPackagingPicker
@@ -1795,8 +1904,12 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
               <ContainerScaffoldCard
+                v-if="form.container_scaffold.enabled"
                 v-model="form.container_scaffold"
+                v-model:pending-repo-link="pendingRepoLink"
                 class="mt-4"
+                :workspace-id="repoWorkspaceId"
+                :launchpad-project-id="launchpadProjectId"
                 :disabled="loadingConfig"
               />
               <AnsibleConfigurator
@@ -1832,7 +1945,10 @@ async function onPrimaryAction() {
               <ContainerScaffoldCard
                 v-if="form.container_scaffold.enabled"
                 v-model="form.container_scaffold"
+                v-model:pending-repo-link="pendingRepoLink"
                 class="mt-4"
+                :workspace-id="repoWorkspaceId"
+                :launchpad-project-id="launchpadProjectId"
                 :disabled="loadingConfig"
               />
               <AnsibleConfigurator
@@ -2276,14 +2392,15 @@ async function onPrimaryAction() {
       <!-- Footer -->
       <div class="flex items-center justify-between border-t border-[var(--lp-line)] pt-6">
         <button
+          v-if="currentStep > 1"
           type="button"
           class="lp-btn-ghost"
-          :class="{ invisible: currentStep === 1 }"
           @click="prevStep"
         >
           <span class="material-symbols-outlined text-base">arrow_back</span>
           {{ t('common.back') }}
         </button>
+        <div v-else />
         <button
           type="button"
           class="lp-btn-primary px-8"

@@ -186,7 +186,7 @@ async function onDestroy() {
         || env?.status === 'TEARDOWN_PENDING',
     })
     void loadOrgCosts()
-    toast.success(t('environments.toasts.destroyed'), `${name} is being destroyed.`)
+    toast.success(t('environments.toasts.destroyed'), t('environments.toasts.deletingBanner'))
   } catch (err) {
     toast.error(
       t('environments.toasts.destroyFailed'),

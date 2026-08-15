@@ -131,6 +131,25 @@ export function normalizeArtifactsForRuntimeMode(input: {
   }
 
   if (runtimeMode === 'docker_compose') {
+    const linkOrImportOnly =
+      !(input.containerScaffold.services?.length)
+      && input.containerScaffold.generate_dockerfile === false
+      && input.containerScaffold.generate_docker_compose === false
+    if (linkOrImportOnly) {
+      return {
+        artifactMode: 'iac_only',
+        kubernetesPackaging: 'none',
+        containerScaffold: {
+          ...input.containerScaffold,
+          enabled: true,
+          services: [],
+          frameworks: [],
+          generate_dockerfile: false,
+          generate_docker_compose: false,
+        },
+        runningInstance,
+      }
+    }
     const existing = input.containerScaffold.services ?? []
     const services = existing.length > 0 ? existing : defaultContainerServices()
     const primary = services[0]
@@ -161,14 +180,28 @@ export function normalizeArtifactsForRuntimeMode(input: {
     if (provider === 'local' && runningInstance.kind === 'serverless') {
       runningInstance = { ...runningInstance, kind: 'local_machine' }
     }
-    const scaffold = input.containerScaffold.enabled
-      ? input.containerScaffold
-      : {
+    const linkOrImportOnly =
+      input.containerScaffold.enabled
+      && !(input.containerScaffold.services?.length)
+      && input.containerScaffold.generate_dockerfile === false
+      && input.containerScaffold.generate_docker_compose === false
+    const scaffold = linkOrImportOnly
+      ? {
           ...input.containerScaffold,
           enabled: true,
-          generate_dockerfile: true,
+          services: [],
+          frameworks: [],
+          generate_dockerfile: false,
           generate_docker_compose: false,
         }
+      : input.containerScaffold.enabled
+        ? input.containerScaffold
+        : {
+            ...input.containerScaffold,
+            enabled: true,
+            generate_dockerfile: true,
+            generate_docker_compose: false,
+          }
     // Keep runningInstance.listen_port as the user-chosen host publish port.
     // Container port is resolved from Dockerfile EXPOSE / service scaffold at attach.
     return {

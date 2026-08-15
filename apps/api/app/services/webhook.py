@@ -530,6 +530,139 @@ class GitHubWebhookService:
             message=f"Queued rebuild for {len(matched_ids)} environment(s)",
         )
 
+    async def process_actions_cd_notify(
+        self,
+        *,
+        repository_full_name: str,
+        branch: str,
+        commit_sha: str,
+        correlation_id: str,
+        workspace_id: str | None = None,
+    ) -> WebhookProcessResult:
+        """Rebuild matching envs from a GitHub Actions CD notify (Option B)."""
+        from app.services.git_urls import short_commit_sha
+        from app.workers.tasks import enqueue_rebuild_environment
+
+        full_name = repository_full_name.strip()
+        branch_name = branch.strip()
+        short = short_commit_sha(commit_sha) or commit_sha.strip()[:7]
+        if not full_name or not branch_name or not short:
+            return WebhookProcessResult(
+                accepted=True,
+                event="github_actions_cd",
+                matched_environment_ids=[],
+                message="Missing repository, branch, or commit",
+            )
+
+        matches = await self._environments.list_active_for_repo_branch(
+            repo_full_name=full_name,
+            branch=branch_name,
+        )
+        if workspace_id and workspace_id.strip():
+            try:
+                ws_uuid = UUID(workspace_id.strip())
+            except ValueError:
+                ws_uuid = None
+            if ws_uuid is not None:
+                scoped = [env for env in matches if env.workspace_id == ws_uuid]
+                if scoped:
+                    matches = scoped
+
+        if not matches:
+            logger.info(
+                "webhook_actions_cd_no_match",
+                repo=full_name,
+                branch=branch_name,
+                commit=short,
+                workspace_id=workspace_id,
+            )
+            return WebhookProcessResult(
+                accepted=True,
+                event="github_actions_cd",
+                matched_environment_ids=[],
+                message="No active environments matched repository/branch",
+            )
+
+        matched_ids: list[UUID] = []
+        audit = AuditService(self._session)
+        for candidate in matches:
+            if await is_state_locked(candidate.id, scope="environment"):
+                logger.warning(
+                    "webhook_actions_cd_skipped_lock_held",
+                    environment_id=str(candidate.id),
+                    message=PROVISIONING_IN_PROGRESS_MESSAGE,
+                )
+                await self._logs.create(
+                    environment_id=candidate.id,
+                    message=PROVISIONING_IN_PROGRESS_MESSAGE,
+                    log_level=LogLevel.WARN,
+                )
+                await audit.record(
+                    action=AuditAction.REBUILD_INITIATED,
+                    actor_id=AuditService.webhook_actor("github-actions-cd"),
+                    status=AuditStatus.REJECTED,
+                    environment_id=candidate.id,
+                    workspace_id=candidate.workspace_id,
+                    commit_sha=short,
+                    detail=PROVISIONING_IN_PROGRESS_MESSAGE,
+                )
+                await self._session.commit()
+                continue
+
+            environment = await self._environments.mark_rebuild(
+                candidate.id,
+                commit_sha=short,
+            )
+            if environment is None:
+                continue
+
+            await self._logs.create(
+                environment_id=environment.id,
+                message=(
+                    f"GitHub Actions CD notify: rebuild queued for "
+                    f"{full_name}@{branch_name} ({short})"
+                ),
+                log_level=LogLevel.INFO,
+            )
+            await audit.record(
+                action=AuditAction.REBUILD_INITIATED,
+                actor_id=AuditService.webhook_actor("github-actions-cd"),
+                status=AuditStatus.PENDING,
+                environment_id=environment.id,
+                workspace_id=environment.workspace_id,
+                commit_sha=short,
+            )
+            await self._session.commit()
+
+            await publish_env_event(
+                environment.id,
+                event_type="STATUS_CHANGE",
+                status=EnvironmentStatus.PROVISIONING.value,
+                commit_sha=short,
+                message="Rebuild queued from GitHub Actions CD",
+            )
+            enqueue_rebuild_environment(
+                environment_id=str(environment.id),
+                commit_sha=short,
+                correlation_id=correlation_id,
+            )
+            matched_ids.append(environment.id)
+            logger.info(
+                "webhook_actions_cd_enqueued",
+                environment_id=str(environment.id),
+                repo=full_name,
+                branch=branch_name,
+                commit=short,
+                correlation_id=correlation_id,
+            )
+
+        return WebhookProcessResult(
+            accepted=True,
+            event="github_actions_cd",
+            matched_environment_ids=matched_ids,
+            message=f"Queued rebuild for {len(matched_ids)} environment(s)",
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class GitLabPushEventDetails:

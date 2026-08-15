@@ -14,8 +14,10 @@
   - `GithubInstallationPicker` for personal vs organization App installs
   - `GithubRepoPicker` for searchable repository selection
   - `GitlabRepoPicker` for searchable GitLab project selection
+  - `GitBranchPicker` for branch dropdown (optional create-on-push for GitHub)
   - `GithubConnectCard` for connection/status surfaces
   - `~/utils/githubAccount` for account-type labels and clone URLs
 - Backend: reuse `app/services/` and `pkg/` helpers (tokens, installs, clone, detect). Do not reimplement the same path in a second router or worker.
 - If two call sites need the same UI or logic, extract a shared module before shipping a third copy.
-- Follow `.cursor/rules/` (especially `idp-core`, `reusable-code`, `nuxt-frontend`, `fastapi-backend`, `research`).
+- Follow `.cursor/rules/` (especially `idp-core`, `reusable-code`, `nuxt-frontend`, `fastapi-backend`, `research`, `typecheck-lint`).
+- Before finishing: run lints/type diagnostics on edited files and fix required-field TypeScript errors (for example wizard `dependencies`). Do not leave known red squiggles from your change set.

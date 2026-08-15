@@ -539,3 +539,58 @@ def search_all_repositories(
     offset = max(0, (page - 1) * per_page)
     return all_repos[offset : offset + per_page]
 
+
+@dataclass(frozen=True, slots=True)
+class GitHubBranchSummary:
+    name: str
+    protected: bool
+    is_default: bool
+
+
+def list_repository_branches(
+    *,
+    installation_id: int,
+    full_name: str,
+    settings: Settings | None = None,
+    limit: int = 100,
+) -> list[GitHubBranchSummary]:
+    """List branches for a repository visible to a GitHub App installation."""
+    repo_name = full_name.strip()
+    if "/" not in repo_name:
+        raise GitHubAppAuthError("full_name must be owner/repo")
+    client, resolved_id, _, _ = get_installation_client(
+        installation_id=installation_id,
+        settings=settings,
+    )
+    capped = max(1, min(limit, 200))
+    try:
+        repo = client.get_repo(repo_name)
+        default_branch = str(getattr(repo, "default_branch", None) or "main")
+        branches: list[GitHubBranchSummary] = []
+        for branch in repo.get_branches():
+            name = str(getattr(branch, "name", "") or "")
+            if not name:
+                continue
+            branches.append(
+                GitHubBranchSummary(
+                    name=name,
+                    protected=bool(getattr(branch, "protected", False)),
+                    is_default=name == default_branch,
+                )
+            )
+            if len(branches) >= capped:
+                break
+    except GithubException as exc:
+        logger.error(
+            "github_list_branches_failed",
+            installation_id=resolved_id,
+            full_name=repo_name,
+            status=exc.status,
+        )
+        raise GitHubAppAuthError(
+            f"Failed to list branches for {repo_name}"
+        ) from exc
+
+    branches.sort(key=lambda item: (not item.is_default, item.name.lower()))
+    return branches
+

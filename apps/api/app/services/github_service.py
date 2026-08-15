@@ -25,6 +25,7 @@ _FALLBACK_WORKFLOW_PATHS = (
     ".github/workflows/launchpad-deploy.yml",
     ".github/workflows/launchpad-infra.yml",
 )
+_APP_CD_WORKFLOW_PATH = ".github/workflows/launchpad-app-cd.yml"
 
 def _workspace_has_dockerfile(files: dict[str, str]) -> bool:
     for path in files:
@@ -555,6 +556,78 @@ class GitHubProvisioningService:
             created=False,
         )
 
+    def ensure_app_cd_workflow(
+        self,
+        *,
+        installation_id: int,
+        full_name: str,
+        branch: str,
+        control_plane_url: str,
+        cd_secret: str | None,
+        workspace_id: str,
+    ) -> str:
+        """Commit launchpad-app-cd.yml and optional CD secrets into the app repo."""
+        client, resolved_installation_id, _login, _account_type = get_installation_client(
+            installation_id=installation_id,
+        )
+        try:
+            repo = client.get_repo(full_name)
+        except GithubException as exc:
+            raise ValueError(
+                f"Unable to open repository {full_name}: "
+                f"{self._friendly_github_error(exc)}"
+            ) from exc
+
+        workflow = render_app_cd_workflow(
+            branch=branch,
+            control_plane_url=control_plane_url,
+        )
+        try:
+            self._commit_files(
+                repo,
+                {_APP_CD_WORKFLOW_PATH: workflow},
+                message="chore: add Launchpad app CD workflow",
+            )
+        except (GithubException, AssertionError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Failed to write Launchpad app CD workflow: "
+                f"{self._friendly_github_error(exc) if isinstance(exc, GithubException) else str(exc)}"
+            ) from exc
+
+        if cd_secret:
+            try:
+                repo.create_secret("LAUNCHPAD_CD_SECRET", cd_secret)
+                repo.create_secret("LAUNCHPAD_API_URL", control_plane_url.rstrip("/"))
+            except GithubException as exc:
+                logger.warning(
+                    "github_app_cd_secret_set_failed",
+                    full_name=full_name,
+                    status=exc.status,
+                )
+                raise ValueError(
+                    "Workflow written but failed to set LAUNCHPAD_CD_SECRET / "
+                    f"LAUNCHPAD_API_URL: {self._friendly_github_error(exc)}"
+                ) from exc
+
+        try:
+            # Best-effort workspace id for Actions (GitHub Variables API via PyGithub).
+            repo.create_variable("LAUNCHPAD_WORKSPACE_ID", workspace_id)
+        except Exception as exc:  # noqa: BLE001 - variable API optional on older PyGithub
+            logger.info(
+                "github_app_cd_variable_skipped",
+                full_name=full_name,
+                error=str(exc),
+            )
+
+        logger.info(
+            "github_app_cd_workflow_ensured",
+            full_name=full_name,
+            branch=branch,
+            workflow_path=_APP_CD_WORKFLOW_PATH,
+            installation_id=resolved_installation_id,
+        )
+        return _APP_CD_WORKFLOW_PATH
+
     @staticmethod
     def _friendly_github_error(
         exc: GithubException,
@@ -628,6 +701,7 @@ on:
     branches: [main]
     paths:
       - "infra/**"
+      - "Makefile"
       - "{workflow_path}"
   workflow_dispatch:
 
@@ -654,6 +728,19 @@ jobs:
       - name: OpenTofu Apply
         if: github.ref == 'refs/heads/main'
         run: tofu apply -auto-approve -input=false
+  configure:
+    needs: opentofu
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure hosts (VM playbooks)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ansible
+          if [ -f infra/ansible/playbooks/site.yml ]; then make configure; fi
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
 """
 
 
@@ -667,6 +754,7 @@ on:
     branches: [main]
     paths:
       - "infra/**"
+      - "Makefile"
       - "{workflow_path}"
   workflow_dispatch:
 
@@ -693,6 +781,32 @@ jobs:
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main'
         run: terraform apply -auto-approve -input=false
+      - name: Capture outputs
+        if: github.ref == 'refs/heads/main'
+        id: tfouts
+        run: |
+          echo "json<<EOF" >> "$GITHUB_OUTPUT"
+          terraform output -json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+  configure:
+    needs: terraform
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Ansible
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ansible
+      - name: Configure hosts (VM playbooks)
+        run: |
+          if [ -f infra/ansible/playbooks/site.yml ]; then
+            make configure
+          else
+            echo "No Ansible playbook - serverless/k8s-only workspace"
+          fi
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
 """
 
 
@@ -795,3 +909,37 @@ def _readme(
         f"- Engine: `{engine.value}`\n"
         f"{workflow_line}"
     )
+
+
+def render_app_cd_workflow(*, branch: str, control_plane_url: str) -> str:
+    """GitHub Actions workflow that notifies Launchpad to rebuild cloud envs."""
+    api = control_plane_url.rstrip("/")
+    safe_branch = branch.replace('"', "")
+    # Double braces become single braces in the Actions file (${{ ... }}).
+    return f"""name: Launchpad app CD
+on:
+  push:
+    branches: ["{safe_branch}"]
+  workflow_dispatch:
+
+jobs:
+  notify-launchpad:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Launchpad to rebuild cloud environments
+        env:
+          LAUNCHPAD_API_URL: ${{{{ secrets.LAUNCHPAD_API_URL || '{api}' }}}}
+          LAUNCHPAD_CD_SECRET: ${{{{ secrets.LAUNCHPAD_CD_SECRET }}}}
+        run: |
+          set -euo pipefail
+          if [ -z "${{LAUNCHPAD_CD_SECRET:-}}" ]; then
+            echo "LAUNCHPAD_CD_SECRET is not set."
+            echo "Set it to the same value as Launchpad WEBHOOK_SECRET,"
+            echo "or use CD mode webhook (Option A) instead."
+            exit 1
+          fi
+          curl -fsS -X POST "$LAUNCHPAD_API_URL/api/v1/webhooks/github-actions-cd" \\
+            -H "Content-Type: application/json" \\
+            -H "X-Launchpad-Cd-Secret: $LAUNCHPAD_CD_SECRET" \\
+            -d "{{\\"repository_full_name\\":\\"${{{{ github.repository }}}}\\",\\"branch\\":\\"${{{{ github.ref_name }}}}\\",\\"commit_sha\\":\\"${{{{ github.sha }}}}\\",\\"workspace_id\\":\\"${{{{ vars.LAUNCHPAD_WORKSPACE_ID }}}}"}}"
+"""

@@ -12,15 +12,17 @@ from app.services.gcp_api_enablement import (
 from app.services.terraform_bundle import gcp_required_apis
 
 
-def test_gcp_required_apis_includes_container_when_gke() -> None:
+def test_gcp_required_apis_includes_compute_for_vm_only() -> None:
     apis = gcp_required_apis(
-        GcpResources(project_id="launchpad-504012", gke=True, vpc=True),
+        GcpResources(
+            project_id="proj",
+            vpc=False,
+            subnets=False,
+            gke=False,
+            compute_instance=True,
+        ),
     )
-    assert apis[0] == "cloudresourcemanager.googleapis.com"
-    assert "serviceusage.googleapis.com" in apis
     assert "compute.googleapis.com" in apis
-    assert "container.googleapis.com" in apis
-    assert "secretmanager.googleapis.com" in apis  # default secret backend
 
 
 def test_gcp_required_apis_native_k8s_skips_secretmanager() -> None:

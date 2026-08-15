@@ -103,12 +103,11 @@ const GCP_TARGETS: InstanceComputeTarget[] = [
   {
     id: 'gcp_vm_ssh',
     kind: 'vm',
-    resourceKey: null,
+    resourceKey: 'compute_instance',
     runsContainerImage: true,
     icon: 'dns',
   },
 ]
-
 const AWS_TARGETS: InstanceComputeTarget[] = [
   {
     id: 'aws_app_runner',

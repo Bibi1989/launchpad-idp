@@ -1,0 +1,16 @@
+---
+description: Always verify TypeScript and linter diagnostics before finishing code changes
+alwaysApply: true
+---
+
+# Typecheck and Lint Before Finish
+
+Before marking implementation work complete (and before offering a commit message):
+
+1. Run IDE diagnostics (`ReadLints`) on every file you created or edited in the session.
+2. Fix TypeScript errors and lint issues you introduced. Do not leave known red squiggles in touched files.
+3. For backend Python changes, run the relevant `pytest` targets when practical.
+4. For frontend type contract changes (props, Zod schemas, `ProvisioningWizardInput`, etc.), ensure return objects and reactive form state include every **required** field (for example `dependencies`, `image_source`, `image_scan`). Prefer shared defaults (`defaultWorkloadDependencies`, `defaultKubernetesWorkloadOptions`) over hand-rolled partial objects.
+5. If you cannot run a check (permissions, missing tooling), say so explicitly in the final reply and list what remains unverified.
+
+Do not claim "done" while edited files still have unresolved type or lint errors from this change set.

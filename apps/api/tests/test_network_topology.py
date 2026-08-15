@@ -17,6 +17,8 @@ def test_gcp_simple_topology_single_subnet() -> None:
     )
     assert 'google_compute_subnetwork" "subnet"' in hcl
     assert "google_compute_router_nat" not in hcl
+    # create_before_destroy + same name causes 409 on retry after import.
+    assert "create_before_destroy" not in hcl
 
 
 def test_gcp_standard_topology_public_private_nat() -> None:

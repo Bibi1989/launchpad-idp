@@ -14,8 +14,8 @@ alwaysApply: false
 - Validation: Zod for forms and API payloads.
 - Real-time: prefer SSE or WebSockets for deployment logs; always remove listeners in `onUnmounted()`.
 - **Reuse first**: before new UI, search `components/`, `composables/`, `utils/`. Prefer composing existing pieces over duplicating markup or fetch logic.
-- **GitHub selection**: always use `GithubInstallationPicker` + `GithubRepoPicker` (and `~/utils/githubAccount`) for account/repo pickers. Do not rebuild `<select>` lists for installs or repos.
-- **GitLab selection**: always use `GitlabRepoPicker` for project pickers. Do not rebuild plain `<select>` lists for projects.
+- **GitHub selection**: always use `GithubInstallationPicker` + `GithubRepoPicker` + `GitBranchPicker` (and `~/utils/githubAccount`) for account/repo/branch pickers. Do not rebuild plain `<select>` lists for installs, repos, or branches.
+- **GitLab selection**: always use `GitlabRepoPicker` + `GitBranchPicker` for project/branch pickers. Do not rebuild plain `<select>` lists for projects or branches.
 
 ```typescript
 // ❌ BAD - listener leak + any

@@ -79,7 +79,10 @@ export function infraConfigToArtifactMode(
   const hasProvision = config.provision.enabled
   const hasKubernetes = config.kubernetes.enabled
   if (hasProvision && hasKubernetes) return 'both'
+  if (hasProvision) return 'iac_only'
   if (hasKubernetes) return 'manifest_only'
+  // Nothing selected: still request IaC so cloud apply has a tree to run
+  // (Provision toggle defaults on for cloud; this is a safe fallback).
   return 'iac_only'
 }
 

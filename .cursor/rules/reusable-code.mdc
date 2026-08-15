@@ -14,6 +14,7 @@ Before adding UI, API helpers, or domain logic, search the codebase for an exist
   - `GithubInstallationPicker` for personal vs organization App installs
   - `GithubRepoPicker` for searchable repository selection
   - `GitlabRepoPicker` for searchable GitLab project selection
+  - `GitBranchPicker` for repo branch dropdown (and optional create-on-push)
   - `GithubConnectCard` for connect / status surfaces
   - `~/utils/githubAccount` for account labels and clone URLs
 3. **Extract when duplicated** - if the same UI or logic appears twice, pull a shared component or util before shipping the third copy.

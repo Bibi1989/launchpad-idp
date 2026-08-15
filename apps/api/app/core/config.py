@@ -9,11 +9,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def resolve_settings_paths(here: Path | None = None) -> tuple[Path, Path]:
-    """Return ``(api_dir, repo_root)`` for ``.env`` lookup.
+    """Return ``(api_dir, repo_root)`` for Settings path resolution.
 
     Monorepo: ``apps/api/app/core/config.py`` → api_dir=apps/api, repo_root=repo.
     OCI / compose image: ``/app/app/core/config.py`` → both resolve under ``/app``
     (``parents[4]`` does not exist and must not IndexError).
+
+    Env files are loaded from ``api_dir/.env`` only, never from the monorepo
+    root ``.env`` or ``deploy/oci/.env``.
     """
     path = (here or Path(__file__)).resolve()
     parents = list(path.parents)
@@ -31,11 +34,9 @@ def resolve_settings_paths(here: Path | None = None) -> tuple[Path, Path]:
 
 
 _API_DIR, _REPO_ROOT = resolve_settings_paths()
-_ENV_FILES = (
-    str(_API_DIR / ".env"),
-    str(_REPO_ROOT / ".env"),
-    str(_REPO_ROOT / "deploy" / "oci" / ".env"),
-)
+# Local/dev and monorepo: only apps/api/.env. Never load repo-root or
+# deploy/oci/.env (those carry Compose/OCI values that override localhost).
+_ENV_FILES = (str(_API_DIR / ".env"),)
 
 
 class Settings(BaseSettings):
@@ -347,6 +348,15 @@ class Settings(BaseSettings):
     # provider and for workspaces that were never applied (no state).
     iac_destroy_on_workspace_delete: bool = True
     iac_destroy_timeout_seconds: int = 1200
+    # Scaffold-driven Deploy to cloud: terraform/pulumi apply + ansible from the
+    # workspace tree (instead of imperative attach_deploy cloud APIs).
+    scaffold_cloud_deploy_enabled: bool = True
+    iac_apply_timeout_seconds: int = 1800
+    ansible_deploy_timeout_seconds: int = 900
+    # Pin Pulumi CLI auto-install for workers without a system package.
+    pulumi_cli_version: str = "3.143.0"
+    # Auto-download Pulumi into ~/.launchpad/tools/bin when missing from PATH.
+    pulumi_cli_auto_install: bool = True
 
     # AI Infrastructure Provisioner (Gemini blueprint generation, heuristic fallback)
     ai_provisioner_heuristic_fallback: bool = True

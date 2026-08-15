@@ -83,6 +83,14 @@ export default {
     "view": "Anzeigen",
     "apply": "Anwenden"
   },
+  "gitBranch": {
+    "default": "Standard",
+    "selectRepoFirst": "Repository wählen, um Branches zu laden.",
+    "createNew": "+ Neuen Branch erstellen…",
+    "newPlaceholder": "feature/mein-branch",
+    "createHint": "Der neue Branch wird beim Push vom Standard-Branch erstellt.",
+    "loadFailed": "Branches konnten nicht geladen werden"
+  },
   "nav": {
     "home": "Start",
     "environments": "Umgebungen",
@@ -800,9 +808,9 @@ export default {
     "destroy": {
       "title": "Umgebung zerstören?",
       "titleStop": "Bereitstellung stoppen?",
-      "message": "Preview \"{name}\" zerstören? Kubernetes-Ressourcen für diese Umgebung werden abgebaut. Dies kann nicht rückgängig gemacht werden.",
+      "message": "Preview \"{name}\" zerstören? Laufzeit-Ressourcen dieser Umgebung werden abgebaut. Bei Cloud-Previews über Scaffold-IaC wird Terraform/Pulumi destroy auf dem verknüpften Workspace ausgeführt, wenn keine anderen aktiven Umgebungen ihn teilen. Dies kann nicht rückgängig gemacht werden.",
       "messageProvisioning": "Bereitstellung von \"{name}\" stoppen? Laufende Arbeit wird abgebrochen. Bereits erstellte Ressourcen bleiben bestehen (spaeter Zerstoeren zum Abbauen).",
-      "messageForce": "Preview \"{name}\" zerstören? Laufende Bereitstellung wird abgebrochen und erstellte Ressourcen werden abgebaut. Dies kann nicht rückgängig gemacht werden.",
+      "messageForce": "Preview \"{name}\" zerstören? Laufende Bereitstellung wird abgebrochen und erstellte Ressourcen werden abgebaut (einschliesslich Scaffold-IaC bei Cloud-Deploy). Dies kann nicht rückgängig gemacht werden.",
       "confirm": "Ja, zerstören",
       "confirmStop": "Ja, stoppen",
       "cancel": "Nein"
@@ -840,7 +848,7 @@ export default {
       "failed": "FEHLGESCHLAGEN",
       "destroyed": "ZERSTÖRT",
       "expired": "ABGELAUFEN",
-      "teardown": "ABBAU"
+      "teardown": "LÖSCHEN"
     },
     "toasts": {
       "paused": "Umgebung pausiert",
@@ -849,8 +857,10 @@ export default {
       "resumeFailed": "Fortsetzen fehlgeschlagen",
       "relaunched": "Umgebung erneut gestartet",
       "relaunchFailed": "Erneutes Starten fehlgeschlagen",
-      "destroyed": "Umgebung zerstört",
+      "destroyed": "Umgebung gelöscht",
+      "destroyComplete": "Entfernung abgeschlossen. Zurück zur Übersicht.",
       "destroyFailed": "Zerstören fehlgeschlagen",
+      "deletingBanner": "Umgebung wird gelöscht und Ressourcen freigegeben…",
       "stopped": "Bereitstellung gestoppt",
       "stopFailed": "Stoppen fehlgeschlagen",
       "extended": "TTL verlängert",
@@ -1262,7 +1272,8 @@ export default {
     "iacEngineLocalRuntimeHint": "Lokale Compose- und Running-Instance-Workspaces scaffolden Terraform-, OpenTofu- oder Pulumi-Stubs plus optionales CI/CD. Für Managed Modules zu einem Cloud-Anbieter wechseln.",
     "editingExisting": "Bearbeiten",
     "editingExistingSuffix": "vorherige Ressourcenauswahl wird im nächsten Schritt geladen. Zugangsdaten leer lassen, um gespeicherte zu behalten.",
-    "credentialsStored": "Zugangsdaten sind für diesen Workspace gespeichert. Nur neue Werte einfügen zum Ersetzen; sonst Felder leer lassen.",
+    "credentialsStored": "Kontoschlüssel aus den Einstellungen wurden für diesen Provider erkannt. Anmeldefelder leer lassen, um sie zu nutzen, oder neue Werte einfügen, um sie für diesen Workspace zu überschreiben.",
+    "credentialsDetectedTitle": "Gespeicherte Cloud-Zugangsdaten erkannt",
     "infraGeneration": "Infrastruktur-Generierung",
     "providerBlurbs": {
       "aws": "Enterprise-Skalierung mit EKS, EC2 und Secrets Manager.",
@@ -1441,7 +1452,10 @@ export default {
       "destroy": "Zerstören",
       "filteredByProject": "Gefiltert nach Projekt",
       "backToProject": "Zurück zum Projekt",
-      "clearProjectFilter": "Alle Workspaces zeigen"
+      "clearProjectFilter": "Alle Workspaces zeigen",
+      "deleting": "Wird gelöscht…",
+      "destroyFailed": "Löschen fehlgeschlagen",
+      "retryDestroy": "Löschen erneut versuchen"
     },
     "destroy": {
       "title": "Workspace zerstören?",
@@ -1458,6 +1472,36 @@ export default {
       "composeSuite": "Compose Suite",
       "instanceSuite": "Instanz Suite",
       "manifestConfigurator": "Manifest-Konfigurator"
+    },
+    "update": {
+      "action": "Workspace aktualisieren",
+      "eyebrow": "Workspace",
+      "title": "Workspace aktualisieren",
+      "blurb": "Cloud-Services, Runtime-Modus und Scaffold-Einstellungen für diesen Workspace ändern.",
+      "blurbNamed": "Cloud-Services, Runtime-Modus und Scaffold-Einstellungen für {name} ändern.",
+      "back": "Zurück zum Workspace",
+      "saved": "Workspace-Konfiguration aktualisiert"
+    },
+    "linkedRepo": {
+      "title": "Verknüpftes App-Repository",
+      "blurb": "Verbinde das GitHub-Repo mit deinem App-Code. Launchpad verfolgt den gewählten Branch und aktualisiert Cloud-Umgebungen bei Push.",
+      "branch": "Branch verfolgen",
+      "cdMode": "Continuous Deploy",
+      "modeWebhook": "Webhook (Standard)",
+      "modeWebhookBlurb": "GitHub-Push-Webhook lässt Launchpad passende Umgebungen neu bauen. Keine Workflow-Änderungen im App-Repo.",
+      "modeActions": "GitHub Actions",
+      "modeActionsBlurb": "Launchpad schreibt einen Workflow ins App-Repo, der Launchpad bei Push auf den Branch benachrichtigt.",
+      "save": "Verknüpfung speichern",
+      "unlink": "Trennen",
+      "saved": "App-Repo verknüpft",
+      "unlinked": "App-Repo getrennt",
+      "loadFailed": "Verknüpftes App-Repo konnte nicht geladen werden",
+      "saveFailed": "Verknüpftes App-Repo konnte nicht gespeichert werden",
+      "repoRequired": "GitHub-Installation und Repository wählen",
+      "connectGithub": "Zuerst GitHub verbinden:",
+      "webhookOk": "WEBHOOK_SECRET gesetzt",
+      "webhookMissing": "WEBHOOK_SECRET fehlt",
+      "workflow": "Workflow"
     },
     "errors": {
       "load": "Workspace konnte nicht geladen werden",
@@ -1601,6 +1645,7 @@ export default {
     "shell": "Shell",
     "logs": "Live-Logs",
     "refresh": "Metriken aktualisieren",
+    "openObservability": "Observability",
     "cpu": "CPU",
     "memory": "Speicher",
     "healthPing": "Health-Ping",
@@ -1618,6 +1663,48 @@ export default {
       "streamingLogs": "Logs werden gestreamt…",
       "logsDone": "Log-Stream beendet",
       "logsError": "Log-Stream-Fehler"
+    }
+  },
+  "envObservability": {
+    "title": "Cluster Observability",
+    "blurb": "Health und aggregierte Metriken für {name}",
+    "back": "Zurück zur Environment",
+    "window": "Letzte 1h",
+    "autoRefresh": "Auto-Refresh",
+    "loadFailed": "Observability-Daten konnten nicht geladen werden",
+    "cards": {
+      "cpu": "CPU (Sample)",
+      "cpuHint": "{pct}% der gesampelten Kapazität",
+      "sampleHint": "Aus Control-Plane-Sample",
+      "errorRate": "Preview-Fehlerrate",
+      "errorHint": "Basierend auf dem letzten Health-Ping",
+      "latency": "Health-Latenz",
+      "latencyHint": "Round-Trip zur Preview-URL",
+      "alerts": "Aktive Alerts",
+      "previewDown": "Preview-Health-Check fehlgeschlagen",
+      "noAlerts": "Keine aktiven Alerts"
+    },
+    "signals": {
+      "title": "Golden Signals der Core Services",
+      "service": "Service",
+      "status": "Status",
+      "cpu": "CPU",
+      "memory": "Speicher",
+      "health": "Health"
+    },
+    "trace": {
+      "title": "Aktuelle Samples"
+    },
+    "stream": {
+      "title": "Aggregierter Stream"
+    },
+    "context": {
+      "title": "Environment-Kontext",
+      "target": "Ziel",
+      "owner": "Owner",
+      "provider": "Provider",
+      "deploy": "Deploy-Modus",
+      "appReady": "App bereit"
     }
   },
   "credentials": {
@@ -2227,6 +2314,31 @@ export default {
       "previewHint": "Dockerfile- und Compose-Vorlagen (werden beim Speichern / Provisionieren geschrieben)",
       "syncedToCicd": "Stacks fließen automatisch in Create CI/CD und Create Docker ein."
     },
+    "repoSource": {
+      "title": "Anwendungs-Repository",
+      "blurb": "GitHub- oder GitLab-Repo und Branch für automatische Rebuilds bei Push verknüpfen, oder ein Repo importieren, um einen Workspace aus dem Code zu scaffolden.",
+      "modeLink": "Repo verknüpfen",
+      "modeImport": "Repo importieren",
+      "modeServices": "Services",
+      "saveLink": "Verknüpfung speichern",
+      "queueLink": "Dieses Repo verwenden",
+      "pendingHint": "Repo und Branch jetzt wählen. Launchpad wendet die Verknüpfung an, wenn dieser Workspace erstellt wird.",
+      "pendingSaved": "Repo vorgemerkt",
+      "pendingSavedBlurb": "Die Verknüpfung wird beim Erstellen oder Speichern des Workspace angewendet.",
+      "pendingCleared": "Vorgemerkte Repo-Verknüpfung gelöscht",
+      "pendingBadge": "vorgemerkt",
+      "loadFailed": "Repository-Verknüpfung konnte nicht geladen werden",
+      "saveFailed": "Repository-Verknüpfung konnte nicht gespeichert werden",
+      "connectGitlab": "Zuerst GitLab verbinden:",
+      "gitlabRepoRequired": "GitLab-Projekt auswählen",
+      "gitlabTrackBlurb": "Pushes auf diesen Branch bauen passende Launchpad-Environments neu (GitLab-Webhook). Webhook ggf. unter Integrationen einrichten.",
+      "gitlabSaved": "GitLab-Repo wird verfolgt",
+      "gitlabSavedBlurb": "Branch-Pushes können Environment-Rebuilds auslösen.",
+      "gitlabUnlinked": "GitLab-Tracking entfernt",
+      "importBlurb": "Import analysiert ein GitHub- oder GitLab-Repository, erkennt Services und erstellt daraus einen Workspace.",
+      "openImport": "Von GitHub / GitLab importieren",
+      "saveWorkspaceFirst": "Workspace zuerst speichern oder anlegen, dann ein Repository für branch-basiertes Auto-Deploy verknüpfen."
+    },
     "ansible": {
       "label": "Ansible",
       "title": "Host mit Ansible konfigurieren",
@@ -2341,7 +2453,7 @@ export default {
       "loading": "Setup wird geladen…",
       "detectedTitle": "Aus Workspace erkannt",
       "detectedBlurb": "Schalter unten wurden aus vorhandenen Dateien aktiviert.",
-      "credentialsStored": "Zugangsdaten sind gespeichert. Felder leer lassen, um sie beizubehalten.",
+      "credentialsStored": "Kontoschlüssel aus den Einstellungen (oder diesem Workspace) wurden erkannt. Felder leer lassen, um sie zu nutzen, oder neue Werte einfügen zum Überschreiben.",
       "clusterName": "Cluster-Name",
       "kubectlContext": "kubectl-Kontext",
       "servicesInIac": "In IaC einzubeziehende Services",

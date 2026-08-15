@@ -147,7 +147,11 @@ def _destroy_terraform(
     if not _has_terraform_state(tf_dir):
         return IaCDestroyResult("skipped", "no terraform state - nothing was applied")
     if shutil.which(cli) is None:
-        return IaCDestroyResult("skipped", f"{cli} CLI not installed")
+        # State implies real cloud resources; skipping would orphan them.
+        return IaCDestroyResult(
+            "failed",
+            f"{cli} CLI not installed but terraform state exists",
+        )
 
     env = _destroy_env(credentials, org_id=org_id, workspace_id=workspace_id)
     # Re-init so providers/backend are available, then destroy.
@@ -178,20 +182,43 @@ def _destroy_pulumi(
     workspace_id: str,
     timeout: float,
 ) -> IaCDestroyResult:
+    from app.services.iac_cli import (
+        IaCCliError,
+        ensure_pulumi_env,
+        pulumi_was_applied,
+        resolve_pulumi_bin,
+    )
+
     if not pulumi_dir.is_dir():
         return IaCDestroyResult("skipped", "no infra/pulumi directory")
-    if shutil.which("pulumi") is None:
-        return IaCDestroyResult("skipped", "pulumi CLI not installed")
 
-    env = _destroy_env(credentials, org_id=org_id, workspace_id=workspace_id)
+    # Scaffold always writes infra/pulumi; without a prior successful up there is
+    # nothing to destroy. Do not block workspace delete on a missing CLI.
+    if not pulumi_was_applied(pulumi_dir):
+        return IaCDestroyResult("skipped", "no pulumi stack - nothing was applied")
+
+    settings = get_settings()
+    try:
+        pulumi_bin = resolve_pulumi_bin(
+            install_if_missing=bool(settings.pulumi_cli_auto_install),
+        )
+    except IaCCliError as exc:
+        return IaCDestroyResult(
+            "failed",
+            f"{exc} but infra/pulumi has applied state",
+        )
+
+    env = ensure_pulumi_env(
+        _destroy_env(credentials, org_id=org_id, workspace_id=workspace_id)
+    )
     destroy = _run(
-        ["pulumi", "destroy", "--yes", "--skip-preview", "--non-interactive"],
+        [pulumi_bin, "destroy", "--yes", "--skip-preview", "--non-interactive"],
         cwd=pulumi_dir,
         env=env,
         timeout=timeout,
     )
     if destroy.returncode != 0:
-        stderr = (destroy.stderr or destroy.stdout)
+        stderr = destroy.stderr or destroy.stdout
         # No stack selected / nothing initialized => nothing to destroy.
         if "no stack" in stderr.lower() or "no current stack" in stderr.lower():
             return IaCDestroyResult("skipped", "no pulumi stack - nothing was applied")

@@ -18,6 +18,7 @@ import yaml
 
 from app.schemas.cloud import (
     CloudCredentials,
+    CloudProvider,
     ContainerScaffoldConfig,
     DataStoreDependency,
     DependencyPlacement,
@@ -28,6 +29,7 @@ from app.schemas.cloud import (
     LocalResources,
     ProvisioningWizardRequest,
     WorkloadDependenciesConfig,
+    WorkspaceArtifactsMode,
 )
 from app.services.iac_generator import IaCGenerator
 
@@ -429,6 +431,34 @@ def test_explicit_expose_preview_overrides_default(tmp_path: Path) -> None:
     ing = yaml.safe_load((mdir / "ingress.yaml").read_text())
     routes = {p["path"]: p["backend"]["service"]["name"] for p in ing["spec"]["rules"][0]["http"]["paths"]}
     assert routes["/"] == "launch-gateway-service"
+
+
+def test_link_repo_skips_default_app_scaffold(tmp_path: Path) -> None:
+    """Link/Import keeps container_scaffold enabled but must not invent apps/*."""
+    from app.schemas.cloud import GcpCloudConfig, GcpResources
+
+    gen = IaCGenerator(workspace_root=tmp_path)
+    request = ProvisioningWizardRequest(
+        name="linked-only",
+        iac_engine=IaCEngine.PULUMI,
+        artifact_mode=WorkspaceArtifactsMode.IAC_ONLY,
+        cloud=GcpCloudConfig(
+            provider=CloudProvider.GCP,
+            resources=GcpResources(project_id="demo"),
+        ),
+        credentials=CloudCredentials(),
+        container_scaffold=ContainerScaffoldConfig(
+            enabled=True,
+            generate_dockerfile=False,
+            generate_docker_compose=False,
+            services=[],
+            frameworks=[],
+        ),
+    )
+    root = Path(gen.generate(request).root_dir)
+    assert (root / "infra/pulumi/Pulumi.yaml").is_file()
+    assert not (root / "apps").exists()
+    assert not (root / "docker-compose.yml").exists()
 
 
 def test_scaffold_disabled_uses_placeholder(tmp_path: Path) -> None:

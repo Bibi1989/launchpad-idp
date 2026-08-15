@@ -252,8 +252,9 @@ def test_iac_generator_writes_pulumi_aws_bundle() -> None:
             ),
         )
         bundle = generator.generate(request)
-        assert "index.ts" in bundle.files
-        index = (Path(bundle.root_dir) / "index.ts").read_text(encoding="utf-8")
+        assert "infra/pulumi/index.ts" in bundle.files
+        assert "infra/pulumi/Pulumi.yaml" in bundle.files
+        index = (Path(bundle.root_dir) / "infra/pulumi/index.ts").read_text(encoding="utf-8")
         assert "@pulumi/aws" in index or "aws.ec2.Vpc" in index
 
 

@@ -70,6 +70,28 @@ describe('workspaceRuntimeMode', () => {
     expect(result.containerScaffold.services?.[0]?.name).toBe('api')
   })
 
+  it('preserves link/import scaffold without default apps', () => {
+    const result = normalizeArtifactsForRuntimeMode({
+      provider: 'gcp',
+      runtimeMode: 'running_instance',
+      artifactMode: 'iac_only',
+      kubernetesPackaging: 'none',
+      containerScaffold: {
+        ...defaultContainerScaffold(),
+        enabled: true,
+        services: [],
+        frameworks: [],
+        generate_dockerfile: false,
+        generate_docker_compose: false,
+      },
+      runningInstance: defaultRunningInstanceConfig(),
+    })
+    expect(result.containerScaffold.enabled).toBe(true)
+    expect(result.containerScaffold.services).toEqual([])
+    expect(result.containerScaffold.generate_dockerfile).toBe(false)
+    expect(result.containerScaffold.generate_docker_compose).toBe(false)
+  })
+
   it('preserves user host listen_port over scaffold service ports', () => {
     const result = normalizeArtifactsForRuntimeMode({
       provider: 'local',

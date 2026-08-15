@@ -470,10 +470,14 @@ async function onBuild() {
             @select-repo="onGithubRepoSelect"
           />
         </div>
-        <label class="block space-y-1.5">
-          <span class="lp-label">{{ t('dockerfiles.branchRef') }}</span>
-          <input v-model="branch" type="text" class="lp-input" placeholder="main">
-        </label>
+        <GitBranchPicker
+          v-model="branch"
+          host="github"
+          :installation-id="installationId"
+          :full-name="fullName"
+          allow-create
+          :label="t('dockerfiles.branchRef')"
+        />
         <label class="block space-y-1.5">
           <span class="lp-label">{{ t('dockerfiles.detectedStack') }}</span>
           <select v-model="selectedStack" class="lp-input">

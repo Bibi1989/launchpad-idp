@@ -1,26 +1,38 @@
 <script setup lang="ts">
 import type { ContainerScaffoldConfig, ContainerServiceItem, ProjectStackOption } from '~/types/provisioning'
+import type { PendingWorkspaceRepoLink, WorkspaceSourceMode } from '~/types/workspaceRepo'
 import { defaultContainerServices } from '~/utils/cloudValidation'
 
 const props = withDefaults(
   defineProps<{
     modelValue: ContainerScaffoldConfig
     disabled?: boolean
+    /** When set, link/import can save immediately; otherwise link is queued. */
+    workspaceId?: string | null
+    launchpadProjectId?: string | null
   }>(),
   {
     disabled: false,
+    workspaceId: null,
+    launchpadProjectId: null,
   },
 )
 
 const emit = defineEmits<{
   'update:modelValue': [value: ContainerScaffoldConfig]
+  imported: [workspaceId: string]
 }>()
+
+const pendingRepoLink = defineModel<PendingWorkspaceRepoLink | null>('pendingRepoLink', {
+  default: null,
+})
 
 const { t } = useI18n()
 
 const activeTab = ref<'dockerfile' | 'compose'>('dockerfile')
 const previewOpen = ref(false)
 const copiedState = ref(false)
+const sourceMode = ref<WorkspaceSourceMode>('services')
 
 const config = computed({
   get: () => props.modelValue,
@@ -87,6 +99,28 @@ function emitServices(overrides: Partial<ContainerScaffoldConfig> = {}) {
   })
 }
 
+watch(sourceMode, (mode) => {
+  if (mode === 'services') {
+    if (!(servicesList.value.length > 0)) {
+      servicesList.value = defaultContainerServices().map((s) => ({ ...s }))
+    }
+    emitServices({
+      generate_dockerfile: true,
+      generate_docker_compose: true,
+    })
+    return
+  }
+  // Link / Import: keep the card enabled for UI, but do not scaffold apps/*.
+  servicesList.value = []
+  emit('update:modelValue', {
+    ...props.modelValue,
+    services: [],
+    frameworks: [],
+    generate_dockerfile: false,
+    generate_docker_compose: false,
+  })
+})
+
 function updateField<K extends keyof ContainerScaffoldConfig>(key: K, val: ContainerScaffoldConfig[K]) {
   if (key === 'enabled' && val === true && !(props.modelValue.services?.length)) {
     emitServices({ enabled: true })
@@ -99,9 +133,11 @@ function updateField<K extends keyof ContainerScaffoldConfig>(key: K, val: Conta
 }
 
 onMounted(() => {
-  // UI defaults to frontend + backend, but modelValue.services stayed [] until
-  // the user edited a row. Sync once so compose provision creates both services.
-  if (!(props.modelValue.services && props.modelValue.services.length > 0)) {
+  // Sync once so compose provision creates both services when Services mode is active.
+  if (
+    sourceMode.value === 'services'
+    && !(props.modelValue.services && props.modelValue.services.length > 0)
+  ) {
     emitServices()
   }
 })
@@ -338,8 +374,52 @@ function downloadFile() {
     </div>
 
     <div v-if="config.enabled" class="space-y-4 pt-2 border-t border-[var(--lp-line)]">
+      <div class="flex flex-wrap gap-2 rounded-lg border border-[var(--lp-line)] p-1">
+        <button
+          type="button"
+          class="flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition min-w-[7rem]"
+          :class="sourceMode === 'link' ? 'bg-[var(--lp-accent)] text-[var(--lp-on-accent)]' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
+          :disabled="disabled"
+          @click="sourceMode = 'link'"
+        >
+          <span class="material-symbols-outlined text-base">link</span>
+          {{ t('scaffold.repoSource.modeLink') }}
+        </button>
+        <button
+          type="button"
+          class="flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition min-w-[7rem]"
+          :class="sourceMode === 'import' ? 'bg-[var(--lp-accent)] text-[var(--lp-on-accent)]' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
+          :disabled="disabled"
+          @click="sourceMode = 'import'"
+        >
+          <span class="material-symbols-outlined text-base">download</span>
+          {{ t('scaffold.repoSource.modeImport') }}
+        </button>
+        <button
+          type="button"
+          class="flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition min-w-[7rem]"
+          :class="sourceMode === 'services' ? 'bg-[var(--lp-accent)] text-[var(--lp-on-accent)]' : 'text-[var(--lp-muted)] hover:text-[var(--lp-text)]'"
+          :disabled="disabled"
+          @click="sourceMode = 'services'"
+        >
+          <span class="material-symbols-outlined text-base">deployed_code</span>
+          {{ t('scaffold.repoSource.modeServices') }}
+        </button>
+      </div>
+
+      <WorkspaceRepoSourcePanel
+        v-if="sourceMode === 'link' || sourceMode === 'import'"
+        v-model:pending-link="pendingRepoLink"
+        :workspace-id="workspaceId"
+        :force-mode="sourceMode"
+        :launchpad-project-id="launchpadProjectId"
+        embedded
+        :disabled="disabled"
+        @imported="emit('imported', $event)"
+      />
+
       <!-- Multi-Service / Deployment Configurations -->
-      <div class="space-y-3">
+      <div v-if="sourceMode === 'services'" class="space-y-3">
         <div class="flex items-center justify-between">
           <span class="lp-label">{{ t('scaffold.containerCard.servicesLabel') }}</span>
           <button
@@ -439,6 +519,7 @@ function downloadFile() {
         </div>
       </div>
 
+      <template v-if="sourceMode === 'services'">
       <p class="text-[11px] leading-relaxed text-[var(--lp-muted)]">
         {{ t('scaffold.containerCard.exposePreviewHint') }}
       </p>
@@ -548,6 +629,7 @@ function downloadFile() {
           </div>
         </div>
       </div>
+      </template>
     </div>
   </div>
 </template>

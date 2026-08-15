@@ -75,8 +75,10 @@ def promote_cloud_deploy_mode(
 def promote_runtime_target(
     source: WorkspaceWizardConfig,
 ) -> RunningInstanceKind:
-    """Instance mode promotes to cloud VM; compose promotes to serverless."""
+    """Compose and instance modes promote to cloud VMs; explicit serverless stays serverless."""
     if source.runtime_mode == WorkspaceRuntimeMode.DOCKER_COMPOSE:
+        return RunningInstanceKind.VM
+    if source.running_instance.kind == RunningInstanceKind.SERVERLESS:
         return RunningInstanceKind.SERVERLESS
     return RunningInstanceKind.VM
 
@@ -178,6 +180,7 @@ def cloud_config_for_promote(
                 existing_vpc_id=existing,
                 gke=kubernetes,
                 cloud_run=serverless,
+                compute_instance=(not kubernetes) and not serverless,
                 artifact_registry=True,
                 region=resolved_region,
             ),
@@ -320,7 +323,8 @@ def build_cloud_promote_wizard_request(
     # status-dashboard scaffold. Instance/VM promote still scaffolds Dockerfiles.
     scaffold = source.container_scaffold.model_copy(
         update={
-            "generate_docker_compose": False,
+            "generate_docker_compose": source.runtime_mode
+            == WorkspaceRuntimeMode.DOCKER_COMPOSE,
             "services": services,
             **(
                 {"enabled": False, "generate_dockerfile": False}
@@ -345,7 +349,11 @@ def build_cloud_promote_wizard_request(
     runtime_mode = (
         WorkspaceRuntimeMode.KUBERNETES
         if kubernetes
-        else WorkspaceRuntimeMode.RUNNING_INSTANCE
+        else (
+            WorkspaceRuntimeMode.DOCKER_COMPOSE
+            if source.runtime_mode == WorkspaceRuntimeMode.DOCKER_COMPOSE
+            else WorkspaceRuntimeMode.RUNNING_INSTANCE
+        )
     )
     source_packaging = source.kubernetes_packaging
     if kubernetes and source_packaging == KubernetesPackaging.NONE:
@@ -367,6 +375,16 @@ def build_cloud_promote_wizard_request(
         container_scaffold=scaffold,
         running_instance=running_instance,
     )
+    from app.services.scaffold_cloud_deploy import ansible_config_for_runtime
+
+    ansible = ansible_config_for_runtime(
+        source=source.ansible,
+        runtime_mode=runtime_mode,
+        running_instance=running_instance,
+    )
+    if kubernetes:
+        ansible = source.ansible
+
     return ProvisioningWizardRequest(
         name=workspace_name,
         iac_engine=source.iac_engine or IaCEngine.TERRAFORM,
@@ -381,7 +399,7 @@ def build_cloud_promote_wizard_request(
         cost_optimization=source.cost_optimization,
         container_scaffold=scaffold,
         dependencies=source.dependencies,
-        ansible=source.ansible,
+        ansible=ansible,
     )
 
 
@@ -402,8 +420,12 @@ def resolve_attach_running_instance(
         if running_instance.service_name:
             return running_instance
 
-    target_kind = RunningInstanceKind.SERVERLESS
-    if runtime_mode != WorkspaceRuntimeMode.DOCKER_COMPOSE:
+    # Compose and default instance → VM; keep explicit serverless.
+    if runtime_mode == WorkspaceRuntimeMode.DOCKER_COMPOSE:
+        target_kind = RunningInstanceKind.VM
+    elif running_instance.kind == RunningInstanceKind.SERVERLESS:
+        target_kind = RunningInstanceKind.SERVERLESS
+    else:
         target_kind = RunningInstanceKind.VM
 
     if running_instance.kind in {

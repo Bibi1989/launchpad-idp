@@ -1825,6 +1825,15 @@ class EnvironmentService:
         git_repo_url = str(payload.get("git_repo_url") or "").strip()
         git_branch = str(payload.get("git_branch") or "").strip() or "main"
 
+        linked = payload.get("linked_app_repo")
+        if isinstance(linked, dict):
+            linked_url = str(linked.get("git_repo_url") or "").strip()
+            linked_branch = str(linked.get("git_branch") or "").strip()
+            if linked_url:
+                git_repo_url = linked_url
+            if linked_branch:
+                git_branch = linked_branch
+
         if not git_repo_url:
             # Backward-compatible fallback: previews still deploy, but push-based
             # webhook matching can only work when the workspace includes repo_import

@@ -496,6 +496,94 @@ async def _sync_workspace_after_cloud_deploy(
     )
 
 
+async def _teardown_attach_prefer_scaffold(
+    session: AsyncSession,
+    *,
+    environment: Environment,
+    running_instance: object,
+    attach_credentials: object,
+    attach_provider: str | None,
+    workspace_provider: str | None,
+    wizard_cloud_provider: str | None,
+    attach_org_slug: str | None,
+    workspace_root: Path | None,
+    settings: object,
+    log_repo: DeploymentLogRepository | None = None,
+    commit_sha: str | None = None,
+) -> str:
+    """Tear down cloud ATTACH resources via scaffold IaC destroy when applicable.
+
+    Falls back to ``teardown_attach`` when scaffold destroy is skipped or shared.
+    Returns a short note for logs.
+    """
+    from app.services.attach_deploy import teardown_attach
+    from app.services.scaffold_cloud_deploy import teardown_via_scaffold
+
+    env_uuid = environment.id
+    workspace_id = environment.workspace_id
+    engine = "terraform"
+    sibling_active = 0
+    if workspace_id is not None:
+        workspace_row = await session.get(ProvisioningWorkspace, workspace_id)
+        if workspace_row is not None and getattr(workspace_row, "engine", None):
+            engine = str(workspace_row.engine)
+        env_repo = EnvironmentRepository(session)
+        sibling_active = await env_repo.count_non_destroyed_for_workspace(
+            workspace_id,
+            exclude_environment_id=env_uuid,
+        )
+
+    handled, detail = await asyncio.to_thread(
+        teardown_via_scaffold,
+        workspace_root=workspace_root,
+        engine=engine,
+        credentials=attach_credentials,
+        org_id=str(getattr(environment, "org_id", None) or environment.owner_id),
+        workspace_id=str(workspace_id or env_uuid),
+        cloud_provider=attach_provider,
+        running_instance=running_instance,
+        settings=settings,
+        sibling_active_envs=sibling_active,
+    )
+    if handled:
+        if log_repo is not None:
+            await _emit_log(
+                log_repo,
+                environment_id=env_uuid,
+                message=f"APPLY - scaffold IaC destroy: {detail}",
+                status=EnvironmentStatus.TEARDOWN_PENDING.value,
+                commit_sha=commit_sha or environment.latest_commit_sha,
+                stage=ExecutionStage.APPLY,
+            )
+        return f"scaffold IaC destroy ({detail})"
+
+    if log_repo is not None and detail:
+        await _emit_log(
+            log_repo,
+            environment_id=env_uuid,
+            message=f"APPLY - scaffold IaC destroy skipped ({detail}); using attach teardown",
+            log_level=LogLevel.INFO,
+            status=EnvironmentStatus.TEARDOWN_PENDING.value,
+            commit_sha=commit_sha or environment.latest_commit_sha,
+            stage=ExecutionStage.APPLY,
+        )
+
+    await asyncio.to_thread(
+        teardown_attach,
+        running_instance=running_instance,
+        namespace=environment.namespace_name,
+        environment_id=str(env_uuid),
+        environment_name=environment.name,
+        settings=settings,
+        cloud_provider=attach_provider,
+        credentials=attach_credentials,
+        org_slug=attach_org_slug,
+        workspace_provider=workspace_provider,
+        wizard_cloud_provider=wizard_cloud_provider,
+    )
+    return f"attach teardown ({detail or 'legacy'})"
+
+
 async def _effective_deploy_mode(
     session: AsyncSession,
     environment: Environment,
@@ -1532,35 +1620,115 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             commit_sha=commit_sha,
                         )
                         try:
-                            resources = await asyncio.to_thread(
-                                deploy_attach,
-                                namespace=environment.namespace_name,
-                                environment_id=str(environment.id),
-                                name=environment.name,
-                                git_branch=environment.git_branch,
-                                git_repo_url=environment.git_repo_url,
-                                ttl_expires_at=environment.ttl_expires_at.isoformat(),
-                                owner_label=owner_label,
-                                image=deploy_image,
-                                enable_postgres=getattr(environment, "enable_postgres", False),
-                                enable_redis=getattr(environment, "enable_redis", False),
-                                running_instance=running_instance,
-                                workspace_root=workspace_root,
-                                packaging=packaging,
-                                settings=settings,
-                                services=attach_services,
-                                cloud_provider=attach_provider,
-                                credentials=attach_credentials,
-                                org_slug=attach_org_slug,
-                                workspace_provider=workspace_provider,
-                                wizard_cloud_provider=wizard_cloud_provider,
-                                create_vpc=create_vpc,
-                                create_subnets=create_subnets,
-                                gcp_project_id=gcp_project_id,
-                                existing_vpc_id=existing_vpc_id,
-                                existing_security_group_id=existing_security_group_id,
+                            from app.services.scaffold_cloud_deploy import (
+                                ScaffoldCloudDeployError,
+                                deploy_via_scaffold,
+                                should_use_scaffold_cloud_deploy,
                             )
-                        except AttachDeployError as exc:
+
+                            use_scaffold = (
+                                workspace_root is not None
+                                and should_use_scaffold_cloud_deploy(
+                                    cloud_provider=attach_provider,
+                                    running_instance=running_instance,
+                                    settings=settings,
+                                )
+                            )
+                            if use_scaffold:
+                                engine = "terraform"
+                                if workspace_id is not None:
+                                    ws_row = await session.get(
+                                        ProvisioningWorkspace, workspace_id
+                                    )
+                                    if ws_row is not None and getattr(ws_row, "engine", None):
+                                        engine = str(ws_row.engine)
+                                await _emit_stage(
+                                    log_repo,
+                                    session,
+                                    environment_id=env_uuid,
+                                    stage=ExecutionStage.APPLY,
+                                    message=(
+                                        "APPLY - scaffold cloud deploy "
+                                        f"(IaC apply + Ansible via workspace, engine={engine})"
+                                    ),
+                                    commit_sha=commit_sha,
+                                )
+                                tf_vars: dict[str, str] = {
+                                    "app_listen_port": str(
+                                        running_instance.listen_port or 8080
+                                    ),
+                                }
+                                if deploy_image:
+                                    tf_vars["app_image"] = deploy_image
+                                # Prefer wizard snapshot engine over stale DB column
+                                # (heal/regenerate may have switched pulumi ↔ terraform).
+                                if workspace_root is not None:
+                                    from app.services.iac_generator import IaCGenerator
+
+                                    snap = IaCGenerator().read_wizard_snapshot(
+                                        Path(workspace_root)
+                                    )
+                                    if snap and snap.get("iac_engine"):
+                                        engine = str(snap["iac_engine"])
+                                    cloud_snap = snap.get("cloud") if snap else None
+                                    if isinstance(cloud_snap, dict):
+                                        resources = cloud_snap.get("resources")
+                                        if isinstance(resources, dict):
+                                            project = resources.get("project_id")
+                                            if isinstance(project, str) and project.strip():
+                                                tf_vars["project_id"] = project.strip()
+                                resources = await asyncio.to_thread(
+                                    deploy_via_scaffold,
+                                    workspace_root=workspace_root,
+                                    engine=engine,
+                                    credentials=attach_credentials,
+                                    org_id=str(
+                                        getattr(environment, "org_id", None)
+                                        or environment.owner_id
+                                    ),
+                                    workspace_id=str(workspace_id or environment.id),
+                                    environment_id=str(environment.id),
+                                    environment_name=environment.name,
+                                    namespace=environment.namespace_name,
+                                    running_instance=running_instance,
+                                    settings=settings,
+                                    ssh_private_key_path=running_instance.ssh_key_path,
+                                    tf_vars=tf_vars,
+                                    git_repo_url=environment.git_repo_url or "",
+                                    git_branch=environment.git_branch or "main",
+                                    image=deploy_image,
+                                    cloud_provider=attach_provider,
+                                )
+                            else:
+                                resources = await asyncio.to_thread(
+                                    deploy_attach,
+                                    namespace=environment.namespace_name,
+                                    environment_id=str(environment.id),
+                                    name=environment.name,
+                                    git_branch=environment.git_branch,
+                                    git_repo_url=environment.git_repo_url,
+                                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                                    owner_label=owner_label,
+                                    image=deploy_image,
+                                    enable_postgres=getattr(environment, "enable_postgres", False),
+                                    enable_redis=getattr(environment, "enable_redis", False),
+                                    running_instance=running_instance,
+                                    workspace_root=workspace_root,
+                                    packaging=packaging,
+                                    settings=settings,
+                                    services=attach_services,
+                                    cloud_provider=attach_provider,
+                                    credentials=attach_credentials,
+                                    org_slug=attach_org_slug,
+                                    workspace_provider=workspace_provider,
+                                    wizard_cloud_provider=wizard_cloud_provider,
+                                    create_vpc=create_vpc,
+                                    create_subnets=create_subnets,
+                                    gcp_project_id=gcp_project_id,
+                                    existing_vpc_id=existing_vpc_id,
+                                    existing_security_group_id=existing_security_group_id,
+                                )
+                        except (AttachDeployError, ScaffoldCloudDeployError) as exc:
                             raise RuntimeError(str(exc)) from exc
                     else:
                         await _emit_stage(
@@ -2222,36 +2390,88 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                             commit_sha=short_sha,
                         )
                         try:
-                            rebuild_resources = await asyncio.to_thread(
-                                deploy_attach,
-                                namespace=environment.namespace_name,
-                                environment_id=str(environment.id),
-                                name=environment.name,
-                                git_branch=environment.git_branch,
-                                git_repo_url=environment.git_repo_url,
-                                ttl_expires_at=environment.ttl_expires_at.isoformat(),
-                                owner_label=owner_label,
-                                image=rebuild_image,
-                                enable_postgres=getattr(
-                                    environment, "enable_postgres", False
-                                ),
-                                enable_redis=getattr(environment, "enable_redis", False),
-                                running_instance=running_instance,
-                                workspace_root=workspace_root,
-                                packaging=packaging,
-                                settings=settings,
-                                services=attach_services,
-                                cloud_provider=attach_provider,
-                                credentials=attach_credentials,
-                                org_slug=attach_org_slug,
-                                workspace_provider=workspace_provider,
-                                wizard_cloud_provider=wizard_cloud_provider,
-                                create_vpc=create_vpc,
-                                create_subnets=create_subnets,
-                                gcp_project_id=gcp_project_id,
-                                existing_vpc_id=existing_vpc_id,
-                                existing_security_group_id=existing_security_group_id,
+                            from app.services.scaffold_cloud_deploy import (
+                                ScaffoldCloudDeployError,
+                                deploy_via_scaffold,
+                                should_use_scaffold_cloud_deploy,
                             )
+
+                            use_scaffold = (
+                                workspace_root is not None
+                                and should_use_scaffold_cloud_deploy(
+                                    cloud_provider=attach_provider,
+                                    running_instance=running_instance,
+                                    settings=settings,
+                                )
+                            )
+                            if use_scaffold:
+                                engine = "terraform"
+                                if workspace_id is not None:
+                                    ws_row = await session.get(
+                                        ProvisioningWorkspace, workspace_id
+                                    )
+                                    if ws_row is not None and getattr(ws_row, "engine", None):
+                                        engine = str(ws_row.engine)
+                                tf_vars = {
+                                    "app_listen_port": str(
+                                        running_instance.listen_port or 8080
+                                    ),
+                                }
+                                if rebuild_image:
+                                    tf_vars["app_image"] = rebuild_image
+                                rebuild_resources = await asyncio.to_thread(
+                                    deploy_via_scaffold,
+                                    workspace_root=workspace_root,
+                                    engine=engine,
+                                    credentials=attach_credentials,
+                                    org_id=str(
+                                        getattr(environment, "org_id", None)
+                                        or environment.owner_id
+                                    ),
+                                    workspace_id=str(workspace_id or environment.id),
+                                    environment_id=str(environment.id),
+                                    environment_name=environment.name,
+                                    namespace=environment.namespace_name,
+                                    running_instance=running_instance,
+                                    settings=settings,
+                                    ssh_private_key_path=running_instance.ssh_key_path,
+                                    tf_vars=tf_vars,
+                                    git_repo_url=environment.git_repo_url or "",
+                                    git_branch=environment.git_branch or "main",
+                                    image=rebuild_image,
+                                    cloud_provider=attach_provider,
+                                )
+                            else:
+                                rebuild_resources = await asyncio.to_thread(
+                                    deploy_attach,
+                                    namespace=environment.namespace_name,
+                                    environment_id=str(environment.id),
+                                    name=environment.name,
+                                    git_branch=environment.git_branch,
+                                    git_repo_url=environment.git_repo_url,
+                                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                                    owner_label=owner_label,
+                                    image=rebuild_image,
+                                    enable_postgres=getattr(
+                                        environment, "enable_postgres", False
+                                    ),
+                                    enable_redis=getattr(environment, "enable_redis", False),
+                                    running_instance=running_instance,
+                                    workspace_root=workspace_root,
+                                    packaging=packaging,
+                                    settings=settings,
+                                    services=attach_services,
+                                    cloud_provider=attach_provider,
+                                    credentials=attach_credentials,
+                                    org_slug=attach_org_slug,
+                                    workspace_provider=workspace_provider,
+                                    wizard_cloud_provider=wizard_cloud_provider,
+                                    create_vpc=create_vpc,
+                                    create_subnets=create_subnets,
+                                    gcp_project_id=gcp_project_id,
+                                    existing_vpc_id=existing_vpc_id,
+                                    existing_security_group_id=existing_security_group_id,
+                                )
                             from app.schemas.environment import dump_preview_endpoints
 
                             await _attach_docker_host_preview_ingress(
@@ -2278,7 +2498,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                 resources=rebuild_resources,
                                 cloud_provider=attach_provider,
                             )
-                        except AttachDeployError as exc:
+                        except (AttachDeployError, ScaffoldCloudDeployError) as exc:
                             raise RuntimeError(str(exc)) from exc
                     else:
                         provisioner = await _retarget_provisioner_for_cloud_k8s(
@@ -2633,18 +2853,19 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                                 from_teardown_context=bool(ctx),
                             )
 
-                            await asyncio.to_thread(
-                                teardown_attach,
+                            await _teardown_attach_prefer_scaffold(
+                                session,
+                                environment=environment,
                                 running_instance=running_instance,
-                                namespace=namespace_name,
-                                environment_id=str(env_uuid),
-                                environment_name=env_name,
-                                settings=settings,
-                                cloud_provider=attach_provider,
-                                credentials=attach_credentials,
-                                org_slug=attach_org_slug,
+                                attach_credentials=attach_credentials,
+                                attach_provider=attach_provider,
                                 workspace_provider=workspace_provider,
                                 wizard_cloud_provider=wizard_cloud_provider,
+                                attach_org_slug=attach_org_slug,
+                                workspace_root=workspace_root,
+                                settings=settings,
+                                log_repo=log_repo,
+                                commit_sha=commit_sha,
                             )
                             try:
                                 await asyncio.wait_for(
@@ -2840,15 +3061,8 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         commit_sha=commit_sha,
                         stage=ExecutionStage.APPLY,
                     )
-                    await _record_audit(
-                        session,
-                        action=AuditAction.TEARDOWN_SUCCEEDED,
-                        actor_id=actor_id,
-                        status=AuditStatus.SUCCESS,
-                        environment_id=env_uuid,
-                        workspace_id=workspace_id,
-                        commit_sha=commit_sha,
-                    )
+                    # Commit DESTROYED before audit so a missing workspace FK (or
+                    # other audit failure) never rolls back the terminal status.
                     await session.commit()
                     await _publish_status(
                         env_uuid,
@@ -2857,6 +3071,23 @@ async def _run_teardown(environment_id: str, correlation_id: str) -> None:
                         message="Teardown completed",
                         stage=ExecutionStage.APPLY,
                     )
+                    try:
+                        await _record_audit(
+                            session,
+                            action=AuditAction.TEARDOWN_SUCCEEDED,
+                            actor_id=actor_id,
+                            status=AuditStatus.SUCCESS,
+                            environment_id=env_uuid,
+                            workspace_id=workspace_id,
+                            commit_sha=commit_sha,
+                        )
+                        await session.commit()
+                    except Exception:
+                        logger.exception(
+                            "teardown_success_audit_failed",
+                            environment_id=environment_id,
+                        )
+                        await session.rollback()
                 except Exception as exc:
                     logger.exception("teardown_failed", environment_id=environment_id)
                     await session.rollback()
@@ -3083,20 +3314,19 @@ async def _reclaim_environment_runtime(
                 owner_id=owner_for_vault,
                 provider=attach_provider,
             )
-            await asyncio.to_thread(
-                teardown_attach,
+            note = await _teardown_attach_prefer_scaffold(
+                session,
+                environment=environment,
                 running_instance=running_instance,
-                namespace=environment.namespace_name,
-                environment_id=str(environment.id),
-                environment_name=environment.name,
-                settings=settings,
-                cloud_provider=attach_provider,
-                credentials=attach_credentials,
-                org_slug=attach_org_slug,
+                attach_credentials=attach_credentials,
+                attach_provider=attach_provider,
                 workspace_provider=workspace_provider,
                 wizard_cloud_provider=wizard_cloud_provider,
+                attach_org_slug=attach_org_slug,
+                workspace_root=workspace_root,
+                settings=settings,
             )
-            notes.append("attach instance stopped")
+            notes.append(note)
             if provisioner is not None:
                 try:
                     await asyncio.wait_for(
@@ -3452,6 +3682,71 @@ def rebuild_environment_task(
 )
 def teardown_environment_task(self, environment_id: str, correlation_id: str) -> None:
     asyncio.run(_run_teardown(environment_id, correlation_id))
+
+
+@celery_app.task(
+    name="launchpad.finalize_workspace_destroy",
+    bind=True,
+    max_retries=0,
+    soft_time_limit=2400,
+    time_limit=2700,
+)
+def finalize_workspace_destroy_task(
+    self, workspace_id: str, owner_id: str
+) -> None:
+    del self
+    asyncio.run(_run_finalize_workspace_destroy(workspace_id, owner_id))
+
+
+async def _run_finalize_workspace_destroy(workspace_id: str, owner_id: str) -> None:
+    from app.models.domain import User
+    from app.services.provisioning import ProvisioningService
+
+    session_factory = _session_factory()
+    ws_uuid = UUID(workspace_id)
+    owner_uuid = UUID(owner_id)
+    async with session_factory() as session:
+        owner = await session.get(User, owner_uuid)
+        if owner is None:
+            logger.error(
+                "workspace_finalize_owner_missing",
+                workspace_id=workspace_id,
+                owner_id=owner_id,
+            )
+            return
+        service = ProvisioningService(session)
+        try:
+            await service.finalize_workspace_destroy(ws_uuid, owner)
+        except Exception:
+            logger.exception(
+                "workspace_finalize_failed",
+                workspace_id=workspace_id,
+            )
+            # Never leave the row stuck on ``deleting`` after a worker crash/timeout.
+            try:
+                from sqlalchemy import select as sa_select
+
+                from app.models.domain import ProvisioningWorkspace
+
+                row = await session.scalar(
+                    sa_select(ProvisioningWorkspace).where(
+                        ProvisioningWorkspace.id == ws_uuid
+                    )
+                )
+                if row is not None and row.status == "deleting":
+                    row.status = "destroy_failed"
+                    await session.commit()
+            except Exception:  # noqa: BLE001 - best-effort recovery
+                logger.exception(
+                    "workspace_finalize_mark_failed_error",
+                    workspace_id=workspace_id,
+                )
+            raise
+
+
+def enqueue_finalize_workspace_destroy(*, workspace_id: str, owner_id: str) -> str:
+    result = finalize_workspace_destroy_task.delay(workspace_id, owner_id)
+    return result.id
 
 
 async def _run_drift_scan() -> int:

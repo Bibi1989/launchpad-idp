@@ -1,5 +1,6 @@
 import type { AuditLogEntry } from '~/types/environment'
 import type {
+  GitBranchListResponse,
   GitHubAppStatus,
   GitHubInstallationItem,
   GitHubRepositoryItem,
@@ -14,6 +15,8 @@ import type {
   TerminalSessionResponse,
   WorkspaceFileContent,
   WorkspaceFileNode,
+  WorkspaceLinkedAppRepoRequest,
+  WorkspaceLinkedAppRepoResponse,
   WorkspaceListItem,
   WorkspacePushRequest,
   WorkspacePromoteInput,
@@ -177,12 +180,11 @@ export function useProvisioning() {
     )
   }
 
-  async function destroyWorkspace(workspaceId: string): Promise<void> {
-    await apiFetch<void>(`/provisioning/workspaces/${workspaceId}`, {
+  async function destroyWorkspace(workspaceId: string): Promise<WorkspaceListItem> {
+    return apiFetch<WorkspaceListItem>(`/provisioning/workspaces/${workspaceId}`, {
       method: 'DELETE',
-      // Destroy runs terraform/pulumi destroy on any applied cloud infra, which
-      // can take minutes; don't time out at the default 20s.
-      timeoutMs: LOCAL_CLUSTER_TIMEOUT_MS,
+      // Enqueue-only; cloud destroy + env cascade finish in the background.
+      timeoutMs: 60_000,
     })
   }
 
@@ -422,6 +424,60 @@ export function useProvisioning() {
     return apiFetch<GitHubRepositorySearchResponse>(`/provisioning/github/repositories${queryStr}`)
   }
 
+  async function listGithubBranches(opts: {
+    installationId: number
+    fullName: string
+  }): Promise<GitBranchListResponse> {
+    const params = new URLSearchParams({
+      installation_id: String(opts.installationId),
+      full_name: opts.fullName.trim(),
+    })
+    return apiFetch<GitBranchListResponse>(
+      `/provisioning/github/repositories/branches?${params.toString()}`,
+    )
+  }
+
+  async function listGitlabBranches(opts: {
+    pathWithNamespace: string
+  }): Promise<GitBranchListResponse> {
+    const params = new URLSearchParams({
+      path_with_namespace: opts.pathWithNamespace.trim(),
+    })
+    return apiFetch<GitBranchListResponse>(
+      `/provisioning/gitlab/projects/branches?${params.toString()}`,
+    )
+  }
+
+  async function getLinkedAppRepo(workspaceId: string): Promise<WorkspaceLinkedAppRepoResponse> {
+    return apiFetch<WorkspaceLinkedAppRepoResponse>(
+      `/provisioning/workspaces/${workspaceId}/linked-app-repo`,
+    )
+  }
+
+  async function setLinkedAppRepo(
+    workspaceId: string,
+    body: WorkspaceLinkedAppRepoRequest,
+  ): Promise<WorkspaceLinkedAppRepoResponse> {
+    return apiFetch<WorkspaceLinkedAppRepoResponse>(
+      `/provisioning/workspaces/${workspaceId}/linked-app-repo`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(body),
+        timeoutMs: 120_000,
+      },
+    )
+  }
+
+  async function setWorkspaceGitSource(
+    workspaceId: string,
+    body: { git_repo_url?: string | null; git_branch?: string; clear?: boolean },
+  ): Promise<{ git_repo_url: string | null; git_branch: string; message: string }> {
+    return apiFetch(`/provisioning/workspaces/${workspaceId}/git-source`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    })
+  }
+
   async function inspectImage(image: string): Promise<ImageInspectResult> {
     return apiFetch<ImageInspectResult>('/provisioning/images/inspect', {
       method: 'POST',
@@ -438,6 +494,9 @@ export function useProvisioning() {
     getWorkspace,
     listAudits,
     getWizardConfig,
+    getLinkedAppRepo,
+    setLinkedAppRepo,
+    setWorkspaceGitSource,
     promoteWorkspace,
     estimateProvisioningCost,
     enableCloudApis,
@@ -467,6 +526,8 @@ export function useProvisioning() {
     listGithubInstallations,
     listGithubRepositories,
     searchGithubRepositories,
+    listGithubBranches,
+    listGitlabBranches,
     inspectImage,
   }
 }

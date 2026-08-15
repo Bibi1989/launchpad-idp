@@ -9,6 +9,7 @@ from app.schemas.cloud import (
     AwsResources,
     AzureCloudConfig,
     AzureResources,
+    CloudProvider,
     ContainerScaffoldConfig,
     GcpCloudConfig,
     GcpResources,
@@ -29,10 +30,56 @@ from app.schemas.k8s import DeployMode
 from app.services.preview_deploy_plan import resolve_preview_deploy_plan
 from app.services.runtime_mode import (
     RuntimeModeViolation,
+    ensure_autocreate_vm_resources,
     normalize_artifacts_for_runtime_mode,
     validate_runtime_mode,
 )
 from app.schemas.cloud import ProvisioningWizardRequest, CloudCredentials
+
+
+def test_ensure_autocreate_vm_enables_gcp_compute_instance() -> None:
+    cloud = GcpCloudConfig(
+        provider=CloudProvider.GCP,
+        resources=GcpResources(project_id="demo", compute_instance=False),
+    )
+    patched = ensure_autocreate_vm_resources(
+        cloud,
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+    )
+    assert isinstance(patched, GcpCloudConfig)
+    assert patched.resources.compute_instance is True
+
+
+def test_wizard_request_forces_compute_instance_for_gcp_vm() -> None:
+    req = ProvisioningWizardRequest(
+        name="vm-preview",
+        iac_engine=IaCEngine.PULUMI,
+        cloud=GcpCloudConfig(
+            provider=CloudProvider.GCP,
+            resources=GcpResources(project_id="demo", compute_instance=False),
+        ),
+        credentials=CloudCredentials(),
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+        artifact_mode=WorkspaceArtifactsMode.IAC_ONLY,
+        kubernetes_packaging=KubernetesPackaging.NONE,
+    )
+    assert isinstance(req.cloud, GcpCloudConfig)
+    assert req.cloud.resources.compute_instance is True
+    assert req.ansible.enabled is True
+
+
+def test_ensure_ansible_for_cloud_vm_without_host() -> None:
+    from app.schemas.cloud import AnsibleConfig
+    from app.services.runtime_mode import ensure_ansible_for_vm_runtime
+
+    patched = ensure_ansible_for_vm_runtime(
+        AnsibleConfig(enabled=False),
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+    )
+    assert patched.enabled is True
 
 
 def test_compose_local_only() -> None:

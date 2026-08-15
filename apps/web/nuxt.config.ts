@@ -74,7 +74,7 @@ export default defineNuxtConfig({
       cssMinify: true,
     },
     server: {
-      allowedHosts: [".trycloudflare.com"],
+      allowedHosts: [".trycloudflare.com", ".ngrok-free.dev", "ngrok.io", "importer-proud-robust.ngrok-free.dev"],
       proxy: {
         "/api/v1": {
           target: "http://127.0.0.1:8000",
@@ -121,13 +121,19 @@ export default defineNuxtConfig({
   hooks: {
     // Rolldown (Vite 8) emits PLUGIN_TIMINGS on large Monaco/Mermaid builds.
     "vite:extendConfig"(config) {
-      const build = (config.build ??= {}) as Record<string, unknown>
+      const viteConfig = config as {
+        build?: Record<string, unknown>
+      }
+      const build: Record<string, unknown> = {
+        ...(viteConfig.build ?? {}),
+      }
       const existing = (build.rolldownOptions ?? {}) as Record<string, unknown>
       const checks = (existing.checks ?? {}) as Record<string, unknown>
       build.rolldownOptions = {
         ...existing,
         checks: { ...checks, pluginTimings: false },
       }
+      viteConfig.build = build
     },
   },
   app: {

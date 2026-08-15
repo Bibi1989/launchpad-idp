@@ -65,7 +65,7 @@ def test_promote_runtime_target_instance_vs_compose() -> None:
         update={"runtime_mode": WorkspaceRuntimeMode.DOCKER_COMPOSE}
     )
     assert promote_runtime_target(instance_src) == RunningInstanceKind.VM
-    assert promote_runtime_target(compose_src) == RunningInstanceKind.SERVERLESS
+    assert promote_runtime_target(compose_src) == RunningInstanceKind.VM
 
 
 def test_recommend_primary_service_prefers_frontend() -> None:
@@ -113,6 +113,7 @@ def test_cloud_config_for_promote_vm_vs_serverless() -> None:
     assert isinstance(vm, GcpCloudConfig)
     assert vm.resources.artifact_registry is True
     assert vm.resources.cloud_run is False
+    assert vm.resources.compute_instance is True
     assert vm.resources.vpc is False
     assert vm.resources.subnets is False
 

@@ -7,9 +7,6 @@ import {
 } from '~/utils/workspaceInfraScaffold'
 
 const WorkspaceIde = defineAsyncComponent(() => import('~/components/WorkspaceIde.vue'))
-const WorkspaceServiceSetupForm = defineAsyncComponent(
-  () => import('~/components/WorkspaceServiceSetupForm.vue'),
-)
 const KubernetesSuite = defineAsyncComponent(
   () => import('~/components/KubernetesSuite.vue'),
 )
@@ -32,7 +29,6 @@ const runInit = ref(false)
 const advancedMode = useState('lp-workspace-advanced', () => false)
 const activeTabMode = useState<'iac' | 'k8s' | 'ide'>('lp-workspace-view-tab', () => 'iac')
 const detailsOpen = ref(false)
-const setupOpen = ref(false)
 const selectedInfraFile = ref<string | null>(null)
 const infraFilesKey = ref(0)
 const audits = ref<AuditLogEntry[]>([])
@@ -149,7 +145,7 @@ async function toggleStar() {
   }
 }
 
-async function onOpenTerminal(opts: { runInitOnOpen?: boolean } = {}) {
+async function openTerminalSession(opts: { runInitOnOpen?: boolean } = {}) {
   if (openingTerminal.value) return
   openingTerminal.value = true
   loadError.value = null
@@ -168,6 +164,10 @@ async function onOpenTerminal(opts: { runInitOnOpen?: boolean } = {}) {
   }
 }
 
+function onOpenTerminalClick() {
+  void openTerminalSession()
+}
+
 /** Start sandbox session without forcing the terminal panel open. */
 async function ensureSandboxBackground() {
   sandboxWarm.value = true
@@ -175,7 +175,7 @@ async function ensureSandboxBackground() {
   sandboxWarming.value = true
   try {
     // Skip auto IaC bootstrap - the guided wizard runs init/validate/plan/apply itself.
-    await onOpenTerminal({ runInitOnOpen: false })
+    await openTerminalSession({ runInitOnOpen: false })
   } finally {
     sandboxWarming.value = false
   }
@@ -224,7 +224,10 @@ async function onDestroy() {
   confirmDestroyOpen.value = false
   destroying.value = true
   try {
-    await destroyWorkspace(workspaceId.value)
+    const updated = await destroyWorkspace(workspaceId.value)
+    if (workspace.value) {
+      workspace.value = { ...workspace.value, status: updated.status }
+    }
     activeTerminalWsPath.value = null
     await navigateTo('/workspaces')
   } catch (err) {
@@ -257,7 +260,7 @@ async function ensureTerminalAndRun(
   }
 }
 
-function onSetupError(message: string) {
+function onConfiguratorError(message: string) {
   loadError.value = message
   formErrorMessage.value = message
 }
@@ -273,14 +276,6 @@ function onConfiguratorDeleted(path: string) {
   }
   formStatusMessage.value = `Deleted ${path}`
   infraFilesKey.value += 1
-}
-
-async function onWorkspaceSetupSaved() {
-  formStatusMessage.value = 'Workspace configuration updated'
-  formErrorMessage.value = null
-  setupOpen.value = false
-  infraFilesKey.value += 1
-  await load()
 }
 
 function onPushSuccess(fullName: string) {
@@ -304,6 +299,10 @@ const publishButtonLabel = computed(() => t('workspaceIde.publish'))
 onMounted(async () => {
   document.addEventListener('click', closeActionsMenu)
   await load()
+  if (String(route.query.updated || '') === '1') {
+    formStatusMessage.value = t('workspaces.update.saved')
+    formErrorMessage.value = null
+  }
 })
 
 onBeforeUnmount(() => {
@@ -431,15 +430,15 @@ watch(advancedMode, async (enabled) => {
                   role="menu"
                   class="absolute right-0 top-full z-50 mt-1.5 min-w-[220px] overflow-hidden rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] py-1 shadow-xl"
                 >
-                  <button
-                    type="button"
+                  <NuxtLink
+                    :to="`/workspaces/${workspaceId}/update`"
                     role="menuitem"
                     class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm transition hover:bg-[var(--lp-panel-2)]"
-                    @click="setupOpen = !setupOpen; closeActionsMenu()"
+                    @click="closeActionsMenu()"
                   >
                     <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">tune</span>
-                    {{ setupOpen ? 'Close setup' : 'Update workspace' }}
-                  </button>
+                    {{ t('workspaces.update.action') }}
+                  </NuxtLink>
                   <NuxtLink
                     :to="`/launch?workspace=${workspace.workspace_id || (workspace as any).id || workspaceId}`"
                     role="menuitem"
@@ -516,30 +515,14 @@ watch(advancedMode, async (enabled) => {
         </div>
       </section>
 
+      <WorkspaceRepoSourcePanel :workspace-id="workspace.workspace_id" />
+
       <p v-if="formStatusMessage && !advancedMode" class="text-sm text-[var(--lp-ok)]">
         {{ formStatusMessage }}
       </p>
       <p v-if="formErrorMessage && !advancedMode" class="text-sm text-[var(--lp-danger)]">
         {{ formErrorMessage }}
       </p>
-
-      <section
-        v-if="setupOpen"
-        class="lp-glass overflow-visible rounded-xl p-5"
-      >
-        <h2 class="mb-4 text-lg font-semibold">Update workspace configuration</h2>
-        <ClientOnly>
-          <WorkspaceServiceSetupForm
-            :workspace-id="workspace.workspace_id"
-            @saved="onWorkspaceSetupSaved"
-            @error="onSetupError"
-            @cancel="setupOpen = false"
-          />
-          <template #fallback>
-            <p class="text-sm text-[var(--lp-muted)]">{{ t('workspaces.detail.loadingSetup') }}</p>
-          </template>
-        </ClientOnly>
-      </section>
 
       <!-- Workspace Suite View Tabs -->
       <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-3 font-mono text-xs">
@@ -612,7 +595,7 @@ watch(advancedMode, async (enabled) => {
             :selected-path="selectedInfraFile"
             @saved="onConfiguratorSaved"
             @deleted="onConfiguratorDeleted"
-            @error="onSetupError"
+            @error="onConfiguratorError"
           />
         </div>
       </section>
@@ -637,7 +620,7 @@ watch(advancedMode, async (enabled) => {
             type="button"
             class="lp-btn-ghost text-xs uppercase tracking-wide"
             :disabled="openingTerminal"
-            @click="onOpenTerminal(); interactiveTerminalOpen = true"
+            @click="onOpenTerminalClick(); interactiveTerminalOpen = true"
           >
             <span class="material-symbols-outlined text-base">terminal</span>
             {{ openingTerminal ? 'Opening…' : wsPath ? 'Reconnect' : 'Open terminal' }}
@@ -688,7 +671,7 @@ watch(advancedMode, async (enabled) => {
               type="button"
               class="lp-btn-primary text-xs uppercase tracking-wide"
               :disabled="openingTerminal"
-              @click="onOpenTerminal"
+              @click="onOpenTerminalClick"
             >
               <span class="material-symbols-outlined text-base">terminal</span>
               {{ openingTerminal ? 'Opening…' : wsPath ? 'Reconnect' : 'Open terminal' }}

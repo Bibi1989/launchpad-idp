@@ -232,6 +232,10 @@ def resolve_core_scaffold(request: ProvisioningWizardRequest) -> CoreScaffold | 
     cfg = request.container_scaffold
     if not cfg.enabled or cfg.services:
         return None
+    # Link-repo / import flows keep the Services card open but turn off Docker
+    # generation so we must not invent a default apps/<slug> tree.
+    if not cfg.generate_dockerfile and not cfg.generate_docker_compose:
+        return None
     stacks = resolve_scaffold_stacks(stack=cfg.stack, frameworks=cfg.frameworks)
     if len(stacks) != 1:
         return None

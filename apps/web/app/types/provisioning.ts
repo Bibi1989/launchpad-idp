@@ -274,6 +274,36 @@ export interface WorkspaceListItem {
   runtime_mode?: WorkspaceRuntimeMode | null
 }
 
+export type WorkspaceCdMode = 'webhook' | 'github_actions'
+
+export interface WorkspaceLinkedAppRepo {
+  installation_id: number
+  full_name: string
+  git_repo_url: string
+  git_branch: string
+  cd_mode: WorkspaceCdMode
+  workflow_path?: string | null
+  updated_at?: string | null
+}
+
+export interface WorkspaceLinkedAppRepoRequest {
+  installation_id?: number | null
+  full_name?: string | null
+  git_branch?: string
+  cd_mode?: WorkspaceCdMode
+  clear?: boolean
+}
+
+export interface WorkspaceLinkedAppRepoResponse {
+  linked: WorkspaceLinkedAppRepo | null
+  webhook_configured: boolean
+  webhook_path: string
+  control_plane_url: string | null
+  message: string
+  workflow_path?: string | null
+  environments_updated: number
+}
+
 export interface WorkspaceWizardConfig {
   name: string
   iac_engine: IaCEngine
@@ -296,6 +326,8 @@ export interface WorkspaceWizardConfig {
   has_credentials: boolean
   /** Safe display name for the stored cloud key (never the secret). */
   credential_label?: string | null
+  git_repo_url?: string | null
+  git_branch?: string | null
 }
 
 export type WorkspacePromotionTarget = 'staging' | 'prod'
@@ -519,6 +551,17 @@ export interface GitHubRepositorySearchItem {
 
 export interface GitHubRepositorySearchResponse {
   repositories: GitHubRepositorySearchItem[]
+}
+
+export interface GitBranchItem {
+  name: string
+  protected: boolean
+  is_default: boolean
+}
+
+export interface GitBranchListResponse {
+  branches: GitBranchItem[]
+  default_branch?: string | null
 }
 
 export interface GitHubAppStatus {

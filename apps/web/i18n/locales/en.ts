@@ -83,6 +83,14 @@ export default {
     "view": "View",
     "apply": "Apply"
   },
+  "gitBranch": {
+    "default": "default",
+    "selectRepoFirst": "Select a repository to load branches.",
+    "createNew": "+ Create new branch…",
+    "newPlaceholder": "feature/my-branch",
+    "createHint": "The new branch is created from the default branch when you push.",
+    "loadFailed": "Could not load branches"
+  },
   "nav": {
     "home": "Home",
     "environments": "Environments",
@@ -859,9 +867,9 @@ export default {
     "destroy": {
       "title": "Destroy environment?",
       "titleStop": "Stop provisioning?",
-      "message": "Destroy preview \"{name}\"? Kubernetes resources for this environment will be torn down. This cannot be undone.",
+      "message": "Destroy preview \"{name}\"? Runtime resources for this environment are torn down. For cloud previews provisioned via scaffold IaC, Terraform/Pulumi destroy runs on the linked workspace when no other active environments share it. This cannot be undone.",
       "messageProvisioning": "Stop provisioning \"{name}\"? In-flight work will be cancelled. Resources already created are left as-is (use Destroy later to tear them down).",
-      "messageForce": "Destroy preview \"{name}\"? In-flight provisioning will be cancelled and created resources will be torn down. This cannot be undone.",
+      "messageForce": "Destroy preview \"{name}\"? In-flight provisioning will be cancelled and created resources will be torn down (including scaffold IaC when this was a cloud deploy). This cannot be undone.",
       "confirm": "Yes, destroy",
       "confirmStop": "Yes, stop",
       "cancel": "No"
@@ -899,7 +907,7 @@ export default {
       "failed": "FAILED",
       "destroyed": "DESTROYED",
       "expired": "EXPIRED",
-      "teardown": "TEARDOWN"
+      "teardown": "DELETING"
     },
     "toasts": {
       "paused": "Environment paused",
@@ -908,8 +916,10 @@ export default {
       "resumeFailed": "Resume failed",
       "relaunched": "Environment relaunched",
       "relaunchFailed": "Relaunch failed",
-      "destroyed": "Environment destroyed",
+      "destroyed": "Environment deleted",
+      "destroyComplete": "Removal finished. Returning to environments.",
       "destroyFailed": "Destroy failed",
+      "deletingBanner": "Deleting environment and reclaiming resources…",
       "stopped": "Provisioning stopped",
       "stopFailed": "Stop failed",
       "extended": "TTL extended",
@@ -1254,7 +1264,8 @@ export default {
     "iacEngineLocalRuntimeHint": "Local Compose and running-instance workspaces scaffold Terraform, OpenTofu, or Pulumi stubs plus optional CI/CD. Promote to a cloud provider for managed modules.",
     "editingExisting": "Editing",
     "editingExistingSuffix": "prior resource selections are loaded on the next step. Leave credentials blank to keep the ones already stored.",
-    "credentialsStored": "Credentials are already stored for this workspace. Paste new values only if you want to replace them; otherwise leave the fields blank.",
+    "credentialsStored": "Account cloud keys from Settings were detected for this provider. Leave credential fields blank to use them, or paste new values to override for this workspace.",
+    "credentialsDetectedTitle": "Stored cloud credentials detected",
     "infraGeneration": "Infrastructure generation",
     "providerBlurbs": {
       "aws": "Enterprise scalability with EKS, EC2, and Secrets Manager.",
@@ -1433,7 +1444,10 @@ export default {
       "destroy": "Destroy",
       "filteredByProject": "Filtered by project",
       "backToProject": "Back to project",
-      "clearProjectFilter": "Show all workspaces"
+      "clearProjectFilter": "Show all workspaces",
+      "deleting": "Deleting…",
+      "destroyFailed": "Destroy failed",
+      "retryDestroy": "Retry destroy"
     },
     "destroy": {
       "title": "Destroy workspace?",
@@ -1450,6 +1464,36 @@ export default {
       "composeSuite": "Compose Suite",
       "instanceSuite": "Instance Suite",
       "manifestConfigurator": "Manifest Configurator"
+    },
+    "update": {
+      "action": "Update workspace",
+      "eyebrow": "Workspace",
+      "title": "Update workspace",
+      "blurb": "Change cloud services, runtime mode, and scaffold settings for this workspace.",
+      "blurbNamed": "Change cloud services, runtime mode, and scaffold settings for {name}.",
+      "back": "Back to workspace",
+      "saved": "Workspace configuration updated"
+    },
+    "linkedRepo": {
+      "title": "Linked application repo",
+      "blurb": "Connect the GitHub repo that holds your app code. Launchpad tracks the branch you choose and updates cloud environments on push.",
+      "branch": "Track branch",
+      "cdMode": "Continuous deploy",
+      "modeWebhook": "Webhook (default)",
+      "modeWebhookBlurb": "GitHub push webhook tells Launchpad to rebuild matching environments. No workflow changes in the app repo.",
+      "modeActions": "GitHub Actions",
+      "modeActionsBlurb": "Launchpad writes a workflow in the app repo that notifies Launchpad on push to the tracked branch.",
+      "save": "Save link",
+      "unlink": "Unlink",
+      "saved": "App repo linked",
+      "unlinked": "App repo unlinked",
+      "loadFailed": "Could not load linked app repo",
+      "saveFailed": "Could not save linked app repo",
+      "repoRequired": "Select a GitHub installation and repository",
+      "connectGithub": "Connect GitHub first:",
+      "webhookOk": "WEBHOOK_SECRET set",
+      "webhookMissing": "WEBHOOK_SECRET missing",
+      "workflow": "Workflow"
     },
     "errors": {
       "load": "Failed to load workspace",
@@ -1601,6 +1645,7 @@ export default {
     "shell": "Shell",
     "logs": "Live logs",
     "refresh": "Refresh metrics",
+    "openObservability": "Observability",
     "cpu": "CPU",
     "memory": "Memory",
     "healthPing": "Health ping",
@@ -1618,6 +1663,48 @@ export default {
       "streamingLogs": "streaming logs…",
       "logsDone": "log stream finished",
       "logsError": "log stream error"
+    }
+  },
+  "envObservability": {
+    "title": "Cluster Observability",
+    "blurb": "Health and aggregate metrics for {name}",
+    "back": "Back to environment",
+    "window": "Last 1h",
+    "autoRefresh": "Auto-refresh",
+    "loadFailed": "Could not load observability data",
+    "cards": {
+      "cpu": "CPU (sample)",
+      "cpuHint": "{pct}% of sampled capacity",
+      "sampleHint": "From control-plane sample",
+      "errorRate": "Preview error rate",
+      "errorHint": "Based on latest health ping",
+      "latency": "Health latency",
+      "latencyHint": "Round-trip to preview URL",
+      "alerts": "Active alerts",
+      "previewDown": "Preview health check failing",
+      "noAlerts": "No active alerts"
+    },
+    "signals": {
+      "title": "Core services golden signals",
+      "service": "Service",
+      "status": "Status",
+      "cpu": "CPU",
+      "memory": "Memory",
+      "health": "Health"
+    },
+    "trace": {
+      "title": "Recent samples"
+    },
+    "stream": {
+      "title": "Aggregated stream"
+    },
+    "context": {
+      "title": "Environment context",
+      "target": "Target",
+      "owner": "Owner",
+      "provider": "Provider",
+      "deploy": "Deploy mode",
+      "appReady": "App ready"
     }
   },
   "credentials": {
@@ -2227,6 +2314,31 @@ export default {
       "previewHint": "Dockerfile and compose templates (written on save / provision)",
       "syncedToCicd": "Stacks sync into Create CI/CD and Create Docker automatically."
     },
+    "repoSource": {
+      "title": "Application repository",
+      "blurb": "Link a GitHub or GitLab repo and branch for automatic rebuilds on push, or import a repo to scaffold a workspace from its code.",
+      "modeLink": "Link repo",
+      "modeImport": "Import repo",
+      "modeServices": "Services",
+      "saveLink": "Save link",
+      "queueLink": "Use this repo",
+      "pendingHint": "Choose a repo and branch now. Launchpad applies the link when this workspace is created.",
+      "pendingSaved": "Repo queued",
+      "pendingSavedBlurb": "Link will be applied when you create or save the workspace.",
+      "pendingCleared": "Queued repo link cleared",
+      "pendingBadge": "queued",
+      "loadFailed": "Could not load repository link",
+      "saveFailed": "Could not save repository link",
+      "connectGitlab": "Connect GitLab first:",
+      "gitlabRepoRequired": "Select a GitLab project",
+      "gitlabTrackBlurb": "Pushes to this branch rebuild matching Launchpad environments (GitLab webhook). Connect the webhook under Integrations if needed.",
+      "gitlabSaved": "GitLab repo tracked",
+      "gitlabSavedBlurb": "Branch pushes can trigger environment rebuilds.",
+      "gitlabUnlinked": "GitLab tracking cleared",
+      "importBlurb": "Import analyzes a GitHub or GitLab repository, detects services, and creates a workspace from that source.",
+      "openImport": "Import from GitHub / GitLab",
+      "saveWorkspaceFirst": "Save or create the workspace first, then link a repository for branch-based auto deploy."
+    },
     "ansible": {
       "label": "Ansible",
       "title": "Configure host with Ansible",
@@ -2341,7 +2453,7 @@ export default {
       "loading": "Loading setup…",
       "detectedTitle": "Detected from workspace",
       "detectedBlurb": "Toggles below were enabled from files already in this workspace.",
-      "credentialsStored": "Credentials are already stored. Leave fields blank to keep them unchanged.",
+      "credentialsStored": "Account cloud keys from Settings (or this workspace) were detected. Leave fields blank to use them, or paste new values to override.",
       "clusterName": "Cluster name",
       "kubectlContext": "kubectl context",
       "servicesInIac": "Services to include in IaC",

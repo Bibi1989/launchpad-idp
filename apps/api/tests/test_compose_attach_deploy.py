@@ -426,7 +426,7 @@ def test_attach_pm2_cloud_vm_skips_docker_image_push(tmp_path: Path) -> None:
             environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             name="demo",
             git_branch="main",
-            git_repo_url="https://github.com/acme/app.git",
+            git_repo_url=f"https://launchpad.local/workspaces/{tmp_path.name}/",
             ttl_expires_at="2099-01-01T00:00:00+00:00",
             running_instance=RunningInstanceConfig(
                 kind=RunningInstanceKind.VM,
@@ -443,7 +443,7 @@ def test_attach_pm2_cloud_vm_skips_docker_image_push(tmp_path: Path) -> None:
     assert resources.preview_url == "http://1.2.3.4:3000"
     assert resources.image is None
     joined = "\n".join(remote_cmds)
-    assert "deb.nodesource.com/setup_20.x" in joined
+    assert "deb.nodesource.com/setup_20.x" in joined or "node_major" in joined
     assert "npm install -g pm2" in joined or "sudo npm install -g pm2" in joined
     assert "apps/web-ui" in joined
     assert "pm2" in joined
@@ -1007,6 +1007,76 @@ def test_native_bootstrap_pm2_script() -> None:
     assert "pm2 start" in script
     assert "pm2 save" in script
     assert "pm2 startup systemd" in script
+    assert "preview healthy" in script or "waiting for preview" in script
+
+
+def test_detect_start_uses_placeholder_without_app(tmp_path: Path) -> None:
+    from app.services.attach_deploy import (
+        _detect_start_command,
+        _native_bootstrap_and_start,
+        _placeholder_preview_start_command,
+    )
+
+    cmd = _detect_start_command(tmp_path)
+    assert cmd == _placeholder_preview_start_command()
+    script = _native_bootstrap_and_start(
+        strategy=InstanceProcessStrategy.PM2,
+        app_dir="/opt/launchpad/app",
+        workdir_rel=".",
+        listen=8080,
+        unit="demo",
+        start_command=cmd,
+    )
+    assert ".launchpad-preview-server.py" in script
+    assert "ThreadingHTTPServer" in script
+
+
+def test_detect_start_prefers_nitro_output(tmp_path: Path) -> None:
+    from app.services.attach_deploy import _detect_start_command
+
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"start":"nuxt start"},"dependencies":{"nuxt":"3.15.0"}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "nuxt.config.ts").write_text("export default {}\n", encoding="utf-8")
+    out = tmp_path / ".output" / "server"
+    out.mkdir(parents=True)
+    (out / "index.mjs").write_text("export {}\n", encoding="utf-8")
+    cmd = _detect_start_command(tmp_path)
+    assert "node .output/server/index.mjs" in cmd
+    assert "NITRO_PORT" in cmd
+
+
+def test_detect_start_nuxt_without_output_uses_preview(tmp_path: Path) -> None:
+    from app.services.attach_deploy import _detect_start_command
+
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"start":"nuxt start","preview":"nuxt preview"},'
+        '"dependencies":{"nuxt":"3.15.0"}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "nuxt.config.ts").write_text("export default {}\n", encoding="utf-8")
+    cmd = _detect_start_command(tmp_path)
+    assert "npm run preview" in cmd or "nuxi preview" in cmd
+    assert "npm start -- --host" not in cmd
+
+
+def test_autodetect_bootstrap_refines_nitro_and_uses_wrapper() -> None:
+    from app.services.attach_deploy import _native_bootstrap_and_start
+
+    script = _native_bootstrap_and_start(
+        strategy=InstanceProcessStrategy.PM2,
+        app_dir="/opt/launchpad/app",
+        workdir_rel=".",
+        listen=8080,
+        unit="demo",
+        start_command="",
+        autodetect_on_vm=True,
+    )
+    assert ".output/server/index.mjs" in script
+    assert ".launchpad-start.sh" in script
+    assert "setup_20.x" in script or "node_major" in script
+    assert "pm2 start /opt/launchpad/app/.launchpad-start.sh" in script
 
 
 def test_native_bootstrap_systemd_script() -> None:

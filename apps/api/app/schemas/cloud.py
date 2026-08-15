@@ -560,6 +560,8 @@ class GcpResources(BaseModel):
     artifact_registry: bool = False
     secret_backend: SecretBackend = SecretBackend.SECRET_MANAGER
     cloud_run: bool = False
+    # Ephemeral Ubuntu VM for running_instance / docker_compose cloud promotes.
+    compute_instance: bool = False
     cloud_functions: bool = False
     cloud_sql: bool = False
     cloud_sql_engine: SqlDatabaseEngine = SqlDatabaseEngine.POSTGRES
@@ -833,10 +835,22 @@ class ProvisioningWizardRequest(BaseModel):
     @model_validator(mode="after")
     def apply_runtime_mode_matrix(self) -> ProvisioningWizardRequest:
         from app.services.runtime_mode import (
+            ensure_ansible_for_vm_runtime,
+            ensure_autocreate_vm_resources,
             normalize_artifacts_for_runtime_mode,
             validate_runtime_mode,
         )
 
+        self.cloud = ensure_autocreate_vm_resources(
+            self.cloud,
+            runtime_mode=self.runtime_mode,
+            running_instance=self.running_instance,
+        )
+        self.ansible = ensure_ansible_for_vm_runtime(
+            self.ansible,
+            runtime_mode=self.runtime_mode,
+            running_instance=self.running_instance,
+        )
         validate_runtime_mode(self.cloud, self.runtime_mode, self.running_instance)
         (
             self.artifact_mode,
@@ -992,6 +1006,149 @@ class WorkspacePushRequest(BaseModel):
         return cleaned
 
 
+class WorkspaceCdMode(str, Enum):
+    """How Launchpad learns about app commits for cloud rebuilds.
+
+    - webhook: GitHub push webhook → Launchpad rebuild (default)
+    - github_actions: Launchpad writes an Actions workflow that notifies Launchpad
+    """
+
+    WEBHOOK = "webhook"
+    GITHUB_ACTIONS = "github_actions"
+
+
+class WorkspaceLinkedAppRepo(BaseModel):
+    installation_id: int = Field(ge=1)
+    full_name: str = Field(min_length=3, max_length=200)
+    git_repo_url: str = Field(min_length=8, max_length=512)
+    git_branch: str = Field(default="main", min_length=1, max_length=256)
+    cd_mode: WorkspaceCdMode = WorkspaceCdMode.WEBHOOK
+    workflow_path: str | None = Field(default=None, max_length=256)
+    updated_at: datetime | None = None
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if cleaned.count("/") != 1:
+            raise ValueError("full_name must be owner/repo")
+        owner, repo = cleaned.split("/", 1)
+        if not owner or not repo:
+            raise ValueError("full_name must be owner/repo")
+        return cleaned
+
+    @field_validator("git_branch")
+    @classmethod
+    def normalize_branch(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("git_branch is required")
+        if any(ch in cleaned for ch in (" ", "\n", "\r", "\t")):
+            raise ValueError("git_branch must not contain whitespace")
+        return cleaned
+
+
+class WorkspaceLinkedAppRepoRequest(BaseModel):
+    """Link or unlink an application GitHub repository for GitOps CD."""
+
+    installation_id: int | None = Field(default=None, ge=1)
+    full_name: str | None = Field(default=None, min_length=3, max_length=200)
+    git_branch: str = Field(default="main", min_length=1, max_length=256)
+    cd_mode: WorkspaceCdMode = WorkspaceCdMode.WEBHOOK
+    clear: bool = False
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if cleaned.count("/") != 1:
+            raise ValueError("full_name must be owner/repo")
+        owner, repo = cleaned.split("/", 1)
+        if not owner or not repo:
+            raise ValueError("full_name must be owner/repo")
+        return cleaned
+
+    @field_validator("git_branch")
+    @classmethod
+    def normalize_branch(cls, value: str) -> str:
+        cleaned = value.strip() or "main"
+        if any(ch in cleaned for ch in (" ", "\n", "\r", "\t")):
+            raise ValueError("git_branch must not contain whitespace")
+        return cleaned
+
+    @model_validator(mode="after")
+    def require_link_fields(self) -> WorkspaceLinkedAppRepoRequest:
+        if self.clear:
+            return self
+        if self.installation_id is None or not self.full_name:
+            raise ValueError("installation_id and full_name are required unless clear=true")
+        return self
+
+
+class WorkspaceLinkedAppRepoResponse(BaseModel):
+    linked: WorkspaceLinkedAppRepo | None = None
+    webhook_configured: bool = False
+    webhook_path: str = "/api/v1/webhooks/github"
+    control_plane_url: str | None = None
+    message: str = ""
+    workflow_path: str | None = None
+    environments_updated: int = 0
+
+
+class WorkspaceGitSourceRequest(BaseModel):
+    """Track a clone URL + branch for GitOps rebuild matching (GitLab or any git HTTPS URL).
+
+    Prefer ``linked-app-repo`` for GitHub App CD (webhooks / Actions).
+    """
+
+    git_repo_url: str | None = Field(default=None, min_length=8, max_length=512)
+    git_branch: str = Field(default="main", min_length=1, max_length=256)
+    clear: bool = False
+
+    @field_validator("git_repo_url")
+    @classmethod
+    def validate_git_repo_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        lower = cleaned.lower()
+        if not (
+            lower.startswith("https://")
+            or lower.startswith("http://")
+            or lower.startswith("git@")
+            or lower.startswith("ssh://")
+        ):
+            raise ValueError("git_repo_url must be an http(s), git@, or ssh URL")
+        return cleaned
+
+    @field_validator("git_branch")
+    @classmethod
+    def normalize_branch(cls, value: str) -> str:
+        cleaned = value.strip() or "main"
+        if any(ch in cleaned for ch in (" ", "\n", "\r", "\t")):
+            raise ValueError("git_branch must not contain whitespace")
+        return cleaned
+
+    @model_validator(mode="after")
+    def require_url_unless_clear(self) -> WorkspaceGitSourceRequest:
+        if self.clear:
+            return self
+        if not self.git_repo_url:
+            raise ValueError("git_repo_url is required unless clear=true")
+        return self
+
+
+class WorkspaceGitSourceResponse(BaseModel):
+    git_repo_url: str | None = None
+    git_branch: str = "main"
+    message: str = ""
+    environments_updated: int = 0
+
+
 class IaCBundleSummary(BaseModel):
     workspace_id: str
     engine: IaCEngine
@@ -1035,6 +1192,8 @@ class WorkspaceWizardConfig(BaseModel):
     has_credentials: bool = False
     """Safe display name for the stored cloud key (never the secret itself)."""
     credential_label: str | None = None
+    git_repo_url: str | None = None
+    git_branch: str | None = None
 
 
 class WorkspacePromotionTarget(str, Enum):
@@ -1194,6 +1353,17 @@ class GitHubRepositorySearchItem(BaseModel):
 
 class GitHubRepositorySearchResponse(BaseModel):
     repositories: list[GitHubRepositorySearchItem] = Field(default_factory=list)
+
+
+class GitBranchItem(BaseModel):
+    name: str
+    protected: bool = False
+    is_default: bool = False
+
+
+class GitBranchListResponse(BaseModel):
+    branches: list[GitBranchItem] = Field(default_factory=list)
+    default_branch: str | None = None
 
 
 class GitHubAppStatusResponse(BaseModel):

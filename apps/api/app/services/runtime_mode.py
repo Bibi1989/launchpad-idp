@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from app.schemas.cloud import (
+    AnsibleConfig,
     AwsCloudConfig,
     AzureCloudConfig,
     CloudConfig,
     ContainerScaffoldConfig,
     GcpCloudConfig,
+    InstanceProcessStrategy,
     KubernetesPackaging,
     LocalCloudConfig,
     RunningInstanceConfig,
@@ -50,10 +52,89 @@ def has_managed_kubernetes(cloud: CloudConfig) -> bool:
 
 
 def has_vm_hint(cloud: CloudConfig) -> bool:
-    """True when cloud resources suggest a VM target (e.g. EC2)."""
+    """True when cloud resources suggest a VM target (GCE / EC2)."""
     if isinstance(cloud, AwsCloudConfig):
         return cloud.resources.ec2
+    if isinstance(cloud, GcpCloudConfig):
+        return cloud.resources.compute_instance
     return False
+
+
+def ensure_ansible_for_vm_runtime(
+    ansible: AnsibleConfig,
+    *,
+    runtime_mode: WorkspaceRuntimeMode,
+    running_instance: RunningInstanceConfig | None,
+) -> AnsibleConfig:
+    """Enable ``infra/ansible`` for VM running-instance (cloud auto-create or BYO).
+
+    Terraform/Pulumi create the VM; Ansible (or SSH fallback) configures the app.
+    Without this, cloud wizards leave ``ansible.enabled=false`` and deploy skips
+    playbooks with ``ansible not attempted``.
+    """
+    if runtime_mode != WorkspaceRuntimeMode.RUNNING_INSTANCE:
+        return ansible
+    instance = running_instance or RunningInstanceConfig()
+    if instance.kind != RunningInstanceKind.VM:
+        return ansible
+    updates: dict[str, object] = {"enabled": True}
+    if instance.listen_port:
+        updates["app_listen_port"] = int(instance.listen_port)
+    if instance.ssh_user:
+        updates["ssh_user"] = instance.ssh_user
+    if instance.ssh_port:
+        updates["ssh_port"] = int(instance.ssh_port)
+    if instance.ssh_key_path:
+        updates["ssh_private_key_path"] = instance.ssh_key_path
+    if instance.host:
+        updates["hosts"] = instance.host
+    if instance.process_strategy == InstanceProcessStrategy.DOCKER:
+        updates["install_docker"] = True
+    return ansible.model_copy(update=updates)
+
+
+def ensure_autocreate_vm_resources(
+    cloud: CloudConfig,
+    *,
+    runtime_mode: WorkspaceRuntimeMode,
+    running_instance: RunningInstanceConfig | None,
+) -> CloudConfig:
+    """Enable GCE/EC2 IaC when running_instance VM has no BYO host.
+
+    Provision UI historically left ``compute_instance`` false for GCP VMs
+    (``gcp_vm_ssh`` had no resourceKey). Without this, Pulumi/Terraform apply
+    succeeds with only VPC/secrets and never yields a preview URL.
+    """
+    if runtime_mode != WorkspaceRuntimeMode.RUNNING_INSTANCE:
+        return cloud
+    instance = running_instance or RunningInstanceConfig()
+    if instance.kind != RunningInstanceKind.VM:
+        return cloud
+    if (instance.host or "").strip() or (instance.preview_url_override or "").strip():
+        return cloud
+
+    if isinstance(cloud, GcpCloudConfig):
+        updates: dict[str, object] = {}
+        if not cloud.resources.compute_instance:
+            updates["compute_instance"] = True
+        # Prefer an explicit VPC/subnet when already selected; otherwise default
+        # network is fine for a single ephemeral VM.
+        if updates:
+            return cloud.model_copy(
+                update={"resources": cloud.resources.model_copy(update=updates)}
+            )
+        return cloud
+
+    if isinstance(cloud, AwsCloudConfig):
+        if not cloud.resources.ec2:
+            return cloud.model_copy(
+                update={
+                    "resources": cloud.resources.model_copy(update={"ec2": True})
+                }
+            )
+        return cloud
+
+    return cloud
 
 
 def validate_runtime_mode(

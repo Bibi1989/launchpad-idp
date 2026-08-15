@@ -154,6 +154,79 @@ def _run(
     return completed
 
 
+_SSH_TRANSIENT_MARKERS = (
+    "connection reset by peer",
+    "broken pipe",
+    "connection timed out",
+    "closed by remote host",
+    "connection refused",
+    "kex_exchange_identification",
+    "no route to host",
+    "network is unreachable",
+    "temporarily unavailable",
+)
+
+
+def _ssh_client_option_args() -> list[str]:
+    """OpenSSH client options for cloud VM sessions (keepalive + non-interactive)."""
+    return [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=10",
+        "-o",
+        "TCPKeepAlive=yes",
+        "-o",
+        "ConnectTimeout=20",
+    ]
+
+
+def _ssh_client_option_string() -> str:
+    """Space-joined ``-o`` flags for rsync ``-e``."""
+    parts = _ssh_client_option_args()
+    return " ".join(parts)
+
+
+def _is_transient_ssh_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _SSH_TRANSIENT_MARKERS)
+
+
+def _run_with_ssh_retries(
+    cmd: list[str],
+    *,
+    timeout: float,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    attempts: int = 5,
+    delay_seconds: float = 8.0,
+) -> subprocess.CompletedProcess[str]:
+    """Run SSH/rsync/scp with retries on idle NAT resets and early sshd flaps."""
+    import time as _time
+
+    last_err: AttachDeployError | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return _run(cmd, timeout=timeout, env=env, cwd=cwd)
+        except AttachDeployError as exc:
+            last_err = exc
+            if attempt >= attempts or not _is_transient_ssh_error(exc):
+                raise
+            logger.warning(
+                "instance_ssh_transient_retry",
+                attempt=attempt,
+                attempts=attempts,
+                detail=str(exc)[-300:],
+            )
+            _time.sleep(delay_seconds * attempt)
+    assert last_err is not None
+    raise last_err
+
+
 def _credential_env(
     credentials: CloudCredentials | None,
     *,
@@ -1194,10 +1267,38 @@ def _remote_shell(
     command: str,
     timeout: float = 600,
 ) -> None:
+    from app.services.cloud_instance_compute import _gcp_zone
+
     provider = (cloud_provider or CloudProvider.LOCAL.value).strip().lower()
     instance_name = (running_instance.service_name or "").strip()
-    zone = (running_instance.region or "").strip()
+    zone = _gcp_zone(running_instance.region or "") if (running_instance.region or "").strip() else ""
     remote_cmd = _wrap_remote_bash(command)
+    key_path = (running_instance.ssh_key_path or "").strip()
+
+    # Prefer key-based SSH when scaffold/attach injected a key + public host.
+    # gcloud --zone must be a zone (europe-west3-a), not a region (europe-west3).
+    if host and key_path and shutil.which("ssh") is not None:
+        running_instance = _prepare_aws_ssh_access(
+            running_instance=running_instance,
+            cloud_provider=cloud_provider,
+            credentials=credentials,
+            environment_id=environment_id,
+        )
+        user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
+        ssh_base = [
+            "ssh",
+            *_ssh_client_option_args(),
+            "-p",
+            str(running_instance.ssh_port),
+            "-i",
+            key_path,
+        ]
+        _run_with_ssh_retries(
+            [*ssh_base, f"{user}@{host}", remote_cmd],
+            timeout=timeout,
+        )
+        return
+
     if (
         provider == CloudProvider.GCP.value
         and instance_name
@@ -1209,7 +1310,7 @@ def _remote_shell(
             environment_id=environment_id,
             provider=provider,
         )
-        _run(
+        _run_with_ssh_retries(
             [
                 "gcloud",
                 "compute",
@@ -1235,19 +1336,18 @@ def _remote_shell(
     user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
     ssh_base = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
+        *_ssh_client_option_args(),
         "-p",
         str(running_instance.ssh_port),
     ]
-    key_path = (running_instance.ssh_key_path or "").strip()
     if key_path:
         ssh_base.extend(["-i", key_path])
     if shutil.which("ssh") is None:
         raise AttachDeployError("ssh CLI is required for native VM deploy")
-    _run([*ssh_base, f"{user}@{host}", remote_cmd], timeout=timeout)
+    _run_with_ssh_retries(
+        [*ssh_base, f"{user}@{host}", remote_cmd],
+        timeout=timeout,
+    )
 
 
 def _wait_for_vm_ssh(
@@ -1357,15 +1457,34 @@ def _wait_for_vm_host_ready(
     environment_id: str,
 ) -> None:
     """Wait until the VM can install packages (startup done / apt free)."""
+    import time
+
     script = _wait_for_vm_host_ready_script(os_family=_vm_os_family(cloud_provider))
-    _remote_shell(
-        running_instance=running_instance,
-        host=host,
-        cloud_provider=cloud_provider,
-        credentials=credentials,
-        environment_id=environment_id,
-        command=script,
-        timeout=480,
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            _remote_shell(
+                running_instance=running_instance,
+                host=host,
+                cloud_provider=cloud_provider,
+                credentials=credentials,
+                environment_id=environment_id,
+                command=script,
+                timeout=480,
+            )
+            return
+        except AttachDeployError as exc:
+            last_err = exc
+            if not _is_transient_ssh_error(exc) or attempt >= 3:
+                raise
+            logger.warning(
+                "instance_vm_host_ready_retry",
+                attempt=attempt,
+                detail=str(exc)[-300:],
+            )
+            time.sleep(10 * attempt)
+    raise AttachDeployError(
+        f"VM host ready wait failed: {last_err or 'unknown'}"
     )
 
 
@@ -1409,6 +1528,182 @@ def _resolve_app_workdir_rel(workspace_root: Path | None) -> str:
     return "."
 
 
+def _workspace_has_runnable_app(
+    workspace_root: Path | None,
+    *,
+    workdir_rel: str = ".",
+) -> bool:
+    """True when the synced tree has a Node/Python app entrypoint."""
+    if workspace_root is None or not workspace_root.is_dir():
+        return False
+    root = workspace_root
+    if workdir_rel not in {"", "."}:
+        candidate = workspace_root / workdir_rel
+        if candidate.is_dir():
+            root = candidate
+    if (root / "package.json").is_file():
+        return True
+    if (root / "requirements.txt").is_file() or (root / "pyproject.toml").is_file():
+        return True
+    if (root / "main.py").is_file() or (root / "app" / "main.py").is_file():
+        return True
+    if (root / "index.js").is_file() or (root / "server.js").is_file():
+        return True
+    return False
+
+
+def _placeholder_preview_start_command() -> str:
+    """Stdlib HTTP server so Open App works for infra-only workspaces."""
+    return (
+        "python3 /opt/launchpad/.launchpad-preview-server.py"
+    )
+
+
+def _write_placeholder_preview_server_script() -> str:
+    """Shell fragment that installs a tiny always-on preview page on the VM."""
+    return r"""
+sudo mkdir -p /opt/launchpad
+sudo tee /opt/launchpad/.launchpad-preview-server.py >/dev/null <<'PY'
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
+
+PORT = int(os.environ.get("PORT", "8080"))
+BODY = (
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<title>Launchpad preview</title>"
+    "<style>body{font-family:system-ui,sans-serif;max-width:40rem;"
+    "margin:3rem auto;padding:0 1rem;line-height:1.5}"
+    "code{background:#f4f4f5;padding:.1rem .35rem;border-radius:4px}</style>"
+    "</head><body>"
+    "<h1>Launchpad preview is up</h1>"
+    "<p>Cloud infrastructure provisioned successfully. "
+    "This workspace has no application package yet "
+    "(no <code>package.json</code> / <code>apps/*</code>).</p>"
+    "<p>Link a repo or scaffold an app under <code>apps/</code>, "
+    "then re-provision to serve your real application on this URL.</p>"
+    "</body></html>"
+).encode("utf-8")
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(BODY)))
+        self.end_headers()
+        self.wfile.write(BODY)
+
+    def log_message(self, *_args):
+        return
+
+
+ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+PY
+"""
+
+
+def _preview_healthcheck_script(*, listen: int) -> str:
+    """Fail the remote bootstrap when nothing answers on the preview port."""
+    return f"""
+PORT={listen}
+echo "waiting for preview on 127.0.0.1:${{PORT}}"
+healthy=0
+for i in $(seq 1 90); do
+  code=$(curl -s -o /dev/null --max-time 2 -w '%{{http_code}}' "http://127.0.0.1:${{PORT}}/" || true)
+  case "$code" in
+    [12345][0-9][0-9])
+      echo "preview healthy on ${{PORT}} (http $code, attempt $i)"
+      healthy=1
+      break
+      ;;
+  esac
+  if command -v ss >/dev/null 2>&1; then
+    if ss -lnt 2>/dev/null | grep -qE ":${{PORT}}[[:space:]]"; then
+      echo "preview port ${{PORT}} is listening (attempt $i)"
+      healthy=1
+      break
+    fi
+  fi
+  sleep 2
+done
+if [ "$healthy" != "1" ]; then
+  echo "preview port ${{PORT}} not reachable after start" >&2
+  (command -v pm2 >/dev/null 2>&1 && pm2 ls && pm2 logs --lines 80 --nostream) || true
+  (command -v journalctl >/dev/null 2>&1 && sudo journalctl -u "*.service" -n 40 --no-pager) || true
+  (command -v ss >/dev/null 2>&1 && sudo ss -lntp) || true
+  exit 1
+fi
+"""
+
+
+def _node_start_command_from_package(
+    *,
+    root: Path,
+    port_token: str = "${PORT}",
+) -> str | None:
+    """Return a production start command for a Node app directory, or None."""
+    pkg = root / "package.json"
+    if not pkg.is_file():
+        return None
+    nitro = root / ".output" / "server" / "index.mjs"
+    if nitro.is_file():
+        return (
+            f"HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={port_token} "
+            f"NITRO_PORT={port_token} node .output/server/index.mjs"
+        )
+    standalone = root / ".next" / "standalone" / "server.js"
+    if standalone.is_file():
+        return f"HOST=0.0.0.0 PORT={port_token} node .next/standalone/server.js"
+    is_nuxt = any(
+        (root / name).is_file()
+        for name in ("nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs")
+    )
+    scripts: dict[str, object] = {}
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+        raw_scripts = data.get("scripts") if isinstance(data, dict) else None
+        if isinstance(raw_scripts, dict):
+            scripts = raw_scripts
+        deps = {}
+        if isinstance(data, dict):
+            for key in ("dependencies", "devDependencies"):
+                block = data.get(key)
+                if isinstance(block, dict):
+                    deps.update(block)
+            if "nuxt" in deps:
+                is_nuxt = True
+    except Exception:
+        pass
+    if is_nuxt:
+        if scripts.get("preview"):
+            return (
+                f"HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={port_token} "
+                f"NITRO_PORT={port_token} npm run preview -- --host 0.0.0.0 --port {port_token}"
+            )
+        return (
+            f"HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={port_token} "
+            f"NITRO_PORT={port_token} npx --yes nuxi preview --host 0.0.0.0 --port {port_token}"
+        )
+    if scripts.get("start"):
+        # Prefer env PORT/HOST; extra CLI flags break many frameworks (Nuxt/Nitro).
+        return f"HOST=0.0.0.0 PORT={port_token} npm start"
+    if scripts.get("preview"):
+        return (
+            f"HOST=0.0.0.0 PORT={port_token} npm run preview -- "
+            f"--host 0.0.0.0 --port {port_token}"
+        )
+    if scripts.get("dev"):
+        return (
+            f"HOST=0.0.0.0 PORT={port_token} npm run dev -- "
+            f"--host 0.0.0.0 --port {port_token}"
+        )
+    if (root / "server.js").is_file():
+        return f"HOST=0.0.0.0 PORT={port_token} node server.js"
+    if (root / "index.js").is_file():
+        return f"HOST=0.0.0.0 PORT={port_token} node index.js"
+    return None
+
+
 def _detect_start_command(workspace_root: Path | None, *, workdir_rel: str = ".") -> str:
     root = workspace_root
     if root is not None and workdir_rel not in {"", "."}:
@@ -1416,29 +1711,18 @@ def _detect_start_command(workspace_root: Path | None, *, workdir_rel: str = "."
         if candidate.is_dir():
             root = candidate
     if root is None:
-        return "npm start"
-    pkg = root / "package.json"
-    if pkg.is_file():
-        try:
-            data = json.loads(pkg.read_text(encoding="utf-8"))
-            scripts = data.get("scripts") if isinstance(data, dict) else None
-            if isinstance(scripts, dict):
-                if scripts.get("start"):
-                    return "npm start"
-                if scripts.get("preview"):
-                    return "npm run preview -- --host 0.0.0.0 --port ${PORT}"
-                if scripts.get("dev"):
-                    return "npm run dev -- --host 0.0.0.0 --port ${PORT}"
-        except Exception:
-            pass
-        return "npm start"
+        return _placeholder_preview_start_command()
+    node_cmd = _node_start_command_from_package(root=root, port_token="${PORT}")
+    if node_cmd:
+        return node_cmd
     if (root / "requirements.txt").is_file() or (root / "pyproject.toml").is_file():
         if (root / "main.py").is_file():
             return "python3 -m uvicorn main:app --host 0.0.0.0 --port ${PORT}"
         if (root / "app" / "main.py").is_file():
             return "python3 -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"
         return "python3 -m uvicorn main:app --host 0.0.0.0 --port ${PORT}"
-    return "npm start"
+    # Infra-only / empty app tree: still expose a reachable Open App URL.
+    return _placeholder_preview_start_command()
 
 
 def _vm_ensure_host_packages_script(
@@ -1498,7 +1782,12 @@ def _vm_ensure_host_packages_script_debian(*, strategy: InstanceProcessStrategy)
         "  done",
         "}",
         "host_ready=1",
-        "command -v node >/dev/null 2>&1 || host_ready=0",
+        "node_major=0",
+        "if command -v node >/dev/null 2>&1; then",
+        "  node_major=$(node -p \"process.versions.node.split('.')[0]\" 2>/dev/null || echo 0)",
+        "fi",
+        # Nuxt 3+/Vite 6+ need Node 20+; apt nodejs on Ubuntu is often too old.
+        "if [ \"${node_major:-0}\" -lt 20 ]; then host_ready=0; fi",
         "command -v npm >/dev/null 2>&1 || host_ready=0",
         "command -v git >/dev/null 2>&1 || host_ready=0",
         "command -v curl >/dev/null 2>&1 || host_ready=0",
@@ -1518,7 +1807,7 @@ def _vm_ensure_host_packages_script_debian(*, strategy: InstanceProcessStrategy)
             "  apt_retry sudo apt-get install -y --no-install-recommends \\",
             "    ca-certificates curl git build-essential python3 python3-pip python3-venv \\",
             "    ufw psmisc",
-            "  if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then",
+            "  if [ \"${node_major:-0}\" -lt 20 ] || ! command -v npm >/dev/null 2>&1; then",
             "    wait_apt_locks",
             "    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -",
             "    wait_apt_locks",
@@ -1578,7 +1867,11 @@ def _vm_ensure_host_packages_script_rhel(*, strategy: InstanceProcessStrategy) -
         "}",
         "PM=$(pkg_mgr)",
         "host_ready=1",
-        "command -v node >/dev/null 2>&1 || host_ready=0",
+        "node_major=0",
+        "if command -v node >/dev/null 2>&1; then",
+        "  node_major=$(node -p \"process.versions.node.split('.')[0]\" 2>/dev/null || echo 0)",
+        "fi",
+        "if [ \"${node_major:-0}\" -lt 20 ]; then host_ready=0; fi",
         "command -v npm >/dev/null 2>&1 || host_ready=0",
         "command -v git >/dev/null 2>&1 || host_ready=0",
         "command -v curl >/dev/null 2>&1 || host_ready=0",
@@ -1598,7 +1891,7 @@ def _vm_ensure_host_packages_script_rhel(*, strategy: InstanceProcessStrategy) -
             "    exit 1",
             "  fi",
             "  sudo $PM install -y git curl python3 python3-pip gcc-c++ make || true",
-            "  if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then",
+            "  if [ \"${node_major:-0}\" -lt 20 ] || ! command -v npm >/dev/null 2>&1; then",
             "    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -",
             "    sudo $PM install -y nodejs",
             "  fi",
@@ -1689,6 +1982,94 @@ def _vm_reverse_proxy_script(*, proxy: InstanceReverseProxy, listen: int) -> str
     return ""
 
 
+def _vm_autodetect_app_env_script(*, app_dir: str, listen: int) -> str:
+    """Shell that sets APP_CWD and START_CMD by inspecting the tree on the VM.
+
+    Used after git clone so we do not rely on the control-plane workspace
+    (often infra-only) for start-command detection.
+    """
+    placeholder = _placeholder_preview_start_command()
+    return f"""
+APP_DIR={app_dir}
+APP_CWD="$APP_DIR"
+START_CMD=""
+if [ -f "$APP_DIR/package.json" ]; then
+  APP_CWD="$APP_DIR"
+elif [ -d "$APP_DIR/apps" ]; then
+  for d in "$APP_DIR"/apps/*/; do
+    [ -f "${{d}}package.json" ] || continue
+    base=$(basename "$d")
+    case "$base" in
+      web|frontend|ui|app|client|www|nuxt|next)
+        APP_CWD="${{d%/}}"
+        break
+        ;;
+    esac
+    if [ -z "$START_CMD" ]; then
+      APP_CWD="${{d%/}}"
+    fi
+  done
+  for d in "$APP_DIR"/apps/*/; do
+    [ -f "${{d}}requirements.txt" ] || [ -f "${{d}}pyproject.toml" ] || continue
+    if [ ! -f "$APP_CWD/package.json" ] && [ ! -f "$APP_CWD/requirements.txt" ] && [ ! -f "$APP_CWD/pyproject.toml" ]; then
+      APP_CWD="${{d%/}}"
+    fi
+    break
+  done
+fi
+if [ -f "$APP_CWD/package.json" ]; then
+  if [ -f "$APP_CWD/nuxt.config.ts" ] || [ -f "$APP_CWD/nuxt.config.js" ] || [ -f "$APP_CWD/nuxt.config.mjs" ] \\
+    || grep -Eq '"nuxt"[[:space:]]*:' "$APP_CWD/package.json"; then
+    if grep -q '"preview"' "$APP_CWD/package.json"; then
+      START_CMD='HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} NITRO_PORT={listen} npm run preview -- --host 0.0.0.0 --port {listen}'
+    else
+      START_CMD='HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} NITRO_PORT={listen} npx --yes nuxi preview --host 0.0.0.0 --port {listen}'
+    fi
+  elif grep -q '"start"' "$APP_CWD/package.json"; then
+    START_CMD='HOST=0.0.0.0 PORT={listen} npm start'
+  elif grep -q '"preview"' "$APP_CWD/package.json"; then
+    START_CMD='HOST=0.0.0.0 PORT={listen} npm run preview -- --host 0.0.0.0 --port {listen}'
+  elif grep -q '"dev"' "$APP_CWD/package.json"; then
+    START_CMD='HOST=0.0.0.0 PORT={listen} npm run dev -- --host 0.0.0.0 --port {listen}'
+  else
+    START_CMD='HOST=0.0.0.0 PORT={listen} npm start'
+  fi
+elif [ -f "$APP_CWD/requirements.txt" ] || [ -f "$APP_CWD/pyproject.toml" ]; then
+  if [ -f "$APP_CWD/main.py" ]; then
+    START_CMD='python3 -m uvicorn main:app --host 0.0.0.0 --port {listen}'
+  elif [ -f "$APP_CWD/app/main.py" ]; then
+    START_CMD='python3 -m uvicorn app.main:app --host 0.0.0.0 --port {listen}'
+  else
+    START_CMD='python3 -m uvicorn main:app --host 0.0.0.0 --port {listen}'
+  fi
+elif [ -f "$APP_CWD/server.js" ]; then
+  START_CMD='HOST=0.0.0.0 PORT={listen} node server.js'
+elif [ -f "$APP_CWD/index.js" ]; then
+  START_CMD='HOST=0.0.0.0 PORT={listen} node index.js'
+else
+  START_CMD={json.dumps(placeholder)}
+fi
+export APP_CWD START_CMD
+echo "launchpad_vm_autodetect cwd=$APP_CWD start=$START_CMD"
+"""
+
+
+def _vm_refine_start_after_build_script(*, listen: int) -> str:
+    """Prefer Nitro/Next production entrypoints once ``npm run build`` finishes."""
+    return f"""
+cd "$APP_CWD"
+if [ -f .output/server/index.mjs ]; then
+  START_CMD='HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} NITRO_PORT={listen} node .output/server/index.mjs'
+elif [ -f .next/standalone/server.js ]; then
+  START_CMD='HOST=0.0.0.0 PORT={listen} node .next/standalone/server.js'
+elif [ -f dist/index.js ] && [ ! -f package.json ]; then
+  START_CMD='HOST=0.0.0.0 PORT={listen} node dist/index.js'
+fi
+export START_CMD
+echo "launchpad_vm_start_refined start=$START_CMD"
+"""
+
+
 def _native_bootstrap_and_start(
     *,
     strategy: InstanceProcessStrategy,
@@ -1699,12 +2080,9 @@ def _native_bootstrap_and_start(
     start_command: str,
     reverse_proxy: InstanceReverseProxy = InstanceReverseProxy.NONE,
     cloud_provider: str = CloudProvider.GCP.value,
+    autodetect_on_vm: bool = False,
 ) -> str:
     """Shell script executed on the VM after code is present."""
-    work = "." if workdir_rel in {"", "."} else workdir_rel.strip().lstrip("./")
-    app_cwd = app_dir if work == "." else f"{app_dir}/{work}"
-    # Expand PORT in start commands that use ${PORT}.
-    start_expanded = start_command.replace("${PORT}", str(listen)).replace("$PORT", str(listen))
     ensure = _vm_ensure_host_packages_script(
         strategy=strategy,
         os_family=_vm_os_family(cloud_provider),
@@ -1713,10 +2091,131 @@ def _native_bootstrap_and_start(
         str(listen),
     )
 
+    if autodetect_on_vm:
+        resolve_env = _vm_autodetect_app_env_script(app_dir=app_dir, listen=listen)
+        refine_start = _vm_refine_start_after_build_script(listen=listen)
+        install_app = (
+            "cd \"$APP_CWD\"\n"
+            f"export PORT={listen}\n"
+            "export HOST=0.0.0.0\n"
+            f"export NITRO_PORT={listen}\n"
+            "export NITRO_HOST=0.0.0.0\n"
+            "export NODE_ENV=production\n"
+            "export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\"\n"
+            "if [ -f package.json ]; then\n"
+            "  if [ -f package-lock.json ]; then npm ci || npm install; "
+            "elif [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then pnpm install --frozen-lockfile || pnpm install; "
+            "elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then yarn install --frozen-lockfile || yarn install; "
+            "else npm install; fi\n"
+            "  if grep -q '\"build\"' package.json; then\n"
+            "    if [ -f nuxt.config.ts ] || [ -f nuxt.config.js ] || [ -f nuxt.config.mjs ] "
+            "|| grep -Eq '\"nuxt\"[[:space:]]*:' package.json; then\n"
+            "      npm run build\n"
+            "    else\n"
+            "      npm run build || true\n"
+            "    fi\n"
+            "  fi\n"
+            "elif [ -f requirements.txt ]; then\n"
+            "  python3 -m pip install --user -r requirements.txt\n"
+            "  export PATH=\"$HOME/.local/bin:$PATH\"\n"
+            "elif [ -f pyproject.toml ]; then\n"
+            "  python3 -m pip install --user .\n"
+            "  export PATH=\"$HOME/.local/bin:$PATH\"\n"
+            "fi\n"
+            + refine_start
+        )
+        placeholder_setup = (
+            f'if [ "$START_CMD" = {json.dumps(_placeholder_preview_start_command())} ]; then\n'
+            + _write_placeholder_preview_server_script()
+            + "fi\n"
+        )
+        health = _preview_healthcheck_script(listen=listen)
+        start_wrapper = f"{app_dir}/.launchpad-start.sh"
+        write_wrapper = (
+            f"{{ printf '%s\\n' "
+            + "'#!/bin/bash' "
+            + "'set -euo pipefail' "
+            + "\"cd $(printf %q \"$APP_CWD\")\" "
+            + f"'export PORT={listen}' "
+            + "'export HOST=0.0.0.0' "
+            + f"'export NITRO_PORT={listen}' "
+            + "'export NITRO_HOST=0.0.0.0' "
+            + "'export NODE_ENV=production' "
+            + "'export PATH=/usr/local/bin:$HOME/.local/bin:$PATH' "
+            + "\"exec bash -lc $(printf %q \"$START_CMD\")\" "
+            + f"; }} > {start_wrapper}\n"
+            + f"chmod +x {start_wrapper}\n"
+        )
+        if strategy == InstanceProcessStrategy.PM2:
+            return (
+                ensure
+                + resolve_env
+                + install_app
+                + placeholder_setup
+                + write_wrapper
+                + f"pm2 delete {unit} >/dev/null 2>&1 || true\n"
+                + "if [ -f \"$APP_CWD/ecosystem.config.cjs\" ]; then\n"
+                + "  (cd \"$APP_CWD\" && pm2 start ecosystem.config.cjs)\n"
+                + "elif [ -f \"$APP_CWD/../ecosystem.config.cjs\" ]; then\n"
+                + "  (cd \"$APP_CWD/..\" && pm2 start ecosystem.config.cjs)\n"
+                + "else\n"
+                + f"  pm2 start {start_wrapper} --name {unit} --update-env\n"
+                + "fi\n"
+                + "pm2 save || true\n"
+                + "sudo env PATH=$PATH pm2 startup systemd -u \"$(whoami)\" --hp \"$HOME\" || true\n"
+                + f"pm2 describe {unit} >/dev/null 2>&1 || pm2 ls\n"
+                + health
+                + _vm_reverse_proxy_script(proxy=reverse_proxy, listen=listen)
+            )
+        if strategy == InstanceProcessStrategy.SYSTEMD:
+            unit_file = f"/etc/systemd/system/{unit}.service"
+            return (
+                ensure
+                + resolve_env
+                + install_app
+                + placeholder_setup
+                + write_wrapper
+                + f"sudo tee {unit_file} >/dev/null <<EOF\n"
+                + "[Unit]\nDescription=Launchpad preview\nAfter=network-online.target\n"
+                + "Wants=network-online.target\n\n"
+                + "[Service]\nType=simple\n"
+                + f"WorkingDirectory={app_dir}\n"
+                + f"Environment=PORT={listen}\n"
+                + "Environment=HOST=0.0.0.0\n"
+                + f"Environment=NITRO_PORT={listen}\n"
+                + "Environment=NITRO_HOST=0.0.0.0\n"
+                + "Environment=NODE_ENV=production\n"
+                + "Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+                + f"ExecStart={start_wrapper}\n"
+                + "Restart=always\nRestartSec=3\n\n"
+                + "[Install]\nWantedBy=multi-user.target\n"
+                + "EOF\n"
+                + "sudo systemctl daemon-reload\n"
+                + f"sudo systemctl enable --now {unit}.service\n"
+                + f"sudo systemctl restart {unit}.service\n"
+                + f"sudo systemctl --no-pager --full status {unit}.service || true\n"
+                + health
+                + _vm_reverse_proxy_script(proxy=reverse_proxy, listen=listen)
+            )
+        return (
+            ensure
+            + resolve_env
+            + install_app
+            + placeholder_setup
+            + f"echo 'Unsupported native strategy {strategy.value}; packages installed.'\n"
+        )
+
+    work = "." if workdir_rel in {"", "."} else workdir_rel.strip().lstrip("./")
+    app_cwd = app_dir if work == "." else f"{app_dir}/{work}"
+    # Expand PORT in start commands that use ${PORT}.
+    start_expanded = start_command.replace("${PORT}", str(listen)).replace("$PORT", str(listen))
+
     install_app = (
         f"cd {app_cwd}\n"
         f"export PORT={listen}\n"
         "export HOST=0.0.0.0\n"
+        f"export NITRO_PORT={listen}\n"
+        "export NITRO_HOST=0.0.0.0\n"
         "export NODE_ENV=production\n"
         "export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\"\n"
         "if [ -f package.json ]; then\n"
@@ -1734,30 +2233,89 @@ def _native_bootstrap_and_start(
         "fi\n"
     )
 
+    needs_placeholder = start_command.strip() == _placeholder_preview_start_command()
+    # Prefer Nitro output after build when syncing a workspace that has Nuxt.
+    if not needs_placeholder:
+        install_app += (
+            f"if [ -f .output/server/index.mjs ]; then\n"
+            f"  START_CMD='HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
+            f"NITRO_PORT={listen} node .output/server/index.mjs'\n"
+            f"  export START_CMD\n"
+            f"fi\n"
+        )
+        # Allow overriding start_expanded when Nitro output appeared.
+        start_expanded_nitro = (
+            f"HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
+            f"NITRO_PORT={listen} node .output/server/index.mjs"
+        )
+    else:
+        start_expanded_nitro = start_expanded
+
+    placeholder_setup = (
+        _write_placeholder_preview_server_script() if needs_placeholder else ""
+    )
+    health = _preview_healthcheck_script(listen=listen)
+
     if strategy == InstanceProcessStrategy.PM2:
-        return (
-            ensure
-            + install_app
-            + f"pm2 delete {unit} >/dev/null 2>&1 || true\n"
+        pm2_cmd = start_expanded_nitro if not needs_placeholder else start_expanded
+        # Prefer runtime Nitro entry when present (shell checks at start time).
+        pm2_launch = (
+            f"pm2 delete {unit} >/dev/null 2>&1 || true\n"
             + "if [ -f ecosystem.config.cjs ]; then\n"
             + "  pm2 start ecosystem.config.cjs\n"
             + "elif [ -f ../ecosystem.config.cjs ]; then\n"
             + "  pm2 start ../ecosystem.config.cjs\n"
-            + f"else\n"
-            + f"  pm2 start bash --name {unit} -- -lc {json.dumps(start_expanded)}\n"
+            + "elif [ -f .output/server/index.mjs ]; then\n"
+            + f"  pm2 start bash --name {unit} --cwd {app_cwd} --update-env -- -lc "
+            + json.dumps(
+                f"cd {app_cwd} && HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
+                f"NITRO_PORT={listen} NODE_ENV=production node .output/server/index.mjs"
+            )
+            + "\n"
+            + "else\n"
+            + f"  pm2 start bash --name {unit} --cwd {app_cwd} --update-env -- -lc "
+            + json.dumps(f"cd {app_cwd} && {pm2_cmd}")
+            + "\n"
             + "fi\n"
+        )
+        return (
+            ensure
+            + placeholder_setup
+            + install_app
+            + pm2_launch
             + "pm2 save || true\n"
             + "sudo env PATH=$PATH pm2 startup systemd -u \"$(whoami)\" --hp \"$HOME\" || true\n"
             + f"pm2 describe {unit} >/dev/null 2>&1 || pm2 ls\n"
+            + health
             + _vm_reverse_proxy_script(proxy=reverse_proxy, listen=listen)
         )
 
     if strategy == InstanceProcessStrategy.SYSTEMD:
         unit_file = f"/etc/systemd/system/{unit}.service"
-        exec_start = start_expanded.replace('"', '\\"')
+        start_wrapper = f"{app_cwd}/.launchpad-start.sh"
+        exec_start = start_expanded.replace("'", "'\"'\"'")
+        nitro_exec = (
+            f"HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
+            f"NITRO_PORT={listen} node .output/server/index.mjs"
+        ).replace("'", "'\"'\"'")
         return (
             ensure
+            + placeholder_setup
             + install_app
+            + f"if [ -f {app_cwd}/.output/server/index.mjs ]; then\n"
+            + f"  START_LINE='{nitro_exec}'\n"
+            + "else\n"
+            + f"  START_LINE='{exec_start}'\n"
+            + "fi\n"
+            + f"printf '%s\\n' '#!/bin/bash' 'set -euo pipefail' "
+            + f"'cd {app_cwd}' "
+            + f"'export PORT={listen}' 'export HOST=0.0.0.0' "
+            + f"'export NITRO_PORT={listen}' 'export NITRO_HOST=0.0.0.0' "
+            + "'export NODE_ENV=production' "
+            + "'export PATH=/usr/local/bin:$HOME/.local/bin:$PATH' "
+            + "\"exec bash -lc \\\"$START_LINE\\\"\" "
+            + f"> {start_wrapper}\n"
+            + f"chmod +x {start_wrapper}\n"
             + f"sudo tee {unit_file} >/dev/null <<'EOF'\n"
             + "[Unit]\nDescription=Launchpad preview\nAfter=network-online.target\n"
             + "Wants=network-online.target\n\n"
@@ -1765,9 +2323,11 @@ def _native_bootstrap_and_start(
             + f"WorkingDirectory={app_cwd}\n"
             + f"Environment=PORT={listen}\n"
             + "Environment=HOST=0.0.0.0\n"
+            + f"Environment=NITRO_PORT={listen}\n"
+            + "Environment=NITRO_HOST=0.0.0.0\n"
             + "Environment=NODE_ENV=production\n"
             + "Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
-            + f'ExecStart=/bin/bash -lc "{exec_start}"\n'
+            + f"ExecStart={start_wrapper}\n"
             + "Restart=always\nRestartSec=3\n\n"
             + "[Install]\nWantedBy=multi-user.target\n"
             + "EOF\n"
@@ -1775,12 +2335,14 @@ def _native_bootstrap_and_start(
             + f"sudo systemctl enable --now {unit}.service\n"
             + f"sudo systemctl restart {unit}.service\n"
             + f"sudo systemctl --no-pager --full status {unit}.service || true\n"
+            + health
             + _vm_reverse_proxy_script(proxy=reverse_proxy, listen=listen)
         )
 
     # Docker strategy on VM is handled by _deploy_vm_docker; keep a safe fallback.
     return (
         ensure
+        + placeholder_setup
         + install_app
         + f"echo 'Unsupported native strategy {strategy.value}; packages installed.'\n"
     )
@@ -1796,9 +2358,15 @@ def _sync_workspace_over_ssh(
     credentials: CloudCredentials | None,
     environment_id: str,
 ) -> None:
+    from app.services.cloud_instance_compute import _gcp_zone
+
     provider = (cloud_provider or CloudProvider.LOCAL.value).strip().lower()
     instance_name = (running_instance.service_name or "").strip()
-    zone = (running_instance.region or "").strip()
+    zone = (
+        _gcp_zone(running_instance.region or "")
+        if (running_instance.region or "").strip()
+        else ""
+    )
     _remote_shell(
         running_instance=running_instance,
         host=host,
@@ -1808,6 +2376,50 @@ def _sync_workspace_over_ssh(
         command=f"sudo mkdir -p {app_dir} && sudo chown -R $(whoami) {app_dir}",
         timeout=120,
     )
+
+    running_instance = _prepare_aws_ssh_access(
+        running_instance=running_instance,
+        cloud_provider=cloud_provider,
+        credentials=credentials,
+        environment_id=environment_id,
+    )
+    user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
+    key_path = (running_instance.ssh_key_path or "").strip()
+
+    # Prefer key-based sync when a key is present (scaffold injects metadata keys).
+    if host and key_path and shutil.which("rsync") is not None:
+        ssh_opts = (
+            f"ssh {_ssh_client_option_string()} "
+            f"-p {running_instance.ssh_port} -i {key_path}"
+        )
+        _run_with_ssh_retries(
+            [
+                "rsync",
+                "-az",
+                "--delete",
+                "-e",
+                ssh_opts,
+                f"{workspace_root}/",
+                f"{user}@{host}:{app_dir}/",
+            ],
+            timeout=900,
+        )
+        return
+    if host and key_path and shutil.which("scp") is not None:
+        scp = [
+            "scp",
+            *_ssh_client_option_args(),
+            "-P",
+            str(running_instance.ssh_port),
+            "-i",
+            key_path,
+            "-r",
+            f"{workspace_root}/.",
+            f"{user}@{host}:{app_dir}/",
+        ]
+        _run_with_ssh_retries(scp, timeout=900)
+        return
+
     if (
         provider == CloudProvider.GCP.value
         and instance_name
@@ -1819,8 +2431,7 @@ def _sync_workspace_over_ssh(
             environment_id=environment_id,
             provider=provider,
         )
-        # gcloud scp recursive into remote app dir
-        _run(
+        _run_with_ssh_retries(
             [
                 "gcloud",
                 "compute",
@@ -1837,20 +2448,14 @@ def _sync_workspace_over_ssh(
         )
         return
 
-    running_instance = _prepare_aws_ssh_access(
-        running_instance=running_instance,
-        cloud_provider=cloud_provider,
-        credentials=credentials,
-        environment_id=environment_id,
-    )
-
-    user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
     if shutil.which("rsync") is not None:
-        ssh_opts = f"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p {running_instance.ssh_port}"
-        key_path = (running_instance.ssh_key_path or "").strip()
+        ssh_opts = (
+            f"ssh {_ssh_client_option_string()} "
+            f"-p {running_instance.ssh_port}"
+        )
         if key_path:
             ssh_opts += f" -i {key_path}"
-        _run(
+        _run_with_ssh_retries(
             [
                 "rsync",
                 "-az",
@@ -1865,11 +2470,19 @@ def _sync_workspace_over_ssh(
         return
     if shutil.which("scp") is None:
         raise AttachDeployError("rsync or scp is required to copy code over SSH")
-    scp = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", str(running_instance.ssh_port), "-r"]
-    key_path = (running_instance.ssh_key_path or "").strip()
+    scp = [
+        "scp",
+        *_ssh_client_option_args(),
+        "-P",
+        str(running_instance.ssh_port),
+        "-r",
+    ]
     if key_path:
         scp.extend(["-i", key_path])
-    _run([*scp, f"{workspace_root}/.", f"{user}@{host}:{app_dir}/"], timeout=900)
+    _run_with_ssh_retries(
+        [*scp, f"{workspace_root}/.", f"{user}@{host}:{app_dir}/"],
+        timeout=900,
+    )
 
 
 def _clone_repo_on_vm(
@@ -1882,23 +2495,49 @@ def _clone_repo_on_vm(
     cloud_provider: str,
     credentials: CloudCredentials | None,
     environment_id: str,
+    settings: Settings | None = None,
+    installation_id: int | None = None,
 ) -> None:
+    from app.core.config import get_settings
+    from app.services.git_urls import is_launchpad_workspace_git_url
+    from app.services.github_app import resolve_git_clone_token
+    from app.services.preview_build import _resolve_clone_url
+
     repo = (git_repo_url or "").strip()
     if not repo:
         raise AttachDeployError(
             "GitHub code source requires a git repository URL on the environment"
         )
+    if is_launchpad_workspace_git_url(repo):
+        raise AttachDeployError(
+            "Repository URL is a Launchpad workspace placeholder "
+            f"({repo}) and cannot be cloned from the VM; sync the workspace over SSH instead"
+        )
     branch = (git_branch or "main").strip() or "main"
-    # Escape for remote shell
-    safe_repo = repo.replace("'", "'\"'\"'")
+    cfg = settings or get_settings()
+    token = resolve_git_clone_token(
+        settings=cfg,
+        installation_id=installation_id,
+    )
+    try:
+        clone_url = _resolve_clone_url(repo, token)
+    except Exception as exc:
+        raise AttachDeployError(f"Invalid git repository URL: {exc}") from exc
+    # Escape for remote shell (token may be embedded; never log clone_url).
+    safe_repo = clone_url.replace("'", "'\"'\"'")
+    safe_branch = branch.replace("'", "'\"'\"'")
     cmd = (
         "set -euo pipefail\n"
         f"sudo mkdir -p {app_dir} && sudo chown -R $(whoami) {app_dir}\n"
+        "export GIT_TERMINAL_PROMPT=0\n"
         f"if [ -d {app_dir}/.git ]; then\n"
-        f"  cd {app_dir} && git fetch --all && git checkout {branch} && git pull --ff-only origin {branch}\n"
+        f"  cd {app_dir}\n"
+        f"  git remote set-url origin '{safe_repo}' || true\n"
+        f"  git fetch --depth 1 origin '{safe_branch}'\n"
+        f"  git checkout -B '{safe_branch}' FETCH_HEAD\n"
         "else\n"
         f"  rm -rf {app_dir}/* {app_dir}/.[!.]* 2>/dev/null || true\n"
-        f"  git clone --branch {branch} --depth 1 '{safe_repo}' {app_dir}\n"
+        f"  git clone --branch '{safe_branch}' --depth 1 '{safe_repo}' {app_dir}\n"
         "fi\n"
     )
     _remote_shell(
@@ -1910,6 +2549,31 @@ def _clone_repo_on_vm(
         command=cmd,
         timeout=900,
     )
+
+
+def _prefer_workspace_sync(
+    *,
+    code_source: InstanceCodeSource,
+    git_repo_url: str,
+    workspace_root: Path | None,
+) -> bool:
+    """Decide whether to rsync the control-plane workspace instead of git clone.
+
+    Default for cloud: clone a linked remote repo. Sync only when there is no
+    cloneable remote (imported/scaffolded app on disk, or launchpad.local URL).
+    """
+    from app.services.git_urls import (
+        is_launchpad_workspace_git_url,
+        is_remote_cloneable_git_url,
+    )
+
+    if is_remote_cloneable_git_url(git_repo_url):
+        return False
+    if workspace_root is None or not workspace_root.is_dir():
+        return False
+    if code_source == InstanceCodeSource.GITHUB:
+        return is_launchpad_workspace_git_url(git_repo_url) or not (git_repo_url or "").strip()
+    return True
 
 
 def _deploy_vm_native(
@@ -1927,7 +2591,8 @@ def _deploy_vm_native(
     resources: ProvisionedResources,
     override: str,
 ) -> ProvisionedResources:
-    _ = settings
+    from app.services.git_urls import is_remote_cloneable_git_url
+
     listen = running_instance.listen_port
     strategy = running_instance.process_strategy
     code_source = running_instance.code_source or InstanceCodeSource.SSH
@@ -1949,21 +2614,23 @@ def _deploy_vm_native(
             credentials=credentials,
             environment_id=environment_id,
         )
-        if code_source == InstanceCodeSource.GITHUB:
-            _clone_repo_on_vm(
-                git_repo_url=git_repo_url,
-                git_branch=git_branch,
-                app_dir=app_dir,
-                running_instance=running_instance,
-                host=host,
-                cloud_provider=cloud_provider,
-                credentials=credentials,
-                environment_id=environment_id,
-            )
-        else:
-            if workspace_root is None or not workspace_root.is_dir():
-                raise AttachDeployError(
-                    "SSH code source requires a linked workspace on disk"
+        use_sync = _prefer_workspace_sync(
+            code_source=code_source,
+            git_repo_url=git_repo_url,
+            workspace_root=workspace_root,
+        )
+        autodetect_on_vm = False
+        if use_sync:
+            assert workspace_root is not None  # guarded by _prefer_workspace_sync
+            from app.services.git_urls import is_launchpad_workspace_git_url
+
+            if code_source == InstanceCodeSource.GITHUB and is_launchpad_workspace_git_url(
+                git_repo_url
+            ):
+                logger.info(
+                    "vm_deploy_sync_instead_of_clone",
+                    environment_id=environment_id,
+                    reason="launchpad_workspace_git_url",
                 )
             _sync_workspace_over_ssh(
                 workspace_root=workspace_root,
@@ -1974,9 +2641,32 @@ def _deploy_vm_native(
                 credentials=credentials,
                 environment_id=environment_id,
             )
-
-        workdir_rel = _resolve_app_workdir_rel(workspace_root)
-        start_cmd = _detect_start_command(workspace_root, workdir_rel=workdir_rel)
+            workdir_rel = _resolve_app_workdir_rel(workspace_root)
+            start_cmd = _detect_start_command(workspace_root, workdir_rel=workdir_rel)
+        elif is_remote_cloneable_git_url(git_repo_url):
+            logger.info(
+                "vm_deploy_clone_linked_repo",
+                environment_id=environment_id,
+                branch=git_branch,
+            )
+            _clone_repo_on_vm(
+                git_repo_url=git_repo_url,
+                git_branch=git_branch,
+                app_dir=app_dir,
+                running_instance=running_instance,
+                host=host,
+                cloud_provider=cloud_provider,
+                credentials=credentials,
+                environment_id=environment_id,
+                settings=settings,
+            )
+            workdir_rel = "."
+            start_cmd = ""
+            autodetect_on_vm = True
+        else:
+            raise AttachDeployError(
+                "No cloneable git_repo_url and no workspace on disk to sync over SSH"
+            )
         bootstrap = _native_bootstrap_and_start(
             strategy=strategy,
             app_dir=app_dir,
@@ -1986,6 +2676,7 @@ def _deploy_vm_native(
             start_command=start_cmd,
             reverse_proxy=running_instance.reverse_proxy,
             cloud_provider=cloud_provider,
+            autodetect_on_vm=autodetect_on_vm,
         )
         _remote_shell(
             running_instance=running_instance,
@@ -2043,10 +2734,7 @@ def _deploy_vm_docker(
 
     ssh_base = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
+        *_ssh_client_option_args(),
         "-p",
         str(port),
     ]
@@ -2069,9 +2757,24 @@ def _deploy_vm_docker(
         f"-p {listen}:{listen} -e PORT={listen} {image}"
     )
     instance_name = (running_instance.service_name or "").strip()
-    zone = (running_instance.region or "").strip()
+    from app.services.cloud_instance_compute import _gcp_zone
+
+    zone = (
+        _gcp_zone(running_instance.region or "")
+        if (running_instance.region or "").strip()
+        else ""
+    )
     try:
-        if (
+        _wait_for_vm_ssh(
+            running_instance=running_instance,
+            host=host,
+            cloud_provider=cloud_provider,
+            credentials=credentials,
+            environment_id=environment_id,
+        )
+        if host and key_path and shutil.which("ssh") is not None:
+            _run_with_ssh_retries([*ssh_base, target, remote], timeout=600)
+        elif (
             provider == CloudProvider.GCP.value
             and instance_name
             and zone
@@ -2082,7 +2785,7 @@ def _deploy_vm_docker(
                 environment_id=environment_id,
                 provider=provider,
             )
-            _run(
+            _run_with_ssh_retries(
                 [
                     "gcloud",
                     "compute",
@@ -2097,7 +2800,7 @@ def _deploy_vm_docker(
                 env=env,
             )
         else:
-            _run([*ssh_base, target, remote], timeout=300)
+            _run_with_ssh_retries([*ssh_base, target, remote], timeout=600)
     except AttachDeployError:
         logger.exception("instance_vm_ssh_deploy_failed", host=host)
         raise

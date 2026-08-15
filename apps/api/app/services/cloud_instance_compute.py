@@ -1111,6 +1111,21 @@ _GCP_ALREADY_EXISTS_ZONE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GCP_INSTANCE_SELF_LINK_RE = re.compile(
+    r"projects/(?P<project>[^/'\s]+)/zones/(?P<zone>[a-z0-9-]+)/instances/(?P<name>[a-z0-9-]+)",
+    re.IGNORECASE,
+)
+
+
+def parse_gcp_compute_instance_id(
+    resource_id: str | None,
+) -> tuple[str, str, str] | None:
+    """Parse ``projects/.../zones/.../instances/...`` into (project, zone, name)."""
+    match = _GCP_INSTANCE_SELF_LINK_RE.search((resource_id or "").strip())
+    if not match:
+        return None
+    return match.group("project"), match.group("zone"), match.group("name")
+
 
 def _parse_gcp_already_exists(detail: str) -> tuple[str, str] | None:
     """Return (zone, instance_name) from a GCE 'already exists' error when present."""

@@ -20,14 +20,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       gnupg \
       unzip \
+      nodejs \
+      npm \
     && rm -rf /var/lib/apt/lists/*
 
-# kubectl + Docker CLI + k3d + AWS CLI (arch-aware)
+# kubectl + Docker CLI + k3d + AWS CLI + Pulumi (arch-aware)
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     case "$ARCH" in \
-      x86_64) KARCH=amd64; DARCH=x86_64; AWS_ARCH=x86_64 ;; \
-      aarch64|arm64) KARCH=arm64; DARCH=aarch64; AWS_ARCH=aarch64 ;; \
+      x86_64) KARCH=amd64; DARCH=x86_64; AWS_ARCH=x86_64; PULUMI_ARCH=linux-x64 ;; \
+      aarch64|arm64) KARCH=arm64; DARCH=aarch64; AWS_ARCH=aarch64; PULUMI_ARCH=linux-arm64 ;; \
       *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
     esac; \
     KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"; \
@@ -49,11 +51,18 @@ RUN set -eux; \
     unzip -q /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install; \
     rm -rf /tmp/aws /tmp/awscliv2.zip; \
+    PULUMI_VERSION=3.143.0; \
+    curl -fsSL \
+      "https://github.com/pulumi/pulumi/releases/download/v${PULUMI_VERSION}/pulumi-v${PULUMI_VERSION}-${PULUMI_ARCH}.tar.gz" \
+      | tar -xz -C /tmp; \
+    mv /tmp/pulumi/* /usr/local/bin/; \
+    rm -rf /tmp/pulumi; \
     kubectl version --client=true; \
     docker --version; \
     k3d version; \
     cloudflared --version; \
-    aws --version
+    aws --version; \
+    pulumi version
 
 COPY apps/api/pyproject.toml ./
 COPY apps/api/app ./app

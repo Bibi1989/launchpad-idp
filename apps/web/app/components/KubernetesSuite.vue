@@ -214,11 +214,11 @@ function requestNukeWorkspace() {
 async function confirmNukeWorkspace() {
   if (nuking.value) return
   nuking.value = true
-  consoleLogs.value.push(`[warning] Destroying workspace ${props.workspaceId}…`)
+  consoleLogs.value.push(`[warning] Deleting workspace ${props.workspaceId}…`)
   try {
     await destroyWorkspace(props.workspaceId)
     confirmNukeOpen.value = false
-    consoleLogs.value.push(`[success] Workspace destroyed`)
+    consoleLogs.value.push(`[success] Workspace deletion started`)
     await navigateTo('/workspaces')
   } catch (err) {
     consoleLogs.value.push(`[error] Nuke failed: ${err instanceof Error ? err.message : String(err)}`)

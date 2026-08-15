@@ -906,10 +906,14 @@ async function launch() {
             </template>
           </template>
         </div>
-        <label class="block space-y-2">
-          <span class="lp-label">{{ t('common.branch') }}</span>
-          <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
-        </label>
+        <GitBranchPicker
+          v-model="form.git_branch"
+          :host="gitHost"
+          :installation-id="selectedInstallationId"
+          :full-name="selectedRepoFullName"
+          :project-path="selectedGitlabPath"
+          :label="t('common.branch')"
+        />
         <label class="block space-y-2 sm:col-span-3">
           <span class="lp-label">{{ prFieldLabel }}</span>
           <input
@@ -1126,10 +1130,14 @@ async function launch() {
             </template>
           </template>
         </div>
-        <label class="block space-y-2">
-          <span class="lp-label">{{ t('common.branch') }}</span>
-          <input v-model="form.git_branch" class="lp-input font-mono text-xs" placeholder="main">
-        </label>
+        <GitBranchPicker
+          v-model="form.git_branch"
+          :host="gitHost"
+          :installation-id="selectedInstallationId"
+          :full-name="selectedRepoFullName"
+          :project-path="selectedGitlabPath"
+          :label="t('common.branch')"
+        />
         <label class="block space-y-2 sm:col-span-3">
           <span class="lp-label">{{ prFieldLabel }}</span>
           <input

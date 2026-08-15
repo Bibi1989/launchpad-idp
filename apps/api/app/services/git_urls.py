@@ -9,6 +9,59 @@ _SSH_GIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Control-plane placeholder used when a workspace has no upstream clone URL.
+# Remote VMs cannot resolve this host; deploy must sync the workspace over SSH.
+_LAUNCHPAD_WORKSPACE_HOSTS = frozenset(
+    {
+        "launchpad.local",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
+)
+
+
+def is_launchpad_workspace_git_url(value: str) -> bool:
+    """True for synthetic workspace URLs that are not cloneable from a remote VM."""
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return False
+    lower = cleaned.lower()
+    if "launchpad.local/workspaces/" in lower:
+        return True
+    try:
+        parsed = urlparse(cleaned if "://" in cleaned else f"https://{cleaned}")
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    if host in _LAUNCHPAD_WORKSPACE_HOSTS and "/workspaces/" in (parsed.path or "").lower():
+        return True
+    return False
+
+
+def is_remote_cloneable_git_url(value: str) -> bool:
+    """True when the URL can be cloned on a cloud VM (real GitHub/GitLab/etc.).
+
+    Link-repo is the default app source for cloud running-instance deploys.
+    Placeholder ``launchpad.local`` URLs and empty values are not cloneable.
+    """
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return False
+    if is_launchpad_workspace_git_url(cleaned):
+        return False
+    if cleaned.startswith("git@"):
+        return True
+    try:
+        parsed = urlparse(cleaned if "://" in cleaned else f"https://{cleaned}")
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host or host in _LAUNCHPAD_WORKSPACE_HOSTS:
+        return False
+    scheme = (parsed.scheme or "https").lower()
+    return scheme in {"http", "https", "ssh", "git"} or cleaned.startswith("ssh://")
+
 
 def normalize_git_repo_full_name(value: str) -> str | None:
     """Normalize clone/HTML/SSH URLs and bare `owner/repo` to lowercase `owner/repo`."""

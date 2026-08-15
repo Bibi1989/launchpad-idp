@@ -4,7 +4,10 @@ import {
   containerScaffoldSchema,
   defaultContainerScaffold,
   defaultAnsibleConfig,
+  defaultKubernetesWorkloadOptions,
+  defaultWorkloadDependencies,
   emptyCloudCredentials,
+  runningInstanceSchema,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
@@ -16,7 +19,9 @@ import type {
   IaCEngine,
   InfraGenerationConfig,
   KubernetesPackaging,
+  KubernetesWorkloadOptions,
   RunningInstanceConfig,
+  WorkloadDependenciesConfig,
   WorkspaceRuntimeMode,
   WorkspaceWizardConfig,
 } from '~/types/provisioning'
@@ -94,6 +99,7 @@ const form = reactive({
   kubernetes_packaging: 'none' as KubernetesPackaging,
   cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
   container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
+  dependencies: defaultWorkloadDependencies() as WorkloadDependenciesConfig,
   ansible: defaultAnsibleConfig() as AnsibleConfig,
   local: {
     cluster_name: 'launchpad',
@@ -266,6 +272,9 @@ function applyConfig(config: WorkspaceWizardConfig) {
   if (config.container_scaffold) {
     Object.assign(form.container_scaffold, config.container_scaffold)
   }
+  if (config.dependencies) {
+    Object.assign(form.dependencies, defaultWorkloadDependencies(), config.dependencies)
+  }
   Object.assign(form.ansible, defaultAnsibleConfig(), config.ansible ?? {})
   hasStoredCredentials.value = config.has_credentials
   clearCredentials()
@@ -375,31 +384,13 @@ function prevStep() {
 }
 
 function buildPayload(): ProvisioningWizardInput {
+  const baseOptions = {
+    ...defaultKubernetesWorkloadOptions(),
+    deployment: true,
+    service: true,
+  } as unknown as KubernetesWorkloadOptions
   const kubernetes_options = applyCostOptimizationToWorkloadOptions(
-    {
-      deployment: true,
-      service: true,
-      pod: false,
-      job: false,
-      cronjob: false,
-      statefulset: false,
-      daemonset: false,
-      ingress: false,
-      ingress_class: 'nginx' as const,
-      install_ingress_nginx: false,
-      config_map: false,
-      secret: false,
-      service_account: false,
-      pvc: false,
-      role: false,
-      role_binding: false,
-      hpa: false,
-      vpa: false,
-      pdb: false,
-      network_policy: false,
-      resource_quota: false,
-      limit_range: false,
-    },
+    baseOptions,
     form.cost_optimization,
   )
   const resources =
@@ -431,45 +422,57 @@ function buildPayload(): ProvisioningWizardInput {
   Object.assign(form.container_scaffold, normalized.containerScaffold)
   Object.assign(form.running_instance, normalized.runningInstance)
 
+  const running_instance = runningInstanceSchema.parse({
+    ...defaultRunningInstanceConfig(),
+    ...form.running_instance,
+  })
+
+  const ansibleWanted =
+    form.ansible.enabled
+    || form.iac_engine === 'ansible'
+    || infraGeneration.value.provision.engine === 'ansible'
+    || (
+      form.runtime_mode === 'running_instance'
+      && running_instance.kind === 'vm'
+    )
+
   const base = {
     name: workspaceName.value,
     iac_engine: infraGeneration.value.provision.engine,
     credentials: form.credentials,
     run_init: form.run_init,
     runtime_mode: form.runtime_mode,
-    running_instance: form.running_instance,
+    running_instance,
     kubernetes_packaging,
     kubernetes_options,
     cost_optimization: form.cost_optimization,
     container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
+    dependencies: form.dependencies,
     ansible: {
       ...form.ansible,
-      enabled:
-        form.ansible.enabled
-        || form.iac_engine === 'ansible'
-        || infraGeneration.value.provision.engine === 'ansible',
+      enabled: ansibleWanted,
       hosts:
         form.ansible.hosts
-        || form.running_instance.host
+        || running_instance.host
         || '127.0.0.1',
-      ssh_user: form.running_instance.ssh_user || form.ansible.ssh_user,
-      ssh_port: form.running_instance.ssh_port || form.ansible.ssh_port,
+      ssh_user: running_instance.ssh_user || form.ansible.ssh_user,
+      ssh_port: running_instance.ssh_port || form.ansible.ssh_port,
       ssh_private_key_path:
-        form.running_instance.ssh_key_path || form.ansible.ssh_private_key_path,
-      app_listen_port: form.running_instance.listen_port || form.ansible.app_listen_port,
+        running_instance.ssh_key_path || form.ansible.ssh_private_key_path,
+      app_listen_port: running_instance.listen_port || form.ansible.app_listen_port,
       app_deploy_mode:
         form.runtime_mode === 'running_instance'
           ? ansibleDeployModeFromStrategy(
-              form.running_instance.process_strategy || 'docker',
+              running_instance.process_strategy || 'docker',
             )
           : form.ansible.app_deploy_mode,
       reverse_proxy:
         form.runtime_mode === 'running_instance'
-          ? (form.running_instance.reverse_proxy || form.ansible.reverse_proxy || 'none')
+          ? (running_instance.reverse_proxy || form.ansible.reverse_proxy || 'none')
           : (form.ansible.reverse_proxy || 'none'),
       install_docker:
         form.runtime_mode === 'running_instance'
-          ? (form.running_instance.process_strategy || 'docker') === 'docker'
+          ? (running_instance.process_strategy || 'docker') === 'docker'
           : form.ansible.install_docker,
     },
   }
@@ -556,7 +559,14 @@ async function onSave() {
         },
       )
     }
-    if (form.ansible.enabled || form.iac_engine === 'ansible') {
+    if (
+      form.ansible.enabled
+      || form.iac_engine === 'ansible'
+      || (
+        form.runtime_mode === 'running_instance'
+        && form.running_instance.kind === 'vm'
+      )
+    ) {
       const targets =
         ansibleConfiguratorRef.value?.buildWritableFiles()
         ?? buildAnsibleScaffold(workspaceName.value || 'launchpad-workspace', {
@@ -592,6 +602,13 @@ onMounted(async () => {
         azure: form.azure,
         running_instance: form.running_instance,
       })
+      if (!hasStoredCredentials.value && provider.value !== 'local') {
+        hasStoredCredentials.value =
+          (provider.value === 'gcp' && Boolean(credStatus.has_gcp))
+          || (provider.value === 'aws' && Boolean(credStatus.has_aws))
+          || (provider.value === 'azure' && Boolean(credStatus.has_azure))
+          || (provider.value === 'cloudflare' && Boolean(credStatus.has_cloudflare))
+      }
     } catch {
       // Vault preferences are optional
     }
@@ -679,6 +696,7 @@ onMounted(async () => {
           <ContainerScaffoldCard
             v-if="form.container_scaffold.enabled"
             v-model="form.container_scaffold"
+            :workspace-id="workspaceId"
             :disabled="saving"
           />
           <AnsibleConfigurator
@@ -696,9 +714,20 @@ onMounted(async () => {
             :disabled="saving"
           />
         </template>
-        <p v-else class="text-sm text-[var(--lp-muted)]">
-          {{ t('scaffold.setup.selectServicesFirst') }}
-        </p>
+        <template v-else>
+          <p class="text-sm text-[var(--lp-muted)]">
+            {{ t('scaffold.setup.selectServicesFirst') }}
+          </p>
+          <AnsibleConfigurator
+            v-if="form.runtime_mode === 'running_instance' && form.running_instance.kind === 'vm'"
+            ref="ansibleConfiguratorRef"
+            v-model="form.ansible"
+            :cloud-provider="provider"
+            :running-instance="form.running_instance"
+            :workspace-name="workspaceName || 'launchpad-workspace'"
+            :disabled="saving"
+          />
+        </template>
       </div>
 
       <div v-if="currentStep === 2" class="space-y-4">
@@ -853,6 +882,7 @@ onMounted(async () => {
             v-if="form.container_scaffold.enabled"
             v-model="form.container_scaffold"
             class="mt-4"
+            :workspace-id="workspaceId"
             :disabled="saving"
           />
           <CostOptimizationCard
@@ -936,9 +966,9 @@ onMounted(async () => {
     <div class="flex items-center justify-between gap-3 border-t border-[var(--lp-line)] pt-4">
       <div class="flex items-center gap-2">
         <button
+          v-if="currentStep > 1"
           type="button"
           class="lp-btn-ghost"
-          :class="{ invisible: currentStep === 1 }"
           :disabled="loading || saving"
           @click="prevStep"
         >

@@ -34,15 +34,16 @@ def test_skips_when_no_terraform_state(tmp_path: Path) -> None:
     assert result.ok is True
 
 
-def test_skips_when_cli_missing(tmp_path: Path) -> None:
+def test_fails_when_cli_missing_with_state(tmp_path: Path) -> None:
     root = _make_tf_workspace(tmp_path, with_state=True)
     with patch("app.services.iac_destroy.shutil.which", return_value=None):
         result = run_workspace_iac_destroy(
             root_dir=root, engine="terraform", credentials=None,
             org_id="o", workspace_id="w", settings=_settings(),
         )
-    assert result.status == "skipped"
+    assert result.status == "failed"
     assert "not installed" in result.detail
+    assert result.ok is False
 
 
 def test_runs_init_then_destroy_on_success(tmp_path: Path) -> None:
@@ -122,14 +123,33 @@ def test_timeout_reports_failure(tmp_path: Path) -> None:
     assert "timed out" in result.detail
 
 
-def test_pulumi_no_stack_is_skipped(tmp_path: Path) -> None:
+def test_pulumi_scaffold_only_is_skipped_without_cli(tmp_path: Path) -> None:
+    """Scaffolded infra/pulumi without a prior up must not block workspace delete."""
     (tmp_path / "infra" / "pulumi").mkdir(parents=True)
+    (tmp_path / "infra" / "pulumi" / "Pulumi.yaml").write_text("name: demo\n", encoding="utf-8")
+
+    result = run_workspace_iac_destroy(
+        root_dir=str(tmp_path),
+        engine="pulumi",
+        credentials=None,
+        org_id="o",
+        workspace_id="w",
+        settings=_settings(),
+    )
+    assert result.status == "skipped"
+    assert "nothing was applied" in result.detail
+
+
+def test_pulumi_no_stack_is_skipped(tmp_path: Path) -> None:
+    pulumi_dir = tmp_path / "infra" / "pulumi"
+    pulumi_dir.mkdir(parents=True)
+    (pulumi_dir / ".pulumi").mkdir()
 
     def fake_run(cmd, **_):
         return subprocess.CompletedProcess(cmd, 255, stdout="", stderr="error: no stack selected")
 
     with (
-        patch("app.services.iac_destroy.shutil.which", return_value="/usr/bin/pulumi"),
+        patch("app.services.iac_cli.resolve_pulumi_bin", return_value="/usr/bin/pulumi"),
         patch("app.services.iac_destroy._run", side_effect=fake_run),
     ):
         result = run_workspace_iac_destroy(

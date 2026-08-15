@@ -207,7 +207,9 @@ export const kubernetesWorkloadOptionsSchema = z
         enabled: z.boolean().default(false),
         severity_threshold: z.enum(['critical', 'critical_high']).default('critical_high'),
         on_finding: z.enum(['block', 'warn']).default('block'),
-        tool: z.string().max(64).default('trivy-0.58.1'),
+        tool: z
+          .enum(['trivy-action-v0.30.0', 'trivy-0.58.1', 'trivy-0.57.2', 'trivy-0.56.2'])
+          .default('trivy-0.58.1'),
       })
       .default({
         enabled: false,

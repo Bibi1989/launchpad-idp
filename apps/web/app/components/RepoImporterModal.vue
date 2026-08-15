@@ -384,10 +384,14 @@ async function close() {
                 autocomplete="off"
               >
             </label>
-            <label class="block space-y-2">
-              <span class="lp-label">{{ t('common.branch') }}</span>
-              <input v-model="branch" class="lp-input font-mono text-xs" placeholder="main">
-            </label>
+            <GitBranchPicker
+              v-model="branch"
+              :host="gitHost"
+              :installation-id="selectedInstallationId"
+              :full-name="selectedRepoFullName"
+              :project-path="selectedGitlabPath"
+              :label="t('common.branch')"
+            />
           </div>
 
           <label class="block space-y-2">
