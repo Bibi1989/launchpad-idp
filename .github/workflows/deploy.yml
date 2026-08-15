@@ -489,6 +489,29 @@ jobs:
             RESEND_EMAIL_FROM_V="$(env_get RESEND_EMAIL_FROM "$STABLE_ENV")"
           fi
 
+          GCP_OAUTH_CLIENT_ID_V="${GCP_OAUTH_CLIENT_ID:-$(env_get GCP_OAUTH_CLIENT_ID "$STABLE_ENV")}"
+          GCP_OAUTH_CLIENT_SECRET_V="${GCP_OAUTH_CLIENT_SECRET:-$(env_get GCP_OAUTH_CLIENT_SECRET "$STABLE_ENV")}"
+
+          if [ -n "${GCP_OAUTH_CLIENT_ID:-}" ]; then
+            if printf '%s' "$GCP_OAUTH_CLIENT_ID" | grep -q "BEGIN"; then
+              GCP_OAUTH_CLIENT_ID_V="$(printf '%b' "$GCP_OAUTH_CLIENT_ID" | base64 | tr -d '\n')"
+            else
+              GCP_OAUTH_CLIENT_ID_V="$GCP_OAUTH_CLIENT_ID"
+            fi
+          else
+            GCP_OAUTH_CLIENT_ID_V="$(env_get GCP_OAUTH_CLIENT_ID "$STABLE_ENV")"
+          fi
+
+          if [ -n "${GCP_OAUTH_CLIENT_SECRET:-}" ]; then
+            if printf '%s' "$GCP_OAUTH_CLIENT_SECRET" | grep -q "BEGIN"; then
+              GCP_OAUTH_CLIENT_SECRET_V="$(printf '%b' "$GCP_OAUTH_CLIENT_SECRET" | base64 | tr -d '\n')"
+            else
+              GCP_OAUTH_CLIENT_SECRET_V="$GCP_OAUTH_CLIENT_SECRET"
+            fi
+          else
+            GCP_OAUTH_CLIENT_SECRET_V="$(env_get GCP_OAUTH_CLIENT_SECRET "$STABLE_ENV")"
+          fi
+
           umask 077
           cat > "$STABLE_ENV" <<EOF
           POSTGRES_USER=launchpad
@@ -534,6 +557,8 @@ jobs:
           STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET_V}
           RESEND_API_KEY=${RESEND_API_KEY_V}
           RESEND_EMAIL_FROM=${RESEND_EMAIL_FROM_V}
+          GCP_OAUTH_CLIENT_ID=${GCP_OAUTH_CLIENT_ID_V}
+          GCP_OAUTH_CLIENT_SECRET=${GCP_OAUTH_CLIENT_SECRET_V}
           EOF
           sed -i.bak 's/^[[:space:]]*//' "$STABLE_ENV" && rm -f "$STABLE_ENV.bak"
           # Hand the stable env-file path to later steps.
