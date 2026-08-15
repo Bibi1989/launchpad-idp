@@ -2019,7 +2019,7 @@ async function onPrimaryAction() {
               </select>
             </label>
             <CloudCredentialsFields
-              v-model:credentials="form.credentials"
+              :credentials="form.credentials"
               provider="gcp"
               :sa-placeholder="hasStoredCredentials ? t('provision.credentialsHints.leaveBlank') : t('provision.credentialsHints.pasteSaJson')"
             />
@@ -2049,7 +2049,7 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
             </div>
-            <CloudCredentialsFields v-model:credentials="form.credentials" provider="aws" />
+            <CloudCredentialsFields :credentials="form.credentials" provider="aws" />
           </template>
 
           <template v-if="form.provider === 'azure'">
@@ -2075,11 +2075,11 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
             </div>
-            <CloudCredentialsFields v-model:credentials="form.credentials" provider="azure" />
+            <CloudCredentialsFields :credentials="form.credentials" provider="azure" />
           </template>
 
           <template v-if="form.provider === 'cloudflare'">
-            <CloudCredentialsFields v-model:credentials="form.credentials" provider="cloudflare" />
+            <CloudCredentialsFields :credentials="form.credentials" provider="cloudflare" />
           </template>
 
           <div

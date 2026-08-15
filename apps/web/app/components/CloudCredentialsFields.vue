@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import type { CloudCredentialsForm } from '~/utils/cloudValidation'
-import { emptyCloudCredentials } from '~/utils/cloudValidation'
 import { AWS_REGIONS, AZURE_LOCATIONS, GCP_REGIONS } from '~/utils/cloudRegions'
 
 const props = withDefaults(
   defineProps<{
+    /** Parent-owned object; fields are edited in place (no v-model / defineModel). */
     credentials: CloudCredentialsForm
     provider: 'gcp' | 'aws' | 'azure' | 'cloudflare'
     saPlaceholder?: string
@@ -17,39 +17,10 @@ const props = withDefaults(
   },
 )
 
-const emit = defineEmits<{
-  'update:credentials': [CloudCredentialsForm]
-}>()
-
 const { t } = useI18n()
 
 const gcpAuthMode = ref<'sa' | 'wif'>('sa')
 const awsAuthMode = ref<'keys' | 'oidc'>('keys')
-
-/** Always a concrete object so watchers/template never read through undefined. */
-const form = reactive<CloudCredentialsForm>(emptyCloudCredentials())
-let syncingFromProps = false
-
-watch(
-  () => props.credentials,
-  (next) => {
-    syncingFromProps = true
-    Object.assign(form, emptyCloudCredentials(), next ?? {})
-    queueMicrotask(() => {
-      syncingFromProps = false
-    })
-  },
-  { immediate: true, deep: true },
-)
-
-watch(
-  form,
-  () => {
-    if (syncingFromProps) return
-    emit('update:credentials', { ...form })
-  },
-  { deep: true },
-)
 
 const gcpSaPlaceholder = computed(
   () => props.saPlaceholder || t('credentials.fields.gcpSaKeyJsonPlaceholder'),
@@ -69,7 +40,9 @@ function projectIdFromSaJson(raw: string): string | null {
   return null
 }
 
-const saEmbeddedProjectId = computed(() => projectIdFromSaJson(form.gcp_sa_key_json || ''))
+const saEmbeddedProjectId = computed(() =>
+  projectIdFromSaJson(props.credentials?.gcp_sa_key_json || ''),
+)
 
 const showProjectIdField = computed(() => {
   if (props.showGcpProjectId === false) return false
@@ -79,11 +52,12 @@ const showProjectIdField = computed(() => {
 })
 
 watch(
-  () => form.gcp_sa_key_json,
+  () => props.credentials?.gcp_sa_key_json,
   (raw) => {
+    if (!props.credentials) return
     const project = projectIdFromSaJson(raw || '')
-    if (project && !(form.gcp_project_id || '').trim()) {
-      form.gcp_project_id = project
+    if (project && !(props.credentials.gcp_project_id || '').trim()) {
+      props.credentials.gcp_project_id = project
     }
   },
 )
@@ -103,7 +77,7 @@ watch(
       <label v-if="showProjectIdField" class="block space-y-2">
         <span class="lp-label">{{ t('credentials.fields.gcpProjectId') }}</span>
         <input
-          v-model="form.gcp_project_id"
+          v-model="credentials.gcp_project_id"
           class="lp-input font-mono text-xs"
           placeholder="my-gcp-project"
           autocomplete="off"
@@ -119,7 +93,7 @@ watch(
 
       <label class="block space-y-2">
         <span class="lp-label">{{ t('credentials.fields.preferredRegion') }}</span>
-        <select v-model="form.gcp_region" class="lp-input">
+        <select v-model="credentials.gcp_region" class="lp-input">
           <option value="">{{ t('credentials.fields.preferredRegionPlaceholder') }}</option>
           <option v-for="region in GCP_REGIONS" :key="region.value" :value="region.value">
             {{ region.label }}
@@ -159,7 +133,7 @@ watch(
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.gcpSaKeyJson') }}</span>
           <textarea
-            v-model="form.gcp_sa_key_json"
+            v-model="credentials.gcp_sa_key_json"
             rows="5"
             class="lp-input font-mono text-xs"
             :placeholder="gcpSaPlaceholder"
@@ -188,7 +162,7 @@ watch(
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.gcpProjectNumber') }}</span>
           <input
-            v-model="form.gcp_wif_project_number"
+            v-model="credentials.gcp_wif_project_number"
             class="lp-input font-mono text-xs"
             placeholder="123456789012"
             autocomplete="off"
@@ -197,7 +171,7 @@ watch(
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.wifPoolId') }}</span>
           <input
-            v-model="form.gcp_wif_pool_id"
+            v-model="credentials.gcp_wif_pool_id"
             class="lp-input font-mono text-xs"
             placeholder="launchpad-pool"
             autocomplete="off"
@@ -206,7 +180,7 @@ watch(
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.wifProviderId') }}</span>
           <input
-            v-model="form.gcp_wif_provider_id"
+            v-model="credentials.gcp_wif_provider_id"
             class="lp-input font-mono text-xs"
             placeholder="launchpad-provider"
             autocomplete="off"
@@ -215,7 +189,7 @@ watch(
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.targetSaEmail') }}</span>
           <input
-            v-model="form.gcp_wif_target_sa_email"
+            v-model="credentials.gcp_wif_target_sa_email"
             class="lp-input font-mono text-xs"
             placeholder="deployer@project.iam.gserviceaccount.com"
             autocomplete="off"
@@ -227,7 +201,7 @@ watch(
     <template v-else-if="provider === 'aws'">
       <label class="block space-y-2">
         <span class="lp-label">{{ t('credentials.fields.preferredRegion') }}</span>
-        <select v-model="form.aws_region" class="lp-input">
+        <select v-model="credentials.aws_region" class="lp-input">
           <option value="">{{ t('credentials.fields.preferredRegionPlaceholder') }}</option>
           <option v-for="region in AWS_REGIONS" :key="region.value" :value="region.value">
             {{ region.label }}
@@ -266,12 +240,12 @@ watch(
       <div v-if="awsAuthMode === 'keys'" class="grid gap-3 sm:grid-cols-2">
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.accessKeyId') }}</span>
-          <input v-model="form.aws_access_key_id" class="lp-input" autocomplete="off">
+          <input v-model="credentials.aws_access_key_id" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.secretAccessKey') }}</span>
           <input
-            v-model="form.aws_secret_access_key"
+            v-model="credentials.aws_secret_access_key"
             type="password"
             class="lp-input"
             autocomplete="off"
@@ -279,7 +253,7 @@ watch(
         </label>
         <label class="block space-y-2 sm:col-span-2">
           <span class="lp-label">{{ t('credentials.fields.sessionTokenOptional') }}</span>
-          <input v-model="form.aws_session_token" class="lp-input" autocomplete="off">
+          <input v-model="credentials.aws_session_token" class="lp-input" autocomplete="off">
         </label>
       </div>
 
@@ -290,7 +264,7 @@ watch(
         <label class="block space-y-2 sm:col-span-2">
           <span class="lp-label">{{ t('credentials.fields.iamRoleArn') }}</span>
           <input
-            v-model="form.aws_role_arn"
+            v-model="credentials.aws_role_arn"
             class="lp-input font-mono text-xs"
             placeholder="arn:aws:iam::123456789012:role/LaunchpadExec"
             autocomplete="off"
@@ -299,7 +273,7 @@ watch(
         <label class="block space-y-2 sm:col-span-2">
           <span class="lp-label">{{ t('credentials.fields.roleSessionNameOptional') }}</span>
           <input
-            v-model="form.aws_role_session_name"
+            v-model="credentials.aws_role_session_name"
             class="lp-input font-mono text-xs"
             placeholder="launchpad-exec"
             autocomplete="off"
@@ -311,7 +285,7 @@ watch(
     <template v-else-if="provider === 'azure'">
       <label class="block space-y-2">
         <span class="lp-label">{{ t('credentials.fields.preferredRegion') }}</span>
-        <select v-model="form.azure_location" class="lp-input">
+        <select v-model="credentials.azure_location" class="lp-input">
           <option value="">{{ t('credentials.fields.preferredRegionPlaceholder') }}</option>
           <option v-for="region in AZURE_LOCATIONS" :key="region.value" :value="region.value">
             {{ region.label }}
@@ -323,12 +297,12 @@ watch(
       <div class="grid gap-3 sm:grid-cols-2">
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.clientId') }}</span>
-          <input v-model="form.azure_client_id" class="lp-input" autocomplete="off">
+          <input v-model="credentials.azure_client_id" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.clientSecret') }}</span>
           <input
-            v-model="form.azure_client_secret"
+            v-model="credentials.azure_client_secret"
             type="password"
             class="lp-input"
             autocomplete="off"
@@ -336,11 +310,11 @@ watch(
         </label>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.tenantId') }}</span>
-          <input v-model="form.azure_tenant_id" class="lp-input" autocomplete="off">
+          <input v-model="credentials.azure_tenant_id" class="lp-input" autocomplete="off">
         </label>
         <label class="block space-y-2">
           <span class="lp-label">{{ t('credentials.fields.subscriptionId') }}</span>
-          <input v-model="form.azure_subscription_id" class="lp-input" autocomplete="off">
+          <input v-model="credentials.azure_subscription_id" class="lp-input" autocomplete="off">
         </label>
       </div>
     </template>
@@ -349,7 +323,7 @@ watch(
       <label class="block space-y-2">
         <span class="lp-label">{{ t('credentials.fields.apiToken') }}</span>
         <input
-          v-model="form.cloudflare_api_token"
+          v-model="credentials.cloudflare_api_token"
           type="password"
           class="lp-input"
           autocomplete="off"

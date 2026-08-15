@@ -62,7 +62,7 @@ const aiTargetContent = ref('')
 const aiErrorContext = ref<string | null>(null)
 const savedNewCredentials = ref(false)
 
-const credentials = ref(emptyCloudCredentials())
+const credentials = reactive(emptyCloudCredentials())
 
 const isDestroy = computed(() => props.mode === 'destroy')
 const steps = computed(() =>
@@ -118,7 +118,7 @@ const progressPct = computed(() => {
 })
 
 function resetCredentials() {
-  credentials.value = emptyCloudCredentials()
+  Object.assign(credentials, emptyCloudCredentials())
 }
 
 function resetStepStatuses() {
@@ -126,7 +126,7 @@ function resetStepStatuses() {
 }
 
 function hasNewCredentialInput(): boolean {
-  return Object.values(credentials.value).some((v) => typeof v === 'string' && v.trim().length > 0)
+  return Object.values(credentials).some((v) => typeof v === 'string' && v.trim().length > 0)
 }
 
 async function loadWizard() {
@@ -238,7 +238,7 @@ async function persistCredentialsIfNeeded(): Promise<boolean> {
     cost_optimization: config.cost_optimization,
     container_scaffold: config.container_scaffold,
     dependencies: config.dependencies,
-    credentials: { ...credentials.value },
+    credentials: { ...credentials },
     provider: config.cloud.provider,
     resources: config.cloud.resources,
   }
@@ -535,7 +535,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
             <div v-if="credChoice === 'new'" class="space-y-3">
               <CloudCredentialsFields
                 v-if="provider !== 'local'"
-                v-model:credentials="credentials"
+                :credentials="credentials"
                 :provider="(provider as 'gcp' | 'aws' | 'azure' | 'cloudflare')"
               />
             </div>

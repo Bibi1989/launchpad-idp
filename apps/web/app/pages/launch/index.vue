@@ -1051,7 +1051,7 @@ async function launch() {
 
       <template v-if="form.provider !== 'local' && !usesStoredWorkspaceCredentials">
         <CloudCredentialsFields
-          v-model:credentials="form.credentials"
+          :credentials="form.credentials"
           :provider="(form.provider as 'gcp' | 'aws' | 'azure' | 'cloudflare')"
         />
       </template>

@@ -780,7 +780,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields v-model:credentials="form.credentials" provider="gcp" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="gcp" />
         </template>
 
         <template v-else-if="provider === 'aws'">
@@ -809,7 +809,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields v-model:credentials="form.credentials" provider="aws" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="aws" />
         </template>
 
         <template v-else-if="provider === 'azure'">
@@ -842,7 +842,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields v-model:credentials="form.credentials" provider="azure" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="azure" />
         </template>
 
         <template v-else>
@@ -863,7 +863,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields v-model:credentials="form.credentials" provider="cloudflare" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="cloudflare" />
         </template>
 
         <div

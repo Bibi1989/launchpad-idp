@@ -88,7 +88,7 @@ const storedCredentialsStatus = ref<UserCloudCredentialsStatus | null>(null)
 const storedCredentialsLoading = ref(false)
 const useStoredCredentials = ref(false)
 
-const promoteCredentials = ref(emptyCloudCredentials())
+const promoteCredentials = reactive(emptyCloudCredentials())
 
 const promoteForm = reactive({
   provider: 'gcp' as CloudProvider,
@@ -306,11 +306,11 @@ async function loadPromoteServices() {
 }
 
 function clearPromoteCredentials() {
-  promoteCredentials.value = emptyCloudCredentials()
+  Object.assign(promoteCredentials, emptyCloudCredentials())
 }
 
 function promoteCredentialsEmpty() {
-  return Object.values(promoteCredentials.value).every((v) => !String(v ?? '').trim())
+  return Object.values(promoteCredentials).every((v) => !String(v ?? '').trim())
 }
 
 function hasStoredCredsForProvider(provider: CloudProvider) {
@@ -670,7 +670,7 @@ const scanDriftAction = define(
 const promoteAction = define(
   () => promoteToCloud(environment.value!.id, {
     provider: promoteForm.provider,
-    credentials: { ...promoteCredentials.value },
+    credentials: { ...promoteCredentials },
     primary_service: promotePrimaryService.value ?? promoteRecommendedService.value,
     code_source: showPromoteCodeSource.value ? promoteForm.code_source : null,
     region: showPromoteRegion.value ? promoteForm.region : null,
@@ -1370,7 +1370,7 @@ onUnmounted(() => {
 
           <template v-if="!useStoredCredentials">
             <CloudCredentialsFields
-              v-model:credentials="promoteCredentials"
+              :credentials="promoteCredentials"
               :provider="promoteForm.provider"
             />
           </template>

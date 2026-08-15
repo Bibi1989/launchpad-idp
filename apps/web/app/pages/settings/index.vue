@@ -17,10 +17,9 @@ const connecting = ref(false)
 const errorMessage = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 const activeProvider = ref<'gcp' | 'aws' | 'azure' | 'cloudflare'>('gcp')
-// Must be a ref for v-model:credentials (defineModel/useModel). A reactive() object
-// compiles to a no-op onUpdate handler and can leave the child model undefined
-// (Vue production error "2" = watcher getter) so region/SA fields never paint.
-const credentials = ref(emptyCloudCredentials())
+// Parent-owned reactive object; CloudCredentialsFields edits fields in place.
+// Do not use defineModel/v-model here (nested ref + sync watches caused prod "2").
+const credentials = reactive(emptyCloudCredentials())
 const caps = ref<CloudOAuthCapabilities | null>(null)
 const credentialsFormError = ref<string | null>(null)
 const credentialsFormKey = ref(0)
@@ -41,18 +40,21 @@ const kindSuccess = ref<string | null>(null)
 const clusterName = ref('launchpad')
 
 function applyStatusPreferences(credStatus: UserCloudCredentialsStatus) {
-  const next = credentials.value
-  if (credStatus.gcp_region) next.gcp_region = credStatus.gcp_region
-  if (credStatus.aws_region) next.aws_region = credStatus.aws_region
-  if (credStatus.azure_location) next.azure_location = credStatus.azure_location
-  if (credStatus.gcp_project_id && !(next.gcp_project_id || '').trim()) {
-    next.gcp_project_id = credStatus.gcp_project_id
+  if (credStatus.gcp_region) credentials.gcp_region = credStatus.gcp_region
+  if (credStatus.aws_region) credentials.aws_region = credStatus.aws_region
+  if (credStatus.azure_location) credentials.azure_location = credStatus.azure_location
+  if (credStatus.gcp_project_id && !(credentials.gcp_project_id || '').trim()) {
+    credentials.gcp_project_id = credStatus.gcp_project_id
   }
+}
+
+function resetCredentialsForm() {
+  Object.assign(credentials, emptyCloudCredentials())
 }
 
 /** Show project id for Connect / WIF; hide when SA JSON embeds project_id. */
 const showGcpProjectId = computed(() => {
-  const raw = (credentials.value.gcp_sa_key_json || '').trim()
+  const raw = (credentials.gcp_sa_key_json || '').trim()
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as { project_id?: unknown }
@@ -128,8 +130,8 @@ async function onSave() {
   errorMessage.value = null
   successMessage.value = null
   try {
-    status.value = await save({ ...credentials.value })
-    credentials.value = emptyCloudCredentials()
+    status.value = await save({ ...credentials })
+    resetCredentialsForm()
     applyStatusPreferences(status.value)
     successMessage.value = t('settings.credentialsSaved')
   } catch (err) {
@@ -155,7 +157,7 @@ async function onClearProvider() {
       clear_azure: activeProvider.value === 'azure',
       clear_cloudflare: activeProvider.value === 'cloudflare',
     })
-    credentials.value = emptyCloudCredentials()
+    resetCredentialsForm()
     applyStatusPreferences(status.value)
     successMessage.value = t('settings.clearedProvider', { provider: activeProvider.value.toUpperCase() })
   } catch (err) {
@@ -456,7 +458,7 @@ const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kind
       <NuxtErrorBoundary @error="onCredentialsFormError">
         <CloudCredentialsFields
           :key="credentialsFormKey"
-          v-model:credentials="credentials"
+          :credentials="credentials"
           :provider="activeProvider"
           :show-gcp-project-id="showGcpProjectId"
         />
