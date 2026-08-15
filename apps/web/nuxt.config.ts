@@ -28,6 +28,11 @@ export default defineNuxtConfig({
     bundle: {
       optimizeTranslationDirective: false,
     },
+    experimental: {
+      // Default "absolute" embeds Docker WORKDIR paths like /app/i18n/locales/*.ts
+      // into the client bundle. Prefer relative paths in production builds.
+      generatedLocaleFilePathFormat: "relative",
+    },
   },
   fonts: {
     // CI/Docker often cannot resolve fonts.bunny.net; we only use Google families.

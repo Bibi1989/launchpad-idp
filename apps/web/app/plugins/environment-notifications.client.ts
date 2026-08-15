@@ -14,7 +14,11 @@ export default defineNuxtPlugin(() => {
     environments,
     (list) => {
       if (!list?.length) return
-      reconcileMany(list)
+      try {
+        reconcileMany(list)
+      } catch (err) {
+        console.error('[launchpad] environment notification reconcile failed', err)
+      }
     },
     { deep: true, immediate: true },
   )
