@@ -91,6 +91,28 @@ def _run(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: float) -> s
     )
 
 
+def workspace_cloud_infra_cleared(*, root_dir: str, engine: str) -> bool:
+    """True when there is no applied cloud IaC left under the workspace root.
+
+    Used after a failed destroy to detect concurrent teardown that already
+    cleared state (env scaffold destroy racing workspace finalize).
+    """
+    root = Path(root_dir)
+    if engine in _TF_ENGINES:
+        tf_dir = root / "infra" / "terraform"
+        if not tf_dir.is_dir():
+            return True
+        return not _has_terraform_state(tf_dir)
+    if engine == "pulumi":
+        from app.services.iac_cli import pulumi_was_applied
+
+        pulumi_dir = root / "infra" / "pulumi"
+        if not pulumi_dir.is_dir():
+            return True
+        return not pulumi_was_applied(pulumi_dir)
+    return True
+
+
 def run_workspace_iac_destroy(
     *,
     root_dir: str,

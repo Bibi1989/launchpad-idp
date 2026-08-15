@@ -67,6 +67,9 @@ async function refresh() {
     status.value = credStatus
     caps.value = oauthCaps
     applyStatusPreferences(credStatus)
+    if (credStatus.vault_unreadable) {
+      errorMessage.value = t('settings.errors.vaultUnreadable')
+    }
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : t('settings.errors.load')
   } finally {

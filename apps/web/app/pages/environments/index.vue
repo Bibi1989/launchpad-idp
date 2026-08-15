@@ -96,7 +96,9 @@ const softCap = computed(() => {
 const softCapExceeded = computed(() => Boolean(orgCosts.value?.soft_cost_cap_exceeded))
 
 const liveEnvironments = computed(() =>
-  environments.value.filter((e) => e.status !== 'DESTROYED'),
+  environments.value.filter(
+    (e) => e.status !== 'DESTROYED' && e.status !== 'TEARDOWN_PENDING',
+  ),
 )
 
 const providers = computed(() => {
@@ -154,7 +156,7 @@ watch(environments, (list) => {
   recentLogLines.value = [
     `[${new Date().toLocaleTimeString()}] INFO: ${list.length} environment(s) loaded`,
     ...list
-      .filter((e) => e.status !== 'DESTROYED')
+      .filter((e) => e.status !== 'DESTROYED' && e.status !== 'TEARDOWN_PENDING')
       .slice(0, 6)
       .map(
         (e) =>

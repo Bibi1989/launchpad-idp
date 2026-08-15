@@ -550,6 +550,7 @@ export default {
       "save": "Save failed",
       "clear": "Clear failed",
       "oauthFailed": "Browser connect failed or timed out",
+      "vaultUnreadable": "Saved cloud keys could not be decrypted (encryption key may have changed). Paste and save your keys again.",
       "kindLoad": "Failed to load local cluster status",
       "kindUp": "Failed to create local cluster",
       "kindDown": "Failed to delete local cluster"

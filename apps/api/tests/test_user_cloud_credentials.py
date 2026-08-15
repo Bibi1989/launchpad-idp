@@ -106,3 +106,51 @@ async def test_user_cloud_credentials_service(
         assert status.has_gcp is True
         assert status.has_aws is True
         assert status.gcp_label == "Service account JSON"
+
+
+@pytest.mark.asyncio
+async def test_get_status_clears_unreadable_vault(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with session_factory() as session:
+        from app.core.security import hash_password
+        from app.models.domain import User, UserCloudCredentialStore
+
+        user = User(
+            email="corrupt-vault@example.com",
+            password_hash=hash_password("password123"),
+            display_name="Corrupt",
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        session.add(
+            UserCloudCredentialStore(
+                user_id=user.id,
+                encrypted_payload="not-a-valid-fernet-token",
+            )
+        )
+        await session.commit()
+
+        service = UserCloudCredentialsService(session)
+        status = await service.get_status(user.id)
+        assert status.vault_unreadable is True
+        assert status.has_gcp is False
+        assert await service._get_row(user.id) is None
+
+        # Save after clear works with a fresh encrypt path.
+        monkeypatch.setenv("SECRETS_ENCRYPTION_KEY", "test-vault-recovery-key")
+        from app.core.secrets import _fernet
+
+        _fernet.cache_clear()
+        recovered = await service.upsert(
+            user.id,
+            UserCloudCredentialsUpdate(
+                credentials=CloudCredentials(gcp_project_id="recovered-proj"),
+            ),
+        )
+        assert recovered.vault_unreadable is False
+        assert recovered.gcp_project_id == "recovered-proj"
+

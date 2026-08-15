@@ -21,44 +21,19 @@ const confirmDestroyOpen = computed({
 })
 const importOpen = ref(false)
 const filterProject = ref<ProjectSummary | null>(null)
-let destroyPollTimer: ReturnType<typeof setInterval> | null = null
 
 function workspaceStatusLabel(status: string): string {
-  if (status === 'deleting') return t('workspaces.index.deleting')
   if (status === 'destroy_failed') return t('workspaces.index.destroyFailed')
   return status
 }
 
-function isWorkspaceTerminating(ws: WorkspaceListItem): boolean {
-  return ws.status === 'deleting'
-}
-
-function stopDestroyPoll() {
-  if (destroyPollTimer) {
-    clearInterval(destroyPollTimer)
-    destroyPollTimer = null
-  }
-}
-
-function startDestroyPoll() {
-  stopDestroyPoll()
-  destroyPollTimer = setInterval(() => {
-    void refreshQuiet()
-  }, 2500)
-}
-
 async function refreshQuiet() {
   try {
-    const next = await listWorkspaces({
+    workspaces.value = await listWorkspaces({
       projectId: projectIdFilter.value,
     })
-    workspaces.value = next
-    const pending = next.some(
-      (ws) => ws.status === 'deleting' || destroyingId.value === ws.id,
-    )
-    if (!pending) stopDestroyPoll()
   } catch {
-    // Keep last list; next tick retries.
+    // Keep last list.
   }
 }
 
@@ -130,13 +105,16 @@ async function onDestroy() {
   confirmDestroyId.value = null
   destroyingId.value = id
   error.value = null
+  const previous = workspaces.value.find((row) => row.id === id) ?? null
+  // Optimistic: remove from list immediately; cloud teardown continues in background.
+  workspaces.value = workspaces.value.filter((row) => row.id !== id)
   try {
-    const updated = await destroyWorkspace(id)
-    const idx = workspaces.value.findIndex((row) => row.id === id)
-    if (idx >= 0) workspaces.value[idx] = updated
-    else workspaces.value = [updated, ...workspaces.value]
-    startDestroyPoll()
+    await destroyWorkspace(id)
+    void refreshQuiet()
   } catch (err) {
+    if (previous) {
+      workspaces.value = [previous, ...workspaces.value]
+    }
     error.value = err instanceof Error ? err.message : t('workspaces.errors.destroy')
   } finally {
     destroyingId.value = null
@@ -155,16 +133,9 @@ async function onImportSaved() {
 onMounted(async () => {
   await loadFilterProject()
   await refresh()
-  if (workspaces.value.some((ws) => ws.status === 'deleting')) {
-    startDestroyPoll()
-  }
   if (route.query.import === '1' || route.query.import === 'true') {
     importOpen.value = true
   }
-})
-
-onUnmounted(() => {
-  stopDestroyPoll()
 })
 
 watch(
@@ -260,13 +231,12 @@ watch(
         v-for="ws in workspaces"
         :key="ws.id"
         class="lp-glass cursor-pointer overflow-hidden rounded-xl transition hover:border-[var(--lp-accent)]/40"
-        :class="isWorkspaceTerminating(ws) ? 'opacity-70' : ''"
         role="link"
         tabindex="0"
         :aria-label="ws.name"
-        @click="!isWorkspaceTerminating(ws) && navigateTo(`/workspaces/${ws.id}`)"
-        @keydown.enter.prevent="!isWorkspaceTerminating(ws) && navigateTo(`/workspaces/${ws.id}`)"
-        @keydown.space.prevent="!isWorkspaceTerminating(ws) && navigateTo(`/workspaces/${ws.id}`)"
+        @click="navigateTo(`/workspaces/${ws.id}`)"
+        @keydown.enter.prevent="navigateTo(`/workspaces/${ws.id}`)"
+        @keydown.space.prevent="navigateTo(`/workspaces/${ws.id}`)"
       >
         <div class="flex items-start justify-between gap-3 border-b border-[var(--lp-line)] bg-[var(--lp-panel-2)]/40 px-4 py-4">
           <div class="min-w-0">
@@ -305,31 +275,23 @@ watch(
           <span
             class="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wide"
             :class="
-              isWorkspaceTerminating(ws)
-                ? 'animate-pulse text-[var(--lp-warn)]'
-                : ws.status === 'destroy_failed'
-                  ? 'text-[var(--lp-danger)]'
-                  : 'text-[var(--lp-muted)]'
+              ws.status === 'destroy_failed'
+                ? 'text-[var(--lp-danger)]'
+                : 'text-[var(--lp-muted)]'
             "
           >
-            <span
-              v-if="isWorkspaceTerminating(ws)"
-              class="h-1.5 w-1.5 rounded-full bg-current animate-pulse-line"
-            />
             {{ workspaceStatusLabel(ws.status) }}
           </span>
           <button
             type="button"
             class="lp-btn-ghost text-xs text-[var(--lp-danger)]"
-            :disabled="isWorkspaceTerminating(ws) || destroyingId === ws.id"
+            :disabled="destroyingId === ws.id"
             @click.stop="requestDestroy(ws.id)"
           >
             {{
               ws.status === 'destroy_failed'
                 ? t('workspaces.index.retryDestroy')
-                : isWorkspaceTerminating(ws)
-                  ? t('workspaces.index.deleting')
-                  : t('workspaces.index.destroy')
+                : t('workspaces.index.destroy')
             }}
           </button>
         </div>

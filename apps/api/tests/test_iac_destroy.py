@@ -34,6 +34,16 @@ def test_skips_when_no_terraform_state(tmp_path: Path) -> None:
     assert result.ok is True
 
 
+def test_workspace_cloud_infra_cleared_reflects_state(tmp_path: Path) -> None:
+    from app.services.iac_destroy import workspace_cloud_infra_cleared
+
+    with_state = _make_tf_workspace(tmp_path / "a", with_state=True)
+    without = _make_tf_workspace(tmp_path / "b", with_state=False)
+    assert workspace_cloud_infra_cleared(root_dir=with_state, engine="terraform") is False
+    assert workspace_cloud_infra_cleared(root_dir=without, engine="terraform") is True
+    assert workspace_cloud_infra_cleared(root_dir=str(tmp_path / "missing"), engine="terraform") is True
+
+
 def test_fails_when_cli_missing_with_state(tmp_path: Path) -> None:
     root = _make_tf_workspace(tmp_path, with_state=True)
     with patch("app.services.iac_destroy.shutil.which", return_value=None):

@@ -131,29 +131,20 @@ export function useEnvironments() {
   ): Promise<Environment> {
     const query = opts.force ? '?force=true' : ''
     const existing = environments.value.find((item) => item.id === id)
-    const previousStatus = existing?.status
-    // Optimistic: show TEARDOWN_PENDING immediately so destroy never looks hung.
-    if (existing && existing.status !== 'DESTROYED') {
-      environments.value = environments.value.map((item) =>
-        item.id === id
-          ? { ...item, status: 'TEARDOWN_PENDING' as Environment['status'] }
-          : item,
-      )
-    }
+    const previous = existing ? { ...existing } : null
+    // Optimistic: drop from live lists immediately while teardown runs in background.
+    environments.value = environments.value.filter((item) => item.id !== id)
     try {
       const environment = await apiFetch<Environment>(`/environments/${id}${query}`, {
         method: 'DELETE',
         // Enqueue-only; should be fast. Don't wait forever if the API is busy.
         timeoutMs: 30_000,
       })
-      patchEnvironment(environment)
       void refresh({ soft: true }).catch(() => undefined)
       return environment
     } catch (err) {
-      if (previousStatus && existing) {
-        environments.value = environments.value.map((item) =>
-          item.id === id ? { ...item, status: previousStatus } : item,
-        )
+      if (previous) {
+        environments.value = [previous, ...environments.value]
       }
       throw err
     }

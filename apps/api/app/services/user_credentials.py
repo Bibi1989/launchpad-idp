@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.core.secrets import (
     decrypt_secret,
     encrypt_secret,
@@ -23,6 +26,25 @@ from app.schemas.user_credentials import (
     UserCloudCredentialsUpdate,
 )
 
+logger = get_logger(__name__)
+
+
+class UserCloudCredentialsVaultError(Exception):
+    """Stored vault ciphertext cannot be decrypted or parsed."""
+
+    def __init__(
+        self,
+        message: str = (
+            "Stored cloud credentials cannot be decrypted. "
+            "SECRETS_ENCRYPTION_KEY may have changed. Clear and re-save keys in Settings."
+        ),
+        *,
+        code: str = "vault_unreadable",
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
 
 class UserCloudCredentialsService:
     def __init__(self, session: AsyncSession) -> None:
@@ -32,7 +54,16 @@ class UserCloudCredentialsService:
         row = await self._get_row(user_id)
         if row is None:
             return UserCloudCredentialsStatus()
-        creds = CloudCredentials.model_validate_json(decrypt_secret(row.encrypted_payload))
+        try:
+            creds = self._decrypt_payload(row.encrypted_payload)
+        except UserCloudCredentialsVaultError:
+            logger.warning(
+                "user_cloud_credentials_vault_unreadable_cleared",
+                user_id=str(user_id),
+            )
+            await self._session.delete(row)
+            await self._session.commit()
+            return UserCloudCredentialsStatus(vault_unreadable=True)
         return UserCloudCredentialsStatus(
             has_gcp=has_gcp_auth(creds),
             has_aws=has_aws_auth(creds),
@@ -50,13 +81,21 @@ class UserCloudCredentialsService:
             aws_region=(creds.aws_region or "").strip() or None,
             azure_location=(creds.azure_location or "").strip() or None,
             updated_at=row.updated_at,
+            vault_unreadable=False,
         )
 
     async def get_credentials(self, user_id: UUID) -> CloudCredentials:
         row = await self._get_row(user_id)
         if row is None:
             return CloudCredentials()
-        return CloudCredentials.model_validate_json(decrypt_secret(row.encrypted_payload))
+        try:
+            return self._decrypt_payload(row.encrypted_payload)
+        except UserCloudCredentialsVaultError:
+            logger.warning(
+                "user_cloud_credentials_vault_unreadable",
+                user_id=str(user_id),
+            )
+            raise
 
     async def replace_credentials(
         self,
@@ -79,7 +118,18 @@ class UserCloudCredentialsService:
         user_id: UUID,
         payload: UserCloudCredentialsUpdate,
     ) -> UserCloudCredentialsStatus:
-        existing = await self.get_credentials(user_id)
+        try:
+            existing = await self.get_credentials(user_id)
+        except UserCloudCredentialsVaultError:
+            logger.warning(
+                "user_cloud_credentials_upsert_replacing_unreadable_vault",
+                user_id=str(user_id),
+            )
+            row = await self._get_row(user_id)
+            if row is not None:
+                await self._session.delete(row)
+                await self._session.commit()
+            existing = CloudCredentials()
         merged = existing.model_copy()
         incoming = payload.credentials
 
@@ -192,10 +242,25 @@ class UserCloudCredentialsService:
         return UserCloudCredentialsStatus()
 
     async def _get_row(self, user_id: UUID) -> UserCloudCredentialStore | None:
-        result = await self._session.execute(
-            select(UserCloudCredentialStore).where(UserCloudCredentialStore.user_id == user_id)
-        )
-        return result.scalar_one_or_none()
+        try:
+            result = await self._session.execute(
+                select(UserCloudCredentialStore).where(UserCloudCredentialStore.user_id == user_id)
+            )
+            return result.scalar_one_or_none()
+        except (ProgrammingError, OperationalError):
+            await self._session.rollback()
+            logger.exception(
+                "user_cloud_credentials_schema_error",
+                user_id=str(user_id),
+            )
+            return None
+
+    @staticmethod
+    def _decrypt_payload(ciphertext: str) -> CloudCredentials:
+        try:
+            return CloudCredentials.model_validate_json(decrypt_secret(ciphertext))
+        except (ValueError, ValidationError, json.JSONDecodeError, TypeError) as exc:
+            raise UserCloudCredentialsVaultError() from exc
 
     @staticmethod
     def _merge_nonempty(

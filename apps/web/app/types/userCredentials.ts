@@ -14,4 +14,6 @@ export type UserCloudCredentialsStatus = {
   aws_region?: string | null
   azure_location?: string | null
   updated_at?: string | null
+  /** True when vault ciphertext could not be decrypted (cleared on status GET). */
+  vault_unreadable?: boolean
 }

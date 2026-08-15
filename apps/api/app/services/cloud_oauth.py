@@ -25,7 +25,10 @@ from app.schemas.cloud_oauth import (
     CloudOAuthSessionStatus,
     CloudOAuthStartRequest,
 )
-from app.services.user_credentials import UserCloudCredentialsService
+from app.services.user_credentials import (
+    UserCloudCredentialsService,
+    UserCloudCredentialsVaultError,
+)
 
 logger = get_logger(__name__)
 
@@ -137,7 +140,10 @@ class CloudOAuthService:
             label = token_set.email or token_set.subject or payload.provider.value
             async with AsyncSessionLocal() as session:
                 vault = UserCloudCredentialsService(session)
-                existing = await vault.get_credentials(user_id)
+                try:
+                    existing = await vault.get_credentials(user_id)
+                except UserCloudCredentialsVaultError:
+                    existing = CloudCredentials()
                 updates: dict[str, Any] = {}
                 token_json = token_set.model_dump_json()
                 if payload.provider == CloudOAuthProviderName.GCP:

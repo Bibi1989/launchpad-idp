@@ -71,7 +71,9 @@ class EnvironmentRepository:
         """Return a non-destroyed environment with this name in the org (or globally if org omitted)."""
         filters = [
             Environment.name == name,
-            Environment.status != EnvironmentStatus.DESTROYED,
+            Environment.status.notin_(
+                (EnvironmentStatus.DESTROYED, EnvironmentStatus.TEARDOWN_PENDING)
+            ),
         ]
         if org_id is not None:
             filters.append(Environment.org_id == org_id)
@@ -84,10 +86,18 @@ class EnvironmentRepository:
         *,
         limit: int = 100,
         offset: int = 0,
+        include_terminating: bool = False,
     ) -> list[Environment]:
+        filters = [Environment.owner_id == owner_id]
+        if not include_terminating:
+            filters.append(
+                Environment.status.notin_(
+                    (EnvironmentStatus.DESTROYED, EnvironmentStatus.TEARDOWN_PENDING)
+                )
+            )
         result = await self._session.execute(
             select(Environment)
-            .where(Environment.owner_id == owner_id)
+            .where(*filters)
             .order_by(Environment.created_at.desc())
             .limit(limit)
             .offset(offset)
@@ -100,10 +110,18 @@ class EnvironmentRepository:
         *,
         limit: int = 100,
         offset: int = 0,
+        include_terminating: bool = False,
     ) -> list[Environment]:
+        filters = [Environment.org_id == org_id]
+        if not include_terminating:
+            filters.append(
+                Environment.status.notin_(
+                    (EnvironmentStatus.DESTROYED, EnvironmentStatus.TEARDOWN_PENDING)
+                )
+            )
         result = await self._session.execute(
             select(Environment)
-            .where(Environment.org_id == org_id)
+            .where(*filters)
             .order_by(Environment.created_at.desc())
             .limit(limit)
             .offset(offset)
@@ -298,7 +316,7 @@ class EnvironmentRepository:
             environment.github_pr_url = github_pr_url
         if preview_endpoints_json is not None:
             environment.preview_endpoints_json = preview_endpoints_json
-        if status == EnvironmentStatus.DESTROYED:
+        if status in (EnvironmentStatus.DESTROYED, EnvironmentStatus.TEARDOWN_PENDING):
             self._release_unique_identity(environment)
         await self._session.flush()
         await self._session.refresh(environment)

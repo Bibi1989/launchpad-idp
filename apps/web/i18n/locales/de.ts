@@ -550,6 +550,7 @@ export default {
       "save": "Speichern fehlgeschlagen",
       "clear": "Löschen fehlgeschlagen",
       "oauthFailed": "Browser-Connect fehlgeschlagen oder Zeitüberschreitung",
+      "vaultUnreadable": "Gespeicherte Cloud-Schlüssel konnten nicht entschlüsselt werden (Verschlüsselungsschlüssel möglicherweise geändert). Bitte Schlüssel erneut einfügen und speichern.",
       "kindLoad": "Lokaler Cluster-Status konnte nicht geladen werden",
       "kindUp": "Lokaler Cluster konnte nicht erstellt werden",
       "kindDown": "Lokaler Cluster konnte nicht gelöscht werden"

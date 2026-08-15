@@ -253,7 +253,7 @@ class ProvisioningService:
                 stmt = stmt.where(ProvisioningWorkspace.starred_at.is_not(None))
             result = await self._session.execute(stmt)
             rows = list(result.scalars().all())
-            return await self._workspace_list_items(rows)
+            return await self._workspace_list_items(self._exclude_deleting_workspaces(rows))
 
         if org_id is not None:
             ctx = await orgs.resolve_context(user=owner, org_id=org_id)
@@ -302,7 +302,14 @@ class ProvisioningService:
                     .limit(100)
                 )
                 rows = list(result.scalars().all())
-        return await self._workspace_list_items(rows)
+        return await self._workspace_list_items(self._exclude_deleting_workspaces(rows))
+
+    @staticmethod
+    def _exclude_deleting_workspaces(
+        rows: list[ProvisioningWorkspace],
+    ) -> list[ProvisioningWorkspace]:
+        """Hide in-flight deletes from the list; keep destroy_failed for retry."""
+        return [row for row in rows if row.status != "deleting"]
 
     async def _workspace_list_items(
         self,
@@ -1224,9 +1231,15 @@ class ProvisioningService:
         vault fields are merged so a GCP Connect token cannot poison AWS deploys.
         """
         from app.core.secrets import has_aws_auth, has_gcp_auth
-        from app.services.user_credentials import UserCloudCredentialsService
+        from app.services.user_credentials import (
+            UserCloudCredentialsService,
+            UserCloudCredentialsVaultError,
+        )
 
-        vault = await UserCloudCredentialsService(self._session).get_credentials(user_id)
+        try:
+            vault = await UserCloudCredentialsService(self._session).get_credentials(user_id)
+        except UserCloudCredentialsVaultError:
+            return credentials
         updates: dict[str, str | None] = {}
         data = credentials.model_dump()
         vault_data = vault.model_dump()
@@ -1396,14 +1409,47 @@ class ProvisioningService:
                 detail=destroy_result.detail,
             )
             if destroy_result.status == "failed":
-                row.status = "destroy_failed"
-                await self._session.commit()
-                logger.error(
-                    "workspace_iac_destroy_failed_kept",
-                    workspace_id=str(workspace_id),
-                    detail=destroy_result.detail,
-                )
-                return
+                from app.services.iac_destroy import workspace_cloud_infra_cleared
+
+                # Env teardown often runs the same terraform destroy in parallel.
+                # If state is already gone, treat as success so the row is not stuck.
+                if workspace_cloud_infra_cleared(root_dir=root_dir, engine=engine):
+                    logger.info(
+                        "workspace_iac_destroy_race_recovered",
+                        workspace_id=str(workspace_id),
+                        detail=destroy_result.detail,
+                    )
+                else:
+                    destroy_result = await asyncio.to_thread(
+                        run_workspace_iac_destroy,
+                        root_dir=root_dir,
+                        engine=engine,
+                        credentials=credentials,
+                        org_id=str(org_id) if org_id else "default-org",
+                        workspace_id=str(row.id),
+                        settings=settings,
+                    )
+                    if (
+                        destroy_result.status == "failed"
+                        and not workspace_cloud_infra_cleared(
+                            root_dir=root_dir, engine=engine
+                        )
+                    ):
+                        row.status = "destroy_failed"
+                        await self._session.commit()
+                        logger.error(
+                            "workspace_iac_destroy_failed_kept",
+                            workspace_id=str(workspace_id),
+                            detail=destroy_result.detail,
+                            output=(destroy_result.output or "")[-1500:],
+                        )
+                        return
+                    logger.info(
+                        "workspace_iac_destroy_retry_ok",
+                        workspace_id=str(workspace_id),
+                        status=destroy_result.status,
+                        detail=destroy_result.detail,
+                    )
 
         from app.models.domain import Environment, EnvironmentStatus
         from app.services.image_cleanup import (

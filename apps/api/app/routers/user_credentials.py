@@ -19,7 +19,10 @@ from app.schemas.user_credentials import (
     UserCloudCredentialsUpdate,
 )
 from app.services.cloud_oauth import CloudOAuthError, CloudOAuthService
-from app.services.user_credentials import UserCloudCredentialsService
+from app.services.user_credentials import (
+    UserCloudCredentialsService,
+    UserCloudCredentialsVaultError,
+)
 
 router = APIRouter(prefix="/users/me/cloud-credentials", tags=["user-credentials"])
 
@@ -71,7 +74,13 @@ async def list_user_cloud_networks(
     """List VPC/networks from the cloud using vault credentials."""
     from app.services.cloud_networks import CloudNetworkListError, list_cloud_networks
 
-    creds = await service.get_credentials(user.id)
+    try:
+        creds = await service.get_credentials(user.id)
+    except UserCloudCredentialsVaultError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
     try:
         return list_cloud_networks(provider=provider, credentials=creds, region=region)
     except CloudNetworkListError as exc:
@@ -92,7 +101,13 @@ async def list_user_cloud_security_groups(
     """List AWS security groups from the cloud using vault credentials."""
     from app.services.cloud_networks import CloudNetworkListError, list_cloud_security_groups
 
-    creds = await service.get_credentials(user.id)
+    try:
+        creds = await service.get_credentials(user.id)
+    except UserCloudCredentialsVaultError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
     try:
         return list_cloud_security_groups(
             provider=provider,

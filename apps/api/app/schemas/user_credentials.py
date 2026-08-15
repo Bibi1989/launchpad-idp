@@ -27,6 +27,9 @@ class UserCloudCredentialsStatus(BaseModel):
     aws_region: str | None = None
     azure_location: str | None = None
     updated_at: datetime | None = None
+    # True when ciphertext could not be decrypted (e.g. SECRETS_ENCRYPTION_KEY rotated).
+    # The unreadable row is cleared on GET status so Settings can load again.
+    vault_unreadable: bool = False
 
 
 class UserCloudCredentialsUpdate(BaseModel):
