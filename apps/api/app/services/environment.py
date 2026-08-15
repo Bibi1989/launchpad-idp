@@ -94,6 +94,35 @@ def _is_placeholder_workload_image(
     return lowered in _LEGACY_PLACEHOLDER_IMAGES
 
 
+def _build_runtime_summary(
+    *,
+    namespace_name: str,
+    workload_image: str | None,
+    default_workload_image: str = "",
+    node_port: int | None = None,
+    provider: str | None = None,
+    deploy_mode: str | None = None,
+    manifest_packaging: str | None = None,
+) -> str:
+    """Compact header chips for the environment detail page."""
+    parts: list[str] = [f"ns={namespace_name}"]
+    stored = (workload_image or "").strip()
+    if stored and not _is_placeholder_workload_image(
+        stored,
+        default_image=default_workload_image,
+    ):
+        parts.append(f"image={stored}")
+    if node_port is not None:
+        parts.append(f"nodePort={node_port}")
+    if provider:
+        parts.append(f"provider={provider}")
+    if deploy_mode:
+        parts.append(f"deploy={deploy_mode}")
+    if manifest_packaging:
+        parts.append(f"packaging={manifest_packaging}")
+    return " · ".join(parts)
+
+
 def _ttl_timedelta(*, ttl_hours: int | None, ttl_minutes: int | None) -> timedelta:
     if ttl_minutes is not None:
         return timedelta(minutes=ttl_minutes)
@@ -599,6 +628,14 @@ class EnvironmentService:
                     error=str(exc),
                 )
 
+        if deploy_mode in {DeployMode.ATTACH, DeployMode.COMPOSE} and _is_placeholder_workload_image(
+            workload_image,
+            default_image=self._settings.default_workload_image,
+        ):
+            # Instance/compose without an explicit container image: do not persist the
+            # platform default (e.g. nginx) as if it were the running workload.
+            workload_image = None
+
         workload_image_for_log = workload_image or "from workspace manifests"
         if deploy_mode == DeployMode.MANIFEST and _is_placeholder_workload_image(
             payload.workload_image,
@@ -606,6 +643,8 @@ class EnvironmentService:
         ):
             # For MANIFEST deploys, the real image is resolved later from workspace manifests.
             workload_image_for_log = "from workspace manifests"
+        elif deploy_mode in {DeployMode.ATTACH, DeployMode.COMPOSE} and not workload_image:
+            workload_image_for_log = "linked repo / workspace"
 
         if reuse_row is not None:
             environment = reuse_row
@@ -1688,18 +1727,23 @@ class EnvironmentService:
         read.max_concurrent_environments = self._settings.max_concurrent_environments
         read.concurrent_active_count = concurrent_active_count
 
-        parts: list[str] = [f"ns={environment.namespace_name}"]
-        image = (environment.workload_image or self._settings.default_workload_image or "").strip()
-        parts.append(f"image={image or 'from manifests'}")
-        if environment.node_port is not None:
-            parts.append(f"nodePort={environment.node_port}")
-        if environment.provider:
-            parts.append(f"provider={environment.provider}")
-        if environment.deploy_mode:
-            parts.append(f"deploy={environment.deploy_mode}")
-        if environment.manifest_packaging:
-            parts.append(f"packaging={environment.manifest_packaging}")
-        read.runtime_summary = " · ".join(parts)
+        if _is_placeholder_workload_image(
+            environment.workload_image,
+            default_image=self._settings.default_workload_image,
+        ):
+            # Hide platform defaults / legacy placeholders from the UI (instance mode
+            # often has no Docker image at all).
+            read.workload_image = None
+
+        read.runtime_summary = _build_runtime_summary(
+            namespace_name=environment.namespace_name,
+            workload_image=read.workload_image,
+            default_workload_image=self._settings.default_workload_image,
+            node_port=environment.node_port,
+            provider=environment.provider,
+            deploy_mode=environment.deploy_mode,
+            manifest_packaging=environment.manifest_packaging,
+        )
         return read
 
     async def _enrich_drift(

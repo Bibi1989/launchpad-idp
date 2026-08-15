@@ -1858,7 +1858,7 @@ export default {
       "intro": "Launchpad hat vier verwandte Aufgaben. Sie teilen sich dieselbe UI und können verknüpft werden, laufen aber mit unterschiedlichen Lebenszyklen:",
       "provisionBody": "Terraform- oder Pulumi-Workspace für GCP, AWS, Azure, Cloudflare oder kind erzeugen. Sie hängen kurzlebige Cloud-Zugangsdaten an, wählen Ressourcen und wenden den Stack im Sandbox-Terminal an. Damit stellen Sie Plattform-Infrastruktur bereit (VPC, Cluster usw.).",
       "manifestBody": "Kubernetes-YAML oder Helm-Charts aus {path} in Ihrem Workspace anwenden. Damit deployen Sie App-Objekte auf einen bereits vorhandenen Cluster. Im Sandbox-Terminal werden Manifeste getrennt nach Terraform/Pulumi angewendet.",
-      "environmentBody": "kurzlebige, gesteuerte Preview einer App aus Git-Repo und Branch. Launchpad erstellt einen isolierten Namespace, deployt den Workload, streamt Status und Logs und räumt alles ab, wenn die TTL abläuft. Bei Verknüpfung mit einem Workspace mit Raw-Manifesten nutzen Umgebungen {manifestDeploy} statt des eingebauten Preview-Profils.",
+      "environmentBody": "kurzlebige, gesteuerte Preview einer App aus Git-Repo und Branch. Launchpad kann Kubernetes-Previews, Docker Compose oder eine Cloud-/VM-Running-Instance (attach) betreiben. Im Instance-Modus klont Launchpad das verknüpfte App-Repo auf den Host (oder synct den Workspace), startet den Prozess, streamt Status und Logs und räumt alles ab, wenn die TTL abläuft. Bei Verknüpfung mit einem Workspace mit Raw-Manifesten nutzen Umgebungen {manifestDeploy} statt des eingebauten Preview-Profils.",
       "hybridBody": "selbst gehostete Linux-Hosts als Agent-Knoten einschreiben (ausgehender sicherer Tunnel) und optional abgesicherte Infrastruktur-Blueprints mit KI erzeugen. Container auf einem Homelab-Knoten deployen oder den Blueprint auf GCP / AWS / Azure abbilden.",
       "useFlows": "Nutzen Sie {launch} für eine One-Click-Preview - Local Sandbox (ein Bildschirm) oder Cloud, Katalogvorlage oder eigenes Repo. Verwalten Sie laufende Previews über {environments}. Erstellen Sie einen neuen Cloud-Stack über {provision}, öffnen Sie bereits erzeugte Workspaces über {workspaces}, und verwalten Sie Homelab-Knoten sowie KI-Blueprints über {hybrid}."
     },
@@ -1872,21 +1872,21 @@ export default {
       "body": "{home} zeigt aktive Umgebungs- und Workspace-Zahlen sowie, ob Cloud-Schlüssel des Kontos konfiguriert sind. {settings} speichert verschlüsselte Cloud-Zugangsdaten für Ihren Benutzer (SA-JSON, WIF, AWS-Keys/Rollen, Azure-SP, Cloudflare-Token). Leere Felder in Provision greifen auf diesen Tresor zurück."
     },
     "environmentsSection": {
-      "intro": "Eine Umgebung ist eine gesteuerte, zeitlich begrenzte Preview Ihrer Anwendung. Der schnellste Weg ist {launch} - wählen Sie {localSandbox}, um lokal ohne Cloud-Zugangsdaten zu testen, oder verbinden Sie GCP/AWS/Azure/Cloudflare. Die Bereitstellung läuft asynchron; die Detailseite zeigt Live-Status und Logs während des Hochfahrens.",
+      "intro": "Eine Umgebung ist eine gesteuerte, zeitlich begrenzte Preview Ihrer Anwendung. Der schnellste Weg ist {launch} - wählen Sie {localSandbox}, um lokal ohne Cloud-Zugangsdaten zu testen, oder verbinden Sie GCP/AWS/Azure/Cloudflare. Bei Running-Instance-Workspaces provisioniert Launchpad die VM (oder das Ziel), liefert das verknüpfte GitHub-/GitLab-Repo aus, und Open app zeigt auf den laufenden Prozess (kein Docker-Image nötig, außer Sie wählen eine Docker-Strategie). Die Bereitstellung läuft asynchron; die Detailseite zeigt Live-Status und Logs während des Hochfahrens.",
       "step1": "Öffnen Sie {launchPath} und wählen Sie ein Ziel (Local Sandbox ist der Standard für lokale Tests).",
       "step2": "Für lokal: {kindCmd} ausführen (mappt NodePorts auf localhost), {k8sEnabled} und {k8sContext} in der API-{envFile} setzen, dann API und Worker neu starten. Preview öffnen erreicht den echten Pod unter {previewUrl}.",
       "step3": "Preview-App-Vorlage wählen, Umgebung benennen und starten.",
       "step4": "Umgebung öffnen, Live-Logs verfolgen, {running} bestätigen und {openPreview} nutzen."
     },
     "rebuildSection": {
-      "intro": "Wenn ein GitHub-Webhook für Ihre Repositories konfiguriert ist, löst ein Push auf einen Branch, der zu Repo und Branch einer aktiven Umgebung passt, automatisch einen Rebuild aus. Die Umgebungsdetailseite zeigt, ob {webhookSecret} in der API gesetzt ist.",
+      "intro": "Wenn ein GitHub- oder GitLab-Webhook konfiguriert ist, löst ein Push auf einen Branch, der zu Repo und Branch einer aktiven Umgebung passt, automatisch einen Rebuild aus. Instance-Umgebungen klonen (oder synchen) die verknüpfte App erneut und starten den Prozess auf der VM neu. Die Umgebungsdetailseite zeigt, ob {webhookSecret} in der API gesetzt ist (Plattform-Secret, muss zum GitHub-App-Webhook-Secret passen).",
       "step1": "Umgebung gegen den Branch laufen lassen, an dem Sie iterieren.",
-      "step2": "Commits auf diesen Branch in GitHub pushen.",
-      "step3": "Launchpad markiert die Umgebung erneut als provisioning, speichert den neuesten Commit und deployt neu.",
-      "step4": "Umgebungskarte oder Detailseite beobachten - Status, Commit-SHA und Logs aktualisieren sich live."
+      "step2": "Commits auf diesen Branch in GitHub oder GitLab pushen.",
+      "step3": "Launchpad markiert die Umgebung erneut als provisioning, speichert den neuesten Commit und deployt neu (K8s-Apply, Compose up oder VM-Clone/Neustart).",
+      "step4": "Umgebungskarte oder Detailseite beobachten - Status, Commit-SHA und Logs aktualisieren sich live. Workload-Image erscheint nur bei einem echten Container-Image; Instance-/Source-Deploys zeigen keines."
     },
     "provisionSection": {
-      "intro": "Der Provision-Assistent erzeugt ein IaC-Bundle für Sie. Launchpad wendet Cloud-Änderungen nicht selbst an - Sie führen plan/apply im Sandbox-Terminal aus, nachdem das Bundle bereit ist.",
+      "intro": "Der Provision-Assistent erzeugt ein IaC-Bundle für Sie. Bei klassischen Cluster-Stacks führen Sie plan/apply meist im Sandbox-Terminal aus, nachdem das Bundle bereit ist. Bei Running-Instance-(attach)-Cloud-Zielen kann Launchpad den VM-Stack anwenden und das verknüpfte App-Repo per SSH/Clone ausliefern, sodass Open app Ihr echtes Frontend oder Ihre API bedient.",
       "step1": "Gehen Sie zu {provision}.",
       "step2": "Workspace-Namen, Cloud-Anbieter und IaC-Engine ({terraform}, {pulumi} oder {ansible}) wählen.",
       "step3": "Kurzlebige Cloud-Zugangsdaten für diesen Anbieter einfügen (siehe {credentialsLink}).",
@@ -1961,7 +1961,7 @@ export default {
       "afterPermissions": "Nach Berechtigungsänderungen die Installation auf GitHub öffnen und {accept} für die neue Anfrage. Apps auf einem {personalAccount} können per API keine neuen Repos anlegen - legen Sie zuerst ein leeres Repo an oder installieren Sie auf einer {organization}."
     },
     "workspacesSection": {
-      "intro": "Jeder abgeschlossene Provision-Lauf wird ein Workspace: erzeugte Terraform- oder Pulumi-Dateien plus Sandbox, in der Ihre Cloud-Zugangsdaten bereits verfügbar sind. Die Workspace-Seite enthält einen IDE-Explorer zum Bearbeiten von Manifesten, Hinzufügen von Kubernetes-/Terraform-Vorlagen, Speichern, Formatieren, Push to GitHub und kubectl-/terraform-Befehle im Terminal.",
+      "intro": "Jeder abgeschlossene Provision-Lauf wird ein Workspace: erzeugte Terraform- oder Pulumi-Dateien plus Sandbox, in der Ihre Cloud-Zugangsdaten bereits verfügbar sind. Verknüpfen Sie ein GitHub- oder GitLab-App-Repo am Workspace, damit Cloud-Instance-Umgebungen diesen Code standardmäßig klonen und ausführen (Import/Scaffold kann den Workspace weiterhin per SSH syncen). Die Workspace-Seite enthält einen IDE-Explorer zum Bearbeiten von Manifesten, Hinzufügen von Kubernetes-/Terraform-Vorlagen, Speichern, Formatieren, Push to GitHub und kubectl-/terraform-Befehle im Terminal.",
       "step1": "Öffnen Sie {workspaces} und wählen Sie einen Workspace.",
       "step2": "Explorer nutzen, um Dateien zu erstellen, umbenennen, löschen, bearbeiten, formatieren und speichern ({saveShortcut}).",
       "step3": "Kubernetes-YAML (Deployment, Service, Ingress, Pod, Job, …) oder Terraform-Stubs aus den Vorlagenmenüs hinzufügen.",
@@ -2619,10 +2619,10 @@ export default {
     "saved": "Gespeichert",
     "save": "Speichern",
     "saving": "Speichern…",
-    "aiAnalyze": "KI analysieren",
-    "aiAnalyzeFolder": "Ordner analysieren",
-    "aiAnalyzeFolderTitle": "Alle Dateien im Ordner analysieren",
-    "aiAnalyzeFileTitle": "Ausgewählte Datei analysieren",
+    "aiAnalyze": "KI verbessern",
+    "aiAnalyzeFolder": "Ordner mit KI verbessern",
+    "aiAnalyzeFolderTitle": "Alle analysierbaren Dateien im Ordner verbessern (CI, Docker, Terraform)",
+    "aiAnalyzeFileTitle": "Ausgewählte CI-, Docker- oder Terraform-Datei mit KI verbessern",
     "kubernetes": "Kubernetes",
     "engineLabel": "Engine:",
     "restoreFiles": "Dateien wiederherstellen",

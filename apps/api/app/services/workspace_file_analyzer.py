@@ -97,6 +97,39 @@ class WorkspaceFileAnalyzerError(RuntimeError):
     """Workspace file analysis failed."""
 
 
+def _inject_dockerfile_nonroot_user(content: str) -> str | None:
+    """Append USER 10001 before final CMD/ENTRYPOINT when no USER is present."""
+    if re.search(r"(?im)^\s*USER\s+", content):
+        return None
+    lines = content.splitlines(keepends=True)
+    insert_at = len(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        stripped = lines[idx].strip().upper()
+        if stripped.startswith("CMD ") or stripped.startswith("ENTRYPOINT ") or stripped.startswith("HEALTHCHECK "):
+            insert_at = idx
+            break
+    block = "USER 10001\n"
+    if insert_at > 0 and lines[insert_at - 1].strip():
+        block = "\n" + block
+    lines.insert(insert_at, block)
+    fixed = "".join(lines)
+    if not fixed.endswith("\n"):
+        fixed += "\n"
+    return fixed if fixed != content else None
+
+
+def _inject_github_workflow_permissions(content: str) -> str | None:
+    """Insert least-privilege top-level permissions before jobs: when missing."""
+    if re.search(r"(?m)^permissions\s*:", content):
+        return None
+    jobs_match = re.search(r"(?m)^jobs\s*:", content)
+    if not jobs_match:
+        return None
+    block = "permissions:\n  contents: read\n\n"
+    fixed = content[: jobs_match.start()] + block + content[jobs_match.start() :]
+    return fixed if fixed != content else None
+
+
 def _postgres_needs_pgdata_fix(lower: str) -> bool:
     """True for a non-root postgres Deployment with a data volume but no PGDATA env.
 
@@ -318,6 +351,7 @@ class WorkspaceFileAnalyzerService:
     def _heuristic_docker(self, path: str, content: str) -> WorkspaceFileAnalyzeResponse:
         issues: list[WorkspaceFileIssue] = []
         suggestions: list[str] = []
+        improved: str | None = None
         lower = content.lower()
         if ":latest" in lower:
             issues.append(
@@ -339,6 +373,9 @@ class WorkspaceFileAnalyzerService:
                 )
             )
             suggestions.append("Add USER 10001 (or distroless nonroot) in the final stage.")
+            fixed = _inject_dockerfile_nonroot_user(content)
+            if fixed and fixed != content:
+                improved = fixed
         if "as " not in lower and "from " in lower:
             issues.append(
                 WorkspaceFileIssue(
@@ -355,15 +392,20 @@ class WorkspaceFileAnalyzerService:
             suggestions.append("Dockerfile looks reasonably hardened; keep tags pinned and non-root.")
         return WorkspaceFileAnalyzeResponse(
             kind="docker",
-            summary="Heuristic Docker review completed.",
+            summary=(
+                "Heuristic Docker review proposed a non-root USER fix."
+                if improved
+                else "Heuristic Docker review completed."
+            ),
             issues=issues,
             suggestions=suggestions,
-            improvedContent=None,
+            improvedContent=improved,
         )
 
     def _heuristic_cicd(self, path: str, content: str) -> WorkspaceFileAnalyzeResponse:
         issues: list[WorkspaceFileIssue] = []
         suggestions: list[str] = []
+        improved: str | None = None
         if re.search(r"uses:\s*[^\s@]+@v\d", content):
             issues.append(
                 WorkspaceFileIssue(
@@ -378,16 +420,31 @@ class WorkspaceFileAnalyzerService:
             suggestions.append("Add a container vulnerability scan stage (Trivy) before deploy.")
         if "permissions:" not in content and "github" in path.lower():
             suggestions.append("Declare least-privilege `permissions:` for the workflow.")
+            fixed = _inject_github_workflow_permissions(content)
+            if fixed and fixed != content:
+                improved = fixed
+                issues.append(
+                    WorkspaceFileIssue(
+                        title="Missing workflow permissions",
+                        description="GitHub Actions workflows should declare least-privilege permissions.",
+                        severity="warning",
+                        ruleId="MISSING_PERMISSIONS",
+                    )
+                )
         if "secrets." in content.lower() and "environment:" not in content.lower():
             suggestions.append("Consider GitHub Environments for production secret gating.")
         if not issues and not suggestions:
             suggestions.append("Pipeline looks structured; keep scanners and least privilege enabled.")
         return WorkspaceFileAnalyzeResponse(
             kind="cicd",
-            summary="Heuristic CI/CD review completed.",
+            summary=(
+                "Heuristic CI/CD review proposed least-privilege permissions."
+                if improved
+                else "Heuristic CI/CD review completed."
+            ),
             issues=issues,
             suggestions=suggestions or ["Enable SAST + container scanning on main branch pushes."],
-            improvedContent=None,
+            improvedContent=improved,
         )
 
     def _heuristic_kubernetes(self, path: str, content: str) -> WorkspaceFileAnalyzeResponse:

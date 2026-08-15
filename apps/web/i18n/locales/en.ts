@@ -1858,7 +1858,7 @@ export default {
       "intro": "Launchpad has four related jobs. They share the same UI and can be linked, but they run on different lifecycles:",
       "provisionBody": "generate a Terraform or Pulumi workspace for GCP, AWS, Azure, Cloudflare, or kind. You attach short-lived cloud credentials, pick resources, then apply the stack from the sandbox terminal. This stands up platform infrastructure (VPC, cluster, etc.).",
       "manifestBody": "apply Kubernetes YAML or Helm charts from {path} in your workspace. This deploys app objects onto a cluster that already exists. In the sandbox terminal, manifests apply separately after Terraform/Pulumi.",
-      "environmentBody": "short-lived, governed preview of an app from a git repo and branch. Launchpad creates an isolated namespace, deploys the workload, streams status and logs, and tears everything down when the TTL expires. When linked to a workspace with raw manifests, environments use {manifestDeploy} instead of the built-in preview profile.",
+      "environmentBody": "short-lived, governed preview of an app from a git repo and branch. Launchpad can run Kubernetes previews, Docker Compose, or a cloud / VM running-instance (attach). For instance mode it clones the linked app repo onto the host (or syncs the workspace), starts the process, streams status and logs, and tears everything down when the TTL expires. When linked to a workspace with raw manifests, environments use {manifestDeploy} instead of the built-in preview profile.",
       "hybridBody": "enroll self-hosted Linux hosts as agent nodes (outbound secure tunnel) and optionally generate guardrailed infrastructure blueprints with AI. Deploy containers to a node or map the blueprint to GCP / AWS / Azure.",
       "useFlows": "Use {launch} for a one-click preview - Local Sandbox (single screen) or cloud, catalog template or your own repo. Use {environments} to manage running previews. Use {provision} to create a new cloud stack, {workspaces} to reopen one you already generated, and {hybrid} to manage fleet nodes and AI blueprints."
     },
@@ -1872,21 +1872,21 @@ export default {
       "body": "{home} shows active environment and workspace counts plus whether account cloud keys are configured. {settings} stores encrypted cloud credentials for your user (SA JSON, WIF, AWS keys/roles, Azure SP, Cloudflare token). Blank credential fields in Provision fall back to this vault."
     },
     "environmentsSection": {
-      "intro": "An environment is a governed, time-boxed preview of your application. The fastest path is {launch} - choose {localSandbox} to test on your machine with no cloud credentials, or connect GCP/AWS/Azure/Cloudflare. Provisioning runs asynchronously; the detail page shows live status and logs while it comes up.",
+      "intro": "An environment is a governed, time-boxed preview of your application. The fastest path is {launch} - choose {localSandbox} to test on your machine with no cloud credentials, or connect GCP/AWS/Azure/Cloudflare. For running-instance workspaces, Launchpad provisions the VM (or target), delivers the linked GitHub/GitLab repo, and Open app points at the live process (no Docker image required unless you chose a Docker strategy). Provisioning runs asynchronously; the detail page shows live status and logs while it comes up.",
       "step1": "Open {launchPath} and pick a target (Local Sandbox is the default for local testing).",
       "step2": "For Local: run {kindCmd} (maps NodePorts to localhost), set {k8sEnabled} and {k8sContext} in the API {envFile}, then restart API + worker. Open Preview hits the real pod at {previewUrl}.",
       "step3": "Pick a preview app template, name the environment, and launch.",
       "step4": "Open the environment to watch live logs, confirm it reaches {running}, and use {openPreview}."
     },
     "rebuildSection": {
-      "intro": "When a GitHub webhook is configured for your repositories, a push to a branch that matches an active environment's repo and branch automatically triggers a rebuild. The environment detail page shows whether {webhookSecret} is set on the API.",
+      "intro": "When a GitHub or GitLab webhook is configured, a push to a branch that matches an active environment's repo and branch automatically triggers a rebuild. Instance environments re-clone (or re-sync) the linked app and restart the process on the VM. The environment detail page shows whether {webhookSecret} is set on the API (platform secret, must match the GitHub App webhook secret).",
       "step1": "Keep the environment running against the branch you are iterating on.",
-      "step2": "Push commits to that branch in GitHub.",
-      "step3": "Launchpad marks the environment as provisioning again, records the latest commit, and redeploys.",
-      "step4": "Watch the environment card or detail page - status, commit SHA, and logs update live."
+      "step2": "Push commits to that branch in GitHub or GitLab.",
+      "step3": "Launchpad marks the environment as provisioning again, records the latest commit, and redeploys (K8s apply, compose up, or VM clone/restart).",
+      "step4": "Watch the environment card or detail page - status, commit SHA, and logs update live. Workload image is only shown when you supplied a real container image; instance / source-based deploys omit it."
     },
     "provisionSection": {
-      "intro": "The Provision wizard builds an IaC bundle for you. Launchpad does not apply cloud changes by itself - you run the plan/apply commands in the sandbox after the bundle is ready.",
+      "intro": "The Provision wizard builds an IaC bundle for you. For classic cluster stacks you usually run plan/apply in the sandbox after the bundle is ready. For running-instance (attach) cloud targets, Launchpad can apply the VM stack and deliver the linked app repo over SSH/clone so Open app serves your real frontend or API.",
       "step1": "Go to {provision}.",
       "step2": "Choose a workspace name, cloud provider, and IaC engine ({terraform}, {pulumi}, or {ansible}).",
       "step3": "Paste short-lived cloud credentials for that provider (see {credentialsLink}).",
@@ -1961,7 +1961,7 @@ export default {
       "afterPermissions": "After permission changes, open the installation on GitHub and {accept} the new request. Apps installed on a {personalAccount} cannot create new repos via API - create an empty repo first, or install on an {organization}."
     },
     "workspacesSection": {
-      "intro": "Every finished Provision run becomes a workspace: generated Terraform or Pulumi files plus a sandbox where your cloud credentials are already available. The workspace page includes an IDE-style file explorer so you can edit manifests, add Kubernetes/Terraform templates, save, format, push to GitHub, and run kubectl / terraform commands in the terminal.",
+      "intro": "Every finished Provision run becomes a workspace: generated Terraform or Pulumi files plus a sandbox where your cloud credentials are already available. Link a GitHub or GitLab app repo on the workspace so cloud instance environments clone and run that code by default (import/scaffold can still sync the workspace disk over SSH). The workspace page includes an IDE-style file explorer so you can edit manifests, add Kubernetes/Terraform templates, save, format, push to GitHub, and run kubectl / terraform commands in the terminal.",
       "step1": "Open {workspaces} and select a workspace.",
       "step2": "Use the explorer to create, rename, delete, edit, format, and save files ({saveShortcut}).",
       "step3": "Add Kubernetes YAML (Deployment, Service, Ingress, Pod, Job, …) or Terraform stubs from the template menus.",
@@ -2619,10 +2619,10 @@ export default {
     "saved": "Saved",
     "save": "Save",
     "saving": "Saving…",
-    "aiAnalyze": "AI analyze",
-    "aiAnalyzeFolder": "AI analyze folder",
-    "aiAnalyzeFolderTitle": "Analyze all files in folder",
-    "aiAnalyzeFileTitle": "Analyze selected file",
+    "aiAnalyze": "AI enhance",
+    "aiAnalyzeFolder": "AI enhance folder",
+    "aiAnalyzeFolderTitle": "Enhance all analyzable files in folder (CI, Docker, Terraform)",
+    "aiAnalyzeFileTitle": "AI enhance selected CI, Docker, or Terraform file",
     "kubernetes": "Kubernetes",
     "engineLabel": "engine:",
     "restoreFiles": "Restore files",

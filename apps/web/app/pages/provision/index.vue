@@ -60,6 +60,7 @@ import {
 import {
   detectRepoStackForScaffold,
   enhanceDockerScaffoldTargets,
+  enhanceExistingWorkspaceFiles,
 } from '~/utils/workspaceRepoScaffold'
 import { AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, AWS_INSTANCE_TYPES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
 import { applyPreferredCloudRegions } from '~/utils/preferredCloudRegions'
@@ -1106,6 +1107,20 @@ async function scaffoldCiCdFiles(workspaceId: string) {
   )
 }
 
+/** AI-enhance Docker, CI, and Terraform/IaC files already on disk after scaffold. */
+async function enhanceProvisionedInfraFiles(workspaceId: string) {
+  await enhanceExistingWorkspaceFiles(
+    workspaceId,
+    {
+      listWorkspaceFiles,
+      readWorkspaceFile,
+      writeWorkspaceFile,
+      analyzeWorkspaceFile,
+    },
+    ['docker', 'cicd', 'iac'],
+  )
+}
+
 async function scaffoldAnsibleFiles(workspaceId: string) {
   const ansibleWanted =
     form.ansible.enabled
@@ -1244,6 +1259,7 @@ async function onGenerate() {
       await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
       await scaffoldAnsibleFiles(workspaceId)
+      await enhanceProvisionedInfraFiles(workspaceId)
       await refreshBundle(workspaceId)
       creationStep.value = 3
       const terminal = await openTerminal(workspaceId, {
@@ -1274,6 +1290,7 @@ async function onGenerate() {
       await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
       await scaffoldAnsibleFiles(workspaceId)
+      await enhanceProvisionedInfraFiles(workspaceId)
       await refreshBundle(workspaceId)
       creationStep.value = 4
       const terminal = await openTerminal(workspaceId, {
@@ -1293,6 +1310,7 @@ async function onGenerate() {
       await scaffoldDockerFiles(workspaceId, parsed.data.container_scaffold)
       await scaffoldCiCdFiles(workspaceId)
       await scaffoldAnsibleFiles(workspaceId)
+      await enhanceProvisionedInfraFiles(workspaceId)
       await refreshBundle(workspaceId)
       if (!form.github.name.trim()) {
         form.github.name = `launchpad-${parsed.data.name}`

@@ -114,6 +114,14 @@ Beyond launch and destroy:
 | **Jira** | Create or open a linked issue when Jira is connected |
 | **Audits** | Control-plane audit trail for the env |
 
+### Running instance (attach)
+
+Cloud / VM previews with `deploy=attach` clone the workspace **linked app repo** (GitHub or GitLab) onto the host by default, or sync the workspace disk when there is no remote clone URL. **Open app** uses the VM preview URL (for example `http://<ip>:8080`). Workload image is hidden unless you supplied a real container image (platform defaults like `nginx:1.27-alpine` are not shown).
+
+### Git push rebuilds
+
+With `WEBHOOK_SECRET` matching the GitHub App (or GitLab) webhook secret, pushes to the tracked branch rebuild the active environment (re-clone / restart on instance mode). Detail page shows latest commit SHA and whether the webhook is configured. In-app: `/docs#rebuild`.
+
 ### Sharing and PRs
 
 - **`/p/{id}`** - shareable status page (progress, open app when Running).
@@ -135,6 +143,12 @@ Engines:
 - **Terraform** / **Pulumi** - classic cloud IaC (documented in `/docs#provision`).
 - **Ansible** - `infra/ansible` inventory + playbooks; run check/apply from workspace toolbar when detected.
 
+Runtime modes:
+
+- **Kubernetes** - manifests / Helm / Kustomize on a cluster
+- **Compose** - `docker compose` from the workspace
+- **Running instance** - VM or managed compute; control plane applies IaC when configured, then delivers the linked repo (clone) or workspace sync (SSH)
+
 Kubernetes packaging modes:
 
 - Raw manifests (`infra/k8s/manifests/`)
@@ -146,6 +160,8 @@ Optional scaffolds (wizard / Advanced IDE):
 - CI: GitHub Actions or GitLab CI
 - Pipeline security: Trivy / SAST / health-rollback style toggles
 - Cost options: spot / HPA / VPA / idle-shutdown style knobs written into generated infra
+
+**Linked app repo**: on the workspace, link GitHub/GitLab so instance environments clone that branch by default. Repo **import** / scaffold still syncs the workspace tree when there is no remote URL.
 
 Repo **import**: from Workspaces (`?import=1`) or a project, detect GitHub/GitLab repos and pull them into a workspace (often redirects from `/import`).
 

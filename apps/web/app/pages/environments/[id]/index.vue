@@ -474,7 +474,7 @@ const canOpenApp = computed(() => {
 const openAppTitle = computed(() => {
   const env = environment.value
   if (!env) return t('environments.detail.openPreview')
-  const image = env.workload_image || 'workload'
+  const image = env.workload_image || env.name || 'app'
   const port = env.node_port != null ? `NodePort ${env.node_port}` : env.preview_url
   return t('environments.detail.openPreviewTitle', { image, port: port ?? '-' })
 })

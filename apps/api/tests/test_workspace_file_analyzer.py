@@ -4,6 +4,8 @@ from app.core.secrets import credentials_to_env, project_id_from_gcp_sa_json
 from app.services.workspace_file_analyzer import (
     WorkspaceFileAnalyzerService,
     _REPORT_JSON_SCHEMA,
+    _inject_dockerfile_nonroot_user,
+    _inject_github_workflow_permissions,
     _inject_pgdata_env,
     _postgres_needs_pgdata_fix,
     _strip_duplicate_root_provider_blocks,
@@ -200,3 +202,43 @@ resource "google_compute_subnetwork" "subnet" {
     assert any(i.ruleId == "GCP_VPC_UNSUPPORTED_LABELS" for i in report.issues)
     assert report.improvedContent is not None
     assert "labels" not in report.improvedContent
+
+
+def test_heuristic_docker_injects_nonroot_user() -> None:
+    service = WorkspaceFileAnalyzerService.__new__(WorkspaceFileAnalyzerService)
+    raw = "FROM python:3.12-alpine\nWORKDIR /app\nCMD [\"python\", \"main.py\"]\n"
+    resp = service._heuristic_docker("dockers/Dockerfile.app", raw)
+    assert any(i.ruleId == "RUN_AS_ROOT" for i in resp.issues)
+    assert resp.improvedContent is not None
+    assert "USER 10001" in resp.improvedContent
+    assert resp.improvedContent.index("USER 10001") < resp.improvedContent.upper().index("CMD ")
+
+
+def test_inject_dockerfile_nonroot_user_noop_when_present() -> None:
+    content = "FROM alpine:3.20\nUSER 10001\nCMD [\"sleep\", \"infinity\"]\n"
+    assert _inject_dockerfile_nonroot_user(content) is None
+
+
+def test_heuristic_cicd_injects_permissions() -> None:
+    service = WorkspaceFileAnalyzerService.__new__(WorkspaceFileAnalyzerService)
+    raw = (
+        "name: ci\n"
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+    )
+    resp = service._heuristic_cicd("ci/github/workflows/app.yml", raw)
+    assert resp.improvedContent is not None
+    assert "permissions:" in resp.improvedContent
+    assert "contents: read" in resp.improvedContent
+    assert resp.improvedContent.index("permissions:") < resp.improvedContent.index("jobs:")
+
+
+def test_inject_github_workflow_permissions_noop_when_present() -> None:
+    content = "name: ci\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+    assert _inject_github_workflow_permissions(content) is None
