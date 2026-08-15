@@ -62,7 +62,7 @@ const aiTargetContent = ref('')
 const aiErrorContext = ref<string | null>(null)
 const savedNewCredentials = ref(false)
 
-const credentials = reactive(emptyCloudCredentials())
+const credentials = ref(emptyCloudCredentials())
 
 const isDestroy = computed(() => props.mode === 'destroy')
 const steps = computed(() =>
@@ -118,21 +118,7 @@ const progressPct = computed(() => {
 })
 
 function resetCredentials() {
-  credentials.gcp_sa_key_json = ''
-  credentials.gcp_wif_project_number = ''
-  credentials.gcp_wif_pool_id = ''
-  credentials.gcp_wif_provider_id = ''
-  credentials.gcp_wif_target_sa_email = ''
-  credentials.aws_access_key_id = ''
-  credentials.aws_secret_access_key = ''
-  credentials.aws_session_token = ''
-  credentials.aws_role_arn = ''
-  credentials.aws_role_session_name = ''
-  credentials.azure_client_id = ''
-  credentials.azure_client_secret = ''
-  credentials.azure_tenant_id = ''
-  credentials.azure_subscription_id = ''
-  credentials.cloudflare_api_token = ''
+  credentials.value = emptyCloudCredentials()
 }
 
 function resetStepStatuses() {
@@ -140,7 +126,7 @@ function resetStepStatuses() {
 }
 
 function hasNewCredentialInput(): boolean {
-  return Object.values(credentials).some((v) => typeof v === 'string' && v.trim().length > 0)
+  return Object.values(credentials.value).some((v) => typeof v === 'string' && v.trim().length > 0)
 }
 
 async function loadWizard() {
@@ -252,7 +238,7 @@ async function persistCredentialsIfNeeded(): Promise<boolean> {
     cost_optimization: config.cost_optimization,
     container_scaffold: config.container_scaffold,
     dependencies: config.dependencies,
-    credentials: { ...credentials },
+    credentials: { ...credentials.value },
     provider: config.cloud.provider,
     resources: config.cloud.resources,
   }

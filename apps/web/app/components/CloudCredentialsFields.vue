@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { CloudCredentialsForm } from '~/utils/cloudValidation'
+import { emptyCloudCredentials } from '~/utils/cloudValidation'
 import { AWS_REGIONS, AZURE_LOCATIONS, GCP_REGIONS } from '~/utils/cloudRegions'
 
 const credentials = defineModel<CloudCredentialsForm>('credentials', { required: true })
@@ -22,6 +23,8 @@ const { t } = useI18n()
 const gcpAuthMode = ref<'sa' | 'wif'>('sa')
 const awsAuthMode = ref<'keys' | 'oidc'>('keys')
 
+const form = computed(() => credentials.value ?? emptyCloudCredentials())
+
 const gcpSaPlaceholder = computed(
   () => props.saPlaceholder || t('credentials.fields.gcpSaKeyJsonPlaceholder'),
 )
@@ -40,7 +43,7 @@ function projectIdFromSaJson(raw: string): string | null {
   return null
 }
 
-const saEmbeddedProjectId = computed(() => projectIdFromSaJson(credentials.value.gcp_sa_key_json || ''))
+const saEmbeddedProjectId = computed(() => projectIdFromSaJson(form.value.gcp_sa_key_json || ''))
 
 const showProjectIdField = computed(() => {
   if (props.showGcpProjectId === false) return false
@@ -51,8 +54,9 @@ const showProjectIdField = computed(() => {
 })
 
 watch(
-  () => credentials.value.gcp_sa_key_json,
+  () => form.value.gcp_sa_key_json,
   (raw) => {
+    if (!credentials.value) return
     const project = projectIdFromSaJson(raw || '')
     if (project && !(credentials.value.gcp_project_id || '').trim()) {
       credentials.value.gcp_project_id = project

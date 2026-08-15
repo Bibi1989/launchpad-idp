@@ -17,8 +17,13 @@ const connecting = ref(false)
 const errorMessage = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 const activeProvider = ref<'gcp' | 'aws' | 'azure' | 'cloudflare'>('gcp')
-const credentials = reactive(emptyCloudCredentials())
+// Must be a ref for v-model:credentials (defineModel/useModel). A reactive() object
+// compiles to a no-op onUpdate handler and can leave the child model undefined
+// (Vue production error "2" = watcher getter) so region/SA fields never paint.
+const credentials = ref(emptyCloudCredentials())
 const caps = ref<CloudOAuthCapabilities | null>(null)
+const credentialsFormError = ref<string | null>(null)
+const credentialsFormKey = ref(0)
 
 const awsStartUrl = ref('')
 const awsRegion = ref('us-east-1')
@@ -36,17 +41,18 @@ const kindSuccess = ref<string | null>(null)
 const clusterName = ref('launchpad')
 
 function applyStatusPreferences(credStatus: UserCloudCredentialsStatus) {
-  if (credStatus.gcp_region) credentials.gcp_region = credStatus.gcp_region
-  if (credStatus.aws_region) credentials.aws_region = credStatus.aws_region
-  if (credStatus.azure_location) credentials.azure_location = credStatus.azure_location
-  if (credStatus.gcp_project_id && !(credentials.gcp_project_id || '').trim()) {
-    credentials.gcp_project_id = credStatus.gcp_project_id
+  const next = credentials.value
+  if (credStatus.gcp_region) next.gcp_region = credStatus.gcp_region
+  if (credStatus.aws_region) next.aws_region = credStatus.aws_region
+  if (credStatus.azure_location) next.azure_location = credStatus.azure_location
+  if (credStatus.gcp_project_id && !(next.gcp_project_id || '').trim()) {
+    next.gcp_project_id = credStatus.gcp_project_id
   }
 }
 
 /** Show project id for Connect / WIF; hide when SA JSON embeds project_id. */
 const showGcpProjectId = computed(() => {
-  const raw = (credentials.gcp_sa_key_json || '').trim()
+  const raw = (credentials.value.gcp_sa_key_json || '').trim()
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as { project_id?: unknown }
@@ -97,14 +103,26 @@ onMounted(() => {
   void refreshKind()
 })
 
+function onCredentialsFormError(err: unknown) {
+  console.error('[launchpad] CloudCredentialsFields failed', err)
+  credentialsFormError.value
+    = err instanceof Error ? err.message : t('settings.errors.load')
+}
+
+function reloadCredentialsForm(clearBoundary?: () => void) {
+  credentialsFormError.value = null
+  credentialsFormKey.value += 1
+  clearBoundary?.()
+  void refresh()
+}
+
 async function onSave() {
   saving.value = true
   errorMessage.value = null
   successMessage.value = null
   try {
-    status.value = await save({ ...credentials })
-    const next = emptyCloudCredentials()
-    Object.assign(credentials, next)
+    status.value = await save({ ...credentials.value })
+    credentials.value = emptyCloudCredentials()
     applyStatusPreferences(status.value)
     successMessage.value = t('settings.credentialsSaved')
   } catch (err) {
@@ -130,7 +148,7 @@ async function onClearProvider() {
       clear_azure: activeProvider.value === 'azure',
       clear_cloudflare: activeProvider.value === 'cloudflare',
     })
-    Object.assign(credentials, emptyCloudCredentials())
+    credentials.value = emptyCloudCredentials()
     applyStatusPreferences(status.value)
     successMessage.value = t('settings.clearedProvider', { provider: activeProvider.value.toUpperCase() })
   } catch (err) {
@@ -426,22 +444,28 @@ const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kind
             <input v-model="azureSubscriptionId" class="lp-input font-mono text-xs" autocomplete="off">
           </label>
         </div>
-        <label v-if="activeProvider === 'gcp' && showGcpProjectId" class="block space-y-1">
-          <span class="lp-label">{{ t('credentials.fields.gcpProjectId') }}</span>
-          <input
-            v-model="credentials.gcp_project_id"
-            class="lp-input font-mono text-xs"
-            placeholder="my-gcp-project"
-            autocomplete="off"
-          >
-          <p class="text-xs text-[var(--lp-muted)]">{{ t('credentials.fields.gcpProjectIdHint') }}</p>
-        </label>
       </div>
 
-      <CloudCredentialsFields
-        v-model:credentials="credentials"
-        :provider="activeProvider"
-      />
+      <NuxtErrorBoundary @error="onCredentialsFormError">
+        <CloudCredentialsFields
+          :key="credentialsFormKey"
+          v-model:credentials="credentials"
+          :provider="activeProvider"
+          :show-gcp-project-id="showGcpProjectId"
+        />
+        <template #error="{ clearError }">
+          <div class="rounded-lg border border-[var(--lp-danger)]/40 bg-[var(--lp-danger)]/5 p-4 text-sm text-[var(--lp-danger)]">
+            <p>{{ credentialsFormError || t('settings.errors.load') }}</p>
+            <button
+              type="button"
+              class="lp-btn-ghost mt-2 text-xs uppercase tracking-wide"
+              @click="reloadCredentialsForm(clearError)"
+            >
+              {{ t('settings.localKubernetesRefresh') }}
+            </button>
+          </div>
+        </template>
+      </NuxtErrorBoundary>
 
       <div class="flex flex-wrap gap-3 pt-2">
         <button type="button" class="lp-btn-primary" :disabled="saving" @click="onSave">

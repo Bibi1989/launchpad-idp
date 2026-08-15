@@ -88,7 +88,7 @@ const storedCredentialsStatus = ref<UserCloudCredentialsStatus | null>(null)
 const storedCredentialsLoading = ref(false)
 const useStoredCredentials = ref(false)
 
-const promoteCredentials = reactive(emptyCloudCredentials())
+const promoteCredentials = ref(emptyCloudCredentials())
 
 const promoteForm = reactive({
   provider: 'gcp' as CloudProvider,
@@ -306,11 +306,11 @@ async function loadPromoteServices() {
 }
 
 function clearPromoteCredentials() {
-  Object.assign(promoteCredentials, emptyCloudCredentials())
+  promoteCredentials.value = emptyCloudCredentials()
 }
 
 function promoteCredentialsEmpty() {
-  return Object.values(promoteCredentials).every((v) => !String(v ?? '').trim())
+  return Object.values(promoteCredentials.value).every((v) => !String(v ?? '').trim())
 }
 
 function hasStoredCredsForProvider(provider: CloudProvider) {
@@ -670,7 +670,7 @@ const scanDriftAction = define(
 const promoteAction = define(
   () => promoteToCloud(environment.value!.id, {
     provider: promoteForm.provider,
-    credentials: { ...promoteCredentials },
+    credentials: { ...promoteCredentials.value },
     primary_service: promotePrimaryService.value ?? promoteRecommendedService.value,
     code_source: showPromoteCodeSource.value ? promoteForm.code_source : null,
     region: showPromoteRegion.value ? promoteForm.region : null,
