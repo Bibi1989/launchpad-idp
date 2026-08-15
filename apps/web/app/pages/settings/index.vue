@@ -105,8 +105,15 @@ onMounted(() => {
 
 function onCredentialsFormError(err: unknown) {
   console.error('[launchpad] CloudCredentialsFields failed', err)
-  credentialsFormError.value
-    = err instanceof Error ? err.message : t('settings.errors.load')
+  const raw = err instanceof Error ? err.message : String(err ?? '')
+  const vueInfo: Record<string, string> = {
+    '2': 'watcher getter',
+    '1': 'render function',
+    '0': 'setup function',
+  }
+  credentialsFormError.value = vueInfo[raw]
+    ? `Credentials form crashed (${vueInfo[raw]}). Try Refresh, or check the browser console.`
+    : (raw || t('settings.errors.load'))
 }
 
 function reloadCredentialsForm(clearBoundary?: () => void) {

@@ -367,6 +367,8 @@ jobs:
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_EMAIL_FROM: ${{ secrets.RESEND_EMAIL_FROM }}
+          GCP_OAUTH_CLIENT_ID: ${{ secrets.GCP_OAUTH_CLIENT_ID }}
+          GCP_OAUTH_CLIENT_SECRET: ${{ secrets.GCP_OAUTH_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           # actions/checkout wipes the workspace each run, so persist secrets OUTSIDE it.
