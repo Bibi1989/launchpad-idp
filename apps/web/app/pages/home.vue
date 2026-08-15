@@ -119,6 +119,8 @@ const actions = computed(() => [
       </div>
     </section>
 
+    <HomeObservabilityPanel />
+
     <section class="space-y-4">
       <h2 class="text-lg font-semibold">{{ t('home.quickActions') }}</h2>
       <div class="grid gap-4 sm:grid-cols-2">

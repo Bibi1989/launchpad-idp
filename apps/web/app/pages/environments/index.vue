@@ -222,6 +222,7 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
   if (patch.node_port !== undefined) target.node_port = patch.node_port
   if (patch.app_ready !== undefined) target.app_ready = patch.app_ready
   if (patch.error_message !== undefined) target.error_message = patch.error_message
+  if (patch.failure_summary !== undefined) target.failure_summary = patch.failure_summary
 }
 </script>
 

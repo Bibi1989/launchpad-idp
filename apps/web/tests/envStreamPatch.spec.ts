@@ -44,16 +44,30 @@ describe('envStreamPatch', () => {
     expect(env.latest_commit_sha).toBe('abc')
   })
 
+  it('applies failure_summary from SSE', () => {
+    const env = baseEnv({ status: 'FAILED', failure_summary: null })
+    applyEnvStreamPatch(env, {
+      type: 'STATUS_CHANGE',
+      status: 'FAILED',
+      error_message: 'port busy',
+      failure_summary: 'NodePort conflict blocked the preview Service',
+    })
+    expect(env.failure_summary).toBe('NodePort conflict blocked the preview Service')
+    expect(env.error_message).toBe('port busy')
+  })
+
   it('builds list patch with failure fields', () => {
     const patch = envStreamToPatch('env-1', {
       type: 'EXECUTION_FAILED',
       status: 'FAILED',
       error_message: 'port busy',
+      failure_summary: 'Service could not bind NodePort',
     })
     expect(patch).toMatchObject({
       id: 'env-1',
       status: 'FAILED',
       error_message: 'port busy',
+      failure_summary: 'Service could not bind NodePort',
       app_ready: false,
     })
   })

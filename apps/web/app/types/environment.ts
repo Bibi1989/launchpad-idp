@@ -33,6 +33,7 @@ export interface EnvStreamEvent {
   app_ready?: boolean | null
   notice?: string | null
   error_message?: string | null
+  failure_summary?: string | null
   preview_endpoints?: PreviewEndpoint[] | null
 }
 
@@ -65,6 +66,8 @@ export interface Environment {
   cost_source?: string | null
   time_remaining_seconds: number
   error_message: string | null
+  failure_summary?: string | null
+  seed_status?: string | null
   created_at: string
   updated_at: string
   portal_url?: string | null

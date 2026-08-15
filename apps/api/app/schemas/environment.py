@@ -172,6 +172,8 @@ class EnvironmentRead(BaseModel):
     cost_source: str | None = None
     time_remaining_seconds: int = 0
     error_message: str | None
+    failure_summary: str | None = None
+    seed_status: str | None = None
     created_at: datetime
     updated_at: datetime
     # Enriched by EnvironmentService (not persisted).

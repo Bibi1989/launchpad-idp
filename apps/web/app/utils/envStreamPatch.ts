@@ -35,6 +35,11 @@ export function applyEnvStreamPatch(
   } else if (event.status === 'PROVISIONING') {
     env.error_message = null
   }
+  if (event.failure_summary !== undefined && event.failure_summary !== null) {
+    env.failure_summary = event.failure_summary
+  } else if (event.status === 'PROVISIONING' || event.status === 'RUNNING') {
+    env.failure_summary = null
+  }
   return env
 }
 
@@ -66,6 +71,11 @@ export function envStreamToPatch(
     patch.error_message = event.error_message
   } else if (event.status === 'PROVISIONING') {
     patch.error_message = null
+  }
+  if (event.failure_summary !== undefined) {
+    patch.failure_summary = event.failure_summary
+  } else if (event.status === 'PROVISIONING' || event.status === 'RUNNING') {
+    patch.failure_summary = null
   }
   return patch
 }

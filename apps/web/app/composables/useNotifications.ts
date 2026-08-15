@@ -187,7 +187,7 @@ export function useNotifications() {
       emit('ready', 'Preview is ready', `${env.name} is running and reachable.`, 'success')
     }
     if (next.status === 'FAILED' && prev.status !== 'FAILED') {
-      emit('failed', 'Preview failed', env.error_message || `${env.name} failed to provision.`, 'error')
+      emit('failed', 'Preview failed', env.failure_summary || env.error_message || `${env.name} failed to provision.`, 'error')
     }
     // Pause/resume/destroy are user-initiated and already raise action toasts,
     // so we only surface asynchronous transitions (ready/failed/ttl/cost) here.

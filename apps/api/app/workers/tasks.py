@@ -630,6 +630,7 @@ async def _publish_status(
     app_ready: bool | None = None,
     notice: str | None = None,
     error_message: str | None = None,
+    failure_summary: str | None = None,
     preview_endpoints: list[dict[str, object]] | None = None,
 ) -> None:
     await publish_env_event(
@@ -644,6 +645,7 @@ async def _publish_status(
         app_ready=app_ready,
         notice=notice,
         error_message=error_message,
+        failure_summary=failure_summary,
         preview_endpoints=preview_endpoints,
     )
 
@@ -673,6 +675,76 @@ async def _notify_integrations(
             event=event,
             error=str(exc),
         )
+
+
+async def _maybe_run_preview_seed(
+    *,
+    log_repo: DeploymentLogRepository,
+    session: AsyncSession,
+    env_repo: EnvironmentRepository,
+    environment: object,
+    provisioner: object,
+    workspace_root: Path | None,
+    commit_sha: str | None,
+    settings: object,
+) -> None:
+    """Discover and apply seed.sql / seed.sh after the preview workload is ready."""
+    from pathlib import Path as PathType
+
+    from app.services.preview_seed import discover_seed_artifacts, run_seed_plan
+
+    root = workspace_root
+    if root is None or not PathType(root).is_dir():
+        await _emit_stage(
+            log_repo,
+            session,
+            environment_id=environment.id,  # type: ignore[attr-defined]
+            stage=ExecutionStage.APPLY,
+            message="APPLY - seed skipped (no workspace checkout on worker)",
+            commit_sha=commit_sha,
+        )
+        environment.seed_status = "none"  # type: ignore[attr-defined]
+        await session.flush()
+        return
+
+    plan = discover_seed_artifacts(PathType(root))
+    if plan.empty:
+        environment.seed_status = "none"  # type: ignore[attr-defined]
+        await session.flush()
+        return
+
+    await _emit_stage(
+        log_repo,
+        session,
+        environment_id=environment.id,  # type: ignore[attr-defined]
+        stage=ExecutionStage.APPLY,
+        message=(
+            "APPLY - running preview seed: "
+            + ", ".join(a.relative_path for a in plan.artifacts)
+        ),
+        commit_sha=commit_sha,
+    )
+    result = await asyncio.to_thread(
+        run_seed_plan,
+        provisioner,
+        namespace=environment.namespace_name,  # type: ignore[attr-defined]
+        plan=plan,
+        enable_postgres=bool(getattr(environment, "enable_postgres", False)),
+        kubernetes_enabled=bool(getattr(settings, "kubernetes_enabled", False)),
+    )
+    environment.seed_status = result.status  # type: ignore[attr-defined]
+    level = LogLevel.INFO if result.status in ("applied", "skipped", "none") else LogLevel.WARN
+    await _emit_log(
+        log_repo,
+        environment_id=environment.id,  # type: ignore[attr-defined]
+        message=f"APPLY - seed {result.status}: {result.message}",
+        log_level=level,
+        status=EnvironmentStatus.PROVISIONING.value,
+        commit_sha=commit_sha,
+        stage=ExecutionStage.APPLY,
+    )
+    await session.flush()
+    _ = env_repo
 
 
 async def _record_audit(
@@ -786,6 +858,15 @@ async def _fail_execution(
     actor_id: str,
     workspace_id: UUID | None,
 ) -> None:
+    from app.services.environment_failure_summary import summarize_environment_failure
+
+    failure_summary = await summarize_environment_failure(
+        session_factory,
+        environment_id=environment_id,
+        error_text=error_text,
+        correlation_id=str(environment_id),
+    )
+
     async with session_factory() as session:
         env_repo = EnvironmentRepository(session)
         log_repo = DeploymentLogRepository(session)
@@ -802,6 +883,16 @@ async def _fail_execution(
             stage=stage,
             event_type="EXECUTION_FAILED",
         )
+        if failure_summary:
+            await _emit_log(
+                log_repo,
+                environment_id=environment_id,
+                message=f"DIAGNOSE - failure summary: {failure_summary}",
+                log_level=LogLevel.ERROR,
+                status=EnvironmentStatus.FAILED.value,
+                commit_sha=commit_sha or environment.latest_commit_sha,
+                stage=stage,
+            )
         await _record_audit(
             session,
             action=audit_action,
@@ -826,6 +917,7 @@ async def _fail_execution(
             environment,
             EnvironmentStatus.FAILED,
             error_message=error_text,
+            failure_summary=failure_summary,
             latest_commit_sha=commit_sha,
         )
         await session.commit()
@@ -837,16 +929,16 @@ async def _fail_execution(
             stage=stage,
             app_ready=False,
             error_message=error_text,
+            failure_summary=failure_summary,
         )
         async with session_factory() as notify_session:
             await _notify_integrations(
                 notify_session,
                 environment_id,
                 event="failed",
-                message=error_text,
+                message=failure_summary or error_text,
             )
             await notify_session.commit()
-
 
 async def _attempt_rebuild_rollback(
     session_factory: async_sessionmaker[AsyncSession],
@@ -1579,6 +1671,17 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     await _attach_preview_tunnel(env_uuid, environment, resources)
                     await _attach_cloud_preview_url(env_uuid, environment, resources, provisioner)
 
+                    await _maybe_run_preview_seed(
+                        log_repo=log_repo,
+                        session=session,
+                        env_repo=env_repo,
+                        environment=environment,
+                        provisioner=provisioner,
+                        workspace_root=workspace_root,
+                        commit_sha=commit_sha,
+                        settings=settings,
+                    )
+
                     from app.schemas.environment import dump_preview_endpoints
 
                     endpoints = list(getattr(resources, "preview_endpoints", None) or [])
@@ -1590,6 +1693,8 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                         node_port=resources.node_port,
                         workload_image=resources.image,
                         preview_endpoints_json=endpoints_json,
+                        seed_status=getattr(environment, "seed_status", None),
+                        update_seed_status=True,
                     )
                     if endpoints:
                         preview_note = " Previews: " + ", ".join(
@@ -2220,6 +2325,17 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         commit_sha=short_sha,
                     )
 
+                    await _maybe_run_preview_seed(
+                        log_repo=log_repo,
+                        session=session,
+                        env_repo=env_repo,
+                        environment=environment,
+                        provisioner=provisioner,
+                        workspace_root=workspace_root,
+                        commit_sha=short_sha,
+                        settings=settings,
+                    )
+
                     await asyncio.sleep(settings.provision_step_delay_seconds)
                     await env_repo.update_status(
                         environment,
@@ -2227,6 +2343,8 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                         latest_commit_sha=short_sha,
                         error_message=None,
                         workload_image=rebuild_image or environment.workload_image,
+                        seed_status=getattr(environment, "seed_status", None),
+                        update_seed_status=True,
                     )
                     await _emit_log(
                         log_repo,

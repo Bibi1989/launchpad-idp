@@ -9,8 +9,7 @@ import {
 } from '~/utils/previewEndpoints'
 import { recommendPrimaryService } from '~/utils/cloudPromote'
 import { resolveCloudPromoteDeployTargets } from '~/utils/cloudPromoteDeployTargets'
-import type { WorkspaceRuntimeMode } from '~/types/provisioning'
-import type { ContainerServiceSpec } from '~/types/provisioning'
+import type { ContainerServiceItem, WorkspaceRuntimeMode } from '~/types/provisioning'
 import {
   defaultRegionForProvider,
   regionsForProvider,
@@ -124,7 +123,7 @@ const promoteSecurityGroups = ref<CloudSecurityGroupOption[]>([])
 const promoteSecurityGroupsLoading = ref(false)
 const promoteSecurityGroupsError = ref<string | null>(null)
 
-const promoteServices = ref<ContainerServiceSpec[]>([])
+const promoteServices = ref<ContainerServiceItem[]>([])
 const promotePrimaryService = ref<string | null>(null)
 const promoteServicesLoading = ref(false)
 const promoteServicesError = ref<string | null>(null)
@@ -223,8 +222,8 @@ async function loadPromoteNetworks() {
       && promoteNetworks.value.length
     ) {
       const preferred =
-        promoteNetworks.value.find((n) => n.is_default) || promoteNetworks.value[0]
-      promoteForm.existing_vpc_id = preferred.id
+        promoteNetworks.value.find((n) => n.is_default) ?? promoteNetworks.value[0]
+      if (preferred) promoteForm.existing_vpc_id = preferred.id
     }
     if (!promoteNetworks.value.length && promoteForm.network_mode === 'existing') {
       promoteForm.network_mode = 'create'
@@ -259,7 +258,8 @@ async function loadPromoteSecurityGroups() {
       && !promoteForm.existing_security_group_id
       && promoteSecurityGroups.value.length
     ) {
-      promoteForm.existing_security_group_id = promoteSecurityGroups.value[0].id
+      const firstSg = promoteSecurityGroups.value[0]
+      if (firstSg) promoteForm.existing_security_group_id = firstSg.id
     }
   } catch (err) {
     promoteSecurityGroupsError.value = err instanceof Error ? err.message : t('common.failed')
@@ -1547,10 +1547,27 @@ onUnmounted(() => {
           {{ t('environments.detail.livePreviewOnly') }}
         </div>
 
-        <p v-if="environment.error_message" class="border-t border-[var(--lp-line)] px-5 py-3 text-sm text-[var(--lp-danger)]">
-          {{ environment.error_message }}
-        </p>
+        <div
+          v-if="environment.failure_summary || environment.error_message"
+          class="border-t border-[var(--lp-line)] px-5 py-3 text-sm space-y-2"
+        >
+          <p v-if="environment.failure_summary" class="text-[var(--lp-danger)] font-medium">
+            {{ environment.failure_summary }}
+          </p>
+          <p
+            v-if="environment.error_message && environment.error_message !== environment.failure_summary"
+            class="text-[var(--lp-muted)]"
+          >
+            {{ environment.error_message }}
+          </p>
+        </div>
       </section>
+
+      <EnvironmentConsolePanel
+        :environment-id="environment.id"
+        :deploy-mode="environment.deploy_mode"
+        :can-shell="environment.status === 'RUNNING' || environment.status === 'PROVISIONING'"
+      />
 
       <AuditTimeline
         :title="t('audit.title')"

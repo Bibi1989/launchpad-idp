@@ -320,6 +320,21 @@ export default {
     "manageCredentials": "Manage credentials →",
     "addKeys": "Add keys in Settings",
     "quickActions": "Quick actions",
+    "observability": {
+      "title": "Health & metrics",
+      "blurb": "Live HTTP health pings and namespace CPU/memory for active environments.",
+      "refresh": "Refresh",
+      "healthy": "Healthy pings",
+      "unhealthy": "Failed pings",
+      "unknown": "No preview URL",
+      "empty": "No active environments to observe yet. Launch a preview to see health and metrics here.",
+      "loadFailed": "Could not load observability data",
+      "cpu": "CPU",
+      "memory": "Memory",
+      "pingOk": "Ping OK",
+      "pingFail": "Ping failed",
+      "pingNone": "No URL"
+    },
     "actions": {
       "launch": {
         "title": "Launch preview",
@@ -1579,6 +1594,31 @@ export default {
     },
     "notConnected": "terminal not connected",
     "restarting": "restarting session…"
+  },
+  "envConsole": {
+    "title": "Terminal & observability",
+    "blurb": "Shell into the preview pod or VM, or trail live provision logs. CPU/memory and health ping update from the control plane.",
+    "shell": "Shell",
+    "logs": "Live logs",
+    "refresh": "Refresh metrics",
+    "cpu": "CPU",
+    "memory": "Memory",
+    "healthPing": "Health ping",
+    "healthy": "Healthy",
+    "unhealthy": "Unhealthy",
+    "live": "live",
+    "shellBanner": "Connecting environment shell…",
+    "logsBanner": "Streaming environment logs…",
+    "status": {
+      "idle": "idle",
+      "connecting": "connecting…",
+      "connected": "connected ({mode}) · {target}",
+      "error": "error",
+      "disconnected": "disconnected",
+      "streamingLogs": "streaming logs…",
+      "logsDone": "log stream finished",
+      "logsError": "log stream error"
+    }
   },
   "credentials": {
     "fields": {

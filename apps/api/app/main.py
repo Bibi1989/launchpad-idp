@@ -20,6 +20,7 @@ from app.routers.invites import router as invites_router
 from app.routers.billing import router as billing_router
 from app.routers.provisioning import router as provisioning_router
 from app.routers.terminal_ws import router as terminal_ws_router
+from app.routers.environment_shell_ws import router as environment_shell_ws_router
 from app.routers.webhooks import router as webhooks_router
 from app.routers.catalog import router as catalog_router
 
@@ -103,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(provisioning_router, prefix="/api/v1")
     app.include_router(dockerfiles_router, prefix="/api/v1")
     app.include_router(terminal_ws_router, prefix="/api/v1")
+    app.include_router(environment_shell_ws_router, prefix="/api/v1")
     app.include_router(webhooks_router, prefix="/api/v1")
     app.include_router(catalog_router, prefix="/api/v1")
     app.include_router(k8s_router, prefix="/api/v1")

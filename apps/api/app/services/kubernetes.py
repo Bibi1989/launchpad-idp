@@ -304,6 +304,7 @@ class KubernetesProvisioner:
         self._networking = None
         self._apps = None
         self._autoscaling = None
+        self._batch = None
         if self._settings.kubernetes_enabled:
             self._load_clients()
 
@@ -340,6 +341,7 @@ class KubernetesProvisioner:
         self._networking = None
         self._apps = None
         self._autoscaling = None
+        self._batch = None
 
         if self._settings.kubernetes_in_cluster:
             try:
@@ -387,12 +389,14 @@ class KubernetesProvisioner:
             self._networking = client.NetworkingV1Api()
             self._apps = client.AppsV1Api()
             self._autoscaling = client.AutoscalingV2Api()
+            self._batch = client.BatchV1Api()
         except Exception as exc:
             logger.warning("kubernetes_client_init_failed", error=str(exc))
             self._core = None
             self._networking = None
             self._apps = None
             self._autoscaling = None
+            self._batch = None
 
     def retarget(
         self,
@@ -669,6 +673,79 @@ class KubernetesProvisioner:
                         utils.create_from_dict(self._core.api_client, doc, namespace=namespace)
             except Exception as exc:
                 logger.warning("apply_datastore_manifest_failed", filename=filename, error=str(exc))
+
+    def run_preview_seed_job(
+        self,
+        *,
+        namespace: str,
+        kind: str,
+        relative_path: str,
+        content: str,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        """Create ConfigMap + Job to apply seed.sql / seed.sh, wait for success."""
+        from kubernetes import utils
+        from kubernetes.client.rest import ApiException
+
+        from app.services.preview_seed import seed_job_manifests, wait_for_job_complete
+
+        if self._core is None or self._batch is None:
+            raise RuntimeError("Kubernetes clients are not ready for seed jobs")
+
+        safe_kind = "sql" if kind == "sql" else "shell"
+        suffix = abs(hash(f"{namespace}:{relative_path}:{safe_kind}")) % 10_000_000
+        job_name = f"launchpad-seed-{safe_kind}-{suffix}"[:63]
+        config_map_name = f"{job_name}-cm"[:63]
+
+        # Replace prior attempt so retries stay idempotent.
+        try:
+            self._batch.delete_namespaced_job(
+                job_name,
+                namespace,
+                propagation_policy="Background",
+            )
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+        try:
+            self._core.delete_namespaced_config_map(config_map_name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        for doc in seed_job_manifests(
+            namespace=namespace,
+            kind=safe_kind,  # type: ignore[arg-type]
+            relative_path=relative_path,
+            content=content,
+            job_name=job_name,
+            config_map_name=config_map_name,
+        ):
+            # Shell seeds may write temp files under /tmp.
+            if (
+                safe_kind == "shell"
+                and isinstance(doc, dict)
+                and doc.get("kind") == "Job"
+            ):
+                try:
+                    container = doc["spec"]["template"]["spec"]["containers"][0]  # type: ignore[index]
+                    container["securityContext"]["readOnlyRootFilesystem"] = False  # type: ignore[index]
+                except (KeyError, IndexError, TypeError):
+                    pass
+            utils.create_from_dict(self._core.api_client, doc, namespace=namespace)
+
+        wait_for_job_complete(
+            self._batch,
+            namespace=namespace,
+            job_name=job_name,
+            timeout_seconds=timeout_seconds,
+        )
+        logger.info(
+            "preview_seed_job_succeeded",
+            namespace=namespace,
+            path=relative_path,
+            job=job_name,
+        )
 
     def _apply_secret_dict(
         self,

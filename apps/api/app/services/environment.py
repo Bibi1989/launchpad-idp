@@ -631,6 +631,8 @@ class EnvironmentService:
             environment.cost_sampled_at = None
             environment.cost_source = None
             environment.error_message = None
+            environment.failure_summary = None
+            environment.seed_status = None
             environment.preview_url = None
             environment.preview_endpoints_json = None
             environment.node_port = None

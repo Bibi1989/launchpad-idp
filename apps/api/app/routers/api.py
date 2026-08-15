@@ -30,8 +30,18 @@ from app.schemas.environment import (
     PreviewBuildStatus,
     PreviewLaunchRequest,
 )
+from app.schemas.observability import (
+    EnvironmentHealthPingRead,
+    EnvironmentMetricsRead,
+    EnvironmentObservabilitySummary,
+)
 from app.services.audit import AuditService
 from app.services.environment import TERMINAL_STATUSES, EnvironmentService
+from app.services.environment_observability import (
+    build_metrics_for_environment,
+    ping_environment_health,
+    summarize_observability_for_owner,
+)
 from app.services.kind_cluster import delete_kind_cluster, ensure_kind_cluster, probe_kind_cluster
 from app.services.preview_analyzer import PreviewAnalyzerError, PreviewAnalyzerService
 from app.services.security_telemetry import collect_telemetry
@@ -227,6 +237,21 @@ async def create_environment(
     )
 
 
+@router.get(
+    "/environments/observability/summary",
+    response_model=EnvironmentObservabilitySummary,
+)
+async def environment_observability_summary(
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db_session),
+    limit: int = 24,
+) -> EnvironmentObservabilitySummary:
+    """CPU/memory samples and HTTP health pings for active environments."""
+    return await summarize_observability_for_owner(
+        session, user, settings=get_settings(), limit=limit
+    )
+
+
 @router.get("/environments/{environment_id}", response_model=EnvironmentRead)
 async def get_environment(
     environment_id: UUID,
@@ -234,6 +259,32 @@ async def get_environment(
     service: EnvironmentService = Depends(get_environment_service),
 ) -> EnvironmentRead:
     return await service.get_environment(environment_id, user)
+
+
+@router.get(
+    "/environments/{environment_id}/metrics",
+    response_model=EnvironmentMetricsRead,
+)
+async def get_environment_metrics(
+    environment_id: UUID,
+    user: CurrentUser,
+    service: EnvironmentService = Depends(get_environment_service),
+) -> EnvironmentMetricsRead:
+    entity = await service.get_environment_entity(environment_id, user)
+    return build_metrics_for_environment(entity, settings=get_settings())
+
+
+@router.post(
+    "/environments/{environment_id}/health-ping",
+    response_model=EnvironmentHealthPingRead,
+)
+async def post_environment_health_ping(
+    environment_id: UUID,
+    user: CurrentUser,
+    service: EnvironmentService = Depends(get_environment_service),
+) -> EnvironmentHealthPingRead:
+    entity = await service.get_environment_entity(environment_id, user)
+    return ping_environment_health(entity, settings=get_settings())
 
 
 @router.get("/environments/{environment_id}/audits", response_model=list[AuditLogRead])

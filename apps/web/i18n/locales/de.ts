@@ -320,6 +320,21 @@ export default {
     "manageCredentials": "Zugangsdaten verwalten →",
     "addKeys": "Schlüssel unter Einstellungen hinzufügen",
     "quickActions": "Schnellaktionen",
+    "observability": {
+      "title": "Gesundheit & Metriken",
+      "blurb": "Live-HTTP-Health-Pings und Namespace-CPU/Speicher für aktive Environments.",
+      "refresh": "Aktualisieren",
+      "healthy": "Gesunde Pings",
+      "unhealthy": "Fehlgeschlagene Pings",
+      "unknown": "Keine Preview-URL",
+      "empty": "Noch keine aktiven Environments. Starte eine Preview, um Gesundheit und Metriken zu sehen.",
+      "loadFailed": "Observability-Daten konnten nicht geladen werden",
+      "cpu": "CPU",
+      "memory": "Speicher",
+      "pingOk": "Ping OK",
+      "pingFail": "Ping fehlgeschlagen",
+      "pingNone": "Keine URL"
+    },
     "actions": {
       "launch": {
         "title": "Preview starten",
@@ -1579,6 +1594,31 @@ export default {
     },
     "notConnected": "Terminal nicht verbunden",
     "restarting": "Sitzung wird neu gestartet…"
+  },
+  "envConsole": {
+    "title": "Terminal & Observability",
+    "blurb": "Shell in den Preview-Pod oder die VM, oder live Provisioning-Logs. CPU/Speicher und Health-Ping kommen aus der Control Plane.",
+    "shell": "Shell",
+    "logs": "Live-Logs",
+    "refresh": "Metriken aktualisieren",
+    "cpu": "CPU",
+    "memory": "Speicher",
+    "healthPing": "Health-Ping",
+    "healthy": "Gesund",
+    "unhealthy": "Ungesund",
+    "live": "live",
+    "shellBanner": "Environment-Shell wird verbunden…",
+    "logsBanner": "Environment-Logs werden gestreamt…",
+    "status": {
+      "idle": "inaktiv",
+      "connecting": "verbinden…",
+      "connected": "verbunden ({mode}) · {target}",
+      "error": "Fehler",
+      "disconnected": "getrennt",
+      "streamingLogs": "Logs werden gestreamt…",
+      "logsDone": "Log-Stream beendet",
+      "logsError": "Log-Stream-Fehler"
+    }
   },
   "credentials": {
     "fields": {

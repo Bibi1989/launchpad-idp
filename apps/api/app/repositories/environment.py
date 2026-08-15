@@ -263,15 +263,29 @@ class EnvironmentRepository:
         status: EnvironmentStatus,
         *,
         error_message: str | None = None,
+        failure_summary: str | None = None,
+        seed_status: str | None = None,
         latest_commit_sha: str | None = None,
         preview_url: str | None = None,
         node_port: int | None = None,
         workload_image: str | None = None,
         github_pr_url: str | None = None,
         preview_endpoints_json: str | None = None,
+        update_seed_status: bool = False,
     ) -> Environment:
         environment.status = status
         environment.error_message = error_message
+        if status == EnvironmentStatus.FAILED:
+            environment.failure_summary = failure_summary
+        elif status in (
+            EnvironmentStatus.PROVISIONING,
+            EnvironmentStatus.RUNNING,
+            EnvironmentStatus.DESTROYED,
+            EnvironmentStatus.TEARDOWN_PENDING,
+        ):
+            environment.failure_summary = None
+        if update_seed_status:
+            environment.seed_status = seed_status
         if latest_commit_sha is not None:
             environment.latest_commit_sha = latest_commit_sha
         if preview_url is not None:
@@ -367,6 +381,7 @@ class EnvironmentRepository:
         environment.status = EnvironmentStatus.PROVISIONING
         environment.latest_commit_sha = commit_sha
         environment.error_message = None
+        environment.failure_summary = None
         await self._session.flush()
         await self._session.refresh(environment)
         return environment

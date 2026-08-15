@@ -539,7 +539,7 @@ export interface ImageInspectResult {
 }
 
 export type TerminalServerMessage =
-  | { type: 'ready'; session_id: string; mode: string; cols: number; rows: number }
+  | { type: 'ready'; session_id: string; mode: string; cols: number; rows: number; target?: string }
   | { type: 'output'; data: string }
   | { type: 'status'; status: string }
   | { type: 'error'; message: string; details?: unknown }

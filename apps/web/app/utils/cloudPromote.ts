@@ -1,4 +1,4 @@
-import type { ContainerServiceSpec } from '~/types/provisioning'
+import type { ContainerServiceItem } from '~/types/provisioning'
 
 const FRONTEND_TOKENS = new Set([
   'web',
@@ -59,7 +59,7 @@ export function isFrontendAppKind(appKind: string | null | undefined, name = '')
 }
 
 /** Match backend recommend_primary_service: frontend first, else first service. */
-export function recommendPrimaryService(services: ContainerServiceSpec[]): string | null {
+export function recommendPrimaryService(services: ContainerServiceItem[]): string | null {
   if (!services.length) return null
   for (const spec of services) {
     if (isFrontendAppKind(spec.app_kind, spec.name)) {

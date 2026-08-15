@@ -529,6 +529,10 @@ class Environment(Base):
     )
     cost_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Short LLM/heuristic summary of why provision/rebuild failed (human-readable).
+    failure_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Preview seed outcome: applied | skipped | failed | none.
+    seed_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Sealed JSON (encrypt_secret) with workspace creds + wizard handles for async
     # cloud teardown after the workspace row may already be gone.
     teardown_context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
