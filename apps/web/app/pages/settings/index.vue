@@ -107,6 +107,13 @@ onMounted(() => {
 
 function onCredentialsFormError(err: unknown) {
   console.error('[launchpad] CloudCredentialsFields failed', err)
+  // vue-i18n message-compiler uses numeric SyntaxError codes in production
+  // (e.g. "2" for bad linked/@ syntax). Vue runtime info "2" is unrelated (watcher getter).
+  if (err instanceof SyntaxError) {
+    credentialsFormError.value =
+      'Credentials form crashed (i18n message parse). Locale text may contain unescaped @ or { }.'
+    return
+  }
   const raw = err instanceof Error ? err.message : String(err ?? '')
   const vueInfo: Record<string, string> = {
     '2': 'watcher getter',
