@@ -18,9 +18,9 @@ def normalize_deploy_mode(raw: object | None) -> str:
 def init_workflow_message(deploy_mode: str) -> str:
     mode = normalize_deploy_mode(deploy_mode)
     if mode == DeployMode.COMPOSE.value:
-        return "INIT - starting Compose preview workflow"
+        return "INIT - starting Compose deploy workflow"
     if mode == DeployMode.ATTACH.value:
-        return "INIT - starting running-instance preview workflow"
+        return "INIT - starting running-instance deploy workflow"
     if mode == DeployMode.MANIFEST.value:
         return "INIT - starting Kubernetes manifest provision workflow"
     return "INIT - starting Kubernetes provision workflow"

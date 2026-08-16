@@ -53,7 +53,10 @@ export function useEnvironmentLogStream(
       try {
         const payload = JSON.parse(message.data) as { status: string }
         terminalStatus.value = payload.status
-        lines.value = [...lines.value, `--- ${payload.status} ---`]
+        // RUNNING is success for the console banner; keep FAILED/DESTROYED as-is.
+        const banner =
+          payload.status === 'RUNNING' ? 'SUCCEEDED' : payload.status
+        lines.value = [...lines.value, `--- ${banner} ---`]
       } catch {
         lines.value = [...lines.value, `--- ${message.data} ---`]
       }

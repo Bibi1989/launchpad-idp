@@ -1165,11 +1165,19 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
     workspace_id: UUID | None = None
 
     try:
+        # Must use the long provision TTL - NOT teardown_state_lock_timeout
+        # (180s). A short lock expires mid terraform/ansible; the stale reaper
+        # then marks FAILED while the worker is still running, so the log SSE
+        # closes with "--- FAILED ---" even though PROVISION_SUCCEEDED follows.
         async with acquire_state_lock(
             env_uuid,
             scope="environment",
             settings=settings,
-            timeout_seconds=getattr(settings, "teardown_state_lock_timeout_seconds", None),
+            timeout_seconds=getattr(
+                settings,
+                "provision_state_lock_timeout_seconds",
+                settings.state_lock_timeout_seconds,
+            ),
         ):
             async with session_factory() as session:
                 env_repo = EnvironmentRepository(session)
@@ -3483,9 +3491,10 @@ async def pause_expired_environment(
 
 
 # A preview stuck in PROVISIONING with no live worker (crashed mid-run) is failed
-# after this many seconds. Comfortably above the 3-minute readiness cap + overhead
-# so a legitimately slow-but-active provision is never falsely failed.
-STALE_PROVISIONING_SECONDS = 600
+# after this many seconds. Must stay above provision_state_lock_timeout (default
+# 2700s) so a long cloud IaC apply whose Redis lock briefly expired is not
+# falsely failed while the Celery worker is still active.
+STALE_PROVISIONING_SECONDS = 3000
 # TEARDOWN_PENDING with no active lock older than this is re-queued (worker/beat
 # restarts drop in-flight Celery tasks and leave environments "tearing down").
 STALE_TEARDOWN_SECONDS = 180
@@ -3664,7 +3673,14 @@ def requeue_pending_teardowns_task(min_age_seconds: int = 0) -> int:
     return requeue_pending_teardowns_sync(min_age_seconds=min_age_seconds)
 
 
-@celery_app.task(name="launchpad.provision_environment", bind=True, max_retries=0)
+@celery_app.task(
+    name="launchpad.provision_environment",
+    bind=True,
+    max_retries=0,
+    # Match Settings.celery_provision_* / provision_state_lock_timeout (cloud IaC).
+    soft_time_limit=2400,
+    time_limit=2700,
+)
 def provision_environment_task(self, environment_id: str, correlation_id: str) -> None:
     asyncio.run(_run_provision(environment_id, correlation_id))
 

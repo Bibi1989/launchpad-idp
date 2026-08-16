@@ -422,6 +422,16 @@ useEnvironmentLiveStream(environmentId, {
     ) {
       void load({ softAudits: true })
     }
+    // Reconnect provisioning logs when status recovers after a premature
+    // stream close (e.g. stale reaper false-FAILED while worker still running).
+    if (
+      event.type === 'STATUS_CHANGE'
+      && event.status === 'RUNNING'
+      && environmentId.value
+      && (done.value || !connected.value)
+    ) {
+      connect(environmentId.value)
+    }
     if (event.status === 'DESTROYED') {
       toast.info(t('environments.toasts.destroyed'), t('environments.toasts.destroyComplete'))
       void navigateTo('/environments')

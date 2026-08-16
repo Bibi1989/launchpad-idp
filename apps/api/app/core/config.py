@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # Distributed state lock (Redis) - guards concurrent provision / rebuild / teardown
     state_lock_timeout_seconds: float = 900.0
     state_lock_blocking_timeout_seconds: float = 0.0
+    # Cloud attach (terraform + ansible + SSH) regularly exceeds 15 minutes.
+    # Keep this above celery_provision_soft_time_limit so SoftTimeLimitExceeded
+    # can mark FAILED and release the lock before the stale reaper races.
+    provision_state_lock_timeout_seconds: float = 2700.0
     # TEARDOWN state lock should expire quickly so worker restarts
     # can re-queue orphaned TEARDOWN_PENDING environments without waiting
     # for the full provisioning lock TTL. Also the grace window after which an
@@ -73,6 +77,9 @@ class Settings(BaseSettings):
     # FAILED cleanly; the HARD limit is a last-resort backstop.
     celery_task_soft_time_limit_seconds: int = 900
     celery_task_time_limit_seconds: int = 1000
+    # Provision (esp. scaffold cloud) needs a longer ceiling than default k8s apply.
+    celery_provision_soft_time_limit_seconds: int = 2400
+    celery_provision_time_limit_seconds: int = 2700
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
