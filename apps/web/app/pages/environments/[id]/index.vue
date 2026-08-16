@@ -497,11 +497,7 @@ const canExtend = computed(() => {
   return ttlCanExtend(env.created_at, env.ttl_expires_at)
 })
 const canRelaunch = computed(() => displayStatus.value === 'EXPIRED')
-const canPromote = computed(() => {
-  if (!environment.value) return false
-  const status = environment.value.status
-  return (status === 'RUNNING' || status === 'FAILED') && isLocal.value
-})
+const canPromote = computed(() => Boolean(environment.value?.can_promote_to_cloud))
 const canStagePromoteStaging = computed(() => Boolean(environment.value?.can_promote_to_staging))
 const canStagePromoteProduction = computed(() => Boolean(environment.value?.can_promote_to_production))
 const stagePromotePending = ref(false)
@@ -1103,7 +1099,8 @@ onUnmounted(() => {
                   v-if="canPromote"
                   type="button"
                   role="menuitem"
-                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)]"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+                  :disabled="promoteAction.pending"
                   @click="showPromote = !showPromote; closeActionsMenu()"
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">cloud_upload</span>

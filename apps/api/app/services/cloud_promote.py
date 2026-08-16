@@ -33,10 +33,20 @@ from app.schemas.cloud import (
     WorkspaceWizardConfig,
 )
 from app.schemas.k8s import DeployMode
+from app.models.domain import LifecycleStage
 from app.services.runtime_mode import normalize_artifacts_for_runtime_mode
 from app.services.service_kind import is_frontend_app_kind
 
 _SAFE = re.compile(r"[^a-z0-9-]+")
+
+_CLOUD_PROMOTE_STAGES = frozenset(
+    {LifecycleStage.STAGING.value, LifecycleStage.PRODUCTION.value},
+)
+
+
+def cloud_promote_stage_allowed(stage: str | None) -> bool:
+    """Deploy to cloud is limited to staging/production (not preview)."""
+    return (stage or LifecycleStage.PREVIEW.value).lower() in _CLOUD_PROMOTE_STAGES
 
 
 _K8S_DEPLOY_MODES = frozenset({DeployMode.MANIFEST.value, DeployMode.PREVIEW.value})

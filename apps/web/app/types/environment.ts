@@ -76,6 +76,7 @@ export interface Environment {
   promoted_from_id?: string | null
   can_promote_to_staging?: boolean
   can_promote_to_production?: boolean
+  can_promote_to_cloud?: boolean
   pending_promotion_id?: string | null
   cost_estimate_hourly: string
   cost_accrued: string

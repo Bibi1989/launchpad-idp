@@ -81,6 +81,11 @@ class EnvironmentCreate(BaseModel):
     git_repo_url: str = Field(min_length=8, max_length=512)
     ttl_hours: int | None = Field(default=None, ge=1, le=720)
     ttl_minutes: int | None = Field(default=None, ge=1, le=43_200)
+    # When true, persist ttl_expires_at=None (staging/production cloud deploys).
+    disable_ttl: bool = False
+    lifecycle_stage: str | None = Field(default=None, max_length=32)
+    promotion_lineage_id: UUID | None = None
+    promoted_from_id: UUID | None = None
     workspace_id: UUID | None = None
     template_id: str | None = Field(default=None, max_length=64)
     cost_estimate_hourly: Decimal | None = Field(default=None, ge=0)
@@ -127,8 +132,22 @@ class EnvironmentCreate(BaseModel):
             raise ValueError("git_repo_url contains invalid characters")
         return cleaned
 
+    @field_validator("lifecycle_stage")
+    @classmethod
+    def normalize_lifecycle_stage(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if cleaned not in {"preview", "staging", "production"}:
+            raise ValueError("lifecycle_stage must be preview, staging, or production")
+        return cleaned
+
     @model_validator(mode="after")
     def resolve_ttl(self) -> EnvironmentCreate:
+        if self.disable_ttl:
+            if self.ttl_hours is not None or self.ttl_minutes is not None:
+                raise ValueError("Do not set ttl_hours/ttl_minutes when disable_ttl is true")
+            return self
         if self.ttl_hours is not None and self.ttl_minutes is not None:
             raise ValueError("Provide ttl_hours or ttl_minutes, not both")
         if self.ttl_hours is None and self.ttl_minutes is None:
@@ -179,6 +198,7 @@ class EnvironmentRead(BaseModel):
     promoted_from_id: UUID | None = None
     can_promote_to_staging: bool = False
     can_promote_to_production: bool = False
+    can_promote_to_cloud: bool = False
     pending_promotion_id: UUID | None = None
     error_message: str | None
     failure_summary: str | None = None
@@ -323,6 +343,10 @@ class PreviewLaunchRequest(BaseModel):
     credentials: CloudCredentials = Field(default_factory=CloudCredentials)
     ttl_hours: int | None = Field(default=None, ge=1, le=168)
     ttl_minutes: int | None = Field(default=None, ge=1, le=10_080)
+    disable_ttl: bool = False
+    lifecycle_stage: str | None = Field(default=None, max_length=32)
+    promotion_lineage_id: UUID | None = None
+    promoted_from_id: UUID | None = None
     workspace_id: UUID | None = None
     workload_image: str | None = Field(default=None, min_length=3, max_length=256)
     github_pr_number: int | None = Field(default=None, ge=1)
@@ -382,9 +406,22 @@ class PreviewLaunchRequest(BaseModel):
             raise ValueError("workload_image contains invalid whitespace")
         return cleaned
 
+    @field_validator("lifecycle_stage")
+    @classmethod
+    def normalize_lifecycle_stage(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if cleaned not in {"preview", "staging", "production"}:
+            raise ValueError("lifecycle_stage must be preview, staging, or production")
+        return cleaned
+
     @model_validator(mode="after")
     def require_source_and_credentials(self) -> PreviewLaunchRequest:
-        if self.ttl_hours is not None and self.ttl_minutes is not None:
+        if self.disable_ttl:
+            if self.ttl_hours is not None or self.ttl_minutes is not None:
+                raise ValueError("Do not set ttl_hours/ttl_minutes when disable_ttl is true")
+        elif self.ttl_hours is not None and self.ttl_minutes is not None:
             raise ValueError("Provide ttl_hours or ttl_minutes, not both")
 
         has_template = bool(self.template_id)
@@ -492,7 +529,7 @@ class EnvironmentExtendRequest(BaseModel):
 
 
 class EnvironmentPromoteRequest(BaseModel):
-    """Redeploy a local (or existing) preview onto a cloud provider."""
+    """Redeploy a local staging/production environment onto a cloud provider."""
 
     provider: PreviewProvider
     credentials: CloudCredentials = Field(default_factory=CloudCredentials)

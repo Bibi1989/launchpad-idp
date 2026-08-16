@@ -127,7 +127,7 @@ Environments carry a `lifecycle_stage` (`preview`, `staging`, `production`). Fro
 3. Pending requests are approved or rejected at `/org/promotions`. Approve enqueues provision of the target environment.
 4. Production (and optional permanent staging) use **no TTL** and are not reaped by the TTL worker.
 
-This is separate from **Deploy to cloud** (local → cloud preview retarget).
+This is separate from **Deploy to cloud** (local staging/production → cloud retarget, **no TTL**). Preview environments cannot deploy to cloud; promote to staging or production first.
 
 ### Git push rebuilds
 

@@ -161,7 +161,8 @@ def run_ansible_site(
     env.setdefault("ANSIBLE_SSH_RETRIES", "3")
     env.setdefault(
         "ANSIBLE_SSH_ARGS",
-        "-o BatchMode=yes -o StrictHostKeyChecking=accept-new "
+        "-o BatchMode=yes -o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null "
         "-o ServerAliveInterval=30 -o ServerAliveCountMax=10 "
         "-o TCPKeepAlive=yes -o ConnectTimeout=20",
     )

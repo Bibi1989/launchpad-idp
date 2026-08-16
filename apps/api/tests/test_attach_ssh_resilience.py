@@ -22,6 +22,8 @@ def test_ssh_client_options_include_keepalive() -> None:
     assert "ServerAliveInterval=30" in joined
     assert "ServerAliveCountMax=10" in joined
     assert "BatchMode=yes" in joined
+    assert "StrictHostKeyChecking=no" in joined
+    assert "UserKnownHostsFile=/dev/null" in joined
 
 
 def test_transient_ssh_error_detection() -> None:

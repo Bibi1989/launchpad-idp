@@ -84,7 +84,8 @@ def write_ansible_scaffold(
         "pipelining = True\n"
         "retries = 3\n"
         "timeout = 60\n"
-        "ssh_args = -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
+        "ssh_args = -o BatchMode=yes -o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null "
         "-o ServerAliveInterval=30 -o ServerAliveCountMax=10 "
         "-o TCPKeepAlive=yes -o ConnectTimeout=20\n"
         "control_path = %(directory)s/%%h-%%r\n",

@@ -19,6 +19,7 @@ from app.models.domain import (
     OrgPlan,
     EnvironmentStatus,
     ExecutionStage,
+    LifecycleStage,
     LogLevel,
     OrgRole,
     Organization,
@@ -460,14 +461,18 @@ class EnvironmentService:
         ttl_hours = payload.ttl_hours
         ttl_minutes = payload.ttl_minutes
         max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
-        if ttl_hours is None and ttl_minutes is None:
+        if not payload.disable_ttl and ttl_hours is None and ttl_minutes is None:
             ttl_hours = min(int(default_ttl), max_total_hours)
         create_payload = EnvironmentCreate(
             name=payload.name,
             git_branch=git_branch,
             git_repo_url=git_repo_url,
-            ttl_hours=ttl_hours,
-            ttl_minutes=ttl_minutes,
+            ttl_hours=None if payload.disable_ttl else ttl_hours,
+            ttl_minutes=None if payload.disable_ttl else ttl_minutes,
+            disable_ttl=payload.disable_ttl,
+            lifecycle_stage=payload.lifecycle_stage,
+            promotion_lineage_id=payload.promotion_lineage_id,
+            promoted_from_id=payload.promoted_from_id,
             workspace_id=workspace_id,
             template_id=template_id,
             cost_estimate_hourly=cost_override,
@@ -572,13 +577,20 @@ class EnvironmentService:
         ttl_minutes = payload.ttl_minutes
         # Governance: cannot exceed ttl_max_total_hours_from_create from create time.
         max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
-        if ttl_hours is not None:
-            ttl_hours = min(ttl_hours, max_total_hours)
-        if ttl_minutes is not None:
-            ttl_minutes = min(ttl_minutes, max_total_hours * 60)
-
-        ttl_expires_at = now + _ttl_timedelta(ttl_hours=ttl_hours, ttl_minutes=ttl_minutes)
+        if payload.disable_ttl:
+            ttl_expires_at = None
+            ttl_hours = None
+            ttl_minutes = None
+        else:
+            if ttl_hours is not None:
+                ttl_hours = min(ttl_hours, max_total_hours)
+            if ttl_minutes is not None:
+                ttl_minutes = min(ttl_minutes, max_total_hours * 60)
+            ttl_expires_at = now + _ttl_timedelta(ttl_hours=ttl_hours, ttl_minutes=ttl_minutes)
         placeholder_namespace = f"launchpad-env-pending-{payload.name}"[:253]
+        lifecycle_stage = (payload.lifecycle_stage or LifecycleStage.PREVIEW.value).lower()
+        promotion_lineage_id = payload.promotion_lineage_id
+        promoted_from_id = payload.promoted_from_id
 
         await self._auto_pause_if_needed(owner, project_id=project_id, cap=cap, exclude_id=reuse_row.id if reuse_row else None)
         await self._enforce_soft_cost_cap(owner, payload)
@@ -669,6 +681,10 @@ class EnvironmentService:
             environment.enable_postgres = payload.enable_postgres
             environment.enable_redis = payload.enable_redis
             environment.ttl_expires_at = ttl_expires_at
+            environment.lifecycle_stage = lifecycle_stage
+            if promotion_lineage_id is not None:
+                environment.promotion_lineage_id = promotion_lineage_id
+            environment.promoted_from_id = promoted_from_id
             environment.cost_estimate_hourly = hourly
             environment.cost_accrued = Decimal("0.0000")
             environment.cost_sampled_at = None
@@ -706,16 +722,24 @@ class EnvironmentService:
                 kubernetes_image_scan_json=payload.kubernetes_image_scan_json,
                 enable_postgres=payload.enable_postgres,
                 enable_redis=payload.enable_redis,
+                lifecycle_stage=lifecycle_stage,
+                promotion_lineage_id=promotion_lineage_id,
+                promoted_from_id=promoted_from_id,
             )
             environment.namespace_name = f"launchpad-env-{environment.id}"
             await self._session.flush()
             await self._session.refresh(environment)
 
+        ttl_log = (
+            "no TTL"
+            if payload.disable_ttl or ttl_expires_at is None
+            else f"TTL {_ttl_label(ttl_hours=ttl_hours, ttl_minutes=ttl_minutes)}"
+        )
         await self._logs.create(
             environment_id=environment.id,
             message=(
                 f"Queued {deploy_mode.value} deploy for {payload.git_repo_url}@{payload.git_branch} "
-                f"(TTL {_ttl_label(ttl_hours=ttl_hours, ttl_minutes=ttl_minutes)}, "
+                f"({ttl_log}, stage={lifecycle_stage}, "
                 f"image={workload_image_for_log}, "
                 f"correlation_id={correlation_id})"
             ),
@@ -863,10 +887,40 @@ class EnvironmentService:
         correlation_id: str,
         org_id: UUID | None = None,
     ) -> EnvironmentRead:
-        """Launch a new cloud preview from an existing environment's source."""
-        from app.services.cloud_promote import needs_cloud_retarget, promote_cloud_deploy_mode
+        """Redeploy a local staging/production environment onto a cloud provider."""
+        from app.services.cloud_promote import (
+            cloud_promote_stage_allowed,
+            needs_cloud_retarget,
+            promote_cloud_deploy_mode,
+        )
 
         source = await self._require_owned(environment_id, owner)
+        source_stage = (source.lifecycle_stage or LifecycleStage.PREVIEW.value).lower()
+        if not cloud_promote_stage_allowed(source_stage):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "cloud_promote_stage_required",
+                    "message": (
+                        "Deploy to cloud is only available for staging or production. "
+                        "Promote the preview to staging or production first."
+                    ),
+                },
+            )
+        source_id = source.id
+        source_name = source.name
+        lineage_id = source.promotion_lineage_id or source.id
+        source_git_repo_url = source.git_repo_url
+        source_git_branch = source.git_branch
+        source_template_id = source.template_id
+        source_github_pr_number = source.github_pr_number
+        source_github_pr_url = source.github_pr_url
+        source_k8s_image_source = source.kubernetes_image_source
+        source_project_id = source.project_id
+        source_workspace_id = source.workspace_id
+        source_provider = source.provider
+        source_deploy_mode = source.deploy_mode
+
         provisioning = ProvisioningService(self._session)
         filled_credentials = await provisioning.fill_cloud_credentials_from_account_vault(
             payload.credentials,
@@ -895,7 +949,7 @@ class EnvironmentService:
             # Promotion retries should be frictionless: if the user didn't
             # provide an explicit name, pick the next available candidate to
             # avoid environment_exists conflicts.
-            base = f"{source.name}-{suffix}"[:64]
+            base = f"{source_name}-{suffix}"[:64]
             name = base
             for i in range(1, 10):
                 existing = await self._environments.get_by_name(name, org_id=org_id)
@@ -910,18 +964,18 @@ class EnvironmentService:
 
         target_provider = CloudProvider(payload.provider.value)
         retarget = needs_cloud_retarget(
-            source_provider=source.provider,
-            deploy_mode=source.deploy_mode,
+            source_provider=source_provider,
+            deploy_mode=source_deploy_mode,
         )
         cloud_deploy_mode = promote_cloud_deploy_mode(
-            source.deploy_mode,
+            source_deploy_mode,
             retarget=retarget,
         )
-        workspace_id = source.workspace_id
+        workspace_id = source_workspace_id
 
-        if retarget and source.workspace_id is not None:
+        if retarget and source_workspace_id is not None:
             workspace_id = await provisioning.clone_workspace_for_cloud_promote(
-                source.workspace_id,
+                source_workspace_id,
                 owner=owner,
                 org_id=org_id,
                 target_provider=target_provider,
@@ -934,10 +988,10 @@ class EnvironmentService:
                 create_subnets=payload.create_subnets,
                 existing_vpc_id=payload.existing_vpc_id,
                 existing_security_group_id=payload.existing_security_group_id,
-                project_id=source.project_id,
+                project_id=source_project_id,
                 image_scan=payload.kubernetes_image_scan,
             )
-        elif retarget and source.workspace_id is None:
+        elif retarget and source_workspace_id is None:
             from app.schemas.cloud import (
                 InstanceCodeSource,
                 ProvisioningWizardRequest,
@@ -993,50 +1047,41 @@ class EnvironmentService:
                 bundle_req,
                 owner=owner,
                 org_id=org_id,
-                project_id=source.project_id,
+                project_id=source_project_id,
             )
             workspace_id = UUID(bundle.workspace_id)
 
+        cloud_launch_common = {
+            "provider": payload.provider,
+            "credentials": filled_credentials,
+            "disable_ttl": True,
+            "lifecycle_stage": source_stage,
+            "promotion_lineage_id": lineage_id,
+            "promoted_from_id": source_id,
+            "github_pr_number": source_github_pr_number,
+            "github_pr_url": source_github_pr_url,
+            "deploy_mode": cloud_deploy_mode,
+            "kubernetes_image_scan": payload.kubernetes_image_scan,
+        }
         if workspace_id is not None:
             launch = PreviewLaunchRequest(
                 name=name,
-                provider=payload.provider,
-                credentials=filled_credentials,
-                ttl_hours=payload.ttl_hours,
-                ttl_minutes=payload.ttl_minutes,
-                github_pr_number=source.github_pr_number,
-                github_pr_url=source.github_pr_url,
                 workspace_id=workspace_id,
-                deploy_mode=cloud_deploy_mode,
-                kubernetes_image_source=source.kubernetes_image_source,
-                kubernetes_image_scan=payload.kubernetes_image_scan,
+                kubernetes_image_source=source_k8s_image_source,
+                **cloud_launch_common,
             )
-        elif source.template_id:
+        elif source_template_id:
             launch = PreviewLaunchRequest(
                 name=name,
-                template_id=source.template_id,
-                provider=payload.provider,
-                credentials=filled_credentials,
-                ttl_hours=payload.ttl_hours,
-                ttl_minutes=payload.ttl_minutes,
-                github_pr_number=source.github_pr_number,
-                github_pr_url=source.github_pr_url,
-                deploy_mode=cloud_deploy_mode,
-                kubernetes_image_scan=payload.kubernetes_image_scan,
+                template_id=source_template_id,
+                **cloud_launch_common,
             )
         else:
             launch = PreviewLaunchRequest(
                 name=name,
-                git_repo_url=source.git_repo_url,
-                git_branch=source.git_branch,
-                provider=payload.provider,
-                credentials=filled_credentials,
-                ttl_hours=payload.ttl_hours,
-                ttl_minutes=payload.ttl_minutes,
-                github_pr_number=source.github_pr_number,
-                github_pr_url=source.github_pr_url,
-                deploy_mode=cloud_deploy_mode,
-                kubernetes_image_scan=payload.kubernetes_image_scan,
+                git_repo_url=source_git_repo_url,
+                git_branch=source_git_branch,
+                **cloud_launch_common,
             )
         result = await self.launch_preview(
             launch,
@@ -1044,11 +1089,12 @@ class EnvironmentService:
             correlation_id=correlation_id,
             org_id=org_id,
         )
+
         await self._logs.create(
-            environment_id=source.id,
+            environment_id=source_id,
             message=(
-                f"Promoted to cloud preview {result.name} ({payload.provider.value}) "
-                f"as {result.id}"
+                f"Deployed {source_stage} to cloud ({payload.provider.value}) "
+                f"as {result.name} ({result.id})"
             ),
         )
         await self._session.commit()
@@ -1771,6 +1817,11 @@ class EnvironmentService:
         }
         read.can_promote_to_staging = promotable and stage == "preview"
         read.can_promote_to_production = promotable and stage in {"preview", "staging"}
+        from app.services.cloud_promote import cloud_promote_stage_allowed
+
+        read.can_promote_to_cloud = (
+            promotable and read.is_local and cloud_promote_stage_allowed(stage)
+        )
         return read
 
     async def _enrich_workspace_names(

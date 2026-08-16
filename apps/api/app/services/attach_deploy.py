@@ -168,12 +168,20 @@ _SSH_TRANSIENT_MARKERS = (
 
 
 def _ssh_client_option_args() -> list[str]:
-    """OpenSSH client options for cloud VM sessions (keepalive + non-interactive)."""
+    """OpenSSH client options for ephemeral cloud VM sessions.
+
+    Recycled public IPs reuse addresses with new host keys, so accept-new fails
+    after the first VM on that IP. Disable known_hosts for these short-lived hosts.
+    """
     return [
         "-o",
         "BatchMode=yes",
         "-o",
-        "StrictHostKeyChecking=accept-new",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
         "-o",
         "ServerAliveInterval=30",
         "-o",
@@ -2000,7 +2008,7 @@ elif [ -d "$APP_DIR/apps" ]; then
     [ -f "${{d}}package.json" ] || continue
     base=$(basename "$d")
     case "$base" in
-      web|frontend|ui|app|client|www|nuxt|next)
+      web|web-*|frontend|ui|*-ui|app|client|www|nuxt|next|*-web)
         APP_CWD="${{d%/}}"
         break
         ;;
@@ -2115,6 +2123,11 @@ def _native_bootstrap_and_start(
             "      npm run build || true\n"
             "    fi\n"
             "  fi\n"
+            "  if [ -f .next/standalone/server.js ]; then\n"
+            "    mkdir -p .next/standalone/.next\n"
+            "    cp -a .next/static .next/standalone/.next/static 2>/dev/null || true\n"
+            "    cp -a public .next/standalone/public 2>/dev/null || true\n"
+            "  fi\n"
             "elif [ -f requirements.txt ]; then\n"
             "  python3 -m pip install --user -r requirements.txt\n"
             "  export PATH=\"$HOME/.local/bin:$PATH\"\n"
@@ -2224,6 +2237,11 @@ def _native_bootstrap_and_start(
         "elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then yarn install --frozen-lockfile || yarn install; "
         "else npm install; fi\n"
         "  if grep -q '\"build\"' package.json; then npm run build || true; fi\n"
+        "  if [ -f .next/standalone/server.js ]; then\n"
+        "    mkdir -p .next/standalone/.next\n"
+        "    cp -a .next/static .next/standalone/.next/static 2>/dev/null || true\n"
+        "    cp -a public .next/standalone/public 2>/dev/null || true\n"
+        "  fi\n"
         "elif [ -f requirements.txt ]; then\n"
         "  python3 -m pip install --user -r requirements.txt\n"
         "  export PATH=\"$HOME/.local/bin:$PATH\"\n"
@@ -2234,22 +2252,18 @@ def _native_bootstrap_and_start(
     )
 
     needs_placeholder = start_command.strip() == _placeholder_preview_start_command()
-    # Prefer Nitro output after build when syncing a workspace that has Nuxt.
+    # Prefer production server entrypoints after build when present on the VM.
     if not needs_placeholder:
         install_app += (
             f"if [ -f .output/server/index.mjs ]; then\n"
             f"  START_CMD='HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
             f"NITRO_PORT={listen} node .output/server/index.mjs'\n"
             f"  export START_CMD\n"
+            f"elif [ -f .next/standalone/server.js ]; then\n"
+            f"  START_CMD='HOST=0.0.0.0 PORT={listen} node .next/standalone/server.js'\n"
+            f"  export START_CMD\n"
             f"fi\n"
         )
-        # Allow overriding start_expanded when Nitro output appeared.
-        start_expanded_nitro = (
-            f"HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
-            f"NITRO_PORT={listen} node .output/server/index.mjs"
-        )
-    else:
-        start_expanded_nitro = start_expanded
 
     placeholder_setup = (
         _write_placeholder_preview_server_script() if needs_placeholder else ""
@@ -2257,24 +2271,31 @@ def _native_bootstrap_and_start(
     health = _preview_healthcheck_script(listen=listen)
 
     if strategy == InstanceProcessStrategy.PM2:
-        pm2_cmd = start_expanded_nitro if not needs_placeholder else start_expanded
-        # Prefer runtime Nitro entry when present (shell checks at start time).
+        # Runtime checks pick Nitro/Next when present. Never hardcode Nitro as the
+        # fallback (that broke Next apps that only have .next/standalone).
         pm2_launch = (
             f"pm2 delete {unit} >/dev/null 2>&1 || true\n"
-            + "if [ -f ecosystem.config.cjs ]; then\n"
-            + "  pm2 start ecosystem.config.cjs\n"
-            + "elif [ -f ../ecosystem.config.cjs ]; then\n"
-            + "  pm2 start ../ecosystem.config.cjs\n"
-            + "elif [ -f .output/server/index.mjs ]; then\n"
+            + "if [ -f .output/server/index.mjs ]; then\n"
             + f"  pm2 start bash --name {unit} --cwd {app_cwd} --update-env -- -lc "
             + json.dumps(
                 f"cd {app_cwd} && HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
                 f"NITRO_PORT={listen} NODE_ENV=production node .output/server/index.mjs"
             )
             + "\n"
+            + "elif [ -f .next/standalone/server.js ]; then\n"
+            + f"  pm2 start bash --name {unit} --cwd {app_cwd} --update-env -- -lc "
+            + json.dumps(
+                f"cd {app_cwd} && HOST=0.0.0.0 PORT={listen} NODE_ENV=production "
+                f"node .next/standalone/server.js"
+            )
+            + "\n"
+            + "elif [ -f ecosystem.config.cjs ]; then\n"
+            + "  pm2 start ecosystem.config.cjs\n"
+            + "elif [ -f ../ecosystem.config.cjs ] && [ ! -f package.json ]; then\n"
+            + "  (cd .. && pm2 start ecosystem.config.cjs)\n"
             + "else\n"
             + f"  pm2 start bash --name {unit} --cwd {app_cwd} --update-env -- -lc "
-            + json.dumps(f"cd {app_cwd} && {pm2_cmd}")
+            + json.dumps(f"cd {app_cwd} && {start_expanded}")
             + "\n"
             + "fi\n"
         )
@@ -2298,12 +2319,17 @@ def _native_bootstrap_and_start(
             f"HOST=0.0.0.0 NITRO_HOST=0.0.0.0 PORT={listen} "
             f"NITRO_PORT={listen} node .output/server/index.mjs"
         ).replace("'", "'\"'\"'")
+        next_exec = (
+            f"HOST=0.0.0.0 PORT={listen} node .next/standalone/server.js"
+        ).replace("'", "'\"'\"'")
         return (
             ensure
             + placeholder_setup
             + install_app
             + f"if [ -f {app_cwd}/.output/server/index.mjs ]; then\n"
             + f"  START_LINE='{nitro_exec}'\n"
+            + f"elif [ -f {app_cwd}/.next/standalone/server.js ]; then\n"
+            + f"  START_LINE='{next_exec}'\n"
             + "else\n"
             + f"  START_LINE='{exec_start}'\n"
             + "fi\n"
@@ -3530,10 +3556,7 @@ def teardown_attach(
         user = (running_instance.ssh_user or "ubuntu").strip() or "ubuntu"
         ssh_base = [
             "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
+            *_ssh_client_option_args(),
             "-p",
             str(running_instance.ssh_port),
         ]
