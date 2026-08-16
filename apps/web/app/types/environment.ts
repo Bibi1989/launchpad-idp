@@ -37,10 +37,20 @@ export interface EnvStreamEvent {
   preview_endpoints?: PreviewEndpoint[] | null
 }
 
+export type LifecycleStage = 'preview' | 'staging' | 'production'
+
+export type PromotionRequestStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'cancelled'
+  | 'completed'
+
 export interface Environment {
   id: string
   owner_id: string
   workspace_id: string | null
+  workspace_name?: string | null
   name: string
   git_branch: string
   git_repo_url: string
@@ -59,7 +69,14 @@ export interface Environment {
   jira_issue_key?: string | null
   jira_issue_url?: string | null
   stable_pr_url?: string | null
-  ttl_expires_at: string
+  ttl_expires_at: string | null
+  ttl_disabled?: boolean
+  lifecycle_stage?: LifecycleStage | string
+  promotion_lineage_id?: string | null
+  promoted_from_id?: string | null
+  can_promote_to_staging?: boolean
+  can_promote_to_production?: boolean
+  pending_promotion_id?: string | null
   cost_estimate_hourly: string
   cost_accrued: string
   cost_sampled_at?: string | null
@@ -87,6 +104,42 @@ export interface Environment {
   redis_status?: 'pending' | 'running' | 'failed' | 'stopped' | string | null
   drift_detected?: boolean
   drift_summary?: string | null
+}
+
+export interface PromotionRequest {
+  id: string
+  org_id: string
+  source_environment_id: string
+  target_environment_id?: string | null
+  target_stage: LifecycleStage | string
+  status: PromotionRequestStatus | string
+  requested_by: string
+  reviewed_by?: string | null
+  review_note?: string | null
+  created_at: string
+  reviewed_at?: string | null
+  completed_at?: string | null
+  source_environment_name?: string | null
+  target_environment_name?: string | null
+  requires_approval?: boolean
+  executed?: boolean
+}
+
+export interface StagePromotePayload {
+  target_stage: 'staging' | 'production'
+  name?: string | null
+  ttl_hours?: number | null
+}
+
+export interface StagePromoteResponse {
+  promotion: PromotionRequest
+  environment_id?: string | null
+  environment?: Environment | null
+}
+
+export interface OrgPromotionPolicy {
+  staging_requires_approval: boolean
+  production_requires_approval: boolean
 }
 
 export interface DeploymentLog {

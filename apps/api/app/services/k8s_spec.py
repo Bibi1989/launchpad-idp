@@ -6,6 +6,7 @@ for ephemeral preview environments).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,6 +34,15 @@ CONTAINER_RESOURCES: dict[str, dict[str, str]] = {
 def sanitize_label(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in value)
     return cleaned[:63].strip("-_.") or "branch"
+
+
+def format_ttl_expires_at(expires_at: datetime | None) -> str | None:
+    """ISO-8601 for deploy args / K8s labels; None when TTL is disabled (prod)."""
+    if expires_at is None:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at.isoformat()
 
 
 def build_preview_labels(

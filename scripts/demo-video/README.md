@@ -18,3 +18,14 @@ DEMO_EMAIL=you@example.com DEMO_PASSWORD='your-password' node record.mjs
 ```
 
 Output: `out/launchpad-end-to-end-demo.mp4`
+
+Copy the finished MP4 (and optional poster) into the web app for the landing page:
+
+```bash
+mkdir -p apps/web/public/videos
+cp scripts/demo-video/out/launchpad-end-to-end-demo.mp4 apps/web/public/videos/launchpad-demo.mp4
+cp scripts/demo-video/out/frame-25s.png apps/web/public/videos/launchpad-demo-poster.png
+```
+
+Landing embeds `/videos/launchpad-demo.mp4` on `/` (`#demo`).
+

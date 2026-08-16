@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from app.core.logging import get_logger
 from app.models.domain import AuditAction, AuditStatus, Environment
 from app.schemas.k8s import DeployMode
+from app.services.k8s_spec import format_ttl_expires_at
 
 if TYPE_CHECKING:
     from app.services.audit import AuditService
@@ -80,7 +81,7 @@ def expected_manifest_deployments(
         name=environment.name,
         git_branch=environment.git_branch,
         git_repo_url=environment.git_repo_url,
-        ttl_expires_at=environment.ttl_expires_at.isoformat(),
+        ttl_expires_at=format_ttl_expires_at(environment.ttl_expires_at),
         owner_label="launchpad",
         image=image,
     )

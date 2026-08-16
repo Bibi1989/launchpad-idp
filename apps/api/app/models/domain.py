@@ -67,6 +67,26 @@ class AuditAction(str, enum.Enum):
     TEARDOWN_FAILED = "TEARDOWN_FAILED"
     DRIFT_DETECTED = "DRIFT_DETECTED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
+    PROMOTION_REQUESTED = "PROMOTION_REQUESTED"
+    PROMOTION_APPROVED = "PROMOTION_APPROVED"
+    PROMOTION_REJECTED = "PROMOTION_REJECTED"
+    PROMOTION_COMPLETED = "PROMOTION_COMPLETED"
+
+
+class LifecycleStage(str, enum.Enum):
+    """Logical environment class in the promotion pipeline."""
+
+    PREVIEW = "preview"
+    STAGING = "staging"
+    PRODUCTION = "production"
+
+
+class PromotionRequestStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
 
 
 class AuditStatus(str, enum.Enum):
@@ -157,6 +177,18 @@ class Organization(Base):
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     plan_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    promotion_staging_requires_approval: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    promotion_production_requires_approval: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -464,6 +496,8 @@ class Environment(Base):
         Index("ix_environments_owner_id", "owner_id"),
         Index("ix_environments_org_id", "org_id"),
         Index("ix_environments_project_id", "project_id"),
+        Index("ix_environments_lifecycle_stage", "lifecycle_stage"),
+        Index("ix_environments_promotion_lineage_id", "promotion_lineage_id"),
         UniqueConstraint("org_id", "name", name="uq_environments_org_id_name"),
     )
 
@@ -515,7 +549,26 @@ class Environment(Base):
     kubernetes_image_scan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     enable_postgres: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     enable_redis: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    ttl_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lifecycle_stage: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=LifecycleStage.PREVIEW.value,
+        server_default="preview",
+    )
+    promotion_lineage_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    promoted_from_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("environments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Null means no TTL (staging/production permanent until explicit destroy).
+    ttl_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     cost_estimate_hourly: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
     cost_accrued: Mapped[Decimal] = mapped_column(
         Numeric(12, 4),
@@ -563,6 +616,58 @@ class Environment(Base):
         order_by="AuditLog.timestamp.asc()",
         passive_deletes=True,
     )
+
+
+class PromotionRequest(Base):
+    """Governed promote request: preview → staging → production."""
+
+    __tablename__ = "promotion_requests"
+    __table_args__ = (
+        Index("ix_promotion_requests_org_id", "org_id"),
+        Index("ix_promotion_requests_status", "status"),
+        Index("ix_promotion_requests_source_environment_id", "source_environment_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_environment_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("environments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_environment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("environments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    target_stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=PromotionRequestStatus.PENDING.value,
+        server_default="pending",
+    )
+    requested_by: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DeploymentLog(Base):

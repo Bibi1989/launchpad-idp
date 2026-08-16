@@ -118,6 +118,17 @@ Beyond launch and destroy:
 
 Cloud / VM previews with `deploy=attach` clone the workspace **linked app repo** (GitHub or GitLab) onto the host by default, or sync the workspace disk when there is no remote clone URL. **Open app** uses the VM preview URL (for example `http://<ip>:8080`). Workload image is hidden unless you supplied a real container image (platform defaults like `nginx:1.27-alpine` are not shown).
 
+### Stage promotions (preview → staging → production)
+
+Environments carry a `lifecycle_stage` (`preview`, `staging`, `production`). From an environment detail page:
+
+1. **Promote to staging** / **Promote to production** creates a new environment in that stage (same workspace/git, new name).
+2. Org policy (Organization → Stage promotions) controls whether staging/production need admin approval. Production requires approval by default.
+3. Pending requests are approved or rejected at `/org/promotions`. Approve enqueues provision of the target environment.
+4. Production (and optional permanent staging) use **no TTL** and are not reaped by the TTL worker.
+
+This is separate from **Deploy to cloud** (local → cloud preview retarget).
+
 ### Git push rebuilds
 
 With `WEBHOOK_SECRET` matching the GitHub App (or GitLab) webhook secret, pushes to the tracked branch rebuild the active environment (re-clone / restart on instance mode). Detail page shows latest commit SHA and whether the webhook is configured. In-app: `/docs#rebuild`.

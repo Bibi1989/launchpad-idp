@@ -135,7 +135,9 @@ def _ttl_label(*, ttl_hours: int | None, ttl_minutes: int | None) -> str:
     return f"{ttl_hours if ttl_hours is not None else 2}h"
 
 
-def _ttl_is_past(expires_at: datetime, *, now: datetime | None = None) -> bool:
+def _ttl_is_past(expires_at: datetime | None, *, now: datetime | None = None) -> bool:
+    if expires_at is None:
+        return False
     cutoff = now or datetime.now(UTC)
     expires = expires_at
     if expires.tzinfo is None:
@@ -206,6 +208,7 @@ class EnvironmentService:
             )
             for row in rows
         ]
+        reads = await self._enrich_workspace_names(reads)
         return await self._enrich_drift(reads, [row.id for row in rows])
 
     async def get_environment(self, environment_id: UUID, owner: User) -> EnvironmentRead:
@@ -216,7 +219,8 @@ class EnvironmentService:
         else:
             active = await self._environments.count_active_for_owner(owner.id)
         read = self._to_read(environment, concurrent_active_count=active)
-        enriched = await self._enrich_drift([read], [environment.id])
+        reads = await self._enrich_workspace_names([read])
+        enriched = await self._enrich_drift(reads, [environment.id])
         return enriched[0]
 
     async def get_environment_entity(self, environment_id: UUID, owner: User):
@@ -763,6 +767,14 @@ class EnvironmentService:
                 detail={
                     "code": "ttl_extend_not_allowed",
                     "message": "TTL can only be extended while RUNNING or FAILED",
+                },
+            )
+        if environment.ttl_expires_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "ttl_disabled",
+                    "message": "This environment has no TTL (staging/production permanent)",
                 },
             )
 
@@ -1483,7 +1495,11 @@ class EnvironmentService:
                     name=environment.name,
                     git_branch=environment.git_branch,
                     git_repo_url=environment.git_repo_url,
-                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                    ttl_expires_at=(
+                        environment.ttl_expires_at.isoformat()
+                        if environment.ttl_expires_at is not None
+                        else datetime.now(UTC).isoformat()
+                    ),
                     image=environment.workload_image,
                     running_instance=RunningInstanceConfig(
                         kind=RunningInstanceKind.LOCAL_MACHINE,
@@ -1713,7 +1729,8 @@ class EnvironmentService:
             environment.cost_estimate_hourly == 0 and environment.workspace_id is None
         )
         read.ttl_warning = (
-            0 < read.time_remaining_seconds <= self._settings.ttl_warning_hours * 3600
+            not read.ttl_disabled
+            and 0 < read.time_remaining_seconds <= self._settings.ttl_warning_hours * 3600
             and environment.status == EnvironmentStatus.RUNNING
         )
         read.soft_cost_cap_exceeded = (
@@ -1744,7 +1761,37 @@ class EnvironmentService:
             deploy_mode=environment.deploy_mode,
             manifest_packaging=environment.manifest_packaging,
         )
+        stage = (getattr(environment, "lifecycle_stage", None) or "preview").lower()
+        read.lifecycle_stage = stage
+        read.promotion_lineage_id = getattr(environment, "promotion_lineage_id", None)
+        read.promoted_from_id = getattr(environment, "promoted_from_id", None)
+        promotable = environment.status in {
+            EnvironmentStatus.RUNNING,
+            EnvironmentStatus.FAILED,
+        }
+        read.can_promote_to_staging = promotable and stage == "preview"
+        read.can_promote_to_production = promotable and stage in {"preview", "staging"}
         return read
+
+    async def _enrich_workspace_names(
+        self,
+        reads: list[EnvironmentRead],
+    ) -> list[EnvironmentRead]:
+        ws_ids = {read.workspace_id for read in reads if read.workspace_id is not None}
+        if not ws_ids:
+            return reads
+        from sqlalchemy import select
+
+        result = await self._session.execute(
+            select(ProvisioningWorkspace.id, ProvisioningWorkspace.name).where(
+                ProvisioningWorkspace.id.in_(ws_ids)
+            )
+        )
+        names = {row.id: row.name for row in result.all()}
+        for read in reads:
+            if read.workspace_id is not None:
+                read.workspace_name = names.get(read.workspace_id)
+        return reads
 
     async def _enrich_drift(
         self,

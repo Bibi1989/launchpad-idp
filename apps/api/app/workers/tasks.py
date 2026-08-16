@@ -31,6 +31,7 @@ from app.services.deploy_mode_routing import (
     normalize_deploy_mode,
 )
 from app.services.drift_scanner import DRIFT_SCANNER_ACTOR, record_drift_if_changed, scan_environment
+from app.services.k8s_spec import format_ttl_expires_at
 from app.services.kubernetes import (
     KubernetesProvisioner,
     PreviewCancelled,
@@ -1498,7 +1499,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             name=environment.name,
                             git_branch=environment.git_branch,
                             git_repo_url=environment.git_repo_url,
-                            ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                            ttl_expires_at=format_ttl_expires_at(environment.ttl_expires_at),
                             owner_label=owner_label,
                             image=manifest_image_override,
                             cloud_provider=cloud_provider,
@@ -1707,7 +1708,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                     name=environment.name,
                                     git_branch=environment.git_branch,
                                     git_repo_url=environment.git_repo_url,
-                                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                                    ttl_expires_at=format_ttl_expires_at(environment.ttl_expires_at),
                                     owner_label=owner_label,
                                     image=deploy_image,
                                     enable_postgres=getattr(environment, "enable_postgres", False),
@@ -1747,7 +1748,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             name=environment.name,
                             git_branch=environment.git_branch,
                             git_repo_url=environment.git_repo_url,
-                            ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                            ttl_expires_at=format_ttl_expires_at(environment.ttl_expires_at),
                             owner_label=owner_label,
                             image=deploy_image,
                             enable_postgres=getattr(environment, "enable_postgres", False),
@@ -2449,7 +2450,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                     name=environment.name,
                                     git_branch=environment.git_branch,
                                     git_repo_url=environment.git_repo_url,
-                                    ttl_expires_at=environment.ttl_expires_at.isoformat(),
+                                    ttl_expires_at=format_ttl_expires_at(environment.ttl_expires_at),
                                     owner_label=owner_label,
                                     image=rebuild_image,
                                     enable_postgres=getattr(
@@ -3426,7 +3427,11 @@ async def pause_expired_environment(
     settings = settings or get_settings()
     if environment.status not in {EnvironmentStatus.RUNNING, EnvironmentStatus.FAILED}:
         return False
+    if getattr(environment, "lifecycle_stage", None) == "production":
+        return False
     expires = environment.ttl_expires_at
+    if expires is None:
+        return False
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
     if expires > datetime.now(UTC):
@@ -3457,7 +3462,7 @@ async def pause_expired_environment(
         environment_id=environment.id,
         message=(
             f"TTL expired - environment marked expired ({cleanup_note}) "
-            f"(expires_at={environment.ttl_expires_at.isoformat()})"
+            f"(expires_at={format_ttl_expires_at(environment.ttl_expires_at) or 'none'})"
         ),
         log_level=LogLevel.WARN,
         status=EnvironmentStatus.EXPIRED.value,
@@ -3635,6 +3640,8 @@ async def _run_ttl_reaper() -> int:
             running = await env_repo.list_running()
             for environment in running:
                 expires = environment.ttl_expires_at
+                if expires is None:
+                    continue
                 if expires.tzinfo is None:
                     expires = expires.replace(tzinfo=UTC)
                 remaining = (expires - now).total_seconds()

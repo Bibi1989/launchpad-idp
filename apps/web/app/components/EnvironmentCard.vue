@@ -179,9 +179,15 @@ function onRetry() {
 }
 
 const repoShort = computed(() => {
+  const workspaceName = (props.environment.workspace_name || '').trim()
+  if (workspaceName) return workspaceName
   const url = props.environment.git_repo_url
   try {
     const path = new URL(url).pathname.replace(/^\//, '').replace(/\.git$/, '')
+    const last = path.split('/').filter(Boolean).pop() || path
+    if (/^[0-9a-f-]{36}$/i.test(last) && path.includes('workspaces/')) {
+      return workspaceName || props.environment.name
+    }
     return path || url
   } catch {
     return url
@@ -236,6 +242,7 @@ function onCardKeydown(event: KeyboardEvent) {
       </div>
         <div class="flex flex-col items-end gap-1.5">
         <div class="flex flex-wrap items-center justify-end gap-1.5">
+          <LifecycleStageBadge :stage="environment.lifecycle_stage" />
           <DeployKindBadge :deploy-mode="environment.deploy_mode" />
           <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
           <a

@@ -142,6 +142,8 @@ class EnvironmentRead(BaseModel):
     id: UUID
     owner_id: UUID
     workspace_id: UUID | None
+    # Enriched from ProvisioningWorkspace (not persisted on Environment).
+    workspace_name: str | None = None
     name: str
     git_branch: str
     git_repo_url: str
@@ -165,12 +167,19 @@ class EnvironmentRead(BaseModel):
     kubernetes_image_scan_json: str | None = None
     enable_postgres: bool = False
     enable_redis: bool = False
-    ttl_expires_at: datetime
+    ttl_expires_at: datetime | None = None
     cost_estimate_hourly: Decimal
     cost_accrued: Decimal = Decimal("0.0000")
     cost_sampled_at: datetime | None = None
     cost_source: str | None = None
     time_remaining_seconds: int = 0
+    ttl_disabled: bool = False
+    lifecycle_stage: str = "preview"
+    promotion_lineage_id: UUID | None = None
+    promoted_from_id: UUID | None = None
+    can_promote_to_staging: bool = False
+    can_promote_to_production: bool = False
+    pending_promotion_id: UUID | None = None
     error_message: str | None
     failure_summary: str | None = None
     seed_status: str | None = None
@@ -203,9 +212,6 @@ class EnvironmentRead(BaseModel):
         created = self.created_at
         if created.tzinfo is None:
             created = created.replace(tzinfo=UTC)
-        expires = self.ttl_expires_at
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=UTC)
 
         from app.core.config import get_settings
         from app.services.cost_metering import convert_display_cost
@@ -224,7 +230,15 @@ class EnvironmentRead(BaseModel):
             self.cost_estimate_hourly or Decimal("0.0000"),
             settings=settings,
         )
-        self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
+        if self.ttl_expires_at is None:
+            self.ttl_disabled = True
+            self.time_remaining_seconds = 0
+        else:
+            self.ttl_disabled = False
+            expires = self.ttl_expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=UTC)
+            self.time_remaining_seconds = max(int((expires - now).total_seconds()), 0)
         deploy_mode = (
             self.deploy_mode.value
             if hasattr(self.deploy_mode, "value")

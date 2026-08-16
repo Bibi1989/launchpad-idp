@@ -156,7 +156,12 @@ export default {
     "nav": {
       "product": "Product",
       "platforms": "Platforms",
-      "security": "Security"
+      "security": "Security",
+      "demo": "Demo"
+    },
+    "demo": {
+      "ariaLabel": "Launchpad product demo video",
+      "caption": "End-to-end walkthrough: launch, status, and provision"
     },
     "platforms": {
       "eyebrow": "Works with the stack you already run",
@@ -706,6 +711,31 @@ export default {
     "secretBadge": "secret",
     "noEnvExample": "No .env.example found. You can still set datastore URLs above."
   },
+  "promotions": {
+    "title": "Stage promotions",
+    "blurb": "Promote environments from preview to staging to production. Production requires approval by default.",
+    "backToOrg": "Organization",
+    "policyTitle": "Approval policy",
+    "policyBlurb": "Control whether staging and production promotions need an org admin to approve before deploy.",
+    "stagingRequiresApproval": "Staging requires approval",
+    "productionRequiresApproval": "Production requires approval",
+    "savePolicy": "Save policy",
+    "policySaved": "Policy saved",
+    "policySavedBlurb": "Promotion approval rules updated for this organization.",
+    "adminOnly": "Only owners and admins can change promotion policy.",
+    "queueTitle": "Promotion queue",
+    "filterPending": "Pending",
+    "filterAll": "All",
+    "empty": "No promotion requests yet.",
+    "openSource": "Open source environment",
+    "openTarget": "Open new environment",
+    "approve": "Approve",
+    "reject": "Reject",
+    "approved": "Promotion approved",
+    "approvedBlurb": "The target environment was queued.",
+    "rejected": "Promotion rejected",
+    "rejectedBlurb": "The request was closed without deploying."
+  },
   "notifications": {
     "title": "Notifications",
     "empty": "You're all caught up.",
@@ -719,6 +749,11 @@ export default {
     "inviteProjectBody": "{by} invited you to {org} as {role}. Open to accept."
   },
   "environments": {
+    "lifecycle": {
+      "preview": "Preview",
+      "staging": "Staging",
+      "production": "Production"
+    },
     "index": {
       "title": "Active Environments",
       "estHourlySpend": "Est. Hourly Spend",
@@ -727,6 +762,8 @@ export default {
       "controlPlane": "Control Plane",
       "ephemeralTargets": "Ephemeral K8s targets",
       "live": "Live Environments",
+      "lineageBlurb": "Grouped by app: Preview, Staging, then Production.",
+      "lineageStages": "{count} stage | {count} stages",
       "launchPreview": "Launch preview",
       "loading": "Loading environments…",
       "empty": "No active environments yet.",
@@ -763,7 +800,26 @@ export default {
       "provisioning": "App provisioning…",
       "appUrl": "App URL",
       "ttlRemaining": "TTL remaining",
+      "noTtl": "No TTL",
+      "noTtlHint": "Permanent until you destroy this environment",
       "expires": "Expires",
+      "promoteToStaging": "Promote to staging",
+      "promoteToProduction": "Promote to production",
+      "stagePromoting": "Promoting…",
+      "stagePromoteStarted": "Promoting to {stage}",
+      "stagePromoteStartedBlurb": "Opening the new environment. Provisioning will continue in the background.",
+      "stagePromotePendingTitle": "Approval required",
+      "stagePromotePendingApproval": "Promotion to {stage} is waiting for an org admin. Review it under Stage promotions.",
+      "stagePromoteFailed": "Promotion failed",
+      "confirmPromoteStagingTitle": "Promote to staging?",
+      "confirmPromoteStagingMessage": "Create a new staging environment from \"{name}\". The current preview keeps running. Staging gets a longer TTL (default 7 days) and reuses the same repo, branch, and workspace.",
+      "confirmPromoteStagingAction": "Yes, promote to staging",
+      "confirmPromoteProductionTitle": "Promote to production?",
+      "confirmPromoteProductionMessage": "Create a production environment from \"{name}\". Production has no TTL and usually needs an org admin approval before it deploys. The current environment keeps running.",
+      "confirmPromoteProductionAction": "Yes, promote to production",
+      "lifecycleStage": "Lifecycle stage",
+      "promotedFrom": "Promoted from",
+      "viewPromotions": "View promotions",
       "costToDate": "Cost to date",
       "localShadow": "Local shadow",
       "gitRepo": "Git repository",

@@ -213,6 +213,13 @@ onMounted(() => {
       <p class="max-w-3xl text-sm leading-relaxed text-[var(--lp-muted)]">
         {{ t('org.blurbDetail') }}
       </p>
+      <NuxtLink
+        to="/org/promotions"
+        class="inline-flex items-center gap-2 text-sm text-[var(--lp-accent)] hover:underline"
+      >
+        <span class="material-symbols-outlined text-base">approval</span>
+        {{ t('promotions.title') }}
+      </NuxtLink>
     </header>
 
     <section v-if="plan" class="lp-glass space-y-4 rounded-xl p-5">

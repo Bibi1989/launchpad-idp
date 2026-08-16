@@ -156,7 +156,12 @@ export default {
     "nav": {
       "product": "Produkt",
       "platforms": "Plattformen",
-      "security": "Sicherheit"
+      "security": "Sicherheit",
+      "demo": "Demo"
+    },
+    "demo": {
+      "ariaLabel": "Launchpad Produktdemo-Video",
+      "caption": "End-to-end Walkthrough: Launch, Status und Provisionierung"
     },
     "platforms": {
       "eyebrow": "Passt zum Stack, den Sie bereits betreiben",
@@ -647,6 +652,31 @@ export default {
     "secretBadge": "secret",
     "noEnvExample": "Keine .env.example gefunden. Datastore-URLs können trotzdem gesetzt werden."
   },
+  "promotions": {
+    "title": "Stage-Promotions",
+    "blurb": "Umgebungen von Preview über Staging nach Production promoten. Production erfordert standardmäßig Freigabe.",
+    "backToOrg": "Organisation",
+    "policyTitle": "Freigabe-Richtlinie",
+    "policyBlurb": "Steuern Sie, ob Staging- und Production-Promotions vor dem Deploy eine Org-Admin-Freigabe brauchen.",
+    "stagingRequiresApproval": "Staging erfordert Freigabe",
+    "productionRequiresApproval": "Production erfordert Freigabe",
+    "savePolicy": "Richtlinie speichern",
+    "policySaved": "Richtlinie gespeichert",
+    "policySavedBlurb": "Freigaberegeln für diese Organisation aktualisiert.",
+    "adminOnly": "Nur Owner und Admins können die Promotion-Richtlinie ändern.",
+    "queueTitle": "Promotion-Warteschlange",
+    "filterPending": "Ausstehend",
+    "filterAll": "Alle",
+    "empty": "Noch keine Promotion-Anfragen.",
+    "openSource": "Quell-Umgebung öffnen",
+    "openTarget": "Neue Umgebung öffnen",
+    "approve": "Freigeben",
+    "reject": "Ablehnen",
+    "approved": "Promotion freigegeben",
+    "approvedBlurb": "Die Zielumgebung wurde eingereiht.",
+    "rejected": "Promotion abgelehnt",
+    "rejectedBlurb": "Die Anfrage wurde ohne Deploy geschlossen."
+  },
   "notifications": {
     "title": "Benachrichtigungen",
     "empty": "Alles erledigt.",
@@ -660,6 +690,11 @@ export default {
     "inviteProjectBody": "{by} hat dich zu {org} als {role} eingeladen. Öffnen zum Annehmen."
   },
   "environments": {
+    "lifecycle": {
+      "preview": "Preview",
+      "staging": "Staging",
+      "production": "Production"
+    },
     "index": {
       "title": "Aktive Umgebungen",
       "estHourlySpend": "Geschätzte Stundenkosten",
@@ -668,6 +703,8 @@ export default {
       "controlPlane": "Control Plane",
       "ephemeralTargets": "Ephemere K8s-Ziele",
       "live": "Live-Umgebungen",
+      "lineageBlurb": "Gruppiert nach App: Preview, Staging, dann Production.",
+      "lineageStages": "{count} Stufe | {count} Stufen",
       "launchPreview": "Preview starten",
       "loading": "Umgebungen werden geladen…",
       "empty": "Noch keine aktiven Umgebungen.",
@@ -704,7 +741,26 @@ export default {
       "provisioning": "App wird bereitgestellt…",
       "appUrl": "App-URL",
       "ttlRemaining": "TTL verbleibend",
+      "noTtl": "Keine TTL",
+      "noTtlHint": "Permanent bis Sie die Umgebung zerstören",
       "expires": "Läuft ab",
+      "promoteToStaging": "Nach Staging promoten",
+      "promoteToProduction": "Nach Production promoten",
+      "stagePromoting": "Wird promoted…",
+      "stagePromoteStarted": "Promotion nach {stage}",
+      "stagePromoteStartedBlurb": "Die neue Umgebung wird geöffnet. Die Bereitstellung läuft im Hintergrund weiter.",
+      "stagePromotePendingTitle": "Freigabe erforderlich",
+      "stagePromotePendingApproval": "Promotion nach {stage} wartet auf einen Org-Admin. Prüfen Sie unter Stage-Promotions.",
+      "stagePromoteFailed": "Promotion fehlgeschlagen",
+      "confirmPromoteStagingTitle": "Nach Staging promoten?",
+      "confirmPromoteStagingMessage": "Neue Staging-Umgebung aus „{name}“ erstellen. Die aktuelle Preview läuft weiter. Staging hat eine längere TTL (Standard 7 Tage) und nutzt dasselbe Repo, denselben Branch und Workspace.",
+      "confirmPromoteStagingAction": "Ja, nach Staging promoten",
+      "confirmPromoteProductionTitle": "Nach Production promoten?",
+      "confirmPromoteProductionMessage": "Production-Umgebung aus „{name}“ erstellen. Production hat keine TTL und braucht meist eine Org-Admin-Freigabe vor dem Deploy. Die aktuelle Umgebung läuft weiter.",
+      "confirmPromoteProductionAction": "Ja, nach Production promoten",
+      "lifecycleStage": "Lebenszyklus-Stufe",
+      "promotedFrom": "Promoted von",
+      "viewPromotions": "Promotions anzeigen",
       "costToDate": "Kosten bisher",
       "localShadow": "Lokaler Schattenwert",
       "gitRepo": "Git-Repository",

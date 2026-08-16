@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { OrgCostSummary } from '~/types/auth'
 import type { Environment } from '~/types/environment'
+import { groupEnvironmentsByLineage } from '~/utils/environmentLineage'
 
 const { t } = useI18n()
 const { environments, loading, error, refresh, destroy, retryProvision, pauseEnvironment, resumeEnvironment, relaunchEnvironment } = useEnvironments()
@@ -101,6 +102,8 @@ const liveEnvironments = computed(() =>
   ),
 )
 
+const lineageGroups = computed(() => groupEnvironmentsByLineage(liveEnvironments.value))
+
 const providers = computed(() => {
   const set = new Set(
     environments.value
@@ -158,10 +161,12 @@ watch(environments, (list) => {
     ...list
       .filter((e) => e.status !== 'DESTROYED' && e.status !== 'TEARDOWN_PENDING')
       .slice(0, 6)
-      .map(
-        (e) =>
-          `[${new Date(e.updated_at).toLocaleTimeString()}] ${e.status}: ${e.name} · TTL ${new Date(e.ttl_expires_at).toLocaleString()}`,
-      ),
+      .map((e) => {
+        const ttl = e.ttl_expires_at
+          ? `TTL ${new Date(e.ttl_expires_at).toLocaleString()}`
+          : 'no TTL'
+        return `[${new Date(e.updated_at).toLocaleTimeString()}] ${e.status}: ${e.name} · ${ttl}`
+      }),
   ]
 })
 
@@ -293,10 +298,15 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
       </div>
     </section>
 
-    <!-- Live environments -->
+    <!-- Live environments grouped by app lineage -->
     <section class="space-y-4 animate-fade-up [animation-delay:80ms]">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <h2 class="text-xl font-semibold">{{ t('environments.index.live') }}</h2>
+        <div>
+          <h2 class="text-xl font-semibold">{{ t('environments.index.live') }}</h2>
+          <p class="mt-1 text-sm text-[var(--lp-muted)]">
+            {{ t('environments.index.lineageBlurb') }}
+          </p>
+        </div>
         <div class="flex items-center gap-2">
           <button type="button" class="lp-btn-ghost py-1.5 text-xs uppercase tracking-wide" @click="refresh({ soft: true })">
             <span class="material-symbols-outlined text-sm">refresh</span>
@@ -329,19 +339,49 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
         </button>
       </div>
 
-      <div v-else class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <EnvironmentCard
-          v-for="env in liveEnvironments"
-          :key="env.id"
-          :environment="env"
-          :retrying="retryingId === env.id"
-          @destroy="requestDestroy"
-          @retry="onRetry"
-          @pause="pauseAction.run"
-          @resume="resumeAction.run"
-          @relaunch="relaunchAction.run"
-          @update="onCardUpdate"
-        />
+      <div v-else class="space-y-8">
+        <section
+          v-for="group in lineageGroups"
+          :key="group.lineageId"
+          class="space-y-3"
+        >
+          <header class="flex flex-wrap items-end justify-between gap-2 border-b border-[var(--lp-line)] pb-2">
+            <div class="min-w-0">
+              <h3 class="truncate text-base font-semibold tracking-tight">
+                {{ group.title }}
+              </h3>
+              <p v-if="group.subtitle" class="mt-0.5 truncate font-mono text-xs text-[var(--lp-muted)]">
+                {{ group.subtitle }}
+              </p>
+            </div>
+            <p class="font-mono text-[10px] uppercase tracking-wide text-[var(--lp-muted)]">
+              {{
+                t(
+                  'environments.index.lineageStages',
+                  group.environments.length,
+                  { count: group.environments.length },
+                )
+              }}
+            </p>
+          </header>
+          <div
+            class="grid grid-cols-1 gap-4"
+            :class="group.environments.length >= 2 ? 'xl:grid-cols-3' : 'xl:grid-cols-2'"
+          >
+            <EnvironmentCard
+              v-for="env in group.environments"
+              :key="env.id"
+              :environment="env"
+              :retrying="retryingId === env.id"
+              @destroy="requestDestroy"
+              @retry="onRetry"
+              @pause="pauseAction.run"
+              @resume="resumeAction.run"
+              @relaunch="relaunchAction.run"
+              @update="onCardUpdate"
+            />
+          </div>
+        </section>
       </div>
     </section>
 

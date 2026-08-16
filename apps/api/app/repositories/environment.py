@@ -225,7 +225,7 @@ class EnvironmentRepository:
         git_branch: str,
         git_repo_url: str,
         namespace_name: str,
-        ttl_expires_at: datetime,
+        ttl_expires_at: datetime | None,
         cost_estimate_hourly: Decimal,
         project_id: UUID | None = None,
         workspace_id: UUID | None = None,
@@ -243,6 +243,9 @@ class EnvironmentRepository:
         kubernetes_image_scan_json: str | None = None,
         enable_postgres: bool = False,
         enable_redis: bool = False,
+        lifecycle_stage: str = "preview",
+        promotion_lineage_id: UUID | None = None,
+        promoted_from_id: UUID | None = None,
     ) -> Environment:
         environment = Environment(
             owner_id=owner_id,
@@ -269,9 +272,15 @@ class EnvironmentRepository:
             kubernetes_image_scan_json=kubernetes_image_scan_json,
             enable_postgres=enable_postgres,
             enable_redis=enable_redis,
+            lifecycle_stage=lifecycle_stage,
+            promotion_lineage_id=promotion_lineage_id,
+            promoted_from_id=promoted_from_id,
         )
         self._session.add(environment)
         await self._session.flush()
+        if environment.promotion_lineage_id is None:
+            environment.promotion_lineage_id = environment.id
+            await self._session.flush()
         await self._session.refresh(environment)
         return environment
 
@@ -420,7 +429,9 @@ class EnvironmentRepository:
                         EnvironmentStatus.FAILED,
                     )
                 ),
+                Environment.ttl_expires_at.is_not(None),
                 Environment.ttl_expires_at <= cutoff,
+                Environment.lifecycle_stage != "production",
             )
         )
         return list(result.scalars().all())

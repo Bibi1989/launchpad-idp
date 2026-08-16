@@ -43,6 +43,7 @@ const route = useRoute()
 const id = computed(() => String(route.params.id))
 const environmentId = computed(() => id.value || null)
 const { getById, destroy, cancelProvision, extendTtl, promoteToCloud, listAudits, scanDrift, retryProvision, pauseEnvironment, resumeEnvironment, relaunchEnvironment } = useEnvironments()
+const { stagePromote } = usePromotions()
 const { getWizardConfig } = useProvisioning()
 const { createOrLinkJiraIssue } = useOrgIntegrations()
 const { reconcileEnvironment } = useNotifications()
@@ -431,12 +432,16 @@ useEnvironmentLiveStream(environmentId, {
 const remainingLabel = computed(() => {
   tick.value
   if (!environment.value) return '-'
+  if (environment.value.ttl_disabled || !environment.value.ttl_expires_at) {
+    return t('environments.detail.noTtl')
+  }
   return formatDuration(ttlLeftSeconds(environment.value.ttl_expires_at))
 })
 
 const ttlExpired = computed(() => {
   tick.value
   if (!environment.value) return false
+  if (environment.value.ttl_disabled || !environment.value.ttl_expires_at) return false
   if (environment.value.status === 'EXPIRED') return true
   return ttlIsExpired(environment.value.ttl_expires_at)
 })
@@ -485,6 +490,7 @@ const isLocal = computed(() => Boolean(environment.value?.is_local))
 const canExtend = computed(() => {
   const env = environment.value
   if (!env) return false
+  if (env.ttl_disabled || !env.ttl_expires_at) return false
   const s = env.status
   if (s !== 'RUNNING' && s !== 'FAILED') return false
   tick.value
@@ -496,6 +502,86 @@ const canPromote = computed(() => {
   const status = environment.value.status
   return (status === 'RUNNING' || status === 'FAILED') && isLocal.value
 })
+const canStagePromoteStaging = computed(() => Boolean(environment.value?.can_promote_to_staging))
+const canStagePromoteProduction = computed(() => Boolean(environment.value?.can_promote_to_production))
+const stagePromotePending = ref(false)
+const stagePromoteNotice = ref<string | null>(null)
+const confirmStagePromoteOpen = ref(false)
+const confirmStageTarget = ref<'staging' | 'production' | null>(null)
+
+const stagePromoteDialogTitle = computed(() => {
+  if (confirmStageTarget.value === 'production') {
+    return t('environments.detail.confirmPromoteProductionTitle')
+  }
+  return t('environments.detail.confirmPromoteStagingTitle')
+})
+
+const stagePromoteDialogMessage = computed(() => {
+  const name = environment.value?.name || '-'
+  if (confirmStageTarget.value === 'production') {
+    return t('environments.detail.confirmPromoteProductionMessage', { name })
+  }
+  return t('environments.detail.confirmPromoteStagingMessage', { name })
+})
+
+const stagePromoteConfirmLabel = computed(() => {
+  if (confirmStageTarget.value === 'production') {
+    return t('environments.detail.confirmPromoteProductionAction')
+  }
+  return t('environments.detail.confirmPromoteStagingAction')
+})
+
+function requestStagePromote(target: 'staging' | 'production') {
+  confirmStageTarget.value = target
+  confirmStagePromoteOpen.value = true
+  closeActionsMenu()
+}
+
+function cancelStagePromote() {
+  if (stagePromotePending.value) return
+  confirmStagePromoteOpen.value = false
+  confirmStageTarget.value = null
+}
+
+async function onStagePromoteConfirm() {
+  const target = confirmStageTarget.value
+  if (!environment.value || !target || stagePromotePending.value) return
+  stagePromotePending.value = true
+  stagePromoteNotice.value = null
+  loadError.value = null
+  try {
+    const result = await stagePromote(environment.value.id, { target_stage: target })
+    confirmStagePromoteOpen.value = false
+    confirmStageTarget.value = null
+    if (result.environment_id) {
+      const stageLabel =
+        target === 'production'
+          ? t('environments.lifecycle.production')
+          : t('environments.lifecycle.staging')
+      toast.success(
+        t('environments.detail.stagePromoteStarted', { stage: stageLabel }),
+        t('environments.detail.stagePromoteStartedBlurb'),
+      )
+      await navigateTo(`/environments/${result.environment_id}`)
+      return
+    }
+    stagePromoteNotice.value = t('environments.detail.stagePromotePendingApproval', {
+      stage:
+        target === 'production'
+          ? t('environments.lifecycle.production')
+          : t('environments.lifecycle.staging'),
+    })
+    toast.info(
+      t('environments.detail.stagePromotePendingTitle'),
+      stagePromoteNotice.value,
+    )
+  } catch (err) {
+    loadError.value = err instanceof Error ? err.message : t('common.failed')
+    toast.error(t('environments.detail.stagePromoteFailed'), loadError.value)
+  } finally {
+    stagePromotePending.value = false
+  }
+}
 const canScanDrift = computed(() => environment.value?.status === 'RUNNING')
 const canRetry = computed(() => {
   const s = environment.value?.status
@@ -836,11 +922,16 @@ onUnmounted(() => {
           <div class="min-w-0 space-y-3">
             <h1 class="text-3xl font-semibold tracking-tight">{{ environment.name }}</h1>
             <div class="flex flex-wrap items-center gap-3">
+              <LifecycleStageBadge :stage="environment.lifecycle_stage" />
               <DeployKindBadge :deploy-mode="environment.deploy_mode" />
               <StatusBadge :status="displayStatus" />
               <EnvironmentHealthDot :status="displayStatus" :app-ready="environment.app_ready" />
               <span class="break-all font-mono text-xs text-[var(--lp-muted)]">{{ environment.namespace_name }}</span>
             </div>
+            <p v-if="stagePromoteNotice" class="text-sm text-[var(--lp-accent)]">
+              {{ stagePromoteNotice }}
+              <NuxtLink to="/org/promotions" class="ml-1 underline">{{ t('environments.detail.viewPromotions') }}</NuxtLink>
+            </p>
             <p v-if="environment.runtime_summary" class="font-mono text-xs text-[var(--lp-muted)]">
               {{ environment.runtime_summary }}
             </p>
@@ -1017,6 +1108,28 @@ onUnmounted(() => {
                 >
                   <span class="material-symbols-outlined text-base text-[var(--lp-muted)]">cloud_upload</span>
                   {{ t('environments.detail.deployToCloud') }}
+                </button>
+                <button
+                  v-if="canStagePromoteStaging"
+                  type="button"
+                  role="menuitem"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+                  :disabled="stagePromotePending"
+                  @click="requestStagePromote('staging')"
+                >
+                  <span class="material-symbols-outlined text-base text-sky-300">upgrade</span>
+                  {{ t('environments.detail.promoteToStaging') }}
+                </button>
+                <button
+                  v-if="canStagePromoteProduction"
+                  type="button"
+                  role="menuitem"
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm text-[var(--lp-text)] transition hover:bg-[var(--lp-panel-2)] disabled:opacity-60"
+                  :disabled="stagePromotePending"
+                  @click="requestStagePromote('production')"
+                >
+                  <span class="material-symbols-outlined text-base text-amber-300">verified</span>
+                  {{ t('environments.detail.promoteToProduction') }}
                 </button>
                 <NuxtLink
                   :to="`/environments/${environment.id}/observability`"
@@ -1422,8 +1535,14 @@ onUnmounted(() => {
             >
               {{ remainingLabel }}
             </p>
-            <p class="mt-0.5 text-xs text-[var(--lp-muted)]">
+            <p
+              v-if="environment.ttl_expires_at"
+              class="mt-0.5 text-xs text-[var(--lp-muted)]"
+            >
               {{ t('environments.detail.expires') }} {{ new Date(environment.ttl_expires_at).toLocaleString() }}
+            </p>
+            <p v-else class="mt-0.5 text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.noTtlHint') }}
             </p>
           </div>
           <div v-if="!isLocal">
@@ -1529,6 +1648,21 @@ onUnmounted(() => {
             </NuxtLink>
           </div>
           <div>
+            <p class="lp-label">{{ t('environments.detail.lifecycleStage') }}</p>
+            <div class="mt-1.5">
+              <LifecycleStageBadge :stage="environment.lifecycle_stage" />
+            </div>
+          </div>
+          <div v-if="environment.promoted_from_id">
+            <p class="lp-label">{{ t('environments.detail.promotedFrom') }}</p>
+            <NuxtLink
+              :to="`/environments/${environment.promoted_from_id}`"
+              class="mt-1 inline-block font-mono text-xs text-[var(--lp-accent)] hover:underline"
+            >
+              {{ environment.promoted_from_id }}
+            </NuxtLink>
+          </div>
+          <div>
             <p class="lp-label">{{ t('environments.detail.environmentId') }}</p>
             <p class="mt-1 break-all font-mono text-xs">{{ environment.id }}</p>
           </div>
@@ -1618,6 +1752,18 @@ onUnmounted(() => {
         :cancel-label="t('environments.destroy.cancel')"
         :busy="destroyAction.pending"
         @confirm="onDestroy"
+      />
+
+      <ConfirmDialog
+        v-model:open="confirmStagePromoteOpen"
+        :title="stagePromoteDialogTitle"
+        :message="stagePromoteDialogMessage"
+        :confirm-label="stagePromoteConfirmLabel"
+        :cancel-label="t('common.cancel')"
+        :danger="confirmStageTarget === 'production'"
+        :busy="stagePromotePending"
+        @confirm="onStagePromoteConfirm"
+        @cancel="cancelStagePromote"
       />
     </template>
   </div>

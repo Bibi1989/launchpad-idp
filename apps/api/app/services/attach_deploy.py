@@ -3184,7 +3184,7 @@ def deploy_attach(
     name: str,
     git_branch: str,
     git_repo_url: str,
-    ttl_expires_at: str,
+    ttl_expires_at: str | None,
     owner_label: str = "launchpad",
     image: str | None = None,
     enable_postgres: bool = False,
