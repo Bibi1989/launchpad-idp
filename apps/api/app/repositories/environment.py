@@ -557,3 +557,20 @@ class DeploymentLogRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def latest_stage_for(self, environment_id: UUID) -> ExecutionStage | None:
+        """Most recent execution stage logged for an environment.
+
+        Lets the detail page restore the pipeline to the real stage (BUILD/APPLY) on a
+        browser reload, instead of resetting to INIT until the next live event.
+        """
+        result = await self._session.execute(
+            select(DeploymentLog.stage)
+            .where(
+                DeploymentLog.environment_id == environment_id,
+                DeploymentLog.stage.is_not(None),
+            )
+            .order_by(DeploymentLog.timestamp.desc(), DeploymentLog.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()

@@ -221,6 +221,9 @@ class EnvironmentService:
         else:
             active = await self._environments.count_active_for_owner(owner.id)
         read = self._to_read(environment, concurrent_active_count=active)
+        # Surface the last execution stage so a reload restores the pipeline to the real
+        # stage (BUILD/APPLY) instead of INIT.
+        read.stage = await self._logs.latest_stage_for(environment_id)
         reads = await self._enrich_workspace_names([read])
         enriched = await self._enrich_drift(reads, [environment.id])
         return enriched[0]

@@ -991,3 +991,35 @@ async def test_extend_ttl_resets_to_full_window(
         # Reset to ~default window (well beyond the 5 minutes it had left).
         assert default_hours - 0.1 <= remaining_hours <= default_hours + 0.1
 
+
+
+@pytest.mark.asyncio
+async def test_get_environment_restores_latest_stage(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    """The detail-page read surfaces the last logged execution stage so a reload shows
+    the real stage (BUILD/APPLY) instead of resetting the pipeline to INIT."""
+    from app.models.domain import ExecutionStage
+
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        logs = DeploymentLogRepository(session)
+        env = await repo.create(
+            owner_id=test_user.id,
+            name="stage-env",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-stage",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=2),
+            cost_estimate_hourly=Decimal("0.10"),
+        )
+        await logs.create(environment_id=env.id, message="init", stage=ExecutionStage.INIT)
+        await logs.create(environment_id=env.id, message="building", stage=ExecutionStage.BUILD)
+        await session.commit()
+
+        assert await logs.latest_stage_for(env.id) == ExecutionStage.BUILD
+
+        service = EnvironmentService(session)
+        read = await service.get_environment(env.id, test_user)
+        assert read.stage == ExecutionStage.BUILD

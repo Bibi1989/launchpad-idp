@@ -203,6 +203,9 @@ class EnvironmentRead(BaseModel):
     error_message: str | None
     failure_summary: str | None = None
     seed_status: str | None = None
+    # Last execution-pipeline stage (INIT/VALIDATE/PLAN/BUILD/APPLY) so a reload restores
+    # the pipeline to the real stage instead of INIT. Derived from the latest log.
+    stage: str | None = None
     created_at: datetime
     updated_at: datetime
     # Enriched by EnvironmentService (not persisted).

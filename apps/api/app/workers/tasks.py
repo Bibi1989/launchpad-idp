@@ -704,14 +704,6 @@ async def _emit_stage(
         commit_sha=commit_sha,
         stage=stage,
     )
-    # Persist the current stage on the environment row so a browser reload or a fresh
-    # navigation to the detail page shows the REAL stage (e.g. BUILD/APPLY) instead of
-    # resetting the pipeline to INIT until the next live event arrives.
-    from sqlalchemy import update as _sa_update
-
-    await session.execute(
-        _sa_update(Environment).where(Environment.id == environment_id).values(stage=stage)
-    )
     await session.commit()
 
 
