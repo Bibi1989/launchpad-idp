@@ -98,13 +98,13 @@ def test_preview_launch_workspace_only() -> None:
     assert payload.git_repo_url is None
 
 
-def test_preview_launch_gcp_requires_credentials() -> None:
-    with pytest.raises(ValidationError):
-        PreviewLaunchRequest(
-            name="cloud-demo",
-            template_id="hello-web",
-            provider=PreviewProvider.GCP,
-        )
+def test_preview_launch_gcp_accepts_blank_credentials() -> None:
+    payload = PreviewLaunchRequest(
+        name="cloud-demo",
+        template_id="hello-web",
+        provider=PreviewProvider.GCP,
+    )
+    assert payload.credentials.gcp_sa_key_json is None
 
 
 def test_preview_launch_with_workspace_skips_credentials() -> None:

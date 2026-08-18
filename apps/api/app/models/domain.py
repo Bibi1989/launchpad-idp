@@ -569,6 +569,8 @@ class Environment(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # The original duration of the TTL, used to offset ttl_expires_at once provisioned.
+    ttl_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_estimate_hourly: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
     cost_accrued: Mapped[Decimal] = mapped_column(
         Numeric(12, 4),

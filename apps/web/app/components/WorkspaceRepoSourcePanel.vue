@@ -8,6 +8,7 @@ import type {
   GitHubAppStatus,
   WorkspaceCdMode,
   WorkspaceLinkedAppRepoResponse,
+  WorkspaceLinkedRepoItem,
 } from '~/types/provisioning'
 import type { PendingWorkspaceRepoLink, WorkspaceSourceMode } from '~/types/workspaceRepo'
 import { toastError } from '~/composables/useToast'
@@ -41,6 +42,11 @@ const emit = defineEmits<{
 const pendingLink = defineModel<PendingWorkspaceRepoLink | null>('pendingLink', {
   default: null,
 })
+// Multi-repo: full list of repos to link. In create mode (no workspace id) this is
+// staged and applied post-create; with a workspace id each change persists immediately.
+const pendingLinks = defineModel<WorkspaceLinkedRepoItem[]>('pendingLinks', {
+  default: () => [],
+})
 
 const { t } = useI18n()
 const toast = useToast()
@@ -48,10 +54,13 @@ const {
   getGithubAppStatus,
   getGitlabStatus,
   getLinkedAppRepo,
-  setLinkedAppRepo,
-  setWorkspaceGitSource,
+  getWorkspaceLinkedRepos,
+  setWorkspaceLinkedRepos,
   getWizardConfig,
 } = useProvisioning()
+
+// The authoritative set of linked repos shown as chips.
+const linkedList = ref<WorkspaceLinkedRepoItem[]>([])
 
 const mode = ref<'link' | 'import'>(props.forceMode ?? 'link')
 const gitHost = ref<GitHost>('github')
@@ -68,7 +77,6 @@ const gitBranch = ref('main')
 const cdMode = ref<WorkspaceCdMode>('webhook')
 const importOpen = ref(false)
 
-const linked = computed(() => status.value?.linked ?? null)
 const hasWorkspace = computed(() => Boolean(props.workspaceId?.trim()))
 const activeMode = computed(() => props.forceMode ?? mode.value)
 
@@ -92,6 +100,7 @@ async function load() {
 
     if (!hasWorkspace.value) {
       status.value = null
+      linkedList.value = [...pendingLinks.value]
       if (pendingLink.value?.kind === 'github') {
         gitHost.value = 'github'
         installationId.value = pendingLink.value.installation_id
@@ -113,6 +122,11 @@ async function load() {
     }
 
     const workspaceId = props.workspaceId!.trim()
+    try {
+      linkedList.value = (await getWorkspaceLinkedRepos(workspaceId)).repos
+    } catch {
+      linkedList.value = []
+    }
     const linkRes = await getLinkedAppRepo(workspaceId)
     status.value = linkRes
     if (linkRes.linked) {
@@ -151,70 +165,91 @@ async function load() {
   }
 }
 
-function queueGithubPending() {
-  if (!installationId.value || !fullName.value.trim()) {
-    formError.value = t('workspaces.linkedRepo.repoRequired')
-    return
-  }
-  const next: PendingWorkspaceRepoLink = {
-    kind: 'github',
-    installation_id: installationId.value,
-    full_name: fullName.value.trim(),
-    git_branch: gitBranch.value.trim() || 'main',
-    cd_mode: cdMode.value,
-  }
-  pendingLink.value = next
-  emit('pendingLink', next)
-  toast.success(
-    t('scaffold.repoSource.pendingSaved'),
-    t('scaffold.repoSource.pendingSavedBlurb'),
-  )
-}
+// --- Multi-repo linking ----------------------------------------------------
 
-function queueGitlabPending() {
+function currentItem(): WorkspaceLinkedRepoItem | null {
+  if (gitHost.value === 'github') {
+    if (!installationId.value || !fullName.value.trim()) {
+      formError.value = t('workspaces.linkedRepo.repoRequired')
+      return null
+    }
+    return {
+      kind: 'github',
+      git_repo_url: githubCloneUrl(fullName.value.trim()),
+      git_branch: gitBranch.value.trim() || 'main',
+      full_name: fullName.value.trim(),
+      installation_id: installationId.value,
+      cd_mode: cdMode.value,
+    }
+  }
   const path = gitlabPath.value.trim()
   if (!path) {
     formError.value = t('scaffold.repoSource.gitlabRepoRequired')
-    return
+    return null
   }
   const cloneUrl = path.startsWith('http')
     ? path
     : `https://gitlab.com/${path.replace(/^\//, '')}.git`
-  const next: PendingWorkspaceRepoLink = {
+  return {
     kind: 'gitlab',
     git_repo_url: cloneUrl,
     git_branch: gitBranch.value.trim() || 'main',
   }
-  pendingLink.value = next
-  emit('pendingLink', next)
-  toast.success(
-    t('scaffold.repoSource.pendingSaved'),
-    t('scaffold.repoSource.pendingSavedBlurb'),
-  )
 }
 
-async function onSaveGithubLink() {
+function itemAsPending(item: WorkspaceLinkedRepoItem): PendingWorkspaceRepoLink {
+  if (item.kind === 'github') {
+    return {
+      kind: 'github',
+      installation_id: item.installation_id ?? 0,
+      full_name: item.full_name ?? '',
+      git_branch: item.git_branch,
+      cd_mode: item.cd_mode ?? 'webhook',
+    }
+  }
+  return { kind: 'gitlab', git_repo_url: item.git_repo_url, git_branch: item.git_branch }
+}
+
+function syncPendingModels() {
+  pendingLinks.value = [...linkedList.value]
+  const first = linkedList.value[0]
+  pendingLink.value = first ? itemAsPending(first) : null
+  emit('pendingLink', pendingLink.value)
+}
+
+function clearCurrentSelection() {
+  fullName.value = ''
+  gitlabPath.value = ''
+  gitBranch.value = 'main'
+}
+
+async function onAddRepo() {
   if (saving.value || props.disabled) return
-  if (!hasWorkspace.value) {
-    queueGithubPending()
+  const item = currentItem()
+  if (!item) return
+  if (linkedList.value.some((r) => r.git_repo_url === item.git_repo_url)) {
+    clearCurrentSelection()
     return
   }
-  if (!installationId.value || !fullName.value.trim()) {
-    formError.value = t('workspaces.linkedRepo.repoRequired')
+  const next = [...linkedList.value, item]
+  if (!hasWorkspace.value) {
+    linkedList.value = next
+    syncPendingModels()
+    toast.success(
+      t('scaffold.repoSource.pendingSaved'),
+      t('scaffold.repoSource.pendingSavedBlurb'),
+    )
+    clearCurrentSelection()
     return
   }
   saving.value = true
   formError.value = null
   try {
-    status.value = await setLinkedAppRepo(props.workspaceId!, {
-      installation_id: installationId.value,
-      full_name: fullName.value.trim(),
-      git_branch: gitBranch.value.trim() || 'main',
-      cd_mode: cdMode.value,
-    })
-    pendingLink.value = null
-    emit('pendingLink', null)
-    toast.success(t('workspaces.linkedRepo.saved'), status.value.message)
+    const res = await setWorkspaceLinkedRepos(props.workspaceId!, next)
+    linkedList.value = res.repos
+    status.value = await getLinkedAppRepo(props.workspaceId!).catch(() => status.value)
+    toast.success(t('workspaces.linkedRepo.saved'), res.message)
+    clearCurrentSelection()
   } catch (err) {
     formError.value = toastError(err, t('workspaces.linkedRepo.saveFailed'))
     toast.error(t('workspaces.linkedRepo.saveFailed'), formError.value)
@@ -223,74 +258,66 @@ async function onSaveGithubLink() {
   }
 }
 
-async function onSaveGitlabTrack() {
+async function removeRepoAt(index: number) {
   if (saving.value || props.disabled) return
+  const next = linkedList.value.filter((_, i) => i !== index)
   if (!hasWorkspace.value) {
-    queueGitlabPending()
-    return
-  }
-  const path = gitlabPath.value.trim()
-  if (!path) {
-    formError.value = t('scaffold.repoSource.gitlabRepoRequired')
+    linkedList.value = next
+    syncPendingModels()
     return
   }
   saving.value = true
   formError.value = null
   try {
-    const cloneUrl = path.startsWith('http')
-      ? path
-      : `https://gitlab.com/${path.replace(/^\//, '')}.git`
-    await setWorkspaceGitSource(props.workspaceId!, {
-      git_repo_url: cloneUrl,
-      git_branch: gitBranch.value.trim() || 'main',
-    })
-    if (linked.value) {
-      status.value = await setLinkedAppRepo(props.workspaceId!, { clear: true })
-    }
-    pendingLink.value = null
-    emit('pendingLink', null)
-    toast.success(
-      t('scaffold.repoSource.gitlabSaved'),
-      t('scaffold.repoSource.gitlabSavedBlurb'),
-    )
+    const res = await setWorkspaceLinkedRepos(props.workspaceId!, next)
+    linkedList.value = res.repos
+    status.value = await getLinkedAppRepo(props.workspaceId!).catch(() => status.value)
   } catch (err) {
-    formError.value = toastError(err, t('scaffold.repoSource.saveFailed'))
-    toast.error(t('scaffold.repoSource.saveFailed'), formError.value)
+    formError.value = toastError(err, t('workspaces.linkedRepo.saveFailed'))
   } finally {
     saving.value = false
   }
 }
 
-async function onUnlink() {
+function repoLabel(item: WorkspaceLinkedRepoItem): string {
+  return item.full_name || item.git_repo_url.replace(/^https?:\/\//i, '').replace(/\.git$/i, '')
+}
+
+/** Which repo is primary: the flagged one, else the first (server marks exactly one). */
+function isPrimary(item: WorkspaceLinkedRepoItem, index: number): boolean {
+  const anyFlagged = linkedList.value.some((r) => r.primary)
+  return anyFlagged ? Boolean(item.primary) : index === 0
+}
+
+async function setPrimary(index: number) {
   if (saving.value || props.disabled) return
+  const next = linkedList.value.map((r, i) => ({ ...r, primary: i === index }))
   if (!hasWorkspace.value) {
-    pendingLink.value = null
-    emit('pendingLink', null)
-    fullName.value = ''
-    gitlabPath.value = ''
-    gitBranch.value = 'main'
-    toast.success(t('scaffold.repoSource.pendingCleared'))
+    linkedList.value = next
+    syncPendingModels()
     return
   }
   saving.value = true
   formError.value = null
   try {
-    if (gitHost.value === 'github' && linked.value) {
-      status.value = await setLinkedAppRepo(props.workspaceId!, { clear: true })
-      fullName.value = ''
-      gitBranch.value = 'main'
-      cdMode.value = 'webhook'
-      toast.success(t('workspaces.linkedRepo.unlinked'), status.value.message)
-    } else {
-      await setWorkspaceGitSource(props.workspaceId!, { clear: true })
-      gitlabPath.value = ''
-      toast.success(t('scaffold.repoSource.gitlabUnlinked'))
-    }
+    const res = await setWorkspaceLinkedRepos(props.workspaceId!, next)
+    linkedList.value = res.repos
+    status.value = await getLinkedAppRepo(props.workspaceId!).catch(() => status.value)
+    toast.success(t('workspaces.linkedRepo.saved'), res.message)
   } catch (err) {
-    formError.value = toastError(err, t('scaffold.repoSource.saveFailed'))
+    formError.value = toastError(err, t('workspaces.linkedRepo.saveFailed'))
+    toast.error(t('workspaces.linkedRepo.saveFailed'), formError.value)
   } finally {
     saving.value = false
   }
+}
+
+/** Provider from the actual URL host, not the stored kind (which can be wrong). */
+function providerLabel(item: WorkspaceLinkedRepoItem): string {
+  const url = (item.git_repo_url || '').toLowerCase()
+  if (url.includes('gitlab')) return 'gitlab'
+  if (url.includes('github')) return 'github'
+  return item.kind
 }
 
 function onImportSaved(newWorkspaceId: string) {
@@ -437,36 +464,11 @@ watch(
               type="button"
               class="lp-btn-primary text-xs"
               :disabled="disabled || saving || !installationId || !fullName.trim()"
-              @click="onSaveGithubLink"
+              @click="onAddRepo"
             >
-              {{
-                saving
-                  ? t('common.saving')
-                  : hasWorkspace
-                    ? t('scaffold.repoSource.saveLink')
-                    : t('scaffold.repoSource.queueLink')
-              }}
-            </button>
-            <button
-              v-if="linked || pendingLink?.kind === 'github'"
-              type="button"
-              class="lp-btn-ghost text-xs text-[var(--lp-danger)]"
-              :disabled="disabled || saving"
-              @click="onUnlink"
-            >
-              {{ t('workspaces.linkedRepo.unlink') }}
+              {{ saving ? t('common.saving') : t('scaffold.repoSource.addRepo') }}
             </button>
           </div>
-          <p v-if="linked" class="font-mono text-[10px] text-[var(--lp-muted)]">
-            {{ githubCloneUrl(linked.full_name) }} @ {{ linked.git_branch }}
-          </p>
-          <p
-            v-else-if="pendingLink?.kind === 'github'"
-            class="font-mono text-[10px] text-[var(--lp-accent)]"
-          >
-            {{ githubCloneUrl(pendingLink.full_name) }} @ {{ pendingLink.git_branch }}
-            ({{ t('scaffold.repoSource.pendingBadge') }})
-          </p>
         </template>
       </template>
 
@@ -497,28 +499,62 @@ watch(
               type="button"
               class="lp-btn-primary text-xs"
               :disabled="disabled || saving || !gitlabPath.trim()"
-              @click="onSaveGitlabTrack"
+              @click="onAddRepo"
             >
-              {{
-                saving
-                  ? t('common.saving')
-                  : hasWorkspace
-                    ? t('scaffold.repoSource.saveLink')
-                    : t('scaffold.repoSource.queueLink')
-              }}
-            </button>
-            <button
-              v-if="gitlabPath || pendingLink?.kind === 'gitlab'"
-              type="button"
-              class="lp-btn-ghost text-xs text-[var(--lp-danger)]"
-              :disabled="disabled || saving"
-              @click="onUnlink"
-            >
-              {{ t('workspaces.linkedRepo.unlink') }}
+              {{ saving ? t('common.saving') : t('scaffold.repoSource.addRepo') }}
             </button>
           </div>
         </template>
       </template>
+
+      <!-- Linked repositories (multi-repo). The primary repo is the one that deploys. -->
+      <div v-if="linkedList.length" class="space-y-1 border-t border-[var(--lp-line)] pt-3">
+        <p class="lp-label">
+          {{ t('scaffold.repoSource.linkedTitle') }}
+          <span v-if="!hasWorkspace" class="text-[var(--lp-accent)]">({{ t('scaffold.repoSource.pendingBadge') }})</span>
+        </p>
+        <ul class="space-y-1">
+          <li
+            v-for="(repo, i) in linkedList"
+            :key="repo.git_repo_url"
+            class="flex items-center justify-between gap-2 rounded-md border px-2 py-1"
+            :class="isPrimary(repo, i) ? 'border-[var(--lp-accent)]/50' : 'border-[var(--lp-line)]'"
+          >
+            <span class="min-w-0 truncate font-mono text-[11px] text-[var(--lp-text)]">
+              <span
+                class="mr-1 rounded px-1 text-[9px] uppercase"
+                :class="providerLabel(repo) === 'gitlab' ? 'bg-[var(--lp-accent)]/15 text-[var(--lp-accent)]' : 'bg-[var(--lp-line)] text-[var(--lp-muted)]'"
+              >{{ providerLabel(repo) }}</span>
+              {{ repoLabel(repo) }} @ {{ repo.git_branch }}
+              <span
+                v-if="isPrimary(repo, i)"
+                class="ml-1 rounded bg-[var(--lp-accent)]/15 px-1 text-[9px] uppercase text-[var(--lp-accent)]"
+              >{{ t('scaffold.repoSource.primary') }}</span>
+            </span>
+            <span class="flex shrink-0 items-center gap-1">
+              <button
+                v-if="!isPrimary(repo, i)"
+                type="button"
+                class="lp-btn-ghost px-1.5 text-[10px]"
+                :disabled="disabled || saving"
+                @click="setPrimary(i)"
+              >
+                {{ t('scaffold.repoSource.makePrimary') }}
+              </button>
+              <button
+                type="button"
+                class="lp-btn-ghost px-1 text-xs text-[var(--lp-danger)]"
+                :aria-label="t('workspaces.linkedRepo.unlink')"
+                :disabled="disabled || saving"
+                @click="removeRepoAt(i)"
+              >
+                <span class="material-symbols-outlined text-sm">close</span>
+              </button>
+            </span>
+          </li>
+        </ul>
+        <p class="text-[10px] text-[var(--lp-muted)]">{{ t('scaffold.repoSource.primaryHint') }}</p>
+      </div>
     </template>
 
     <template v-else>

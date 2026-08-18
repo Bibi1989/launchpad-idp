@@ -515,7 +515,9 @@ watch(advancedMode, async (enabled) => {
         </div>
       </section>
 
-      <WorkspaceRepoSourcePanel :workspace-id="workspace.workspace_id" />
+      <WorkspaceLinkedReposCard :workspace-id="workspace.workspace_id" />
+
+      <ServiceGraphPanel :workspace-id="workspace.workspace_id" />
 
       <p v-if="formStatusMessage && !advancedMode" class="text-sm text-[var(--lp-ok)]">
         {{ formStatusMessage }}

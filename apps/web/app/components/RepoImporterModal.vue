@@ -4,6 +4,7 @@ import type {
   DetectedService,
   EnvVarOverride,
   RepoImportSession,
+  RepoRef,
 } from '~/types/repoImport'
 import type { GitHost } from '~/types/git'
 import type {
@@ -59,6 +60,10 @@ const cicdPlatform = ref<'github' | 'gitlab'>('github')
 const envVars = ref<EnvVarOverride[]>([])
 const datastoreConfigs = ref<DatastoreImportConfig[]>([])
 
+// Extra repositories to import into the SAME workspace (multi-repo / microservices).
+// Empty => single-repo import, behaviour unchanged.
+const extraRepos = ref<RepoRef[]>([])
+
 const githubInstallations = ref<GitHubInstallationItem[]>([])
 const selectedInstallationId = ref<number | null>(null)
 const selectedRepoFullName = ref('')
@@ -83,6 +88,34 @@ const canAnalyze = computed(() => {
   if (gitHost.value === 'gitlab' && (url.includes('github.com') || url.includes('www.github.com'))) return false
   return true
 })
+
+const canSubmit = computed(() => canAnalyze.value || extraRepos.value.length > 0)
+
+function currentRepoRef(): RepoRef {
+  return {
+    git_repo_url: repoUrl.value.trim(),
+    git_branch: branch.value.trim() || 'main',
+    name: workspaceName.value.trim() ? deriveName(repoUrl.value) : null,
+    github_installation_id:
+      gitHost.value === 'github' ? selectedInstallationId.value : null,
+  }
+}
+
+function addRepo() {
+  if (!canAnalyze.value) return
+  const ref = currentRepoRef()
+  if (extraRepos.value.some((r) => r.git_repo_url === ref.git_repo_url)) return
+  extraRepos.value.push(ref)
+  // Clear the picker so the user can select the next repo (keep host + account).
+  repoUrl.value = ''
+  selectedRepoFullName.value = ''
+  selectedGitlabPath.value = ''
+  branch.value = 'main'
+}
+
+function removeRepo(index: number) {
+  extraRepos.value.splice(index, 1)
+}
 
 function deriveName(url: string) {
   const cleaned = url.trim().replace(/\.git$/i, '')
@@ -187,27 +220,39 @@ async function loadLaunchpadProjects() {
 
 async function analyze() {
   error.value = null
-  if (!canAnalyze.value) {
+  if (!canSubmit.value) {
     error.value = gitHost.value === 'github'
       ? t('import.invalidGithubUrl')
       : t('import.invalidGitlabUrl')
     return
   }
-  if (gitHost.value === 'github' && githubInstallations.value.length > 1 && !selectedInstallationId.value) {
+  if (gitHost.value === 'github' && githubInstallations.value.length > 1 && !selectedInstallationId.value && canAnalyze.value) {
     error.value = t('import.selectGithubAccount')
     return
   }
+  // Combine any staged extra repos with the current selection (deduped).
+  const combined: RepoRef[] = [...extraRepos.value]
+  if (canAnalyze.value) {
+    const current = currentRepoRef()
+    if (!combined.some((r) => r.git_repo_url === current.git_repo_url)) {
+      combined.push(current)
+    }
+  }
+  const primary = combined[0]!
+  const extras = combined.slice(1)
   loading.value = true
   try {
     if (!workspaceName.value.trim()) {
-      workspaceName.value = deriveName(repoUrl.value)
+      workspaceName.value = deriveName(primary.git_repo_url)
     }
     const result = await startImport({
-      git_repo_url: repoUrl.value.trim(),
-      git_branch: branch.value.trim() || 'main',
+      git_repo_url: primary.git_repo_url,
+      git_branch: primary.git_branch || 'main',
       use_github_app_token: gitHost.value === 'github',
       github_installation_id:
-        gitHost.value === 'github' ? selectedInstallationId.value : null,
+        primary.github_installation_id ??
+        (gitHost.value === 'github' ? selectedInstallationId.value : null),
+      repos: extras,
     })
     session.value = result
     services.value = result.services.map((s) => ({ ...s }))
@@ -294,6 +339,7 @@ async function reset() {
   services.value = []
   envVars.value = []
   datastoreConfigs.value = []
+  extraRepos.value = []
   step.value = 'url'
   error.value = null
 }
@@ -394,6 +440,43 @@ async function close() {
             />
           </div>
 
+          <!-- Multi-repo: stage extra repositories into the same workspace. -->
+          <div class="space-y-2 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel-2)] p-3">
+            <div class="flex items-center justify-between gap-2">
+              <div>
+                <p class="lp-label">{{ t('import.multiRepoTitle') }}</p>
+                <p class="text-[11px] text-[var(--lp-muted)]">{{ t('import.multiRepoBlurb') }}</p>
+              </div>
+              <button
+                type="button"
+                class="lp-btn-ghost text-xs"
+                :disabled="!canAnalyze"
+                @click="addRepo"
+              >
+                {{ t('import.addRepo') }}
+              </button>
+            </div>
+            <ul v-if="extraRepos.length" class="space-y-1">
+              <li
+                v-for="(r, i) in extraRepos"
+                :key="r.git_repo_url"
+                class="flex items-center justify-between gap-2 rounded-md border border-[var(--lp-line)] px-2 py-1"
+              >
+                <span class="truncate font-mono text-[11px] text-[var(--lp-text)]">
+                  {{ r.git_repo_url }} @ {{ r.git_branch || 'main' }}
+                </span>
+                <button
+                  type="button"
+                  class="lp-btn-ghost px-1 text-xs"
+                  :aria-label="t('serviceGraph.remove')"
+                  @click="removeRepo(i)"
+                >
+                  <span class="material-symbols-outlined text-sm">close</span>
+                </button>
+              </li>
+            </ul>
+          </div>
+
           <label class="block space-y-2">
             <span class="lp-label">{{ t('import.workspaceName') }}</span>
             <input
@@ -423,7 +506,7 @@ async function close() {
             <button
               type="button"
               class="lp-btn-primary"
-              :disabled="loading || !canAnalyze"
+              :disabled="loading || !canSubmit"
               @click="analyze"
             >
               {{ loading ? t('import.cloningDetecting') : t('import.analyzeRepo') }}

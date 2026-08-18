@@ -20,7 +20,7 @@
    * Dashboard page column (AppShell). Keep clearly narrower than the main
    * pane so cards do not look full-bleed on laptop / ultrawide screens.
    */
-  --lp-content-max: 72rem; /* 1152px - matches Tailwind max-w-6xl */
+  --lp-content-max: 1440px; /* 1152px - matches Tailwind max-w-6xl */
   /* Compact horizontal forms (invite, filters, SSO mapping). */
   --lp-form-row-max: 36rem;
   --lp-page-top: #0a1017;

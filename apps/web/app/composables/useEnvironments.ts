@@ -159,8 +159,12 @@ export function useEnvironments() {
     return environment
   }
 
-  async function retryProvision(id: string): Promise<Environment> {
-    const environment = await apiFetch<Environment>(`/environments/${id}/retry`, {
+  async function retryProvision(
+    id: string,
+    opts: { regenerateDockerfile?: boolean } = {},
+  ): Promise<Environment> {
+    const query = opts.regenerateDockerfile ? '?regenerate_dockerfile=true' : ''
+    const environment = await apiFetch<Environment>(`/environments/${id}/retry${query}`, {
       method: 'POST',
     })
     patchEnvironment(environment)

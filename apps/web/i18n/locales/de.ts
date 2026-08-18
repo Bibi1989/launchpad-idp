@@ -619,6 +619,9 @@ export default {
     "workspaceName": "Workspace-Name",
     "cloningDetecting": "Klonen & Erkennen…",
     "analyzeRepo": "Repository analysieren",
+    "multiRepoTitle": "Weitere Repositories",
+    "multiRepoBlurb": "Mehrere Microservices in einen Workspace importieren. Oben ein Repo auswählen, dann hinzufügen; für jeden Dienst wiederholen.",
+    "addRepo": "Repository hinzufügen",
     "confirmStack": "Erkannten Stack bestätigen",
     "startOver": "Neu starten",
     "savingWorkspace": "Workspace wird gespeichert…",
@@ -643,6 +646,7 @@ export default {
     "datastoreExternal": "Externe URL",
     "datastoreSkip": "Überspringen",
     "datastoreInClusterHint": "Launchpad startet Postgres/Redis neben der App und setzt Verbindungsvariablen.",
+    "datastoreInClusterAutoInjected": "Launchpad betreibt {kind} im Cluster und injiziert die Verbindungs-URL automatisch als Umgebungsvariable (z.B. DATABASE_URL / REDIS_URL). Keine Konfiguration nötig.",
     "datastoreExternalHint": "Empfohlen für shared/managed DBs. z.B. Neon/Supabase Postgres, Upstash Redis.",
     "connectionUrl": "Connection-URL",
     "useSuggestedUrl": "Vorschlag verwenden",
@@ -651,6 +655,23 @@ export default {
     "showSecretKeys": "Secret-Keys anzeigen",
     "secretBadge": "secret",
     "noEnvExample": "Keine .env.example gefunden. Datastore-URLs können trotzdem gesetzt werden."
+  },
+  "envVars": {
+    "title": "Variablen",
+    "customTitle": "Eigene Umgebungsvariablen",
+    "customBlurb": "Variablen hinzufügen, die dein Service zur Laufzeit braucht. Einen .env-Block einfügen oder einzeln hinzufügen. Wird in den Container injiziert.",
+    "paste": ".env einfügen",
+    "pasteHint": "KEY=VALUE-Zeilen einfügen (eine .env-Datei). Kommentare (#) und Leerzeilen werden ignoriert; vorhandene Keys werden aktualisiert.",
+    "pasteParsed": "{count} Variable(n) erkannt",
+    "pasteApply": "Erkannte hinzufügen",
+    "add": "Variable hinzufügen",
+    "remove": "Entfernen",
+    "empty": "Noch keine eigenen Variablen.",
+    "keyPlaceholder": "KEY",
+    "valuePlaceholder": "wert",
+    "reveal": "Wert anzeigen",
+    "hide": "Wert verbergen",
+    "corsNote": "Launchpad fügt die Preview-Frontend-URL beim Deploy automatisch zu den CORS-Origins des Backends hinzu (CORS_ALLOWED_ORIGINS) - angehängt, falls bereits gesetzt, sonst neu hinzugefügt - damit das Frontend das Backend ohne manuelle Einrichtung aufrufen kann."
   },
   "promotions": {
     "title": "Stage-Promotions",
@@ -742,6 +763,7 @@ export default {
       "appUrl": "App-URL",
       "ttlRemaining": "TTL verbleibend",
       "noTtl": "Keine TTL",
+      "ttlPending": "Startet, sobald aktiv",
       "noTtlHint": "Permanent bis Sie die Umgebung zerstören",
       "expires": "Läuft ab",
       "promoteToStaging": "Nach Staging promoten",
@@ -838,7 +860,15 @@ export default {
       "auditEmpty": "Noch keine Control-Plane-Audit-Ereignisse für diese Preview.",
       "openPreview": "Preview öffnen",
       "openPreviewTitle": "{image} öffnen ({port})",
-      "deployingToCloud": "Deployment nach {provider}."
+      "deployingToCloud": "Deployment nach {provider}.",
+      "regenerateDockerfile": {
+        "button": "Dockerfile neu erzeugen und erneut versuchen",
+        "hint": "Der Image-Build ist fehlgeschlagen. Launchpad kann ein zum Stack passendes Dockerfile erzeugen.",
+        "title": "Dockerfile neu erzeugen und erneut versuchen?",
+        "message": "Der Container-Image-Build ist fehlgeschlagen, oft weil das eigene Dockerfile des Repositorys auf Dateien verweist, die nicht im Build-Kontext liegen. Launchpad erzeugt ein neues Dockerfile aus dem erkannten Stack und baut erneut. Ihr Repository wird nicht verändert. Fortfahren?",
+        "confirm": "Erzeugen und erneut versuchen",
+        "toastTitle": "Neuer Build mit erzeugtem Dockerfile"
+      }
     },
     "actions": {
       "pause": "Pausieren",
@@ -855,8 +885,8 @@ export default {
       "queuingStop": "Stoppen…",
       "copyUrl": "URL kopieren",
       "copied": "Kopiert",
-      "extendTtl": "TTL verlängern",
-      "extending": "Verlängern…",
+      "extendTtl": "TTL zurücksetzen",
+      "extending": "Zurücksetzen…",
       "scanDrift": "Drift prüfen",
       "scanning": "Prüfen…",
       "analyze": "Analysieren",
@@ -920,8 +950,8 @@ export default {
       "deletingBanner": "Umgebung wird gelöscht und Ressourcen freigegeben…",
       "stopped": "Bereitstellung gestoppt",
       "stopFailed": "Stoppen fehlgeschlagen",
-      "extended": "TTL verlängert",
-      "extendFailed": "TTL-Verlängerung fehlgeschlagen",
+      "extended": "TTL zurückgesetzt",
+      "extendFailed": "TTL-Zurücksetzen fehlgeschlagen",
       "driftOk": "Kein Drift erkannt",
       "driftFailed": "Drift-Scan fehlgeschlagen",
       "cloudFailed": "Cloud-Preview fehlgeschlagen",
@@ -2379,6 +2409,13 @@ export default {
       "modeServices": "Services",
       "saveLink": "Verknüpfung speichern",
       "queueLink": "Dieses Repo verwenden",
+      "addRepo": "Repository hinzufügen",
+      "linkedTitle": "Verknüpfte Repositories",
+      "primary": "primär",
+      "makePrimary": "Als primär festlegen",
+      "primaryHint": "Das primäre Repo wird deployt. Standard ist das Frontend-Repo.",
+      "manage": "Verwalten",
+      "emptyDetail": "Noch kein Repository verknüpft. Über Aktualisieren verknüpfen oder importieren.",
       "pendingHint": "Repo und Branch jetzt wählen. Launchpad wendet die Verknüpfung an, wenn dieser Workspace erstellt wird.",
       "pendingSaved": "Repo vorgemerkt",
       "pendingSavedBlurb": "Die Verknüpfung wird beim Erstellen oder Speichern des Workspace angewendet.",
@@ -2489,7 +2526,13 @@ export default {
       "inCluster": "Im Cluster",
       "managedCloud": "Managed Cloud",
       "enableManagedFirst": "Zuerst {service} in Cloud-Ressourcen aktivieren.",
-      "managedHint": "Connection-Strings nutzen Terraform-Outputs - siehe infra/MANAGED_DATASTORES.md nach Apply."
+      "managedHint": "Connection-Strings nutzen Terraform-Outputs - siehe infra/MANAGED_DATASTORES.md nach Apply.",
+      "brokersTitle": "Message-Broker",
+      "brokersBlurb": "Broker im Cluster für deine Microservices betreiben oder eigenen Broker angeben. Services erhalten KAFKA_BROKERS / RABBITMQ_URL automatisch.",
+      "bringYourOwn": "Extern (eigene URL)",
+      "brokerUrl": "Broker-URL",
+      "connectionUrl": "Verbindungs-URL",
+      "inClusterAutoInjected": "Launchpad betreibt dies im Cluster und injiziert die Verbindungs-URL automatisch als Umgebungsvariable (DATABASE_URL / REDIS_URL). Keine Einrichtung nötig."
     },
     "detected": {
       "architecture": "Erkannte Architektur",
@@ -2858,5 +2901,22 @@ export default {
       "noServiceUrl": "Keine veröffentlichte URL (Containerliste am Node prüfen)",
       "dismissResult": "Schließen"
     }
+  },
+  "serviceGraph": {
+    "title": "Dienstverbindungen",
+    "subtitle": "Wie die Dienste in diesem Workspace kommunizieren. Erkannte Verbindungen werden automatisch angezeigt; eigene hinzufügen, um sie zu überschreiben oder zu ergänzen.",
+    "legend": "Durchgezogene Verbindungen sind von dir konfiguriert. Gepunktete Verbindungen wurden aus dem Code erkannt.",
+    "connections": "Verbindungen",
+    "none": "Noch keine Verbindungen erkannt.",
+    "configured": "konfiguriert",
+    "auto": "erkannt",
+    "addConnection": "Verbindung hinzufügen",
+    "source": "Von",
+    "target": "Nach",
+    "protocol": "Protokoll",
+    "protocolAuto": "Automatisch aus Datenbank/Broker erkannt",
+    "add": "Verbindung hinzufügen",
+    "saving": "Speichern…",
+    "remove": "Entfernen"
   }
 } as const

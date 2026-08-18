@@ -54,6 +54,8 @@ describe('groupEnvironmentsByLineage', () => {
         name: 'other-app',
         git_repo_url: 'https://github.com/acme/other.git',
         promotion_lineage_id: null,
+        // Newer creation date -> this group sorts to the top (latest first).
+        created_at: '2026-02-01T00:00:00Z',
         updated_at: '2026-01-04T00:00:00Z',
       }),
     ])

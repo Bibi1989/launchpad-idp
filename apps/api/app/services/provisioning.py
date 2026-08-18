@@ -50,6 +50,10 @@ from app.schemas.cloud import (
     WorkspaceLinkedAppRepo,
     WorkspaceLinkedAppRepoRequest,
     WorkspaceLinkedAppRepoResponse,
+    WorkspaceLinkedRepoItem,
+    WorkspaceLinkedReposRequest,
+    WorkspaceLinkedReposResponse,
+    WorkspaceRepoKind,
     WorkspaceGitSourceRequest,
     WorkspaceGitSourceResponse,
     WorkspaceListItem,
@@ -410,6 +414,86 @@ class ProvisioningService:
             },
         )
 
+    async def get_service_graph(self, workspace_id: UUID, owner: User):
+        """Return the workspace's inter-service connection graph (nodes/edges/mermaid)."""
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        return self._build_service_graph_response(row)
+
+    async def update_service_connections(self, workspace_id: UUID, owner: User, connections):
+        """Persist operator-configured connections and return the rebuilt graph."""
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        try:
+            snapshot = json.loads(row.wizard_config_json) if row.wizard_config_json else {}
+        except json.JSONDecodeError:
+            snapshot = {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        snapshot["service_connections"] = [c.model_dump() for c in connections]
+        row.wizard_config_json = json.dumps(snapshot)
+        await self._session.commit()
+        return self._build_service_graph_response(row)
+
+    def _build_service_graph_response(self, row: ProvisioningWorkspace):
+        """Rebuild the connection graph from persisted comms + operator connections."""
+        from app.schemas.repo_import import ServiceGraphResponse
+        from app.services.comm_detector import ServiceComms
+        from app.services.service_graph import (
+            ExplicitConnection,
+            build_service_graph,
+            graph_to_mermaid,
+        )
+
+        try:
+            raw = json.loads(row.wizard_config_json) if row.wizard_config_json else {}
+        except json.JSONDecodeError:
+            raw = {}
+        raw = raw if isinstance(raw, dict) else {}
+
+        comms = [
+            ServiceComms.model_validate(c)
+            for c in (raw.get("service_comms") or [])
+            if isinstance(c, dict)
+        ]
+        # Linked repos (link flow) carry no detected comms - surface each as a service
+        # node so it can be wired to databases/brokers in the connection editor.
+        existing_services = {c.service for c in comms}
+        for item in self._linked_repos_from_snapshot(raw):
+            name = self._repo_service_name(item)
+            if name and name not in existing_services:
+                comms.append(ServiceComms(service=name, capabilities=[]))
+                existing_services.add(name)
+        explicit = [
+            ExplicitConnection.model_validate(c)
+            for c in (raw.get("service_connections") or [])
+            if isinstance(c, dict)
+        ]
+        frameworks: dict[str, str] = {}
+        detection = raw.get("detection") if isinstance(raw.get("detection"), dict) else {}
+        for svc in (detection or {}).get("services", []):
+            if isinstance(svc, dict) and svc.get("name"):
+                frameworks[str(svc["name"])] = str(svc.get("framework") or "")
+
+        # Enabled dependency kinds (databases, caches, brokers) surface as graph nodes.
+        deps = raw.get("dependencies") if isinstance(raw.get("dependencies"), dict) else {}
+        infra_kinds = [
+            kind
+            for kind, cfg in (deps or {}).items()
+            if isinstance(cfg, dict) and cfg.get("enabled")
+        ]
+
+        graph = build_service_graph(
+            comms,
+            explicit_connections=explicit,
+            frameworks=frameworks,
+            infra_kinds=infra_kinds,
+        )
+        return ServiceGraphResponse(
+            repos=list(raw.get("repos") or []),
+            nodes=[n.model_dump() for n in graph.nodes],
+            edges=[e.model_dump(mode="json") for e in graph.edges],
+            mermaid=graph_to_mermaid(graph),
+        )
+
     async def get_bundle_summary(
         self,
         workspace_id: UUID,
@@ -608,6 +692,7 @@ class ProvisioningService:
             container_scaffold=config.container_scaffold,
             dependencies=config.dependencies,
             ansible=config.ansible,
+            env_vars=config.env_vars,
         )
         return await self.generate_bundle(
             promoted_request,
@@ -2176,6 +2261,254 @@ class ProvisioningService:
             environments_updated=environments_updated,
         )
 
+    # Tokens (whole words in the repo leaf) that mark a repo as the frontend/UI.
+    _FRONTEND_TOKENS = frozenset({
+        "frontend", "front", "web", "webapp", "ui", "client", "www", "site", "dashboard",
+    })
+
+    @classmethod
+    def _is_frontend_repo(cls, item: WorkspaceLinkedRepoItem) -> bool:
+        """Heuristic: is this linked repo the frontend? (by repo name tokens)."""
+        import re
+
+        text = (item.full_name or item.git_repo_url or "").lower()
+        leaf = text.rstrip("/").split("/")[-1].removesuffix(".git")
+        tokens = {t for t in re.split(r"[^a-z0-9]+", leaf) if t}
+        return bool(tokens & cls._FRONTEND_TOKENS)
+
+    @classmethod
+    def _choose_primary_repo_index(cls, repos: list[WorkspaceLinkedRepoItem]) -> int:
+        """Explicit primary wins; else the frontend repo; else the first."""
+        for i, repo in enumerate(repos):
+            if getattr(repo, "primary", False):
+                return i
+        for i, repo in enumerate(repos):
+            if cls._is_frontend_repo(repo):
+                return i
+        return 0
+
+    @staticmethod
+    def _repo_service_name(item: WorkspaceLinkedRepoItem) -> str:
+        """Service-node name for a linked repo (the repo leaf, K8s-safe)."""
+        import re
+
+        base = (item.full_name or "").strip()
+        leaf = base.split("/")[-1] if base else ""
+        if not leaf:
+            url = (item.git_repo_url or "").strip().rstrip("/")
+            leaf = url.split("/")[-1]
+            if leaf.endswith(".git"):
+                leaf = leaf[:-4]
+        return re.sub(r"[^a-z0-9-]+", "-", leaf.lower()).strip("-")[:63]
+
+    def _linked_repos_from_snapshot(
+        self, snapshot: dict[str, object]
+    ) -> list[WorkspaceLinkedRepoItem]:
+        """Read the linked-repos list, falling back to a legacy single link."""
+        raw = snapshot.get("linked_repos")
+        items: list[WorkspaceLinkedRepoItem] = []
+        if isinstance(raw, list):
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    items.append(WorkspaceLinkedRepoItem.model_validate(entry))
+                except Exception:  # noqa: BLE001, S112 - tolerate malformed persisted data
+                    continue
+        if items:
+            return items
+        # Backward compat: synthesize a 1-item list from a legacy single link so the
+        # UI shows an existing GitHub App / git source as the first linked repo.
+        legacy = self._linked_app_repo_from_snapshot(snapshot)
+        if legacy is not None:
+            return [
+                WorkspaceLinkedRepoItem(
+                    kind=WorkspaceRepoKind.GITHUB,
+                    git_repo_url=legacy.git_repo_url,
+                    git_branch=legacy.git_branch,
+                    full_name=legacy.full_name,
+                    installation_id=legacy.installation_id,
+                    cd_mode=legacy.cd_mode,
+                    workflow_path=legacy.workflow_path,
+                    primary=True,
+                )
+            ]
+        url = snapshot.get("git_repo_url")
+        if isinstance(url, str) and url.strip():
+            branch = snapshot.get("git_branch")
+            return [
+                WorkspaceLinkedRepoItem(
+                    kind=WorkspaceRepoKind.GITLAB,
+                    git_repo_url=url.strip(),
+                    git_branch=str(branch).strip() if isinstance(branch, str) and branch.strip() else "main",
+                    primary=True,
+                )
+            ]
+        return []
+
+    async def get_workspace_linked_repos(
+        self, workspace_id: UUID, owner: User
+    ) -> WorkspaceLinkedReposResponse:
+        from app.core.config import get_settings
+
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        snapshot = self._parse_wizard_dict(row)
+        repos = self._linked_repos_from_snapshot(snapshot)
+        settings = get_settings()
+        primary = repos[0] if repos else None
+        return WorkspaceLinkedReposResponse(
+            repos=repos,
+            primary_git_repo_url=primary.git_repo_url if primary else None,
+            primary_git_branch=primary.git_branch if primary else "main",
+            webhook_configured=bool((settings.webhook_secret or "").strip()),
+            control_plane_url=self._control_plane_url(),
+            message=(
+                f"{len(repos)} repository(ies) linked."
+                if repos
+                else "No repositories linked yet."
+            ),
+        )
+
+    async def set_workspace_linked_repos(
+        self,
+        workspace_id: UUID,
+        request: WorkspaceLinkedReposRequest,
+        *,
+        owner: User,
+    ) -> WorkspaceLinkedReposResponse:
+        """Replace the workspace's linked-repo list (primary = first item).
+
+        Multi-repo aware and backward compatible: the primary drives the legacy
+        git_repo_url / linked_app_repo fields and environment mirroring, so existing
+        single-repo consumers and webhook matching keep working. For github repos in
+        github_actions CD mode, a per-repo workflow is installed (all scoped to this
+        workspace), so a push to ANY linked repo rebuilds the workspace.
+        """
+        from datetime import UTC, datetime
+
+        from app.core.config import get_settings
+        from app.models.domain import Environment, EnvironmentStatus
+        from app.repositories.environment import ACTIVE_REBUILD_STATUSES
+
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        snapshot = self._parse_wizard_dict(row)
+        settings = get_settings()
+        webhook_configured = bool((settings.webhook_secret or "").strip())
+
+        if not request.repos:
+            snapshot.pop("linked_repos", None)
+            snapshot.pop("linked_app_repo", None)
+            if snapshot.get("source") != "repo_import":
+                snapshot.pop("git_repo_url", None)
+                snapshot.pop("git_branch", None)
+            row.wizard_config_json = json.dumps(snapshot)
+            await self._session.commit()
+            return WorkspaceLinkedReposResponse(
+                repos=[],
+                webhook_configured=webhook_configured,
+                control_plane_url=self._control_plane_url(),
+                message="All linked repositories cleared.",
+            )
+
+        stored: list[WorkspaceLinkedRepoItem] = []
+        for item in request.repos:
+            workflow_path = item.workflow_path
+            if (
+                item.kind == WorkspaceRepoKind.GITHUB
+                and item.cd_mode == WorkspaceCdMode.GITHUB_ACTIONS
+                and item.installation_id
+                and item.full_name
+            ):
+                cd_secret = (settings.webhook_secret or "").strip() or None
+                if not cd_secret:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "webhook_secret_required",
+                            "message": (
+                                "CD mode github_actions requires WEBHOOK_SECRET on the API "
+                                "so Launchpad can set LAUNCHPAD_CD_SECRET on each repo."
+                            ),
+                        },
+                    )
+                try:
+                    workflow_path = await asyncio.to_thread(
+                        self._github.ensure_app_cd_workflow,
+                        installation_id=item.installation_id,
+                        full_name=item.full_name,
+                        branch=item.git_branch,
+                        control_plane_url=self._control_plane_url(),
+                        cd_secret=cd_secret,
+                        workspace_id=str(workspace_id),
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"code": "github_app_cd_failed", "message": str(exc)},
+                    ) from exc
+            stored.append(item.model_copy(update={"workflow_path": workflow_path}))
+
+        # Choose the primary repo (the one that deploys): an explicit user selection
+        # wins; otherwise default to the frontend-looking repo; otherwise the first.
+        # Reorder so the primary is index 0 and mark exactly one item primary.
+        primary_idx = self._choose_primary_repo_index(stored)
+        if primary_idx > 0:
+            stored.insert(0, stored.pop(primary_idx))
+        stored = [item.model_copy(update={"primary": i == 0}) for i, item in enumerate(stored)]
+
+        snapshot["linked_repos"] = [i.model_dump(mode="json") for i in stored]
+
+        # Primary drives the legacy single-repo fields (backward compatible).
+        primary = stored[0]
+        snapshot["git_repo_url"] = primary.git_repo_url
+        snapshot["git_branch"] = primary.git_branch
+        if primary.kind == WorkspaceRepoKind.GITHUB and primary.installation_id and primary.full_name:
+            snapshot["linked_app_repo"] = WorkspaceLinkedAppRepo(
+                installation_id=primary.installation_id,
+                full_name=primary.full_name,
+                git_repo_url=primary.git_repo_url,
+                git_branch=primary.git_branch,
+                cd_mode=primary.cd_mode,
+                workflow_path=primary.workflow_path,
+                updated_at=datetime.now(UTC),
+            ).model_dump(mode="json")
+        else:
+            snapshot.pop("linked_app_repo", None)
+        row.wizard_config_json = json.dumps(snapshot)
+
+        environments_updated = 0
+        env_rows = (
+            await self._session.execute(
+                select(Environment).where(
+                    Environment.workspace_id == workspace_id,
+                    Environment.status.in_(
+                        (*ACTIVE_REBUILD_STATUSES, EnvironmentStatus.PAUSED)
+                    ),
+                )
+            )
+        ).scalars().all()
+        for env in env_rows:
+            env.git_repo_url = primary.git_repo_url
+            env.git_branch = primary.git_branch
+            environments_updated += 1
+
+        await self._session.commit()
+        logger.info(
+            "workspace_linked_repos_saved",
+            workspace_id=str(workspace_id),
+            repo_count=len(stored),
+            environments_updated=environments_updated,
+        )
+        return WorkspaceLinkedReposResponse(
+            repos=stored,
+            primary_git_repo_url=primary.git_repo_url,
+            primary_git_branch=primary.git_branch,
+            webhook_configured=webhook_configured,
+            control_plane_url=self._control_plane_url(),
+            message=f"Linked {len(stored)} repository(ies). Primary: {primary.git_repo_url}",
+            environments_updated=environments_updated,
+        )
+
     def _workspace_root(self, workspace: ProvisioningWorkspace) -> Path:
         return Path(workspace.root_dir)
 
@@ -2214,17 +2547,27 @@ class ProvisioningService:
             "container_scaffold": request.container_scaffold.model_dump(mode="json"),
             "dependencies": request.dependencies.model_dump(mode="json"),
             "ansible": request.ansible.model_dump(mode="json"),
+            "env_vars": [e.model_dump(mode="json") for e in request.env_vars],
         }
         if preserve:
             for key in (
                 "git_repo_url",
                 "git_branch",
                 "linked_app_repo",
+                "linked_repos",
                 "source",
                 "import_id",
                 "detection",
                 "preview_service",
                 "commit_sha",
+                # Multi-repo + service-graph state must survive a plain workspace
+                # update (which carries no repo/graph fields), or the Services graph
+                # loses its nodes/edges.
+                "repos",
+                "service_comms",
+                "service_connections",
+                "service_graph",
+                "service_graph_mermaid",
             ):
                 if key in preserve and key not in payload:
                     payload[key] = preserve[key]
@@ -2360,6 +2703,7 @@ class ProvisioningService:
             container_scaffold=config.container_scaffold,
             dependencies=config.dependencies,
             ansible=config.ansible,
+            env_vars=config.env_vars,
         )
 
     async def restore_workspace_files(

@@ -452,7 +452,7 @@ watch(
           :class="
             bare
               ? 'w-full'
-              : 'lp-dashboard-main mx-auto w-full max-w-6xl'
+              : 'lp-dashboard-main mx-auto w-full max-w-[1600px]'
           "
         >
           <slot />

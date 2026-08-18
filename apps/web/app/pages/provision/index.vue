@@ -28,6 +28,7 @@ import type {
   RunningInstanceConfig,
   ProvisioningCostEstimate,
   WorkspaceArtifactsMode,
+  WorkspaceLinkedRepoItem,
   WorkspaceListItem,
   WorkspacePromotionTarget,
   WorkspaceRuntimeMode,
@@ -91,6 +92,7 @@ const {
   analyzeWorkspaceFile,
   setLinkedAppRepo,
   setWorkspaceGitSource,
+  setWorkspaceLinkedRepos,
 } = useProvisioning()
 const { t } = useI18n()
 const route = useRoute()
@@ -108,6 +110,7 @@ const selectedWorkspaceId = ref<string>(NEW_WORKSPACE)
 const sessionCreatedWorkspaceId = ref<string | null>(null)
 /** Repo link chosen before workspace exists; applied after create/update. */
 const pendingRepoLink = ref<PendingWorkspaceRepoLink | null>(null)
+const pendingRepoLinks = ref<WorkspaceLinkedRepoItem[]>([])
 const hasStoredCredentials = ref(false)
 const credentialStatus = ref<UserCloudCredentialsStatus | null>(null)
 const loadingConfig = ref(false)
@@ -779,6 +782,7 @@ watch(selectedWorkspaceId, async (id) => {
     loadingConfig.value = false
     sessionCreatedWorkspaceId.value = null
     pendingRepoLink.value = null
+    pendingRepoLinks.value = []
     hasStoredCredentials.value = false
     promoteFromExisting.value = false
     promotedWorkspaceName.value = ''
@@ -1204,6 +1208,18 @@ async function recoverCreatedWorkspaceByName(name: string): Promise<string | nul
 }
 
 async function applyPendingRepoLink(workspaceId: string) {
+  // Multi-repo: apply the full staged list in one call (primary = first).
+  if (pendingRepoLinks.value.length) {
+    try {
+      await setWorkspaceLinkedRepos(workspaceId, pendingRepoLinks.value)
+      pendingRepoLinks.value = []
+      pendingRepoLink.value = null
+      return
+    } catch {
+      // Keep pending so the user can retry from Services after create.
+      return
+    }
+  }
   const pending = pendingRepoLink.value
   if (!pending) return
   try {
@@ -1826,6 +1842,7 @@ async function onPrimaryAction() {
               v-if="form.container_scaffold.enabled"
               v-model="form.container_scaffold"
               v-model:pending-repo-link="pendingRepoLink"
+              v-model:pending-repo-links="pendingRepoLinks"
               class="mt-4"
               :workspace-id="repoWorkspaceId"
               :launchpad-project-id="launchpadProjectId"
@@ -1880,6 +1897,7 @@ async function onPrimaryAction() {
                   v-if="form.container_scaffold.enabled"
                   v-model="form.container_scaffold"
                   v-model:pending-repo-link="pendingRepoLink"
+              v-model:pending-repo-links="pendingRepoLinks"
                   class="mt-4"
                   :workspace-id="repoWorkspaceId"
                   :launchpad-project-id="launchpadProjectId"
@@ -1925,6 +1943,7 @@ async function onPrimaryAction() {
                 v-if="form.container_scaffold.enabled"
                 v-model="form.container_scaffold"
                 v-model:pending-repo-link="pendingRepoLink"
+              v-model:pending-repo-links="pendingRepoLinks"
                 class="mt-4"
                 :workspace-id="repoWorkspaceId"
                 :launchpad-project-id="launchpadProjectId"
@@ -1964,6 +1983,7 @@ async function onPrimaryAction() {
                 v-if="form.container_scaffold.enabled"
                 v-model="form.container_scaffold"
                 v-model:pending-repo-link="pendingRepoLink"
+              v-model:pending-repo-links="pendingRepoLinks"
                 class="mt-4"
                 :workspace-id="repoWorkspaceId"
                 :launchpad-project-id="launchpadProjectId"

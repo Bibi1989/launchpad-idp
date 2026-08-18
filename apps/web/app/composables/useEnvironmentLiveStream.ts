@@ -7,6 +7,7 @@ export function useEnvironmentLiveStream(
   } = {},
 ) {
   const status = ref<EnvironmentStatus | null>(null)
+  const stage = ref<string | null>(null)
   const commitSha = ref<string | null>(null)
   const logLines = ref<string[]>([])
   const connected = ref(false)
@@ -22,6 +23,9 @@ export function useEnvironmentLiveStream(
   function handlePayload(payload: EnvStreamEvent) {
     if (payload.status) {
       status.value = payload.status as EnvironmentStatus
+    }
+    if (payload.stage) {
+      stage.value = payload.stage
     }
     if (payload.commit_sha) {
       commitSha.value = payload.commit_sha
@@ -40,6 +44,7 @@ export function useEnvironmentLiveStream(
     disconnect()
     logLines.value = []
     connected.value = false
+    stage.value = null
 
     const config = useRuntimeConfig()
     const authQuery = token.value ? `?token=${encodeURIComponent(token.value)}` : ''
@@ -81,6 +86,7 @@ export function useEnvironmentLiveStream(
 
   return {
     status,
+    stage,
     commitSha,
     logLines,
     connected,

@@ -58,7 +58,7 @@ def test_environment_read_app_ready_and_ttl() -> None:
 
 
 def test_governance_settings_defaults() -> None:
-    assert Settings.model_fields["max_concurrent_environments"].default in (6,)
+    assert Settings.model_fields["max_concurrent_environments"].default in (10,)
     assert Settings.model_fields["max_concurrent_environments_pro"].default is None
     assert Settings.model_fields["ttl_extend_hours_default"].default == 1
     assert Settings.model_fields["ttl_warning_hours"].default == 0.5

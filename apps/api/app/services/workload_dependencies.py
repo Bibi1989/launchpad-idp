@@ -23,6 +23,8 @@ class DataStoreKind(str, Enum):
     MARIADB = "mariadb"
     MONGODB = "mongodb"
     REDIS = "redis"
+    KAFKA = "kafka"
+    RABBITMQ = "rabbitmq"
 
 
 def default_workload_dependencies() -> WorkloadDependenciesConfig:
@@ -143,6 +145,12 @@ def validate_managed_dependencies(
         else:
             raise ValueError("Managed Redis is not supported for this cloud provider")
 
+    # Message brokers support in-cluster or bring-your-own (external) only.
+    if dependencies.kafka.enabled and dependencies.kafka.placement == DependencyPlacement.MANAGED:
+        raise ValueError("Managed Kafka is not supported; use in-cluster or an external broker URL")
+    if dependencies.rabbitmq.enabled and dependencies.rabbitmq.placement == DependencyPlacement.MANAGED:
+        raise ValueError("Managed RabbitMQ is not supported; use in-cluster or an external broker URL")
+
 
 def _in_cluster_kinds(dependencies: WorkloadDependenciesConfig) -> list[DataStoreKind]:
     mapping = {
@@ -151,6 +159,8 @@ def _in_cluster_kinds(dependencies: WorkloadDependenciesConfig) -> list[DataStor
         DataStoreKind.MARIADB: dependencies.mariadb,
         DataStoreKind.MONGODB: dependencies.mongodb,
         DataStoreKind.REDIS: dependencies.redis,
+        DataStoreKind.KAFKA: dependencies.kafka,
+        DataStoreKind.RABBITMQ: dependencies.rabbitmq,
     }
     return [
         kind
@@ -271,6 +281,26 @@ def dependency_secret_string_data(
         else:
             data["REDIS_URL"] = "redis://${terraform_output:managed_redis_host}:6379/0"
 
+    if dependencies.kafka.enabled:
+        if dependencies.kafka.placement == DependencyPlacement.EXTERNAL:
+            url = (dependencies.kafka.connection_url or "").strip()
+            if url:
+                data["KAFKA_BROKERS"] = url
+                data.setdefault("KAFKA_BOOTSTRAP_SERVERS", url)
+        else:  # in-cluster (managed is rejected in validation)
+            data["KAFKA_BROKERS"] = "kafka:9092"
+            data.setdefault("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+
+    if dependencies.rabbitmq.enabled:
+        if dependencies.rabbitmq.placement == DependencyPlacement.EXTERNAL:
+            url = (dependencies.rabbitmq.connection_url or "").strip()
+            if url:
+                data["RABBITMQ_URL"] = url
+                data.setdefault("AMQP_URL", url)
+        else:  # in-cluster (managed is rejected in validation)
+            data["RABBITMQ_URL"] = "amqp://guest:guest@rabbitmq:5672/"
+            data.setdefault("AMQP_URL", "amqp://guest:guest@rabbitmq:5672/")
+
     return data
 
 
@@ -285,6 +315,8 @@ def init_container_wait_blocks(kinds: list[DataStoreKind]) -> str:
         DataStoreKind.MARIADB: ("wait-for-mariadb", "mariadb", 3306),
         DataStoreKind.MONGODB: ("wait-for-mongodb", "mongodb", 27017),
         DataStoreKind.REDIS: ("wait-for-redis", "redis", 6379),
+        DataStoreKind.KAFKA: ("wait-for-kafka", "kafka", 9092),
+        DataStoreKind.RABBITMQ: ("wait-for-rabbitmq", "rabbitmq", 5672),
     }
     for kind in kinds:
         name, host, port = port_map[kind]
@@ -350,6 +382,12 @@ def in_cluster_manifest_files(
         elif kind == DataStoreKind.REDIS:
             files["redis-deployment.yaml"] = _redis_deployment_yaml(ns, name)
             files["redis-service.yaml"] = _datastore_service_yaml(ns, name, "redis", 6379)
+        elif kind == DataStoreKind.KAFKA:
+            files["kafka-deployment.yaml"] = _kafka_deployment_yaml(ns, name)
+            files["kafka-service.yaml"] = _datastore_service_yaml(ns, name, "kafka", 9092)
+        elif kind == DataStoreKind.RABBITMQ:
+            files["rabbitmq-deployment.yaml"] = _rabbitmq_deployment_yaml(ns, name)
+            files["rabbitmq-service.yaml"] = _datastore_service_yaml(ns, name, "rabbitmq", 5672)
     return files
 
 
@@ -726,6 +764,145 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {{}}
+"""
+
+
+def _kafka_deployment_yaml(ns: str, name: str) -> str:
+    # Single-node KRaft Kafka (no ZooKeeper) suitable for ephemeral workspaces.
+    return f"""\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: {ns}
+  labels:
+{_datastore_labels(name, "kafka").rstrip()}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+      launchpad.io/managed-by: launchpad-idp
+  template:
+    metadata:
+      labels:
+{_datastore_labels(name, "kafka", indent=8).rstrip()}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: bitnami/kafka:3.7
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: kafka
+              containerPort: 9092
+          env:
+            - name: KAFKA_CFG_NODE_ID
+              value: "0"
+            - name: KAFKA_CFG_PROCESS_ROLES
+              value: controller,broker
+            - name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS
+              value: 0@localhost:9093
+            - name: KAFKA_CFG_LISTENERS
+              value: PLAINTEXT://:9092,CONTROLLER://:9093
+            - name: KAFKA_CFG_ADVERTISED_LISTENERS
+              value: PLAINTEXT://kafka:9092
+            - name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP
+              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+            - name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_CFG_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: ALLOW_PLAINTEXT_LISTENER
+              value: "yes"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/kafka
+      volumes:
+        - name: data
+          emptyDir: {{}}
+"""
+
+
+def _rabbitmq_deployment_yaml(ns: str, name: str) -> str:
+    return f"""\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: {ns}
+  labels:
+{_datastore_labels(name, "rabbitmq").rstrip()}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+      launchpad.io/managed-by: launchpad-idp
+  template:
+    metadata:
+      labels:
+{_datastore_labels(name, "rabbitmq", indent=8).rstrip()}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: guest
+            - name: RABBITMQ_DEFAULT_PASS
+              value: guest
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 999
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
       volumes:
         - name: data
           emptyDir: {{}}

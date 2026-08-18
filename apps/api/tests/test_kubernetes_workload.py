@@ -139,7 +139,7 @@ def test_provision_applies_datastores_after_namespace_exists(monkeypatch: pytest
         "app.services.kubernetes.resolve_preview_node_port", lambda *_a, **_k: 30080
     )
 
-    provisioner = KubernetesProvisioner(Settings(kubernetes_enabled=True))
+    provisioner = KubernetesProvisioner(Settings(kubernetes_enabled=True, default_workload_image="app:latest"))
 
     manager = MagicMock()
     monkeypatch.setattr(provisioner, "apply_governance", manager.apply_governance)

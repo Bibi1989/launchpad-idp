@@ -542,6 +542,9 @@ export const workloadDependenciesSchema = z.object({
   mysql: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
   mongodb: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
   redis: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
+  // Message brokers for inter-service communication (in-cluster or bring-your-own).
+  kafka: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
+  rabbitmq: dataStoreDependencySchema.default({ enabled: false, placement: 'in_cluster' }),
 })
 
 export const defaultWorkloadDependencies = (): z.infer<typeof workloadDependenciesSchema> => ({
@@ -549,6 +552,8 @@ export const defaultWorkloadDependencies = (): z.infer<typeof workloadDependenci
   mysql: { enabled: false, placement: 'in_cluster' },
   mongodb: { enabled: false, placement: 'in_cluster' },
   redis: { enabled: false, placement: 'in_cluster' },
+  kafka: { enabled: false, placement: 'in_cluster' },
+  rabbitmq: { enabled: false, placement: 'in_cluster' },
 })
 
 export const containerServiceSpecSchema = z.object({
@@ -637,6 +642,15 @@ const wizardCommonFields = {
   container_scaffold: containerScaffoldSchema.default(defaultContainerScaffold()),
   dependencies: workloadDependenciesSchema.default(defaultWorkloadDependencies()),
   ansible: ansibleConfigSchema.default(defaultAnsibleConfig()),
+  env_vars: z
+    .array(
+      z.object({
+        key: z.string().min(1).max(128),
+        value: z.string().max(4096).default(''),
+      }),
+    )
+    .max(200)
+    .default([]),
 }
 
 export const provisioningWizardSchema = z.discriminatedUnion('provider', [

@@ -621,10 +621,12 @@ class KubernetesProvisioner:
         name: str,
         enable_postgres: bool = False,
         enable_redis: bool = False,
-    ) -> None:
-        """Provision opt-in ephemeral Postgres and/or Redis in-cluster workloads with connection secret."""
+    ) -> dict[str, str]:
+        """Provision opt-in ephemeral Postgres and/or Redis in-cluster workloads with a
+        connection secret. Returns the connection env map (DATABASE_URL / REDIS_URL / …)
+        so callers can also inject it directly into the app container."""
         if not (enable_postgres or enable_redis):
-            return
+            return {}
 
         from app.schemas.cloud import (
             DataStoreDependency,
@@ -646,6 +648,8 @@ class KubernetesProvisioner:
             kinds.append(DataStoreKind.REDIS)
             deps.redis = DataStoreDependency(enabled=True, placement=DependencyPlacement.IN_CLUSTER)
 
+        secret_data = dependency_secret_string_data(deps, name=name)
+
         if not self._settings.kubernetes_enabled:
             logger.info(
                 "kubernetes_simulate_datastores",
@@ -653,9 +657,8 @@ class KubernetesProvisioner:
                 postgres=enable_postgres,
                 redis=enable_redis,
             )
-            return
+            return secret_data or {}
 
-        secret_data = dependency_secret_string_data(deps, name=name)
         if secret_data:
             self._apply_secret_dict(namespace=namespace, secret_name="app-secrets", data=secret_data)
             if name and name != "app":
@@ -673,6 +676,8 @@ class KubernetesProvisioner:
                         utils.create_from_dict(self._core.api_client, doc, namespace=namespace)
             except Exception as exc:
                 logger.warning("apply_datastore_manifest_failed", filename=filename, error=str(exc))
+
+        return secret_data or {}
 
     def run_preview_seed_job(
         self,
@@ -1021,8 +1026,34 @@ class KubernetesProvisioner:
             try:
                 assert self._core is not None
                 try:
-                    self._core.read_namespace(namespace, _request_timeout=self._NAMESPACE_TIMEOUT)
-                    logger.info("kubernetes_namespace_exists", namespace=namespace)
+                    existing = self._core.read_namespace(
+                        namespace, _request_timeout=self._NAMESPACE_TIMEOUT
+                    )
+                    # A retry can land while a prior teardown / failed provision is still
+                    # deleting the namespace. Creating resources in a Terminating namespace
+                    # is rejected by the API server, so wait for it to fully clear, then
+                    # recreate it fresh. Without this, retries fail on "namespace is
+                    # terminating" and never recover.
+                    if self._namespace_phase(existing) == "Terminating":
+                        cleared = self._wait_for_namespace_deleted(namespace)
+                        if not cleared:
+                            raise RuntimeError(
+                                f"Namespace '{namespace}' is stuck in Terminating and did not "
+                                "clear in time. A previous teardown may be blocked on a "
+                                "finalizer. Wait a moment and retry, or delete the namespace "
+                                "manually (kubectl get namespace "
+                                f"{namespace} -o json shows the blocking finalizers)."
+                            )
+                        body = client.V1Namespace(
+                            metadata=client.V1ObjectMeta(name=namespace, labels=labels),
+                        )
+                        self._core.create_namespace(
+                            body, _request_timeout=self._NAMESPACE_TIMEOUT
+                        )
+                        resources.created_namespace = True
+                        logger.info("kubernetes_namespace_recreated", namespace=namespace)
+                    else:
+                        logger.info("kubernetes_namespace_exists", namespace=namespace)
                 except ApiException as exc:
                     if exc.status != 404:
                         raise
@@ -1045,6 +1076,49 @@ class KubernetesProvisioner:
                     error=str(exc),
                 )
                 self._recover_cluster_connection()
+
+    @staticmethod
+    def _namespace_phase(namespace_obj: object) -> str:
+        """Return the namespace lifecycle phase ('Active' / 'Terminating'), or '' if unknown."""
+        status = getattr(namespace_obj, "status", None)
+        return str(getattr(status, "phase", "") or "")
+
+    def _wait_for_namespace_deleted(self, namespace: str) -> bool:
+        """Poll until a Terminating namespace is fully deleted. Returns True if cleared."""
+        from kubernetes.client.rest import ApiException
+
+        assert self._core is not None
+        budget = max(
+            0.0,
+            float(
+                getattr(
+                    self._settings,
+                    "kubernetes_namespace_terminating_wait_seconds",
+                    90.0,
+                )
+            ),
+        )
+        poll = max(0.5, float(self._settings.kubernetes_ready_poll_seconds))
+        deadline = time.monotonic() + budget
+        logger.info(
+            "kubernetes_namespace_terminating_wait",
+            namespace=namespace,
+            budget_seconds=budget,
+        )
+        while True:
+            try:
+                current = self._core.read_namespace(
+                    namespace, _request_timeout=self._NAMESPACE_TIMEOUT
+                )
+            except ApiException as exc:
+                if exc.status == 404:
+                    return True  # fully deleted
+                raise
+            if self._namespace_phase(current) != "Terminating":
+                return True  # somehow became Active again
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll)
 
     def _recover_cluster_connection(self) -> None:
         """Refresh the local cluster kubeconfig (e.g. stale kind/k3d port) and reconnect."""
@@ -1290,6 +1364,45 @@ class KubernetesProvisioner:
             stable_ready_polls = 0
             time.sleep(self._settings.kubernetes_ready_poll_seconds)
 
+        # Primary deadline reached. Cold-start / multi-service rollouts sometimes turn
+        # Ready just after the deadline; keep polling through a grace window (while the
+        # rollout is still progressing and not crash/pull-erroring) before failing, so a
+        # deploy that actually succeeds is not reported as a false timeout.
+        grace_seconds = max(0.0, float(getattr(self._settings, "kubernetes_ready_grace_seconds", 0.0)))
+        grace_deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < grace_deadline:
+            if cancel_check is not None and cancel_check():
+                raise PreviewCancelled(
+                    f"Provisioning of {namespace} cancelled by delete request"
+                )
+            # Terminal states still fast-fail during grace (never wait out the window).
+            pull_error = self._first_pod_image_error(
+                namespace=namespace, expected_image=expected_image, app_label=app_label
+            )
+            if pull_error:
+                raise RuntimeError(pull_error)
+            crash_error = self._first_pod_crash_error(
+                namespace=namespace, app_label=app_label, expected_image=expected_image
+            )
+            if crash_error:
+                raise RuntimeError(crash_error)
+            grace_snapshot = self._deployment_ready_snapshot(
+                namespace=namespace, app_label=app_label
+            )
+            if grace_snapshot["revision_ready"]:
+                logger.info(
+                    "kubernetes_workload_ready_in_grace",
+                    namespace=namespace,
+                    deployment_count=grace_snapshot.get("deployment_count"),
+                    ready_replicas=grace_snapshot["ready"],
+                    updated_replicas=grace_snapshot["updated"],
+                    grace_seconds=grace_seconds,
+                    image=expected_image,
+                    app_label=app_label,
+                )
+                return
+            time.sleep(self._settings.kubernetes_ready_poll_seconds)
+
         snapshot = self._deployment_ready_snapshot(
             namespace=namespace, app_label=app_label
         )
@@ -1307,6 +1420,9 @@ class KubernetesProvisioner:
 
         hint = self._first_pod_probe_hint(namespace=namespace)
         control_plane = self._control_plane_stall_hint()
+        # Surface the app pod's real state + logs so a "not Ready" failure is
+        # self-explanatory (e.g. app bound the wrong port, or a startup error).
+        pod_detail = self._app_pod_diagnostics(namespace=namespace, app_label=app_label)
         extras = " ".join(part for part in (hint, control_plane) if part)
         pending = snapshot.get("pending") or []
         pending_note = f" Pending: {', '.join(pending)}." if pending else ""
@@ -1317,6 +1433,7 @@ class KubernetesProvisioner:
             f"desired={snapshot['desired']}) within {timeout_seconds:.0f}s"
             + pending_note
             + (f". {extras}" if extras else "")
+            + (f"\n{pod_detail}" if pod_detail else "")
         )
 
     def _deployment_ready_snapshot(
@@ -1678,6 +1795,80 @@ class KubernetesProvisioner:
         exit_code = getattr(terminated, "exit_code", None)
         if reason == "OOMKilled" or exit_code == 137:
             return reason or f"exit code {exit_code}"
+        return None
+
+    def _tail_pod_logs(
+        self, *, namespace: str, pod_name: str, lines: int = 25
+    ) -> str | None:
+        """Return the last container log lines (current or previous run), if any."""
+        if self._core is None:
+            return None
+        for previous in (False, True):
+            try:
+                raw = self._core.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    tail_lines=lines,
+                    previous=previous,
+                    _request_timeout=8,
+                )
+            except Exception:  # noqa: BLE001 - best-effort diagnostics
+                continue
+            text = str(raw or "").strip()
+            if text:
+                return text[-1600:]
+        return None
+
+    def _app_pod_diagnostics(
+        self, *, namespace: str, app_label: str | None = None
+    ) -> str | None:
+        """Container state + recent logs for the app pod, to explain a readiness timeout.
+
+        A pod that is Running but never Ready (no crash) usually means the app is
+        listening on a different port than the probe, or logging a startup error - the
+        actual logs make that obvious instead of a generic 'readiness timeout'.
+        """
+        if self._core is None:
+            return None
+        try:
+            pods = self._core.list_namespaced_pod(
+                namespace, _request_timeout=(5, 15)
+            ).items or []
+        except Exception:  # noqa: BLE001 - best-effort diagnostics
+            return None
+        for pod in pods:
+            if not self._pod_matches_wait_scope(
+                pod, app_label=app_label, expected_image=None
+            ):
+                continue
+            meta = getattr(pod, "metadata", None)
+            labels = getattr(meta, "labels", None) if meta is not None else None
+            # Skip datastore/broker companions - we want the app pod.
+            if isinstance(labels, dict) and str(
+                labels.get("launchpad.io/component") or ""
+            ) == "datastore":
+                continue
+            name = getattr(meta, "name", None) or "app"
+            state_note = ""
+            status = getattr(pod, "status", None)
+            for cs in getattr(status, "container_statuses", None) or []:
+                st = getattr(cs, "state", None)
+                waiting = getattr(st, "waiting", None) if st else None
+                terminated = getattr(st, "terminated", None) if st else None
+                if waiting and getattr(waiting, "reason", None):
+                    state_note = f"waiting ({(waiting.message or waiting.reason).strip()})"
+                elif terminated and getattr(terminated, "reason", None):
+                    state_note = (
+                        f"exited ({terminated.reason}, code {terminated.exit_code})"
+                    )
+            logs = self._tail_pod_logs(namespace=namespace, pod_name=name)
+            parts: list[str] = []
+            if state_note:
+                parts.append(f"container {state_note}")
+            if logs:
+                parts.append(f"last logs:\n{logs}")
+            if parts:
+                return f"Pod {name}: " + " - ".join(parts)
         return None
 
     def _first_pod_probe_hint(self, *, namespace: str) -> str | None:
@@ -2122,6 +2313,57 @@ class KubernetesProvisioner:
                 if port.node_port:
                     used.add(int(port.node_port))
         return used
+
+    def reclaim_orphaned_preview_node_ports(self, *, exclude_namespace: str | None = None) -> int:
+        """Delete preview NodePort Services whose namespace is Terminating, freeing the
+        host NodePort so a new preview can allocate within the small kind/k3d range.
+
+        Conservative on purpose: only namespaces the API server is already deleting
+        (phase ``Terminating``) are reclaimed, so a live or still-starting preview in
+        another namespace is never disturbed. Preview namespaces are ``launchpad-env-*``.
+        Returns the number of Services whose NodePort was released.
+        """
+        if not self._settings.kubernetes_enabled or self._core is None:
+            return 0
+        from kubernetes.client.rest import ApiException
+
+        try:
+            services = self._core.list_service_for_all_namespaces()
+        except Exception as exc:  # noqa: BLE001 - best-effort reclaim
+            logger.warning("reclaim_node_ports_list_failed", error=str(exc))
+            return 0
+
+        terminating: dict[str, bool] = {}
+        reclaimed = 0
+        for svc in services.items or []:
+            meta = svc.metadata
+            ns = getattr(meta, "namespace", "") or ""
+            if not ns.startswith("launchpad-env-") or ns == exclude_namespace:
+                continue
+            spec = svc.spec
+            if not spec or spec.type != "NodePort":
+                continue
+            if not any(getattr(p, "node_port", None) for p in (spec.ports or [])):
+                continue
+            if ns not in terminating:
+                try:
+                    ns_obj = self._core.read_namespace(ns, _request_timeout=self._NAMESPACE_TIMEOUT)
+                    terminating[ns] = self._namespace_phase(ns_obj) == "Terminating"
+                except ApiException:
+                    terminating[ns] = True  # namespace gone -> its port is free anyway
+                except Exception:  # noqa: BLE001
+                    terminating[ns] = False
+            if not terminating[ns]:
+                continue
+            try:
+                self._core.delete_namespaced_service(meta.name, ns, _request_timeout=10)
+                reclaimed += 1
+                logger.info(
+                    "reclaimed_orphaned_preview_node_port", namespace=ns, service=meta.name
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("reclaim_node_port_delete_failed", namespace=ns, error=str(exc))
+        return reclaimed
 
     def resolve_external_preview_url(
         self, namespace: str, *, timeout_seconds: float = 90.0
@@ -2959,15 +3201,21 @@ def allocate_node_port(
     port_min: int,
     port_max: int,
     used_ports: set[int] | frozenset[int] | None = None,
+    owner_key: str | None = None,
 ) -> int:
-    """Pick a NodePort in [port_min, port_max], preferring a stable hash of env id.
+    """Pick a NodePort in [port_min, port_max].
 
+    Per-user locality: when ``owner_key`` is given (e.g. the owner's email/id), the
+    preferred start is seeded from the user so each user's previews cluster in their own
+    region of the range instead of hashing globally by env id - one user's previews are
+    less likely to collide with another's. Falls back to the env-id hash otherwise.
     Skips ports listed in ``used_ports`` (already allocated in the cluster).
     """
     if port_max < port_min:
         raise ValueError("preview_node_port_max must be >= preview_node_port_min")
     span = port_max - port_min + 1
-    digest = hashlib.sha256(environment_id.encode("utf-8")).hexdigest()
+    seed = (str(owner_key).strip() or environment_id) if owner_key else environment_id
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     start = int(digest[:8], 16) % span
     used = used_ports or set()
     for step in range(span):
@@ -2977,7 +3225,7 @@ def allocate_node_port(
     raise RuntimeError(
         f"No free NodePort in [{port_min}, {port_max}] "
         f"({len(used)} already allocated). Destroy a preview or widen "
-        "PREVIEW_NODE_PORT_MIN/MAX (and kind port mappings)."
+        "PREVIEW_NODE_PORT_MIN/MAX (and kind/k3d port mappings, then recreate the cluster)."
     )
 
 
@@ -3067,12 +3315,15 @@ def resolve_preview_node_port(
     port_max: int,
     used_ports: set[int] | frozenset[int] | None = None,
     cluster_name: str | None = None,
+    owner_key: str | None = None,
 ) -> int:
     """Keep an in-range sticky NodePort; otherwise allocate inside the mapped window.
 
     Kubernetes auto-assigns NodePorts in 30000-32767 when a Service is created as
     NodePort without an explicit ``nodePort``. Those ports are usually outside the
-    kind ``extraPortMappings`` range and will not load from the host.
+    kind ``extraPortMappings`` range and will not load from the host. ``owner_key``
+    (the environment owner) is passed through so allocation is per-user (see
+    ``allocate_node_port``).
     """
     forwarded = _detect_kind_forwarded_node_ports(cluster_name)
     if forwarded:
@@ -3088,6 +3339,7 @@ def resolve_preview_node_port(
         port_min=port_min,
         port_max=port_max,
         used_ports=used_ports,
+        owner_key=owner_key,
     )
 
 

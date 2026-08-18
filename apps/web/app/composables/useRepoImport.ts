@@ -3,6 +3,7 @@ import type {
   EnvVarOverride,
   RepoImportSaveResult,
   RepoImportSession,
+  RepoRef,
   ServiceOverride,
 } from '~/types/repoImport'
 
@@ -16,6 +17,9 @@ export function useRepoImport() {
     git_branch?: string
     use_github_app_token?: boolean
     github_installation_id?: number | null
+    // Additional repositories to import into the SAME workspace (multi-repo /
+    // microservices). Omitted/empty => single-repo import, unchanged.
+    repos?: RepoRef[]
   }): Promise<RepoImportSession> {
     return apiFetch<RepoImportSession>('/imports', {
       method: 'POST',
@@ -24,6 +28,12 @@ export function useRepoImport() {
         git_branch: input.git_branch || 'main',
         use_github_app_token: input.use_github_app_token ?? true,
         github_installation_id: input.github_installation_id ?? null,
+        repos: (input.repos ?? []).map((r) => ({
+          git_repo_url: r.git_repo_url,
+          git_branch: r.git_branch || 'main',
+          name: r.name || null,
+          github_installation_id: r.github_installation_id ?? null,
+        })),
       }),
       timeoutMs: IMPORT_TIMEOUT_MS,
     })

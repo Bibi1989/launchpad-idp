@@ -335,6 +335,45 @@ def scaffold_dependency_compose_blocks(
                 "",
             ]
         )
+    if (
+        dependencies.kafka.enabled
+        and dependencies.kafka.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        lines.extend(
+            [
+                "  kafka:",
+                "    image: bitnami/kafka:3.7",
+                "    environment:",
+                "      KAFKA_CFG_NODE_ID: \"0\"",
+                "      KAFKA_CFG_PROCESS_ROLES: controller,broker",
+                "      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@localhost:9093",
+                "      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093",
+                "      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092",
+                "      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
+                "      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER",
+                "      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT",
+                "      ALLOW_PLAINTEXT_LISTENER: \"yes\"",
+                "    expose:",
+                '      - "9092"',
+                "",
+            ]
+        )
+    if (
+        dependencies.rabbitmq.enabled
+        and dependencies.rabbitmq.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        lines.extend(
+            [
+                "  rabbitmq:",
+                "    image: rabbitmq:3.13-management-alpine",
+                "    environment:",
+                "      RABBITMQ_DEFAULT_USER: guest",
+                "      RABBITMQ_DEFAULT_PASS: guest",
+                "    expose:",
+                '      - "5672"',
+                "",
+            ]
+        )
     return lines
 
 
@@ -381,6 +420,20 @@ def compose_dependency_env_and_depends(
     ):
         env["REDIS_URL"] = "redis://redis:6379/0"
         depends.append("redis")
+    if (
+        dependencies.kafka.enabled
+        and dependencies.kafka.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        env["KAFKA_BROKERS"] = "kafka:9092"
+        env["KAFKA_BOOTSTRAP_SERVERS"] = "kafka:9092"
+        depends.append("kafka")
+    if (
+        dependencies.rabbitmq.enabled
+        and dependencies.rabbitmq.placement == DependencyPlacement.IN_CLUSTER
+    ):
+        env["RABBITMQ_URL"] = "amqp://guest:guest@rabbitmq:5672/"
+        env["AMQP_URL"] = env["RABBITMQ_URL"]
+        depends.append("rabbitmq")
     return env, depends
 
 
@@ -502,7 +555,7 @@ def _node_dockerfile(app_name: str, port: int) -> str:
 FROM node:22-alpine AS deps
 WORKDIR /src
 RUN apk add --no-cache libc6-compat
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+COPY . .
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \\
@@ -526,7 +579,7 @@ RUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app app \\
 COPY --from=build --chown=10001:10001 /src ./
 ENV NODE_ENV=production
 ENV PORT={port}
-{_common_footer(port=port)}CMD ["node", "server.js"]
+{_common_footer(port=port)}CMD ["sh", "-c", "if [ -f server.js ]; then exec node server.js; elif [ -f index.js ]; then exec node index.js; elif [ -f app.js ]; then exec node app.js; elif [ -f dist/server.js ]; then exec node dist/server.js; elif [ -f dist/index.js ]; then exec node dist/index.js; else exec npm start; fi"]
 # Image: {app_name}
 """
 
@@ -539,12 +592,13 @@ def _python_dockerfile(app_name: str, port: int) -> str:
 FROM python:3.12-alpine AS builder
 WORKDIR /src
 RUN apk add --no-cache build-base libffi-dev
-COPY requirements.txt pyproject.toml poetry.lock* ./
+COPY . .
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN \\
   if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; \\
-  elif [ -f pyproject.toml ]; then pip install --no-cache-dir .; \\
+  elif [ -f pyproject.toml ] || [ -f setup.py ]; then pip install --no-cache-dir .; \\
+  elif [ -f Pipfile ]; then pip install --no-cache-dir pipenv && pipenv install --system --deploy; \\
   else pip install --no-cache-dir uvicorn fastapi; fi
 
 FROM python:3.12-alpine AS runtime
@@ -665,12 +719,13 @@ def _fastapi_dockerfile(app_name: str, port: int) -> str:
 FROM python:3.12-alpine AS builder
 WORKDIR /src
 RUN apk add --no-cache build-base libffi-dev
-COPY requirements.txt pyproject.toml poetry.lock* ./
+COPY . .
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN \\
   if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; \\
-  elif [ -f pyproject.toml ]; then pip install --no-cache-dir .; \\
+  elif [ -f pyproject.toml ] || [ -f setup.py ]; then pip install --no-cache-dir .; \\
+  elif [ -f Pipfile ]; then pip install --no-cache-dir pipenv && pipenv install --system --deploy; \\
   else pip install --no-cache-dir uvicorn fastapi pydantic; fi
 
 FROM python:3.12-alpine AS runtime
@@ -695,7 +750,7 @@ def _vue_dockerfile(app_name: str, port: int) -> str:
 
 FROM node:22-alpine AS build
 WORKDIR /src
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+COPY . .
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f package-lock.json ]; then npm ci; \\
@@ -720,7 +775,7 @@ def _svelte_dockerfile(app_name: str, port: int) -> str:
 
 FROM node:22-alpine AS build
 WORKDIR /src
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+COPY . .
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f package-lock.json ]; then npm ci; \\
@@ -745,7 +800,7 @@ def _angular_dockerfile(app_name: str, port: int) -> str:
 
 FROM node:22-alpine AS build
 WORKDIR /src
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+COPY . .
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f package-lock.json ]; then npm ci; \\
@@ -794,7 +849,7 @@ def _nuxt_dockerfile(app_name: str, port: int) -> str:
 
 FROM node:22-alpine AS build
 WORKDIR /src
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+COPY . .
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f package-lock.json ]; then npm ci; \\
@@ -820,7 +875,7 @@ def _react_vite_dockerfile(app_name: str, port: int) -> str:
 
 FROM node:22-alpine AS build
 WORKDIR /src
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+COPY . .
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f package-lock.json ]; then npm ci; \\
@@ -846,7 +901,7 @@ def _nextjs_dockerfile(app_name: str, port: int) -> str:
 FROM node:22-alpine AS deps
 WORKDIR /src
 RUN apk add --no-cache libc6-compat
-COPY package.json package-lock.json* pnpm-lock.yaml* ./
+COPY . .
 RUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; else npm ci; fi
 
 FROM node:22-alpine AS builder
@@ -876,7 +931,7 @@ def _nestjs_dockerfile(app_name: str, port: int) -> str:
 
 FROM node:22-alpine AS build
 WORKDIR /src
-COPY package.json package-lock.json* pnpm-lock.yaml* ./
+COPY . .
 RUN if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; else npm ci; fi
 COPY . .
 RUN npm run build

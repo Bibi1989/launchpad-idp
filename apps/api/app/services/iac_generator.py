@@ -613,6 +613,27 @@ def _pulumi_index(name: str, cloud: CloudConfig) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _has_container_scaffold_intent(request: ProvisioningWizardRequest) -> bool:
+    """True when the workspace actually wants Launchpad to scaffold an app tree.
+
+    ``container_scaffold.enabled`` only means the source panel is shown (Link / Import /
+    Services tabs). Linking a repo leaves the card enabled but clears services and the
+    generate flags, so scaffolding must NOT run - otherwise a linked workspace gets a
+    phantom ``apps/web-ui``. Scaffolding requires explicit services, a generate flag, or
+    a multi-framework selection.
+    """
+    cfg = request.container_scaffold
+    if not cfg.enabled:
+        return False
+    if cfg.services:
+        return True
+    if cfg.generate_dockerfile or cfg.generate_docker_compose:
+        return True
+    from app.services.dockerfile_scaffold import resolve_scaffold_stacks
+
+    return len(resolve_scaffold_stacks(stack=cfg.stack, frameworks=cfg.frameworks)) > 1
+
+
 def _is_multi_stack_workspace(request: ProvisioningWizardRequest) -> bool:
     """True when the workspace hosts >1 stack (explicit services or multi-framework).
 
@@ -931,7 +952,10 @@ class IaCGenerator:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(readme, encoding="utf-8")
                 files.append("infra/MANAGED_DATASTORES.md")
-        if request.container_scaffold.enabled and not skip_container_scaffold:
+        if (
+            _has_container_scaffold_intent(request)
+            and not skip_container_scaffold
+        ):
             files.extend(self._write_container_scaffold(workspace_dir, request))
 
         if (

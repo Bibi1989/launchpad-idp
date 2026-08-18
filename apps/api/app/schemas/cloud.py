@@ -412,12 +412,29 @@ class DataStoreDependency(BaseModel):
     connection_url: str | None = Field(default=None, max_length=2048)
 
 
+class MessageBrokerDependency(BaseModel):
+    """A message broker (Kafka / RabbitMQ) a workspace's services talk to.
+
+    Mirrors DataStoreDependency: run it in-cluster or bring your own (external)
+    broker URL. Managed placement is not offered for brokers (no first-class
+    managed broker resource is modelled), so only in_cluster/external apply.
+    """
+
+    enabled: bool = False
+    placement: DependencyPlacement = DependencyPlacement.IN_CLUSTER
+    # Used when placement=external (Confluent, CloudAMQP, self-hosted, etc.).
+    connection_url: str | None = Field(default=None, max_length=2048)
+
+
 class WorkloadDependenciesConfig(BaseModel):
     postgres: DataStoreDependency = Field(default_factory=DataStoreDependency)
     mysql: DataStoreDependency = Field(default_factory=DataStoreDependency)
     mariadb: DataStoreDependency = Field(default_factory=DataStoreDependency)
     mongodb: DataStoreDependency = Field(default_factory=DataStoreDependency)
     redis: DataStoreDependency = Field(default_factory=DataStoreDependency)
+    # Message brokers for inter-service communication (additive, default off).
+    kafka: MessageBrokerDependency = Field(default_factory=MessageBrokerDependency)
+    rabbitmq: MessageBrokerDependency = Field(default_factory=MessageBrokerDependency)
 
     def any_enabled(self) -> bool:
         return any(
@@ -428,8 +445,13 @@ class WorkloadDependenciesConfig(BaseModel):
                 self.mariadb,
                 self.mongodb,
                 self.redis,
+                self.kafka,
+                self.rabbitmq,
             )
         )
+
+    def any_broker_enabled(self) -> bool:
+        return self.kafka.enabled or self.rabbitmq.enabled
 
 
 class CostOptimizationConfig(BaseModel):
@@ -803,6 +825,13 @@ class ContainerScaffoldConfig(BaseModel):
 
 
 
+class WorkspaceEnvVar(BaseModel):
+    """A user-defined environment variable injected into the workspace's services."""
+
+    key: str = Field(min_length=1, max_length=128)
+    value: str = Field(default="", max_length=4096)
+
+
 class ProvisioningWizardRequest(BaseModel):
     name: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
     iac_engine: IaCEngine = IaCEngine.TERRAFORM
@@ -826,6 +855,8 @@ class ProvisioningWizardRequest(BaseModel):
         default_factory=WorkloadDependenciesConfig
     )
     ansible: AnsibleConfig = Field(default_factory=AnsibleConfig)
+    # User-defined environment variables injected into the workspace's services.
+    env_vars: list[WorkspaceEnvVar] = Field(default_factory=list, max_length=200)
 
     @field_validator("name")
     @classmethod
@@ -1149,6 +1180,74 @@ class WorkspaceGitSourceResponse(BaseModel):
     environments_updated: int = 0
 
 
+class WorkspaceRepoKind(str, Enum):
+    GITHUB = "github"
+    GITLAB = "gitlab"
+
+
+class WorkspaceLinkedRepoItem(BaseModel):
+    """One repository linked to a (multi-repo) workspace.
+
+    ``github`` items use the GitHub App (installation_id + full_name) and can drive
+    per-repo CD. ``gitlab`` / plain-git items track a clone URL for rebuild matching.
+    """
+
+    kind: WorkspaceRepoKind = WorkspaceRepoKind.GITHUB
+    git_repo_url: str = Field(min_length=8, max_length=512)
+    git_branch: str = Field(default="main", min_length=1, max_length=256)
+    full_name: str | None = Field(default=None, min_length=3, max_length=200)
+    installation_id: int | None = Field(default=None, ge=1)
+    cd_mode: WorkspaceCdMode = WorkspaceCdMode.WEBHOOK
+    workflow_path: str | None = Field(default=None, max_length=256)
+    # The primary repo is the one that deploys (single generic workload). Defaults to
+    # the frontend-looking repo; the user can override it. Exactly one item is primary.
+    primary: bool = False
+
+    @field_validator("git_repo_url")
+    @classmethod
+    def validate_git_repo_url(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned.lower().startswith(("https://", "http://", "git@", "ssh://")):
+            raise ValueError("git_repo_url must be an http(s), git@, or ssh URL")
+        return cleaned
+
+    @field_validator("git_branch")
+    @classmethod
+    def normalize_branch(cls, value: str) -> str:
+        cleaned = value.strip() or "main"
+        if any(ch in cleaned for ch in (" ", "\n", "\r", "\t")):
+            raise ValueError("git_branch must not contain whitespace")
+        return cleaned
+
+    @model_validator(mode="after")
+    def require_github_fields(self) -> WorkspaceLinkedRepoItem:
+        if self.kind == WorkspaceRepoKind.GITHUB and (
+            self.installation_id is None or not self.full_name
+        ):
+            raise ValueError("github repos require installation_id and full_name")
+        return self
+
+
+class WorkspaceLinkedReposRequest(BaseModel):
+    """Set the full list of repos linked to a workspace (replaces the list).
+
+    An empty list clears all linked repos. The first item is the primary and drives
+    the workspace's git_repo_url / linked_app_repo (backward compatible).
+    """
+
+    repos: list[WorkspaceLinkedRepoItem] = Field(default_factory=list, max_length=20)
+
+
+class WorkspaceLinkedReposResponse(BaseModel):
+    repos: list[WorkspaceLinkedRepoItem] = Field(default_factory=list)
+    primary_git_repo_url: str | None = None
+    primary_git_branch: str = "main"
+    webhook_configured: bool = False
+    control_plane_url: str | None = None
+    message: str = ""
+    environments_updated: int = 0
+
+
 class IaCBundleSummary(BaseModel):
     workspace_id: str
     engine: IaCEngine
@@ -1189,6 +1288,9 @@ class WorkspaceWizardConfig(BaseModel):
         default_factory=WorkloadDependenciesConfig
     )
     ansible: AnsibleConfig = Field(default_factory=AnsibleConfig)
+    # User-defined environment variables injected into the workspace's services
+    # (all services in the workspace, like the datastore connection URLs).
+    env_vars: list[WorkspaceEnvVar] = Field(default_factory=list, max_length=200)
     has_credentials: bool = False
     """Safe display name for the stored cloud key (never the secret itself)."""
     credential_label: str | None = None

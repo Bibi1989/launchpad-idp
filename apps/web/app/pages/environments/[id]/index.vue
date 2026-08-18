@@ -404,13 +404,17 @@ watch(useStoredCredentials, (enabled) => {
   if (enabled) clearPromoteCredentials()
 })
 
-const { lines, connected, done, connect } = useEnvironmentLogStream(environmentId)
+const { lines, connected, done, connect: connectLogs } = useEnvironmentLogStream(environmentId)
+const liveMessage = ref<string | null>(null)
 
-useEnvironmentLiveStream(environmentId, {
+const liveStream = useEnvironmentLiveStream(environmentId, {
   onEvent: (event) => {
     if (!environment.value) return
     applyEnvStreamPatch(environment.value, event)
     reconcileEnvironment(environment.value)
+    if (event.message) {
+      liveMessage.value = event.message
+    }
     if (event.notice && !seenNotices.has(event.notice)) {
       seenNotices.add(event.notice)
       toast.info(t('environments.toasts.portRemap'), event.notice)
@@ -430,7 +434,7 @@ useEnvironmentLiveStream(environmentId, {
       && environmentId.value
       && (done.value || !connected.value)
     ) {
-      connect(environmentId.value)
+      connectLogs(environmentId.value)
     }
     if (event.status === 'DESTROYED') {
       toast.info(t('environments.toasts.destroyed'), t('environments.toasts.destroyComplete'))
@@ -438,6 +442,11 @@ useEnvironmentLiveStream(environmentId, {
     }
   },
 })
+
+function reconnectStreams(id: string) {
+  connectLogs(id)
+  liveStream.connect(id)
+}
 
 const remainingLabel = computed(() => {
   tick.value
@@ -644,9 +653,28 @@ async function onAnalyze() {
 const retryAction = define(() => retryProvision(environment.value!.id), {
   success: (env) => ({ type: 'info', title: t('environments.actions.retrying'), message: `${env.name} is provisioning again.` }),
   error: (err) => ({ title: t('common.failed'), message: toastError(err, t('common.failed')) }),
-  onSuccess: (env) => { environment.value = env; loadError.value = null; connect(env.id) },
+  onSuccess: (env) => { environment.value = env; loadError.value = null; reconnectStreams(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
+
+// A container-image BUILD failure is recoverable by regenerating a Launchpad Dockerfile
+// (the repo's own Dockerfile may reference paths that do not exist in the build context).
+const confirmRegenerateOpen = ref(false)
+const isBuildFailure = computed(() => {
+  if (!environment.value || environment.value.status !== 'FAILED') return false
+  const text = `${environment.value.failure_summary ?? ''} ${environment.value.error_message ?? ''}`.toLowerCase()
+  if (!text.trim()) return false
+  return /docker build failed|dockerfile|\bcopy\b|build context|image build|no source files|failed to build the linked repo/.test(text)
+})
+const regenerateAction = define(
+  () => retryProvision(environment.value!.id, { regenerateDockerfile: true }),
+  {
+    success: (env) => ({ type: 'info', title: t('environments.detail.regenerateDockerfile.toastTitle'), message: `${env.name} is building with a generated Dockerfile.` }),
+    error: (err) => ({ title: t('common.failed'), message: toastError(err, t('common.failed')) }),
+    onSuccess: (env) => { environment.value = env; loadError.value = null; confirmRegenerateOpen.value = false; reconnectStreams(env.id) },
+    onError: (msg) => { loadError.value = msg },
+  },
+)
 
 async function load(opts: { softAudits?: boolean } = {}) {
   loadError.value = null
@@ -722,7 +750,7 @@ async function onDestroy() {
 }
 
 const extendAction = define(() => extendTtl(environment.value!.id, {}), {
-  success: (env) => ({ title: t('environments.toasts.extended'), message: `${env.name} will live longer.` }),
+  success: (env) => ({ title: t('environments.toasts.extended'), message: `${env.name} TTL reset to the full window.` }),
   error: (err) => ({ title: t('environments.toasts.extendFailed'), message: toastError(err, t('common.failed')) }),
   onSuccess: (env) => { environment.value = env; loadError.value = null },
   onError: (msg) => { loadError.value = msg },
@@ -731,7 +759,7 @@ const extendAction = define(() => extendTtl(environment.value!.id, {}), {
 const relaunchAction = define(() => relaunchEnvironment(environment.value!.id), {
   success: (env) => ({ title: t('environments.toasts.relaunched'), message: `${env.name} is relaunching.` }),
   error: (err) => ({ title: t('environments.toasts.relaunchFailed'), message: toastError(err, t('common.failed')) }),
-  onSuccess: (env) => { environment.value = env; loadError.value = null; connect(env.id) },
+  onSuccess: (env) => { environment.value = env; loadError.value = null; reconnectStreams(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
 
@@ -1724,15 +1752,38 @@ onUnmounted(() => {
           >
             {{ environment.error_message }}
           </p>
+          <div v-if="isBuildFailure" class="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              class="lp-btn-secondary whitespace-nowrap"
+              :disabled="regenerateAction.pending || retryAction.pending"
+              @click="confirmRegenerateOpen = true"
+            >
+              <span class="material-symbols-outlined text-base">auto_fix_high</span>
+              {{ t('environments.detail.regenerateDockerfile.button') }}
+            </button>
+            <span class="text-xs text-[var(--lp-muted)]">
+              {{ t('environments.detail.regenerateDockerfile.hint') }}
+            </span>
+          </div>
         </div>
       </section>
 
-      <AuditTimeline
+      <ExecutionPipelineStepper
+        :status="environment.status"
+        :current-stage="liveStream.stage.value || environment.stage"
+        :message="liveMessage"
+        :error-message="environment.failure_summary || environment.error_message"
+        :commit-sha="environment.latest_commit_sha"
+        :is-local="environment.is_local"
+      />
+
+      <!-- <AuditTimeline
         :title="t('audit.title')"
         :entries="audits"
         :loading="auditsLoading"
         :empty-label="t('environments.detail.auditEmpty')"
-      />
+      /> -->
 
       <JobLogStream
         :lines="lines"
@@ -1771,6 +1822,17 @@ onUnmounted(() => {
         :busy="stagePromotePending"
         @confirm="onStagePromoteConfirm"
         @cancel="cancelStagePromote"
+      />
+
+      <ConfirmDialog
+        v-model:open="confirmRegenerateOpen"
+        :title="t('environments.detail.regenerateDockerfile.title')"
+        :message="t('environments.detail.regenerateDockerfile.message')"
+        :confirm-label="t('environments.detail.regenerateDockerfile.confirm')"
+        :cancel-label="t('common.cancel')"
+        :danger="false"
+        :busy="regenerateAction.pending"
+        @confirm="regenerateAction.run()"
       />
     </template>
   </div>

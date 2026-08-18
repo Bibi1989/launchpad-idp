@@ -88,9 +88,9 @@ class Settings(BaseSettings):
     provision_step_delay_seconds: float = 0.0
 
     # Preview governance (Launch / Environments)
-    # Free tier: max running environments per project per user.
+    # Free tier: max running environments per ORGANISATION (not per user / not global).
     # Pro tier: unlimited unless max_concurrent_environments_pro is set.
-    max_concurrent_environments: int = 6
+    max_concurrent_environments: int = 10
     max_concurrent_environments_pro: int | None = None
     preview_soft_cost_cap: Decimal = Decimal("25.00")
     ttl_extend_hours_default: int = 1
@@ -133,6 +133,15 @@ class Settings(BaseSettings):
     kubernetes_pod_limit: str = "20"
     kubernetes_ready_timeout_seconds: float = 180.0
     kubernetes_ready_poll_seconds: float = 1.0
+    # After the primary readiness deadline, keep polling for this long while the
+    # rollout is still progressing (no crash/pull errors) before declaring failure.
+    # Prevents false "not Ready within timeout" failures when cold-start / multi-service
+    # pods become Ready just after the deadline (the deploy actually succeeds).
+    kubernetes_ready_grace_seconds: float = 90.0
+    # When a retry hits a namespace still stuck in "Terminating" (a prior teardown /
+    # failed provision has not finished deleting), wait up to this long for it to clear
+    # before recreating it, so retries do not fail on "namespace is terminating".
+    kubernetes_namespace_terminating_wait_seconds: float = 90.0
 
     sse_poll_interval_seconds: float = 0.5
     ttl_reaper_interval_seconds: float = 300.0
@@ -295,6 +304,11 @@ class Settings(BaseSettings):
     # (matches the *.preview.mydomain.com CNAME in Cloudflare DNS). Combined as
     # ws-{workspace_id}.{preview_base_domain}.
     preview_base_domain: str | None = None
+    # Template for auto-issued PR preview subdomains, formatted with {id} (the
+    # environment id) and {base} (preview_base_domain), e.g. pr-<id>.preview.<base>.
+    # Used only by the additive preview ingress route generator; existing ws-* and
+    # production ingress paths are unaffected.
+    preview_subdomain_template: str = "pr-{id}.preview.{base}"
     # Host port published by k3d for ingress-nginx HTTP (Cloudflare Tunnel target).
     preview_ingress_http_port: int = 3080
 

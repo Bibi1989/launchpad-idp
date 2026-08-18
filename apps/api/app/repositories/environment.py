@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -170,6 +170,38 @@ class EnvironmentRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def count_active_for_org(self, org_id: UUID) -> int:
+        """Active preview count for the whole ORGANISATION (all users/projects in it)."""
+        result = await self._session.execute(
+            select(Environment).where(
+                Environment.org_id == org_id,
+                Environment.status.in_(ACTIVE_RUNNING_STATUSES),
+            )
+        )
+        return len(list(result.scalars().all()))
+
+    async def list_active_for_org(
+        self,
+        org_id: UUID,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Environment]:
+        """Active previews for an org, oldest first (for per-org cap enforcement)."""
+        stmt = (
+            select(Environment)
+            .where(
+                Environment.org_id == org_id,
+                Environment.status.in_(ACTIVE_RUNNING_STATUSES),
+            )
+            .order_by(Environment.created_at.asc())
+            .offset(offset)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_active_for_repo_pr(
         self,
         *,
@@ -246,7 +278,23 @@ class EnvironmentRepository:
         lifecycle_stage: str = "preview",
         promotion_lineage_id: UUID | None = None,
         promoted_from_id: UUID | None = None,
+        start_ttl_on_running: bool = False,
     ) -> Environment:
+        ttl_duration_seconds: int | None = None
+        if ttl_expires_at is not None:
+            # We calculate this using a naive duration from now.
+            # It will be applied EXACTLY when the environment becomes RUNNING.
+            duration = (ttl_expires_at - datetime.now(UTC)).total_seconds()
+            if duration > 0:
+                ttl_duration_seconds = int(duration)
+
+        # When start_ttl_on_running is set (the normal provision path), the TTL clock does
+        # NOT start at creation - only the duration is captured, and update_status() applies
+        # ttl_expires_at when the environment reaches RUNNING. This keeps a PROVISIONING /
+        # FAILED environment from showing a misleading countdown before it ever succeeds.
+        # Direct callers that pass an explicit ttl_expires_at (tests, promotion) keep it.
+        initial_ttl_expires_at = None if start_ttl_on_running else ttl_expires_at
+
         environment = Environment(
             owner_id=owner_id,
             org_id=org_id,
@@ -258,7 +306,8 @@ class EnvironmentRepository:
             latest_commit_sha=latest_commit_sha,
             namespace_name=namespace_name,
             status=EnvironmentStatus.PROVISIONING,
-            ttl_expires_at=ttl_expires_at,
+            ttl_expires_at=initial_ttl_expires_at,
+            ttl_duration_seconds=ttl_duration_seconds,
             cost_estimate_hourly=cost_estimate_hourly,
             template_id=template_id,
             preview_url=preview_url,
@@ -300,6 +349,12 @@ class EnvironmentRepository:
         preview_endpoints_json: str | None = None,
         update_seed_status: bool = False,
     ) -> Environment:
+        if status == EnvironmentStatus.RUNNING and environment.status != EnvironmentStatus.RUNNING:
+            if environment.ttl_duration_seconds is not None:
+                environment.ttl_expires_at = datetime.now(UTC) + timedelta(seconds=environment.ttl_duration_seconds)
+                # Clear so we don't double-shift on rebuilds
+                environment.ttl_duration_seconds = None
+
         environment.status = status
         environment.error_message = error_message
         if status == EnvironmentStatus.FAILED:
@@ -346,8 +401,11 @@ class EnvironmentRepository:
         self,
         environment: Environment,
         ttl_expires_at: datetime,
+        extend_delta: timedelta | None = None,
     ) -> Environment:
         environment.ttl_expires_at = ttl_expires_at
+        if extend_delta is not None and environment.ttl_duration_seconds is not None:
+            environment.ttl_duration_seconds += int(extend_delta.total_seconds())
         await self._session.flush()
         await self._session.refresh(environment)
         return environment

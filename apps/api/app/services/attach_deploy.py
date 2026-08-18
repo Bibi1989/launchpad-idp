@@ -698,6 +698,7 @@ def _deploy_local_machine_multi(
     running_instance: RunningInstanceConfig,
     settings: Settings,
     plans: list[_AttachServicePlan],
+    extra_env: dict[str, str] | None = None,
 ) -> ProvisionedResources:
     resources = ProvisionedResources(
         namespace=f"instance-{environment_id[:8]}",
@@ -759,21 +760,30 @@ def _deploy_local_machine_multi(
         )
         if plan.app_kind == "backend":
             backend_ports[plan.name] = container_port
-        env_vars: dict[str, str] = {}
+        env_vars: dict[str, str] = dict(extra_env or {})
         if plan.app_kind == "frontend" and primary_backend is not None:
             be_port = backend_ports.get(
                 primary_backend.name,
                 primary_backend.listen_port,
             )
             api_url = f"http://{primary_backend.name}:{be_port}"
-            env_vars.update(
-                {
-                    "API_URL": api_url,
-                    "BACKEND_URL": api_url,
-                    "NEXT_PUBLIC_API_URL": api_url,
-                    "NUXT_PUBLIC_API_URL": api_url,
-                }
-            )
+            # Expose the backend URL under every common frontend framework key (a stack
+            # only reads its own; the rest are harmless), so the frontend calls the
+            # backend regardless of Next.js / Vite / Vue / Svelte / Angular / Nuxt.
+            for key in (
+                "API_URL",
+                "BACKEND_URL",
+                "NEXT_PUBLIC_API_URL",
+                "NEXT_PUBLIC_API_BASE_URL",
+                "VITE_API_URL",
+                "VITE_API_BASE_URL",
+                "VUE_APP_API_URL",
+                "PUBLIC_API_URL",
+                "NG_APP_API_URL",
+                "NUXT_PUBLIC_API_BASE",
+                "NUXT_PUBLIC_API_URL",
+            ):
+                env_vars.setdefault(key, api_url)
         preferred_host = (
             host_preferred_frontend
             if plan.app_kind == "frontend"
@@ -820,6 +830,7 @@ def _deploy_local_machine(
     settings: Settings,
     workspace_root: Path | None = None,
     services: list[ContainerServiceSpec] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> ProvisionedResources:
     plans = _build_attach_service_plans(workspace_root, services)
     # Multi-service instance: always run FE+BE on a shared network when the wizard
@@ -844,6 +855,7 @@ def _deploy_local_machine(
                 running_instance=running_instance,
                 settings=settings,
                 plans=plans,
+                extra_env=extra_env,
             )
 
     preferred = int(running_instance.listen_port)
@@ -1064,6 +1076,7 @@ def _deploy_vm(
     cloud_provider: str | None = None,
     credentials: CloudCredentials | None = None,
     workspace_root: Path | None = None,
+    extra_env: dict[str, str] | None = None,
     git_repo_url: str = "",
     git_branch: str = "main",
     org_slug: str | None = None,
@@ -1147,6 +1160,7 @@ def _deploy_vm(
             ),
             settings=settings,
             workspace_root=workspace_root,
+            extra_env=extra_env,
         )
 
     listen = running_instance.listen_port
@@ -1179,6 +1193,7 @@ def _deploy_vm(
             git_branch=git_branch,
             resources=resources,
             override=override,
+            extra_env=extra_env,
         )
 
     return _deploy_vm_docker(
@@ -2078,6 +2093,31 @@ echo "launchpad_vm_start_refined start=$START_CMD"
 """
 
 
+def _native_env_file_snippet(env_vars: dict[str, str] | None) -> str:
+    """Shell that writes Launchpad-injected vars into ``$APP_CWD/.env`` (marked block).
+
+    Written before the on-VM build so statically-built frontends (Vite/Next/CRA) bake
+    them in, and sourced by the runtime wrapper so bare systemd/pm2 processes read them
+    too. A prior Launchpad block is removed first, so redeploys stay idempotent.
+    """
+    if not env_vars:
+        return ""
+    lines = []
+    for key, value in env_vars.items():
+        safe = str(value).replace("\r", "").replace("\n", " ").replace("'", "'\\''")
+        lines.append(f"{key}='{safe}'")
+    body = "\n".join(lines)
+    return (
+        "touch .env\n"
+        "sed -i '/# LAUNCHPAD-ENV-START/,/# LAUNCHPAD-ENV-END/d' .env 2>/dev/null || true\n"
+        "cat >> .env <<'LP_ENV_EOF'\n"
+        "# LAUNCHPAD-ENV-START\n"
+        f"{body}\n"
+        "# LAUNCHPAD-ENV-END\n"
+        "LP_ENV_EOF\n"
+    )
+
+
 def _native_bootstrap_and_start(
     *,
     strategy: InstanceProcessStrategy,
@@ -2089,8 +2129,10 @@ def _native_bootstrap_and_start(
     reverse_proxy: InstanceReverseProxy = InstanceReverseProxy.NONE,
     cloud_provider: str = CloudProvider.GCP.value,
     autodetect_on_vm: bool = False,
+    env_vars: dict[str, str] | None = None,
 ) -> str:
     """Shell script executed on the VM after code is present."""
+    env_file = _native_env_file_snippet(env_vars)
     ensure = _vm_ensure_host_packages_script(
         strategy=strategy,
         os_family=_vm_os_family(cloud_provider),
@@ -2142,6 +2184,12 @@ def _native_bootstrap_and_start(
             + _write_placeholder_preview_server_script()
             + "fi\n"
         )
+        # Write Launchpad-injected env into $APP_CWD/.env before the build so static
+        # frontends (Vite/Next) bake it in.
+        if env_file:
+            install_app = install_app.replace(
+                'cd "$APP_CWD"\n', 'cd "$APP_CWD"\n' + env_file, 1
+            )
         health = _preview_healthcheck_script(listen=listen)
         start_wrapper = f"{app_dir}/.launchpad-start.sh"
         write_wrapper = (
@@ -2149,6 +2197,8 @@ def _native_bootstrap_and_start(
             + "'#!/bin/bash' "
             + "'set -euo pipefail' "
             + "\"cd $(printf %q \"$APP_CWD\")\" "
+            # Load the injected .env at runtime (systemd/pm2 both exec this wrapper).
+            + "'set -a; [ -f .env ] && . ./.env || true; set +a' "
             + f"'export PORT={listen}' "
             + "'export HOST=0.0.0.0' "
             + f"'export NITRO_PORT={listen}' "
@@ -2616,6 +2666,7 @@ def _deploy_vm_native(
     git_branch: str,
     resources: ProvisionedResources,
     override: str,
+    extra_env: dict[str, str] | None = None,
 ) -> ProvisionedResources:
     from app.services.git_urls import is_remote_cloneable_git_url
 
@@ -2703,6 +2754,7 @@ def _deploy_vm_native(
             reverse_proxy=running_instance.reverse_proxy,
             cloud_provider=cloud_provider,
             autodetect_on_vm=autodetect_on_vm,
+            env_vars=extra_env,
         )
         _remote_shell(
             running_instance=running_instance,
@@ -3220,6 +3272,7 @@ def deploy_attach(
     packaging: object | None = None,
     settings: Settings | None = None,
     services: list[ContainerServiceSpec] | None = None,
+    extra_env: dict[str, str] | None = None,
     cloud_provider: str | None = None,
     credentials: CloudCredentials | None = None,
     org_slug: str | None = None,
@@ -3308,6 +3361,7 @@ def deploy_attach(
             cloud_provider=provider,
             credentials=credentials,
             workspace_root=workspace_root,
+            extra_env=extra_env,
             git_repo_url=git_repo_url,
             git_branch=git_branch,
             org_slug=org_slug,

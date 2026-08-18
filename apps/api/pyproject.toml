@@ -35,6 +35,9 @@ dev = [
   "pytest-asyncio>=0.24.0",
   "aiosqlite>=0.20.0",
   "ruff>=0.8.0",
+  # Enables `make worker-dev` to auto-restart the Celery worker on code changes,
+  # so provision/build fixes take effect without a manual worker restart.
+  "watchdog>=4.0.0",
 ]
 
 [build-system]

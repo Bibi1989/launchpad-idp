@@ -476,6 +476,80 @@ def load_image_to_local_cluster_with_retry(
     return _load_image_to_local_cluster(image_tag, cluster_name=cluster_name, engine=engine)
 
 
+def load_images_to_local_cluster_batch(
+    image_tags: list[str],
+    *,
+    cluster_name: str | None = None,
+    engine: str | None = None,
+) -> set[str]:
+    """Import MANY tags into the local cluster in ONE call and return those confirmed loaded.
+
+    Alias tags (``docker tag`` of one built image) share layers, so a single batched
+    ``k3d image import a b c`` / ``kind load docker-image a b c`` transfers the content
+    once - versus one full multi-minute import per tag, which is what made linked-repo
+    provisions sit at APPLY for 30-50 minutes. Falls back to per-tag retries if the
+    batch call fails.
+    """
+    import shutil
+
+    from app.core.config import get_settings
+
+    tags = [t for t in dict.fromkeys(image_tags) if t]
+    if not tags:
+        return set()
+    settings = get_settings()
+    active_engine = (engine or getattr(settings, "local_k8s_engine", "k3s")).lower()
+    real_cluster = resolve_kind_cluster_name(cluster_name)
+
+    already = {
+        t for t in tags if cluster_has_image(t, cluster_name=real_cluster, engine=active_engine)
+    }
+    pending = [t for t in tags if t not in already]
+    if not pending:
+        return set(tags)
+
+    # One batched import for the whole workspace's images.
+    if active_engine == "kind":
+        kind_bin = shutil.which("kind")
+        if kind_bin:
+            res = subprocess.run(
+                [kind_bin, "load", "docker-image", *pending, "--name", real_cluster],
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            if res.returncode == 0:
+                logger.info("batch_loaded_images_into_kind", count=len(pending), cluster=real_cluster)
+                return set(tags)
+            logger.warning(
+                "kind_batch_load_failed", detail=(res.stderr or res.stdout or "").strip()[-500:]
+            )
+    else:
+        k3d_bin = shutil.which("k3d")
+        if k3d_bin:
+            res = subprocess.run(
+                [k3d_bin, "image", "import", *pending, "-c", real_cluster],
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            if res.returncode == 0:
+                logger.info("batch_loaded_images_into_k3d", count=len(pending), cluster=real_cluster)
+                return set(tags)
+            logger.warning(
+                "k3d_batch_import_failed", detail=(res.stderr or res.stdout or "").strip()[-500:]
+            )
+
+    # Batch failed - fall back to per-tag (with cluster-ensure retry).
+    loaded = set(already)
+    for tag in pending:
+        if load_image_to_local_cluster_with_retry(
+            tag, cluster_name=real_cluster, engine=active_engine
+        ):
+            loaded.add(tag)
+    return loaded
+
+
 def _is_image_in_kind(image_tag: str, cluster_name: str | None = None) -> bool:
     """Return True if ``image_tag`` is already present in the local cluster (check only)."""
     return cluster_has_image(image_tag, cluster_name=cluster_name)
@@ -723,6 +797,7 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
 
     loaded: list[str] = []
     failed_required: list[str] = []
+    all_tags_to_load: list[str] = []
 
     for (context, df), tags in groups.items():
         try:
@@ -794,22 +869,26 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                         error=(tag_res.stderr or tag_res.stdout or "").strip()[-200:],
                     )
 
-            tags_to_load = list(tags)
-            for image_tag in tags_to_load:
-                if image_tag in loaded:
-                    continue
-                logger.info("loading_local_docker_image", image=image_tag, cluster=real_cluster)
-                if load_image_to_local_cluster_with_retry(image_tag, cluster_name=real_cluster):
-                    loaded.append(image_tag)
-                else:
-                    logger.warning("local_image_load_failed", image=image_tag, cluster=real_cluster)
-                    if image_tag in required_tags:
-                        failed_required.append(f"{image_tag}: built but failed to load into cluster")
+            # Defer loading: accumulate every tag and import them ALL in one batched
+            # call after the build loop (aliases share layers, so one import transfers
+            # the content once instead of a full multi-minute import per tag).
+            all_tags_to_load.extend(tags)
         except Exception as exc:
             logger.warning("local_image_build_exception", dockerfile=str(rel), error=str(exc))
             for image_tag in tags:
                 if image_tag in required_tags:
                     failed_required.append(f"{image_tag}: {exc}")
+
+    # One batched import for the whole workspace's images (the big provision-time win).
+    if all_tags_to_load:
+        logger.info("loading_local_docker_images_batch", count=len(set(all_tags_to_load)))
+        batch_loaded = load_images_to_local_cluster_batch(
+            all_tags_to_load, cluster_name=real_cluster
+        )
+        loaded.extend(sorted(batch_loaded))
+        for image_tag in all_tags_to_load:
+            if image_tag in required_tags and image_tag not in batch_loaded:
+                failed_required.append(f"{image_tag}: built but failed to load into cluster")
 
     if failed_required:
         raise RuntimeError(
@@ -1465,6 +1544,12 @@ def inspect_image_exposed_ports(image: str) -> list[int]:
         return []
 
     if completed.returncode != 0:
+        # Unqualified short names (launch-web:latest, app:latest, <slug>:latest) are built
+        # locally and never exist in a registry - `docker pull` would resolve them to
+        # docker.io/library/<name> and hang for the full timeout. Skip the pull for those;
+        # only registry-qualified images (with a host/) are worth pulling.
+        if is_unqualified_local_image(image):
+            return []
         # Image may not be local yet - best-effort pull then re-inspect.
         pull = subprocess.run(
             ["docker", "pull", image],
@@ -1932,15 +2017,85 @@ def _stamp_launch_workload_pod_labels(doc: dict[str, Any], labels: dict[str, str
     pod_labels.setdefault("launchpad.io/managed-by", "launchpad-idp")
 
 
+_CORS_ENV_NAMES: tuple[str, ...] = (
+    "CORS_ALLOWED_ORIGINS",
+    "CORS_ORIGINS",
+    "CORS_ORIGIN",
+    "ALLOWED_ORIGINS",
+    "CORS_ALLOW_ORIGIN",
+)
+
+
+def merge_preview_cors_origin(
+    extra_env: dict[str, str] | None, origin: str | None
+) -> dict[str, str]:
+    """Return env with the preview frontend URL wired into CORS.
+
+    If the user already set a CORS origins var, the preview URL is appended (comma
+    separated, deduped). Otherwise ``CORS_ALLOWED_ORIGINS`` is added so a backend that
+    reads it accepts requests from the preview frontend without manual configuration.
+    ``FRONTEND_URL`` is also set as a convenience. Returns a copy; input is untouched.
+    """
+    merged = dict(extra_env or {})
+    origin = (origin or "").strip()
+    if not origin:
+        return merged
+    present = [name for name in _CORS_ENV_NAMES if name in merged]
+    if present:
+        for name in present:
+            parts = [p.strip() for p in (merged.get(name) or "").split(",") if p.strip()]
+            if origin not in parts:
+                parts.append(origin)
+            merged[name] = ",".join(parts)
+    else:
+        merged["CORS_ALLOWED_ORIGINS"] = origin
+    merged.setdefault("FRONTEND_URL", origin)
+    return merged
+
+
+def inject_extra_env_into_documents(
+    documents: list[dict[str, Any]], extra_env: dict[str, str] | None
+) -> None:
+    """Add user-defined env vars to every app workload container (in place).
+
+    Datastore companions (postgres/redis/…) keep their own env untouched. Existing
+    container env entries with the same name are overwritten so the user's value wins.
+    """
+    if not extra_env:
+        return
+    for doc in documents:
+        if str(doc.get("kind") or "") != "Deployment" or _is_datastore_workload(doc):
+            continue
+        pod_spec = ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+        if not isinstance(pod_spec, dict):
+            continue
+        for container in pod_spec.get("containers") or []:
+            if not isinstance(container, dict):
+                continue
+            env = {
+                item["name"]: item
+                for item in container.get("env", [])
+                if isinstance(item, dict) and "name" in item
+            }
+            for key, value in extra_env.items():
+                env[key] = {"name": key, "value": value}
+            container["env"] = list(env.values())
+
+
 def _is_launch_workload(doc: dict[str, Any]) -> bool:
     """Return True for a per-stack ``launch-*`` Deployment/Service.
 
     These carry their own built image and their own ``app`` selector so their
     Service + the multi-service Ingress route correctly - the single-app preview
     patch must not overwrite their image or force them onto the ``app`` selector.
+
+    Matches both the bare ``launch-web`` form and the workspace-prefixed form the
+    generator emits (e.g. ``virtual-office-frontend-launch-web``); otherwise a
+    prefixed launch workload skips ``_harden_launch_workload`` and gets probed on the
+    wrong port, so a healthy app never reaches Ready.
     """
     name = str((doc.get("metadata") or {}).get("name") or "").strip().lower()
-    return name.startswith("launch-")
+    return name.startswith("launch-") or "-launch-" in name
 
 
 def _pin_local_image_pull_policy(doc: dict[str, Any]) -> None:
@@ -2362,8 +2517,26 @@ class ManifestDeployer:
         region: str | None = None,
         image_source: str | None = None,
         image_scan: object | None = None,
+        extra_env: dict[str, str] | None = None,
+        enable_postgres: bool = False,
+        enable_redis: bool = False,
     ) -> ProvisionedResources:
         workload_image = image or self._settings.default_workload_image
+        # In-cluster datastores: deploy Postgres/Redis (+ their app-secrets) and capture
+        # the connection URLs so we can inject them straight into the app container - this
+        # is what actually "connects" the datastore to the service on MANIFEST/linked
+        # deploys (the runtime datastore apply otherwise only ran on the PREVIEW path).
+        datastore_env: dict[str, str] = {}
+        if enable_postgres or enable_redis:
+            try:
+                datastore_env = self._provisioner.apply_ephemeral_datastores(
+                    namespace=namespace,
+                    name=name,
+                    enable_postgres=enable_postgres,
+                    enable_redis=enable_redis,
+                )
+            except Exception as exc:  # noqa: BLE001 - datastore apply is best-effort
+                logger.warning("manifest_ephemeral_datastores_failed", namespace=namespace, error=str(exc))
         labels = build_preview_labels(
             environment_id=environment_id,
             name=name,
@@ -2499,6 +2672,17 @@ class ManifestDeployer:
             image=workload_image,
             preview_host=host,
         )
+        # Inject user-defined env vars into every app workload (datastores keep their
+        # own env). Container env overrides the image's Dockerfile ENV, so these win.
+        # Also auto-wire the preview frontend URL into CORS so a backend accepts calls
+        # from the frontend preview without manual setup (appended if a CORS var exists).
+        frontend_origin = (
+            self._provisioner.ingress_preview_url(host=host) if host else None
+        )
+        # Datastore URLs first, then user env (user wins), then CORS wiring on top.
+        combined_env = {**datastore_env, **(extra_env or {})}
+        effective_extra_env = merge_preview_cors_origin(combined_env, frontend_origin)
+        inject_extra_env_into_documents(patched, effective_extra_env)
         # Resolve which workload the preview NodePort exposes (the annotated
         # preview-target, else "app", else the first app workload) so the Service
         # selector matches real pods and the listen port is that workload's port.
@@ -2548,25 +2732,53 @@ class ManifestDeployer:
             resources.node_port = None
             resources.preview_url = None
         else:
-            used_ports = self._provisioner.list_allocated_node_ports(exclude_namespace=namespace)
-            existing_port = self._provisioner.read_namespaced_app_node_port(namespace)
-            node_port = resolve_preview_node_port(
-                environment_id,
-                existing_port=existing_port,
-                port_min=self._settings.preview_node_port_min,
-                port_max=self._settings.preview_node_port_max,
-                used_ports=used_ports,
-                cluster_name=self._settings.kubernetes_context,
-            )
-            # Always pin the Service into the kind-mapped range (fixes auto-assigned ports).
-            node_port = self._assign_node_port(
-                namespace=namespace,
-                node_port=node_port,
-                used_ports=used_ports,
-                labels=labels,
-                target_port=listen_port,
-                selector_app=preview_app_label,
-            )
+            # Homelab / prod: Cloudflare Tunnel -> in-cluster Ingress serves the preview at
+            # ws-{id}.{base_domain}. A per-preview NodePort is NOT needed there, and the
+            # kind/k3d forwarded range is tiny (often 5 ports), so allocating one per
+            # preview needlessly exhausts it. Serve via Ingress only (ClusterIP Service)
+            # when a tunnel host is available; keep NodePort for local offline dev.
+            serve_via_ingress = bool(self._settings.preview_tunnel_active and host)
+            node_port: int | None = None
+            if not serve_via_ingress:
+                existing_port = self._provisioner.read_namespaced_app_node_port(namespace)
+                used_ports = self._provisioner.list_allocated_node_ports(
+                    exclude_namespace=namespace
+                )
+
+                def _resolve() -> int:
+                    return resolve_preview_node_port(
+                        environment_id,
+                        existing_port=existing_port,
+                        port_min=self._settings.preview_node_port_min,
+                        port_max=self._settings.preview_node_port_max,
+                        used_ports=used_ports,
+                        cluster_name=self._settings.kubernetes_context,
+                        owner_key=owner_label,
+                    )
+
+                try:
+                    node_port = _resolve()
+                except RuntimeError:
+                    # NodePort range exhausted. Reclaim ports held by Terminating preview
+                    # namespaces (dead previews still being deleted) and retry once before
+                    # failing - the kind/k3d forwarded range is tiny.
+                    freed = self._provisioner.reclaim_orphaned_preview_node_ports(
+                        exclude_namespace=namespace
+                    )
+                    logger.info("preview_node_port_reclaim_attempt", freed=freed)
+                    used_ports = self._provisioner.list_allocated_node_ports(
+                        exclude_namespace=namespace
+                    )
+                    node_port = _resolve()  # re-raises if still exhausted
+                # Always pin the Service into the kind-mapped range (fixes auto-assigned ports).
+                node_port = self._assign_node_port(
+                    namespace=namespace,
+                    node_port=node_port,
+                    used_ports=used_ports,
+                    labels=labels,
+                    target_port=listen_port,
+                    selector_app=preview_app_label,
+                )
             resources.node_port = node_port
 
             has_workspace_ingress = any(
@@ -2590,19 +2802,21 @@ class ManifestDeployer:
                         resources.preview_url = self._provisioner.ingress_preview_url(host=host)
                     except Exception as exc:
                         # Ingress controllers (or remote GKE gateways) can 504; local
-                        # previews still work via the Kind-mapped NodePort.
+                        # previews still work via the Kind-mapped NodePort when present.
                         logger.warning(
                             "manifest_ingress_apply_failed_fallback_nodeport",
                             namespace=namespace,
                             host=host,
                             error=str(exc)[:400],
                         )
-                        resources.preview_url = self._provisioner.node_port_preview_url(
-                            node_port=node_port
+                        resources.preview_url = (
+                            self._provisioner.node_port_preview_url(node_port=node_port)
+                            if node_port is not None
+                            else self._provisioner.ingress_preview_url(host=host)
                         )
                 else:
                     resources.preview_url = self._provisioner.ingress_preview_url(host=host)
-            else:
+            elif node_port is not None:
                 resources.preview_url = self._provisioner.node_port_preview_url(node_port=node_port)
 
         ready_timeout = _workload_ready_timeout_seconds(

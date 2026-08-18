@@ -430,13 +430,20 @@ async def retry_environment_provision(
     request: Request,
     user: CurrentUser,
     service: EnvironmentService = Depends(get_environment_service),
+    regenerate_dockerfile: bool = False,
 ) -> EnvironmentRead:
-    """Re-queue provision for a FAILED environment."""
+    """Re-queue provision for a FAILED environment.
+
+    ``?regenerate_dockerfile=true`` forces a fresh Launchpad-generated Dockerfile for the
+    linked repo(s) on this attempt - the recovery path when a repo's own Dockerfile fails
+    to build (for example a ``COPY`` whose source is missing from the build context).
+    """
     correlation_id = getattr(request.state, "correlation_id", "unknown")
     return await service.retry_provision(
         environment_id,
         owner=user,
         correlation_id=correlation_id,
+        regenerate_dockerfile=regenerate_dockerfile,
     )
 
 

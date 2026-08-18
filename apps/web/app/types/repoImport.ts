@@ -1,5 +1,13 @@
 /** Repository import → detect → save workspace types. */
 
+/** One repository in a (possibly multi-repo) workspace import. */
+export interface RepoRef {
+  git_repo_url: string
+  git_branch?: string
+  name?: string | null
+  github_installation_id?: number | null
+}
+
 export type ServiceRole = 'web' | 'api' | 'worker' | 'unknown'
 export type ProjectLayout = 'monorepo' | 'single'
 export type MonorepoTool =

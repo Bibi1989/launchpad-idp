@@ -28,6 +28,13 @@ api: migrate
 worker:
 	cd apps/api && .venv/bin/celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
 
+# Dev worker that AUTO-RESTARTS on any app/*.py change (needs the dev extra:
+# `pip install -e '.[dev]'` in apps/api for watchdog). The plain `worker` target does
+# NOT reload, so code fixes to provision/build/deploy only take effect after restart.
+worker-dev:
+	cd apps/api && .venv/bin/watchmedo auto-restart --directory=./app --pattern='*.py' --recursive -- \
+		.venv/bin/celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+
 beat:
 	cd apps/api && .venv/bin/celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
 

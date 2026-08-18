@@ -4,6 +4,7 @@ import type {
   DataStoreKind,
   DataStoreDependency,
   DependencyPlacement,
+  MessageBrokerKind,
   WorkloadDependenciesConfig,
 } from '~/types/provisioning'
 
@@ -114,6 +115,28 @@ function setPlacement(key: DataStoreKind, placement: DependencyPlacement) {
   }
 }
 
+function setStoreUrl(key: DataStoreKind, url: string) {
+  dependencies.value = {
+    ...dependencies.value,
+    [key]: { ...dependencies.value[key], connection_url: url || null },
+  }
+}
+
+function storeUrlPlaceholder(key: DataStoreKind): string {
+  switch (key) {
+    case 'postgres':
+      return 'postgresql://user:pass@host:5432/db'
+    case 'mysql':
+      return 'mysql://user:pass@host:3306/db'
+    case 'mongodb':
+      return 'mongodb+srv://user:pass@host/db'
+    case 'redis':
+      return 'redis://host:6379/0'
+    default:
+      return ''
+  }
+}
+
 function toggleStore(key: DataStoreKind, enabled: boolean) {
   const current = storeRef(key)
   dependencies.value = {
@@ -123,6 +146,39 @@ function toggleStore(key: DataStoreKind, enabled: boolean) {
       enabled,
       placement: enabled && !managedAvailable(key) ? 'in_cluster' : current.placement,
     },
+  }
+}
+
+// --- Message brokers (Kafka / RabbitMQ): in-cluster or bring-your-own URL ---
+
+const brokers: Array<{ key: MessageBrokerKind; title: string; hint: string }> = [
+  { key: 'kafka', title: 'Apache Kafka', hint: 'Event streaming / pub-sub bus' },
+  { key: 'rabbitmq', title: 'RabbitMQ', hint: 'AMQP message broker' },
+]
+
+function brokerRef(key: MessageBrokerKind): DataStoreDependency {
+  return dependencies.value[key]
+}
+
+function toggleBroker(key: MessageBrokerKind, enabled: boolean) {
+  const current = brokerRef(key)
+  dependencies.value = {
+    ...dependencies.value,
+    [key]: { ...current, enabled, placement: enabled ? current.placement || 'in_cluster' : current.placement },
+  }
+}
+
+function setBrokerPlacement(key: MessageBrokerKind, placement: DependencyPlacement) {
+  dependencies.value = {
+    ...dependencies.value,
+    [key]: { ...dependencies.value[key], placement },
+  }
+}
+
+function setBrokerUrl(key: MessageBrokerKind, url: string) {
+  dependencies.value = {
+    ...dependencies.value,
+    [key]: { ...dependencies.value[key], connection_url: url || null },
   }
 }
 </script>
@@ -186,6 +242,19 @@ function toggleStore(key: DataStoreKind, enabled: boolean) {
           >
             {{ t('scaffold.dependencies.managedCloud') }}
           </button>
+          <button
+            type="button"
+            class="rounded-lg border px-3 py-1.5 text-xs transition"
+            :class="
+              storeRef(store.key).placement === 'external'
+                ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10 text-[var(--lp-text)]'
+                : 'border-[var(--lp-line)] text-[var(--lp-muted)] hover:bg-[var(--lp-panel-2)]'
+            "
+            :disabled="disabled"
+            @click="setPlacement(store.key, 'external')"
+          >
+            {{ t('scaffold.dependencies.bringYourOwn') }}
+          </button>
           <p
             v-if="store.key !== 'redis' && storeRef(store.key).placement === 'managed' && !managedAvailable(store.key)"
             class="text-xs text-amber-400"
@@ -204,6 +273,96 @@ function toggleStore(key: DataStoreKind, enabled: boolean) {
           >
             {{ t('scaffold.dependencies.managedHint') }}
           </p>
+          <label v-if="storeRef(store.key).placement === 'external'" class="block w-full space-y-1">
+            <span class="lp-label">{{ t('scaffold.dependencies.connectionUrl') }}</span>
+            <input
+              :value="storeRef(store.key).connection_url || ''"
+              type="text"
+              class="lp-input font-mono text-xs"
+              :placeholder="storeUrlPlaceholder(store.key)"
+              :disabled="disabled"
+              @input="setStoreUrl(store.key, ($event.target as HTMLInputElement).value)"
+            >
+          </label>
+          <p
+            v-else-if="storeRef(store.key).placement === 'in_cluster' && storeRef(store.key).enabled"
+            class="flex items-start gap-1.5 text-xs text-[var(--lp-muted)]"
+          >
+            <span class="material-symbols-outlined text-sm text-[var(--lp-accent)]">bolt</span>
+            <span>{{ t('scaffold.dependencies.inClusterAutoInjected') }}</span>
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Message brokers: in-cluster or bring-your-own (external) URL. -->
+    <div class="space-y-2">
+      <p class="text-sm font-medium">{{ t('scaffold.dependencies.brokersTitle') }}</p>
+      <p class="text-xs text-[var(--lp-muted)]">{{ t('scaffold.dependencies.brokersBlurb') }}</p>
+      <div class="space-y-3">
+        <div
+          v-for="broker in brokers"
+          :key="broker.key"
+          class="rounded-lg border border-[var(--lp-line)] p-3"
+        >
+          <label class="flex cursor-pointer items-start justify-between gap-3">
+            <span>
+              <span class="block text-sm font-medium">{{ broker.title }}</span>
+              <span class="block text-xs text-[var(--lp-muted)]">{{ broker.hint }}</span>
+            </span>
+            <input
+              :checked="brokerRef(broker.key).enabled"
+              type="checkbox"
+              class="mt-0.5 h-4 w-4 accent-[var(--lp-accent)]"
+              :disabled="disabled"
+              @change="toggleBroker(broker.key, ($event.target as HTMLInputElement).checked)"
+            >
+          </label>
+
+          <div
+            v-if="brokerRef(broker.key).enabled"
+            class="mt-3 space-y-3 border-t border-[var(--lp-line)] pt-3"
+          >
+            <div class="flex flex-wrap gap-2">
+              <button
+                type="button"
+                class="rounded-lg border px-3 py-1.5 text-xs transition"
+                :class="
+                  brokerRef(broker.key).placement !== 'external'
+                    ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10 text-[var(--lp-text)]'
+                    : 'border-[var(--lp-line)] text-[var(--lp-muted)] hover:bg-[var(--lp-panel-2)]'
+                "
+                :disabled="disabled"
+                @click="setBrokerPlacement(broker.key, 'in_cluster')"
+              >
+                {{ t('scaffold.dependencies.inCluster') }}
+              </button>
+              <button
+                type="button"
+                class="rounded-lg border px-3 py-1.5 text-xs transition"
+                :class="
+                  brokerRef(broker.key).placement === 'external'
+                    ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10 text-[var(--lp-text)]'
+                    : 'border-[var(--lp-line)] text-[var(--lp-muted)] hover:bg-[var(--lp-panel-2)]'
+                "
+                :disabled="disabled"
+                @click="setBrokerPlacement(broker.key, 'external')"
+              >
+                {{ t('scaffold.dependencies.bringYourOwn') }}
+              </button>
+            </div>
+            <label v-if="brokerRef(broker.key).placement === 'external'" class="block space-y-1">
+              <span class="lp-label">{{ t('scaffold.dependencies.brokerUrl') }}</span>
+              <input
+                :value="brokerRef(broker.key).connection_url || ''"
+                type="text"
+                class="lp-input font-mono text-xs"
+                :placeholder="broker.key === 'kafka' ? 'broker1:9092,broker2:9092' : 'amqps://user:pass@host:5671/vhost'"
+                :disabled="disabled"
+                @input="setBrokerUrl(broker.key, ($event.target as HTMLInputElement).value)"
+              >
+            </label>
+          </div>
         </div>
       </div>
     </div>

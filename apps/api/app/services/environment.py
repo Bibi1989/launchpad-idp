@@ -64,6 +64,7 @@ from app.services.preview_templates import get_preview_template, list_preview_te
 from app.services.provisioning import ProvisioningService
 from app.services.state_lock import (
     PROVISIONING_IN_PROGRESS_MESSAGE,
+    force_release_state_lock,
     is_state_locked,
 )
 from app.workers.tasks import enqueue_provision_environment, enqueue_teardown_environment
@@ -592,7 +593,13 @@ class EnvironmentService:
         promotion_lineage_id = payload.promotion_lineage_id
         promoted_from_id = payload.promoted_from_id
 
-        await self._auto_pause_if_needed(owner, project_id=project_id, cap=cap, exclude_id=reuse_row.id if reuse_row else None)
+        await self._auto_pause_if_needed(
+            owner,
+            project_id=project_id,
+            cap=cap,
+            exclude_id=reuse_row.id if reuse_row else None,
+            org_id=org_id,
+        )
         await self._enforce_soft_cost_cap(owner, payload)
         if payload.cost_estimate_hourly is not None:
             hourly = payload.cost_estimate_hourly
@@ -725,6 +732,9 @@ class EnvironmentService:
                 lifecycle_stage=lifecycle_stage,
                 promotion_lineage_id=promotion_lineage_id,
                 promoted_from_id=promoted_from_id,
+                # TTL starts counting only once provisioning succeeds (status RUNNING),
+                # not at creation - so a PROVISIONING / FAILED env shows no countdown.
+                start_ttl_on_running=True,
             )
             environment.namespace_name = f"launchpad-env-{environment.id}"
             await self._session.flush()
@@ -802,15 +812,10 @@ class EnvironmentService:
                 },
             )
 
-        hours = payload.hours
-        minutes = payload.minutes
-        if hours is None and minutes is None:
-            hours = self._settings.ttl_extend_hours_default
-        extend_delta = (
-            timedelta(minutes=minutes)
-            if minutes is not None
-            else timedelta(hours=hours if hours is not None else self._settings.ttl_extend_hours_default)
-        )
+        # Reset TTL: set the clock to expire the full window (default_ttl_hours, e.g. 2h)
+        # from NOW, so a click always restores the max regardless of how much was left.
+        # Explicit hours/minutes in the payload still override for API callers; otherwise
+        # we reset to the standard preview window.
         now = datetime.now(UTC)
         created = environment.created_at
         if created.tzinfo is None:
@@ -819,22 +824,20 @@ class EnvironmentService:
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
 
-        base = max(expires, now)
-        candidate = base + extend_delta
+        hours = payload.hours
+        minutes = payload.minutes
+        if minutes is not None:
+            reset_delta = timedelta(minutes=minutes)
+        elif hours is not None:
+            reset_delta = timedelta(hours=hours)
+        else:
+            reset_delta = timedelta(hours=max(1, int(self._settings.default_ttl_hours)))
+        candidate = now + reset_delta
+        # Governance: never exceed the absolute cap measured from create time.
         max_total_hours = max(1, int(self._settings.ttl_max_total_hours_from_create))
         max_expiry = created + timedelta(hours=max_total_hours)
         if candidate > max_expiry:
             candidate = max_expiry
-        if candidate <= expires:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "ttl_max_reached",
-                    "message": (
-                        f"Cannot extend beyond {max_total_hours}h from create time"
-                    ),
-                },
-            )
 
         # Soft cost: refuse extend on cloud when accrued already over cap.
         if (environment.provider or "local") != "local":
@@ -1106,8 +1109,14 @@ class EnvironmentService:
         *,
         owner: User,
         correlation_id: str,
+        regenerate_dockerfile: bool = False,
     ) -> EnvironmentRead:
-        """Re-queue provision for a FAILED or RUNNING environment (same namespace / config)."""
+        """Re-queue provision for a FAILED or RUNNING environment (same namespace / config).
+
+        When ``regenerate_dockerfile`` is True, linked-repo builds generate a fresh
+        Launchpad Dockerfile even if the repo ships one - the recovery path for a repo
+        whose own Dockerfile fails to build (for example a bad ``COPY``).
+        """
         environment = await self._require_owned(environment_id, owner)
         if environment.status not in {
             EnvironmentStatus.FAILED,
@@ -1121,13 +1130,26 @@ class EnvironmentService:
                 },
             )
         if await is_state_locked(environment_id, scope="environment"):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "provisioning_in_progress",
-                    "message": PROVISIONING_IN_PROGRESS_MESSAGE,
-                },
-            )
+            # A FAILED environment (including one the user just Stopped) has no
+            # legitimate in-flight provision - the task that held the lock has failed,
+            # been stopped, or died. Break the stale lock so the retry proceeds instead
+            # of dead-ending on "provisioning already in progress". Only a genuinely
+            # RUNNING environment's lock is treated as a real concurrent operation.
+            if environment.status == EnvironmentStatus.FAILED:
+                await force_release_state_lock(environment_id, scope="environment")
+                logger.warning(
+                    "retry_forced_stale_lock_release",
+                    environment_id=str(environment_id),
+                    correlation_id=correlation_id,
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "provisioning_in_progress",
+                        "message": PROVISIONING_IN_PROGRESS_MESSAGE,
+                    },
+                )
 
         await self._environments.update_status(
             environment,
@@ -1152,6 +1174,7 @@ class EnvironmentService:
         enqueue_provision_environment(
             environment_id=str(environment.id),
             correlation_id=correlation_id,
+            regenerate_dockerfile=regenerate_dockerfile,
         )
         try:
             await publish_env_event(
@@ -1676,10 +1699,21 @@ class EnvironmentService:
         project_id: UUID | None,
         cap: int | None,
         exclude_id: UUID | None = None,
+        org_id: UUID | None = None,
     ) -> None:
-        if cap is None or project_id is None:
+        # Cap is per ORGANISATION for the free tier (pro passes cap=None -> unlimited).
+        # Count the whole org's active previews so one org's limit is not per-user or
+        # global. Fall back to per-owner+project only when no org is available.
+        if cap is None:
             return
-        active_envs = await self._environments.list_active_for_owner_project(owner.id, project_id)
+        if org_id is not None:
+            active_envs = await self._environments.list_active_for_org(org_id)
+            scope = "organisation"
+        elif project_id is not None:
+            active_envs = await self._environments.list_active_for_owner_project(owner.id, project_id)
+            scope = "project"
+        else:
+            return
         active_envs = [row for row in active_envs if row.id != exclude_id]
         if len(active_envs) < cap:
             return
@@ -1692,7 +1726,7 @@ class EnvironmentService:
                 environment_id=oldest.id,
                 log_level=LogLevel.WARN,
                 stage=ExecutionStage.APPLY,
-                message=f"Environment auto-paused to enforce plan max active limit of {cap} per project.",
+                message=f"Environment auto-paused to enforce plan max active limit of {cap} per {scope}.",
             )
             logger.info("environment_auto_paused", environment_id=str(oldest.id), cap=cap)
 

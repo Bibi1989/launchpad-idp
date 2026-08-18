@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import uuid
 from datetime import UTC, datetime
@@ -22,9 +23,11 @@ from app.schemas.repo_import import (
     RepoImportSaveRequest,
     RepoImportSaveResult,
     RepoImportSessionRead,
+    RepoRef,
     ServiceOverride,
 )
 from app.services.git_importer import GitImporterError, GitImporterService
+from app.services.multi_repo_import import RepoDetection, assemble_multi_repo
 from pkg.detector import ProjectDetectorEngine
 from pkg.detector.models import DetectedService, DetectionResult
 from pkg.generator.workspace import WorkspaceGenerator
@@ -32,6 +35,21 @@ from pkg.generator.workspace import WorkspaceGenerator
 logger = get_logger(__name__)
 
 _DETECTION_FILE = ".launchpad/detection.json"
+_MULTI_REPO_FILE = ".launchpad/multi_repo.json"
+# Kept at the workspace container root by GitImporterService.clone; must survive the
+# multi-repo relocation of the primary clone into apps/<name>/ (see git_importer).
+_IMPORT_META_FILE = ".launchpad-import.json"
+# Multi-repo layout: every imported repo lives under this dir so generated infra at
+# the container root never nests inside a source repo.
+_APPS_DIR = "apps"
+
+
+def _repo_slug_from_url(url: str) -> str:
+    import re
+
+    tail = url.rstrip("/").rsplit("/", 1)[-1]
+    tail = tail[:-4] if tail.endswith(".git") else tail
+    return re.sub(r"[^a-z0-9-]", "-", tail.lower()).strip("-")[:63] or "repo"
 
 
 class RepoImportService:
@@ -48,25 +66,85 @@ class RepoImportService:
         *,
         owner: User,
     ) -> RepoImportSessionRead:
-        token = self._resolve_token(
-            request.use_github_app_token,
-            installation_id=request.github_installation_id,
-        )
+        refs = request.effective_repos()
+        is_multi = len(refs) > 1
+        used_names: set[str] = set()
+        detections: list[RepoDetection] = []
+        datastore_kinds: set[str] = set()
+        repo_urls: list[str] = []
+        primary = None
+        primary_detection: DetectionResult | None = None
+
         try:
-            cloned = self._importer.clone(
-                repo_url=request.git_repo_url,
-                branch=request.git_branch,
-                token=token,
-            )
+            for index, ref in enumerate(refs):
+                token = self._resolve_token(
+                    request.use_github_app_token,
+                    installation_id=ref.github_installation_id or request.github_installation_id,
+                )
+                cloned = self._importer.clone(
+                    repo_url=ref.git_repo_url, branch=ref.git_branch, token=token
+                )
+                repo_urls.append(cloned.repo_url)
+                name = self._unique_repo_name(ref, cloned.repo_url, used_names)
+
+                if index == 0:
+                    primary = cloned
+                    if is_multi:
+                        # Multi-repo: relocate the primary clone into apps/<name>/ so the
+                        # container root holds only generated infra + .launchpad metadata,
+                        # never a repo's source tree.
+                        root = cloned.root_dir / _APPS_DIR / name
+                        self._relocate_into(cloned.root_dir, root)
+                        mount = f"{_APPS_DIR}/{name}"
+                    else:
+                        # Single-repo import: repo stays at the workspace root (unchanged).
+                        root = cloned.root_dir
+                        mount = ""
+                else:
+                    # Secondary repos live under apps/<name>/ alongside the primary.
+                    root = primary.root_dir / _APPS_DIR / name
+                    root.parent.mkdir(parents=True, exist_ok=True)
+                    if root.exists():
+                        shutil.rmtree(root, ignore_errors=True)
+                    shutil.copytree(
+                        cloned.root_dir, root, symlinks=False, ignore_dangling_symlinks=True
+                    )
+                    self._importer.cleanup(cloned.import_id)
+                    mount = f"{_APPS_DIR}/{name}"
+
+                det = self._detector.detect(root)
+                datastore_kinds.update(det.datastores)
+                if index == 0:
+                    primary_detection = det
+                # Name services after the repo (not the detector's launch-web/launch-server
+                # convention). A single-service repo becomes just <repo>; monorepos become
+                # <repo>-<service>.
+                repo_services = self._apply_repo_naming(name, det.services)
+                detections.append(
+                    RepoDetection(
+                        name=name, root_dir=root, services=repo_services, mount_prefix=mount
+                    )
+                )
         except GitImporterError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "repo_import_clone_failed", "message": str(exc)},
             ) from exc
 
-        detection = self._detector.detect(cloned.root_dir)
-        self._write_detection(cloned.root_dir, detection)
-        meta = self._importer.read_meta(cloned.import_id)
+        assert primary is not None and primary_detection is not None
+        assembly = assemble_multi_repo(detections)
+        merged_detection = primary_detection.model_copy(
+            update={"services": assembly.services, "datastores": sorted(datastore_kinds)}
+        )
+        # Cache the MERGED detection so save re-uses it (never re-detects the tree,
+        # which now contains the secondary repos under repos/).
+        self._write_detection(primary.root_dir, merged_detection)
+
+        multi_repo = len(refs) > 1
+        if multi_repo:
+            self._write_multi_repo(primary.root_dir, repo_urls, assembly)
+
+        meta = self._importer.read_meta(primary.import_id)
         created_raw = meta.get("created_at")
         created_at = None
         if isinstance(created_raw, str):
@@ -77,21 +155,26 @@ class RepoImportService:
 
         logger.info(
             "repo_import_detected",
-            import_id=cloned.import_id,
-            layout=detection.layout.value,
-            services=len(detection.services),
+            import_id=primary.import_id,
+            repos=len(refs),
+            layout=merged_detection.layout.value,
+            services=len(assembly.services),
+            edges=len(assembly.graph.edges),
             owner_id=str(owner.id),
         )
         return RepoImportSessionRead(
-            import_id=cloned.import_id,
-            git_repo_url=cloned.repo_url,
-            git_branch=cloned.branch,
-            commit_sha=cloned.commit_sha,
-            layout=detection.layout,
-            detection=detection,
-            services=detection.services,
+            import_id=primary.import_id,
+            git_repo_url=primary.repo_url,
+            git_branch=primary.branch,
+            commit_sha=primary.commit_sha,
+            layout=merged_detection.layout,
+            detection=merged_detection,
+            services=assembly.services,
             created_at=created_at,
-            datastore_suggestions=self._datastore_suggestions(detection.datastores),
+            datastore_suggestions=self._datastore_suggestions(merged_detection.datastores),
+            repos=repo_urls,
+            service_graph=assembly.graph.model_dump(),
+            mermaid=assembly.mermaid,
         )
 
     async def get_import(self, import_id: str, *, owner: User) -> RepoImportSessionRead:
@@ -118,6 +201,7 @@ class RepoImportService:
             except ValueError:
                 pass
 
+        multi_repo = self._read_multi_repo(root) or {}
         return RepoImportSessionRead(
             import_id=import_id,
             git_repo_url=str(meta.get("repo_url") or ""),
@@ -128,6 +212,9 @@ class RepoImportService:
             services=detection.services,
             created_at=created_at,
             datastore_suggestions=self._datastore_suggestions(detection.datastores),
+            repos=multi_repo.get("repos", []),
+            service_graph=multi_repo.get("service_graph"),
+            mermaid=multi_repo.get("mermaid"),
         )
 
     async def save_as_workspace(
@@ -167,16 +254,24 @@ class RepoImportService:
 
         adjusted = detection.model_copy(update={"services": services})
         runtime_mode = WorkspaceRuntimeMode(request.runtime_mode)
+
+        # Derive message-broker + inter-service connection wiring from the detected
+        # communication graph (multi-repo import). Empty for single plain repos.
+        multi_repo_saved = self._read_multi_repo(import_root) or {}
+        broker_kinds, connection_env = self._connection_wiring(multi_repo_saved, services)
+
         deps = self._build_dependencies(
             detection.datastores,
             request.datastores,
             workspace_name=request.name,
+            broker_kinds=broker_kinds,
         )
         env_map = self._build_env_map(
             detection,
             request.env_vars,
             deps,
             workspace_name=request.name,
+            connection_env=connection_env,
         )
         # External datastore URLs without a matching .env.example key still land in .env
         generated = self._generator.generate(
@@ -308,6 +403,15 @@ class RepoImportService:
             "dependencies": deps.model_dump(),
             "env_vars_configured": sorted(env_map.keys()),
         }
+        # Multi-repo: persist the repo list + inter-service connection graph so the
+        # workspace can render it and later wire the connections.
+        multi_repo = self._read_multi_repo(import_root)
+        if multi_repo:
+            wizard_snapshot["repos"] = multi_repo.get("repos", [])
+            wizard_snapshot["service_graph"] = multi_repo.get("service_graph")
+            wizard_snapshot["service_graph_mermaid"] = multi_repo.get("mermaid")
+            wizard_snapshot["service_comms"] = multi_repo.get("service_comms", [])
+            wizard_snapshot["service_connections"] = multi_repo.get("service_connections", [])
         row = ProvisioningWorkspace(
             id=workspace_id,
             owner_id=owner.id,
@@ -525,15 +629,64 @@ class RepoImportService:
         return out
 
     @staticmethod
+    def _connection_wiring(
+        multi_repo: dict,
+        services: list[DetectedService],
+    ) -> tuple[set[str], dict[str, str]]:
+        """From persisted comms/connections, derive broker kinds + connection env.
+
+        Returns (broker_kinds, connection_env). Empty for single-repo imports that
+        carry no communication graph.
+        """
+        raw_comms = multi_repo.get("service_comms") or []
+        if not raw_comms:
+            return set(), {}
+        from app.services.comm_detector import CommKind, ServiceComms
+        from app.services.service_connection_env import build_connection_env
+        from app.services.service_graph import ExplicitConnection
+
+        comms: list[ServiceComms] = []
+        for item in raw_comms:
+            try:
+                comms.append(ServiceComms.model_validate(item))
+            except Exception:  # noqa: BLE001 - tolerate malformed persisted data
+                continue
+
+        connections: list[ExplicitConnection] = []
+        for item in multi_repo.get("service_connections") or []:
+            try:
+                connections.append(ExplicitConnection.model_validate(item))
+            except Exception:  # noqa: BLE001
+                continue
+
+        broker_kinds: set[str] = set()
+        for comm in comms:
+            kinds = comm.kinds()
+            if CommKind.KAFKA in kinds:
+                broker_kinds.add("kafka")
+            if CommKind.RABBITMQ in kinds:
+                broker_kinds.add("rabbitmq")
+
+        service_ports = {
+            s.name: s.port for s in services if getattr(s, "port", None)
+        }
+        connection_env = build_connection_env(
+            comms, connections, service_ports=service_ports
+        )
+        return broker_kinds, connection_env
+
+    @staticmethod
     def _build_dependencies(
         detected: list[str],
         overrides: list[object],
         *,
         workspace_name: str,
+        broker_kinds: set[str] | None = None,
     ):
         from app.schemas.cloud import (
             DataStoreDependency,
             DependencyPlacement,
+            MessageBrokerDependency,
             WorkloadDependenciesConfig,
         )
         from app.schemas.repo_import import DatastoreImportConfig
@@ -574,12 +727,35 @@ class RepoImportService:
                 placement=DependencyPlacement.IN_CLUSTER,
             )
 
+        # Auto-provision (in-cluster) any message broker the detector saw services
+        # using, unless the user explicitly overrode datastore placement to skip.
+        brokers = broker_kinds or set()
+
+        def _broker(kind: str) -> MessageBrokerDependency:
+            cfg = by_kind.get(kind)
+            if cfg is not None and cfg.placement == "skip":
+                return MessageBrokerDependency(enabled=False)
+            if cfg is not None and cfg.placement == "external":
+                return MessageBrokerDependency(
+                    enabled=True,
+                    placement=DependencyPlacement.EXTERNAL,
+                    connection_url=(cfg.connection_url or "").strip() or None,
+                )
+            if kind in brokers or cfg is not None:
+                return MessageBrokerDependency(
+                    enabled=True,
+                    placement=DependencyPlacement.IN_CLUSTER,
+                )
+            return MessageBrokerDependency(enabled=False)
+
         return WorkloadDependenciesConfig(
             postgres=_dep("postgres"),
             mysql=_dep("mysql"),
             mariadb=_dep("mariadb"),
             mongodb=_dep("mongodb"),
             redis=_dep("redis"),
+            kafka=_broker("kafka"),
+            rabbitmq=_broker("rabbitmq"),
         )
 
     @staticmethod
@@ -589,6 +765,7 @@ class RepoImportService:
         deps,
         *,
         workspace_name: str,
+        connection_env: dict[str, str] | None = None,
     ) -> dict[str, str]:
         from app.schemas.cloud import DependencyPlacement
         from app.schemas.repo_import import EnvVarOverride
@@ -634,6 +811,12 @@ class RepoImportService:
                 env_map["DATABASE_URL"] = url
             else:
                 env_map["DATABASE_URL"] = url
+
+        # Graph-derived inter-service connection targets (gRPC/HTTP). Namespaced by
+        # target service, so safe in the shared .env; placed before user overrides.
+        for key, value in (connection_env or {}).items():
+            if key and value:
+                env_map.setdefault(key, value)
 
         # Explicit user overrides always win.
         for raw in overrides:
@@ -706,6 +889,95 @@ class RepoImportService:
         try:
             return DetectionResult.model_validate_json(path.read_text(encoding="utf-8"))
         except Exception:
+            return None
+
+    @staticmethod
+    def _unique_repo_name(ref: RepoRef, repo_url: str, used: set[str]) -> str:
+        base = (ref.name or "").strip().lower() or _repo_slug_from_url(repo_url)
+        base = re.sub(r"[^a-z0-9-]", "-", base).strip("-")[:63] or "repo"
+        name = base
+        n = 2
+        while name in used:
+            name = f"{base}-{n}"[:63]
+            n += 1
+        used.add(name)
+        return name
+
+    @staticmethod
+    def _apply_repo_naming(
+        repo_name: str, services: list[DetectedService]
+    ) -> list[DetectedService]:
+        """Rename detected services after the repo instead of launch-web/launch-server.
+
+        - A repo with a single service is named exactly after the repo (``orders``).
+        - A monorepo's services keep a repo prefix for uniqueness (``orders-web``),
+          with the detector's ``launch-`` prefix stripped.
+
+        Names stay K8s-safe (slugged) and unique within the repo. Service ``path``,
+        ports, roles, and preview-target flags are preserved.
+        """
+        slug = re.sub(r"[^a-z0-9-]+", "-", (repo_name or "").lower()).strip("-") or "app"
+        single = len(services) == 1
+        out: list[DetectedService] = []
+        used: set[str] = set()
+        for svc in services:
+            if single:
+                name = slug
+            else:
+                leaf = re.sub(r"^launch-", "", svc.name)
+                leaf = re.sub(r"[^a-z0-9-]+", "-", leaf.lower()).strip("-") or "svc"
+                name = leaf if leaf.startswith(slug) else f"{slug}-{leaf}"
+            name = name[:63]
+            base = name
+            n = 2
+            while name in used:
+                name = f"{base}-{n}"[:63]
+                n += 1
+            used.add(name)
+            if name != svc.name:
+                out.append(svc.model_copy(update={"name": name, "id": name}))
+            else:
+                out.append(svc)
+        return out
+
+    @staticmethod
+    def _relocate_into(container: Path, dest: Path) -> None:
+        """Move a clone's files from ``container`` into ``dest`` (e.g. apps/<name>).
+
+        The import meta file and the apps dir itself stay at the container root so
+        ``read_meta`` keeps working and generated infra lands beside apps/, not inside
+        a source repo.
+        """
+        dest.mkdir(parents=True, exist_ok=True)
+        keep = {_IMPORT_META_FILE, _APPS_DIR}
+        for entry in list(container.iterdir()):
+            if entry.name in keep:
+                continue
+            shutil.move(str(entry), str(dest / entry.name))
+
+    @staticmethod
+    def _write_multi_repo(root: Path, repos: list[str], assembly: object) -> None:
+        path = root / _MULTI_REPO_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "repos": repos,
+            "service_graph": assembly.graph.model_dump(),  # type: ignore[attr-defined]
+            "mermaid": assembly.mermaid,  # type: ignore[attr-defined]
+            # Persist per-service comms so operator connection edits can rebuild the
+            # graph without re-cloning/re-detecting.
+            "service_comms": [c.model_dump() for c in assembly.comms],  # type: ignore[attr-defined]
+            "service_connections": [],
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _read_multi_repo(root: Path) -> dict | None:
+        path = root / _MULTI_REPO_FILE
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
             return None
 
     def _resolve_token(

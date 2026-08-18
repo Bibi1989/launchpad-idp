@@ -1,4 +1,5 @@
 import type { AuditLogEntry } from '~/types/environment'
+import type { ServiceConnection, ServiceGraphResponse } from '~/types/serviceGraph'
 import type {
   GitBranchListResponse,
   GitHubAppStatus,
@@ -17,6 +18,8 @@ import type {
   WorkspaceFileNode,
   WorkspaceLinkedAppRepoRequest,
   WorkspaceLinkedAppRepoResponse,
+  WorkspaceLinkedRepoItem,
+  WorkspaceLinkedReposResponse,
   WorkspaceListItem,
   WorkspacePushRequest,
   WorkspacePromoteInput,
@@ -129,6 +132,22 @@ export function useProvisioning() {
 
   async function getWizardConfig(workspaceId: string): Promise<WorkspaceWizardConfig> {
     return apiFetch<WorkspaceWizardConfig>(`/provisioning/workspaces/${workspaceId}/config`)
+  }
+
+  async function getServiceGraph(workspaceId: string): Promise<ServiceGraphResponse> {
+    return apiFetch<ServiceGraphResponse>(
+      `/provisioning/workspaces/${workspaceId}/service-graph`,
+    )
+  }
+
+  async function updateServiceConnections(
+    workspaceId: string,
+    connections: ServiceConnection[],
+  ): Promise<ServiceGraphResponse> {
+    return apiFetch<ServiceGraphResponse>(
+      `/provisioning/workspaces/${workspaceId}/connections`,
+      { method: 'PUT', body: JSON.stringify({ connections }) },
+    )
   }
 
   async function promoteWorkspace(
@@ -478,6 +497,28 @@ export function useProvisioning() {
     })
   }
 
+  async function getWorkspaceLinkedRepos(
+    workspaceId: string,
+  ): Promise<WorkspaceLinkedReposResponse> {
+    return apiFetch<WorkspaceLinkedReposResponse>(
+      `/provisioning/workspaces/${workspaceId}/linked-repos`,
+    )
+  }
+
+  async function setWorkspaceLinkedRepos(
+    workspaceId: string,
+    repos: WorkspaceLinkedRepoItem[],
+  ): Promise<WorkspaceLinkedReposResponse> {
+    return apiFetch<WorkspaceLinkedReposResponse>(
+      `/provisioning/workspaces/${workspaceId}/linked-repos`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ repos }),
+        timeoutMs: 120_000,
+      },
+    )
+  }
+
   async function inspectImage(image: string): Promise<ImageInspectResult> {
     return apiFetch<ImageInspectResult>('/provisioning/images/inspect', {
       method: 'POST',
@@ -494,7 +535,11 @@ export function useProvisioning() {
     getWorkspace,
     listAudits,
     getWizardConfig,
+    getServiceGraph,
+    updateServiceConnections,
     getLinkedAppRepo,
+    getWorkspaceLinkedRepos,
+    setWorkspaceLinkedRepos,
     setLinkedAppRepo,
     setWorkspaceGitSource,
     promoteWorkspace,

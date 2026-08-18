@@ -126,15 +126,14 @@ export function groupEnvironmentsByLineage(
     })
   }
 
-  groups.sort((a, b) => {
-    const aTime = Math.max(
-      ...a.environments.map((e) => new Date(e.updated_at).getTime() || 0),
+  // Latest group first, by creation date. updated_at churns on every status poll,
+  // so it does not reflect which group is newest - use created_at.
+  const groupCreatedAt = (g: EnvironmentLineageGroup): number =>
+    Math.max(
+      0,
+      ...g.environments.map((e) => new Date(e.created_at).getTime() || 0),
     )
-    const bTime = Math.max(
-      ...b.environments.map((e) => new Date(e.updated_at).getTime() || 0),
-    )
-    return bTime - aTime
-  })
+  groups.sort((a, b) => groupCreatedAt(b) - groupCreatedAt(a))
 
   return groups
 }

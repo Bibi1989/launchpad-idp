@@ -208,6 +208,8 @@ export type DependencyPlacement = 'in_cluster' | 'managed' | 'external'
 
 export type DataStoreKind = 'postgres' | 'mysql' | 'mongodb' | 'redis'
 
+export type MessageBrokerKind = 'kafka' | 'rabbitmq'
+
 export interface DataStoreDependency {
   enabled: boolean
   placement: DependencyPlacement
@@ -219,6 +221,9 @@ export interface WorkloadDependenciesConfig {
   mysql: DataStoreDependency
   mongodb: DataStoreDependency
   redis: DataStoreDependency
+  // Message brokers for inter-service communication (in-cluster or bring-your-own).
+  kafka: DataStoreDependency
+  rabbitmq: DataStoreDependency
 }
 
 export interface RunningInstanceConfig {
@@ -304,6 +309,35 @@ export interface WorkspaceLinkedAppRepoResponse {
   environments_updated: number
 }
 
+export type WorkspaceRepoKind = 'github' | 'gitlab'
+
+export interface WorkspaceLinkedRepoItem {
+  kind: WorkspaceRepoKind
+  git_repo_url: string
+  git_branch: string
+  full_name?: string | null
+  installation_id?: number | null
+  cd_mode?: WorkspaceCdMode
+  workflow_path?: string | null
+  /** The primary repo is the one that deploys. Exactly one item is primary. */
+  primary?: boolean
+}
+
+export interface WorkspaceLinkedReposResponse {
+  repos: WorkspaceLinkedRepoItem[]
+  primary_git_repo_url: string | null
+  primary_git_branch: string
+  webhook_configured: boolean
+  control_plane_url: string | null
+  message: string
+  environments_updated: number
+}
+
+export interface WorkspaceEnvVar {
+  key: string
+  value: string
+}
+
 export interface WorkspaceWizardConfig {
   name: string
   iac_engine: IaCEngine
@@ -323,6 +357,7 @@ export interface WorkspaceWizardConfig {
   container_scaffold: ContainerScaffoldConfig
   dependencies: WorkloadDependenciesConfig
   ansible: AnsibleConfig
+  env_vars?: WorkspaceEnvVar[]
   has_credentials: boolean
   /** Safe display name for the stored cloud key (never the secret). */
   credential_label?: string | null

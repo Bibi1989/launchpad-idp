@@ -36,6 +36,8 @@ from app.schemas.cloud import (
     WorkspaceFormatResponse,
     WorkspaceLinkedAppRepoRequest,
     WorkspaceLinkedAppRepoResponse,
+    WorkspaceLinkedReposRequest,
+    WorkspaceLinkedReposResponse,
     WorkspaceGitSourceRequest,
     WorkspaceGitSourceResponse,
     WorkspaceListItem,
@@ -51,6 +53,7 @@ from app.schemas.cloud import (
     ProvisioningCostEstimate,
 )
 from app.schemas.environment import AuditLogRead
+from app.schemas.repo_import import ServiceConnectionsUpdate, ServiceGraphResponse
 from app.services.audit import AuditService
 from app.services.github_app import (
     GitHubAppAuthError,
@@ -196,6 +199,33 @@ async def get_workspace_wizard_config(
 
 
 @router.get(
+    "/workspaces/{workspace_id}/service-graph",
+    response_model=ServiceGraphResponse,
+)
+async def get_workspace_service_graph(
+    workspace_id: UUID,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> ServiceGraphResponse:
+    """Inter-service connection graph (nodes/edges + Mermaid) for a workspace."""
+    return await service.get_service_graph(workspace_id, user)
+
+
+@router.put(
+    "/workspaces/{workspace_id}/connections",
+    response_model=ServiceGraphResponse,
+)
+async def update_workspace_connections(
+    workspace_id: UUID,
+    payload: ServiceConnectionsUpdate,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> ServiceGraphResponse:
+    """Replace the operator-configured service connections; returns the rebuilt graph."""
+    return await service.update_service_connections(workspace_id, user, payload.connections)
+
+
+@router.get(
     "/workspaces/{workspace_id}/linked-app-repo",
     response_model=WorkspaceLinkedAppRepoResponse,
 )
@@ -231,6 +261,31 @@ async def set_workspace_git_source(
     service: ProvisioningService = Depends(get_provisioning_service),
 ) -> WorkspaceGitSourceResponse:
     return await service.set_workspace_git_source(workspace_id, payload, owner=user)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/linked-repos",
+    response_model=WorkspaceLinkedReposResponse,
+)
+async def get_workspace_linked_repos(
+    workspace_id: UUID,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> WorkspaceLinkedReposResponse:
+    return await service.get_workspace_linked_repos(workspace_id, user)
+
+
+@router.put(
+    "/workspaces/{workspace_id}/linked-repos",
+    response_model=WorkspaceLinkedReposResponse,
+)
+async def set_workspace_linked_repos(
+    workspace_id: UUID,
+    payload: WorkspaceLinkedReposRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> WorkspaceLinkedReposResponse:
+    return await service.set_workspace_linked_repos(workspace_id, payload, owner=user)
 
 
 @router.post(

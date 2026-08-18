@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import type { ContainerScaffoldConfig, ContainerServiceItem, ProjectStackOption } from '~/types/provisioning'
+import type {
+  ContainerScaffoldConfig,
+  ContainerServiceItem,
+  ProjectStackOption,
+  WorkspaceLinkedRepoItem,
+} from '~/types/provisioning'
 import type { PendingWorkspaceRepoLink, WorkspaceSourceMode } from '~/types/workspaceRepo'
 import { defaultContainerServices } from '~/utils/cloudValidation'
 
@@ -26,13 +31,21 @@ const emit = defineEmits<{
 const pendingRepoLink = defineModel<PendingWorkspaceRepoLink | null>('pendingRepoLink', {
   default: null,
 })
+// Multi-repo: full staged list of linked repos (applied post-create).
+const pendingRepoLinks = defineModel<WorkspaceLinkedRepoItem[]>('pendingRepoLinks', {
+  default: () => [],
+})
 
 const { t } = useI18n()
 
 const activeTab = ref<'dockerfile' | 'compose'>('dockerfile')
 const previewOpen = ref(false)
 const copiedState = ref(false)
-const sourceMode = ref<WorkspaceSourceMode>('services')
+// Start in the mode that matches the existing config: a workspace that already has
+// scaffolded services is a "services" workspace; anything else defaults to Link.
+const sourceMode = ref<WorkspaceSourceMode>(
+  props.modelValue.services && props.modelValue.services.length > 0 ? 'services' : 'link',
+)
 
 const config = computed({
   get: () => props.modelValue,
@@ -133,12 +146,28 @@ function updateField<K extends keyof ContainerScaffoldConfig>(key: K, val: Conta
 }
 
 onMounted(() => {
-  // Sync once so compose provision creates both services when Services mode is active.
+  if (sourceMode.value === 'services') {
+    // Sync once so compose provision creates both services when Services mode is active.
+    if (!(props.modelValue.services && props.modelValue.services.length > 0)) {
+      emitServices()
+    }
+    return
+  }
+  // Link / Import: never scaffold apps/*. Clear any default services + generation flags
+  // so a linked (or freshly created) workspace does not get a phantom apps/web-ui dir.
   if (
-    sourceMode.value === 'services'
-    && !(props.modelValue.services && props.modelValue.services.length > 0)
+    props.modelValue.generate_dockerfile
+    || props.modelValue.generate_docker_compose
+    || (props.modelValue.services && props.modelValue.services.length > 0)
   ) {
-    emitServices()
+    servicesList.value = []
+    emit('update:modelValue', {
+      ...props.modelValue,
+      services: [],
+      frameworks: [],
+      generate_dockerfile: false,
+      generate_docker_compose: false,
+    })
   }
 })
 
@@ -410,6 +439,7 @@ function downloadFile() {
       <WorkspaceRepoSourcePanel
         v-if="sourceMode === 'link' || sourceMode === 'import'"
         v-model:pending-link="pendingRepoLink"
+        v-model:pending-links="pendingRepoLinks"
         :workspace-id="workspaceId"
         :force-mode="sourceMode"
         :launchpad-project-id="launchpadProjectId"

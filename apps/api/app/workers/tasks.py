@@ -704,6 +704,14 @@ async def _emit_stage(
         commit_sha=commit_sha,
         stage=stage,
     )
+    # Persist the current stage on the environment row so a browser reload or a fresh
+    # navigation to the detail page shows the REAL stage (e.g. BUILD/APPLY) instead of
+    # resetting the pipeline to INIT until the next live event arrives.
+    from sqlalchemy import update as _sa_update
+
+    await session.execute(
+        _sa_update(Environment).where(Environment.id == environment_id).values(stage=stage)
+    )
     await session.commit()
 
 
@@ -1154,7 +1162,12 @@ async def _attempt_rebuild_rollback(
     return True
 
 
-async def _run_provision(environment_id: str, correlation_id: str) -> None:
+async def _run_provision(
+    environment_id: str,
+    correlation_id: str,
+    *,
+    regenerate_dockerfile: bool = False,
+) -> None:
     structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
     settings = get_settings()
     session_factory = _session_factory()
@@ -1475,6 +1488,63 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                     if deploy_mode == DeployMode.MANIFEST.value and workspace_root is not None:
                         from app.services.manifest_deploy import workspace_has_helm_chart
 
+                        # Linked repos are URL references, not files on disk. Clone each into
+                        # the build context the workspace expects (its image-build plan, else
+                        # apps/<slug>) so the manifest's images actually build instead of
+                        # failing as unbuilt 'app:latest' / 'launch-web:latest' references.
+                        linked_repos_raw = (
+                            wizard_snapshot.get("linked_repos")
+                            if isinstance(wizard_snapshot, dict)
+                            else None
+                        )
+                        if isinstance(linked_repos_raw, list) and linked_repos_raw:
+                            from app.services.preview_build import (
+                                PreviewBuildError,
+                                materialize_linked_repos_to_apps,
+                            )
+                            from app.services.service_connection_env import (
+                                connection_env_from_snapshot as _conn_env_build,
+                            )
+
+                            await _emit_stage(
+                                log_repo,
+                                session,
+                                environment_id=env_uuid,
+                                stage=ExecutionStage.BUILD,
+                                message=(
+                                    "BUILD - cloning linked repositories into the workspace "
+                                    "so their images can be built"
+                                ),
+                                commit_sha=commit_sha,
+                            )
+                            try:
+                                materialized = await asyncio.to_thread(
+                                    materialize_linked_repos_to_apps,
+                                    workspace_root=workspace_root,
+                                    linked_repos=[
+                                        r for r in linked_repos_raw if isinstance(r, dict)
+                                    ],
+                                    settings=settings,
+                                    regenerate_dockerfile=regenerate_dockerfile,
+                                    build_env=_conn_env_build(wizard_snapshot),
+                                )
+                            except PreviewBuildError as exc:
+                                raise RuntimeError(
+                                    f"Failed to clone a linked repository for build: {exc}"
+                                ) from exc
+                            if materialized:
+                                await _emit_log(
+                                    log_repo,
+                                    environment_id=env_uuid,
+                                    message=(
+                                        "BUILD - linked repositories ready to build: "
+                                        + ", ".join(materialized)
+                                    ),
+                                    status=EnvironmentStatus.PROVISIONING.value,
+                                    commit_sha=commit_sha,
+                                    stage=ExecutionStage.BUILD,
+                                )
+
                         helm_note = (
                             " (Helm chart)"
                             if workspace_has_helm_chart(workspace_root)
@@ -1499,6 +1569,17 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
 
                         region = _cloud_region_for_provider(cloud_provider, wizard_snapshot)
 
+                        from app.services.service_connection_env import (
+                            connection_env_from_snapshot,
+                            custom_env_from_snapshot,
+                        )
+
+                        # Inter-service connection env (incl. the frontend's framework key
+                        # pointing at the backend), then user env on top (user wins).
+                        manifest_extra_env = {
+                            **connection_env_from_snapshot(wizard_snapshot),
+                            **custom_env_from_snapshot(wizard_snapshot),
+                        }
                         deployer = ManifestDeployer(settings, provisioner)
                         resources = deployer.deploy(
                             workspace_root=workspace_root,
@@ -1515,6 +1596,9 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             region=region,
                             image_source=k8s_image_source,
                             image_scan=image_scan,
+                            extra_env=manifest_extra_env,
+                            enable_postgres=getattr(environment, "enable_postgres", False),
+                            enable_redis=getattr(environment, "enable_redis", False),
                         )
                     elif deploy_mode == DeployMode.COMPOSE.value:
                         from app.services.compose_deploy import ComposeDeployError, deploy_compose
@@ -1531,6 +1615,15 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                             message="APPLY - docker compose up (local Compose preview)",
                             commit_sha=commit_sha,
                         )
+                        from app.services.service_connection_env import (
+                            connection_env_from_snapshot,
+                            custom_env_from_snapshot,
+                        )
+
+                        compose_env = {
+                            **connection_env_from_snapshot(wizard_snapshot),
+                            **custom_env_from_snapshot(wizard_snapshot),
+                        }
                         try:
                             resources = await asyncio.to_thread(
                                 deploy_compose,
@@ -1543,6 +1636,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                 primary_host_preference=_compose_primary_host_preference(
                                     wizard_snapshot
                                 ),
+                                connection_env=compose_env or None,
                             )
                         except ComposeDeployError as exc:
                             raise RuntimeError(str(exc)) from exc
@@ -1709,6 +1803,15 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                     cloud_provider=attach_provider,
                                 )
                             else:
+                                from app.services.service_connection_env import (
+                                    connection_env_from_snapshot as _conn_env,
+                                    custom_env_from_snapshot as _custom_env,
+                                )
+
+                                attach_extra_env = {
+                                    **_conn_env(wizard_snapshot),
+                                    **_custom_env(wizard_snapshot),
+                                }
                                 resources = await asyncio.to_thread(
                                     deploy_attach,
                                     namespace=environment.namespace_name,
@@ -1726,6 +1829,7 @@ async def _run_provision(environment_id: str, correlation_id: str) -> None:
                                     packaging=packaging,
                                     settings=settings,
                                     services=attach_services,
+                                    extra_env=attach_extra_env,
                                     cloud_provider=attach_provider,
                                     credentials=attach_credentials,
                                     org_slug=attach_org_slug,
@@ -2451,6 +2555,15 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                     cloud_provider=attach_provider,
                                 )
                             else:
+                                from app.services.service_connection_env import (
+                                    connection_env_from_snapshot as _conn_env,
+                                    custom_env_from_snapshot as _custom_env,
+                                )
+
+                                rebuild_attach_extra_env = {
+                                    **_conn_env(rebuild_wizard_snapshot),
+                                    **_custom_env(rebuild_wizard_snapshot),
+                                }
                                 rebuild_resources = await asyncio.to_thread(
                                     deploy_attach,
                                     namespace=environment.namespace_name,
@@ -2470,6 +2583,7 @@ async def _run_rebuild(environment_id: str, commit_sha: str, correlation_id: str
                                     packaging=packaging,
                                     settings=settings,
                                     services=attach_services,
+                                    extra_env=rebuild_attach_extra_env,
                                     cloud_provider=attach_provider,
                                     credentials=attach_credentials,
                                     org_slug=attach_org_slug,
@@ -3681,8 +3795,17 @@ def requeue_pending_teardowns_task(min_age_seconds: int = 0) -> int:
     soft_time_limit=2400,
     time_limit=2700,
 )
-def provision_environment_task(self, environment_id: str, correlation_id: str) -> None:
-    asyncio.run(_run_provision(environment_id, correlation_id))
+def provision_environment_task(
+    self,
+    environment_id: str,
+    correlation_id: str,
+    regenerate_dockerfile: bool = False,
+) -> None:
+    asyncio.run(
+        _run_provision(
+            environment_id, correlation_id, regenerate_dockerfile=regenerate_dockerfile
+        )
+    )
 
 
 @celery_app.task(name="launchpad.rebuild_environment", bind=True, max_retries=0)
@@ -3906,8 +4029,15 @@ def sample_environment_costs_task() -> int:
     return asyncio.run(_run_cost_metering())
 
 
-def enqueue_provision_environment(*, environment_id: str, correlation_id: str) -> str:
-    result = provision_environment_task.delay(environment_id, correlation_id)
+def enqueue_provision_environment(
+    *,
+    environment_id: str,
+    correlation_id: str,
+    regenerate_dockerfile: bool = False,
+) -> str:
+    result = provision_environment_task.delay(
+        environment_id, correlation_id, regenerate_dockerfile
+    )
     return result.id
 
 

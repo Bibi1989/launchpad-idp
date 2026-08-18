@@ -17,11 +17,67 @@ from app.services.manifest_deploy import (
     ManifestDeployer,
     _all_already_exist,
     _is_already_exists_status,
+    _is_launch_workload,
     _is_preview_governance_document,
     _requires_dynamic_apply,
     patch_manifest_documents,
     resolve_manifest_workload_image,
 )
+
+
+def test_is_launch_workload_matches_workspace_prefixed_name() -> None:
+    """A launch workload prefixed with the workspace name must still be recognized,
+    else it skips launch hardening (PORT env + TCP probe) and never reaches Ready."""
+
+    def _dep(name: str) -> dict[str, Any]:
+        return {"kind": "Deployment", "metadata": {"name": name}}
+
+    assert _is_launch_workload(_dep("launch-web"))
+    assert _is_launch_workload(_dep("virtual-office-frontend-launch-web"))
+    assert _is_launch_workload(_dep("acme-launch-server"))
+    assert not _is_launch_workload(_dep("app"))
+    assert not _is_launch_workload(_dep("postgres"))
+
+
+def test_prefixed_launch_workload_gets_tcp_probe_and_port_env() -> None:
+    """The workspace-prefixed launch Deployment is hardened: containerPort + TCP probe +
+    PORT env all aligned, so a Node app that listens on its port reaches Ready."""
+    doc = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "virtual-office-frontend-launch-web"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "web",
+                            "image": "virtual-office-frontend-launch-web:latest",
+                            "ports": [{"containerPort": 8080}],
+                        }
+                    ]
+                }
+            }
+        },
+    }
+    patched = patch_manifest_documents(
+        [doc],
+        target_namespace="lp-x",
+        environment_id="env-1",
+        name="virtual-office-frontend",
+        git_branch="main",
+        git_repo_url="https://github.com/acme/virtual-office-frontend.git",
+        ttl_expires_at=None,
+        owner_label="owner",
+        image="virtual-office-frontend-launch-web:latest",
+        preview_host=None,
+    )
+    container = patched[0]["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in container.get("env", [])}
+    assert env.get("PORT") == "8080"
+    # A TCP probe on 8080 (readiness or startup) tracks "listening", not HTTP headers.
+    probes = [container.get(k) for k in ("startupProbe", "readinessProbe", "livenessProbe")]
+    assert any(isinstance(p, dict) and p.get("tcpSocket", {}).get("port") == 8080 for p in probes)
 
 
 def _limit_range_doc(*, name: str = LIMIT_RANGE_NAME) -> dict[str, Any]:

@@ -13,20 +13,20 @@ def _completed(stdout: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_public_ip_treats_none_as_empty() -> None:
-    with patch.object(cic, "_run_cmd", return_value=_completed("None\n")):
+    with patch("app.services.aws_client.ec2_instance_public_ip", return_value=""):
         assert cic._aws_instance_public_ip(instance_id="i-1", region="us-east-1", env={}) == ""
 
 
 def test_public_ip_returns_assigned_ip() -> None:
-    with patch.object(cic, "_run_cmd", return_value=_completed("52.1.2.3\n")):
+    with patch("app.services.aws_client.ec2_instance_public_ip", return_value="52.1.2.3"):
         assert cic._aws_instance_public_ip(instance_id="i-1", region="us-east-1", env={}) == "52.1.2.3"
 
 
 def test_wait_polls_until_ip_appears() -> None:
     # First two reads: not-ready ("None" / empty); third: the IP is assigned.
-    outputs = [_completed("None\n"), _completed("\n"), _completed("52.9.9.9\n")]
+    outputs = ["", "", "52.9.9.9"]
     with (
-        patch.object(cic, "_run_cmd", side_effect=outputs),
+        patch("app.services.aws_client.ec2_instance_public_ip", side_effect=outputs),
         patch.object(cic.time, "sleep", return_value=None),
     ):
         host = cic._wait_aws_instance_ip(instance_id="i-1", region="us-east-1", env={}, attempts=5)

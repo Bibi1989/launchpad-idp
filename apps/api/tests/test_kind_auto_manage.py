@@ -125,6 +125,9 @@ async def test_generate_bundle_skips_kind_for_local(tmp_path: Path) -> None:
     session.commit = AsyncMock()
     session.add = MagicMock()
     session.get = AsyncMock(return_value=None)
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=mock_result)
     service = ProvisioningService(session)
     with (
         patch("app.services.provisioning.ensure_kind_cluster", new_callable=AsyncMock) as up,

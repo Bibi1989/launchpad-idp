@@ -85,6 +85,23 @@ const visibleEnv = computed(() =>
   props.envExample.filter((item) => showSecrets.value || !item.is_secret),
 )
 
+// Custom (user-added) env vars are those not already surfaced from .env.example.
+// The EnvVarsEditor edits only these so the two sections never fight over a key.
+const exampleKeys = computed(() => new Set(props.envExample.map((e) => e.key)))
+const customEnvVars = computed<EnvVarOverride[]>({
+  get: () => envVars.value.filter((e) => !exampleKeys.value.has(e.key)),
+  set: (custom) => {
+    // Keep detected (.env.example) values, then apply custom rows, deduped by key so a
+    // pasted key that matches a detected one updates it instead of duplicating.
+    const merged = new Map<string, string>()
+    for (const e of envVars.value) {
+      if (exampleKeys.value.has(e.key)) merged.set(e.key, e.value)
+    }
+    for (const e of custom) merged.set(e.key, e.value)
+    envVars.value = Array.from(merged, ([key, value]) => ({ key, value }))
+  },
+})
+
 const datastoreLabel: Record<string, string> = {
   postgres: 'PostgreSQL',
   mysql: 'MySQL',
@@ -121,15 +138,12 @@ const datastoreLabel: Record<string, string> = {
             <option value="skip">{{ t('import.datastoreSkip') }}</option>
           </select>
         </div>
-        <p v-if="ensureDatastoreRow(kind).placement === 'in_cluster'" class="text-[11px] text-[var(--lp-muted)]">
-          {{ t('import.datastoreInClusterHint') }}
-          <button
-            type="button"
-            class="text-[var(--lp-accent)] hover:underline"
-            @click="applySuggested(kind, 'in_cluster')"
-          >
-            {{ t('import.useSuggestedUrl') }}
-          </button>
+        <p
+          v-if="ensureDatastoreRow(kind).placement === 'in_cluster'"
+          class="flex items-start gap-1.5 text-[11px] text-[var(--lp-muted)]"
+        >
+          <span class="material-symbols-outlined text-sm text-[var(--lp-accent)]">bolt</span>
+          <span>{{ t('import.datastoreInClusterAutoInjected', { kind: datastoreLabel[kind] || kind }) }}</span>
         </p>
         <template v-if="ensureDatastoreRow(kind).placement === 'external'">
           <label class="block space-y-1">
@@ -195,11 +209,15 @@ const datastoreLabel: Record<string, string> = {
         </label>
       </div>
     </div>
-    <p
-      v-else-if="!detectedDatastores.length"
-      class="text-xs text-[var(--lp-muted)]"
-    >
-      {{ t('import.noEnvExample') }}
-    </p>
+
+    <!-- Custom environment variables (always available): add arbitrary keys one by one
+         or paste a whole .env block. Injected into the service the same way. -->
+    <div class="space-y-2 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-surface)]/40 p-4">
+      <div>
+        <h4 class="text-sm font-semibold">{{ t('envVars.customTitle') }}</h4>
+        <p class="mt-1 text-xs text-[var(--lp-muted)]">{{ t('envVars.customBlurb') }}</p>
+      </div>
+      <EnvVarsEditor v-model="customEnvVars" />
+    </div>
   </div>
 </template>

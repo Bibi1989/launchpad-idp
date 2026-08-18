@@ -5,9 +5,45 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
+from pkg.detector.models import DetectedService, DetectionResult, ProjectLayout
 from pydantic import BaseModel, Field, field_validator
 
-from pkg.detector.models import DetectedService, DetectionResult, ProjectLayout
+
+def _normalize_repo_url(value: str) -> str:
+    cleaned = value.strip()
+    lower = cleaned.lower()
+    if not lower.startswith(("https://", "http://", "git@", "ssh://")):
+        raise ValueError("git_repo_url must be an http(s), git@, or ssh URL")
+    if any(ch in cleaned for ch in (" ", "\n", "\r", "\t")):
+        raise ValueError("git_repo_url contains invalid characters")
+    return cleaned
+
+
+def _normalize_branch(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned or any(ch in cleaned for ch in (" ", "..", "\\")):
+        raise ValueError("git_branch contains invalid characters")
+    return cleaned
+
+
+class RepoRef(BaseModel):
+    """One repository in a (possibly multi-repo) workspace import."""
+
+    git_repo_url: str = Field(min_length=8, max_length=512)
+    git_branch: str = Field(default="main", min_length=1, max_length=256)
+    # Optional short name for this repo's services (defaults to the repo slug).
+    name: str | None = Field(default=None, max_length=64)
+    github_installation_id: int | None = Field(default=None, ge=1)
+
+    @field_validator("git_repo_url")
+    @classmethod
+    def _url(cls, value: str) -> str:
+        return _normalize_repo_url(value)
+
+    @field_validator("git_branch")
+    @classmethod
+    def _branch(cls, value: str) -> str:
+        return _normalize_branch(value)
 
 
 class RepoImportCreateRequest(BaseModel):
@@ -17,30 +53,35 @@ class RepoImportCreateRequest(BaseModel):
     use_github_app_token: bool = True
     # When multiple App installs exist (personal + org), client must pass the chosen one.
     github_installation_id: int | None = Field(default=None, ge=1)
+    # Additional repositories to import into the SAME workspace (multi-repo /
+    # microservices). Empty (default) => single-repo import via git_repo_url, so
+    # existing single-repo callers are unaffected.
+    repos: list[RepoRef] = Field(default_factory=list, max_length=20)
 
     @field_validator("git_repo_url")
     @classmethod
     def normalize_repo_url(cls, value: str) -> str:
-        cleaned = value.strip()
-        lower = cleaned.lower()
-        if not (
-            lower.startswith("https://")
-            or lower.startswith("http://")
-            or lower.startswith("git@")
-            or lower.startswith("ssh://")
-        ):
-            raise ValueError("git_repo_url must be an http(s), git@, or ssh URL")
-        if any(ch in cleaned for ch in (" ", "\n", "\r", "\t")):
-            raise ValueError("git_repo_url contains invalid characters")
-        return cleaned
+        return _normalize_repo_url(value)
 
     @field_validator("git_branch")
     @classmethod
     def normalize_branch(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned or any(ch in cleaned for ch in (" ", "..", "\\")):
-            raise ValueError("git_branch contains invalid characters")
-        return cleaned
+        return _normalize_branch(value)
+
+    def effective_repos(self) -> list[RepoRef]:
+        """All repos to import: the primary git_repo_url plus any extras (deduped)."""
+        primary = RepoRef(
+            git_repo_url=self.git_repo_url,
+            git_branch=self.git_branch,
+            github_installation_id=self.github_installation_id,
+        )
+        seen = {primary.git_repo_url}
+        out = [primary]
+        for ref in self.repos:
+            if ref.git_repo_url not in seen:
+                seen.add(ref.git_repo_url)
+                out.append(ref)
+        return out
 
 
 class ServiceOverride(BaseModel):
@@ -162,6 +203,44 @@ class RepoImportSessionRead(BaseModel):
     created_at: datetime | None = None
     # kind → {in_cluster, external} suggested connection strings
     datastore_suggestions: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # Multi-repo: all imported repo URLs and the inter-service connection graph.
+    # Empty/None for a single-repo import (backward compatible).
+    repos: list[str] = Field(default_factory=list)
+    service_graph: dict | None = None
+    mermaid: str | None = None
+
+
+class ServiceConnection(BaseModel):
+    """An operator-configured edge between two services in the workspace graph."""
+
+    source: str = Field(min_length=1, max_length=128)
+    target: str = Field(min_length=1, max_length=128)
+    protocol: str = Field(default="http", max_length=16)
+
+    @field_validator("protocol")
+    @classmethod
+    def normalize_protocol(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        allowed = {
+            "kafka", "rabbitmq", "grpc", "redis", "http",
+            "postgres", "mysql", "mariadb", "mongodb",
+        }
+        if cleaned not in allowed:
+            raise ValueError(f"protocol must be one of {sorted(allowed)}")
+        return cleaned
+
+
+class ServiceConnectionsUpdate(BaseModel):
+    connections: list[ServiceConnection] = Field(default_factory=list, max_length=200)
+
+
+class ServiceGraphResponse(BaseModel):
+    """Service-connection graph for a workspace (nodes/edges + Mermaid for the UI)."""
+
+    repos: list[str] = Field(default_factory=list)
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)
+    mermaid: str = ""
 
 
 class RepoImportSaveResult(BaseModel):

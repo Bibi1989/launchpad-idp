@@ -121,15 +121,9 @@ async def test_enqueue_provision_creates_environment(
         assert result.namespace_name == f"launchpad-env-{result.id}"
         assert result.status == EnvironmentStatus.PROVISIONING
         assert result.cost_estimate_hourly == Decimal("0.4200")
-        # Max TTL policy: clamp to 2 hours.
-        expires = result.ttl_expires_at
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=UTC)
-        base = now
-        if base.tzinfo is None:
-            base = base.replace(tzinfo=UTC)
-        ttl_delta_hours = (expires - base).total_seconds() / 3600
-        assert 1.8 <= ttl_delta_hours <= 2.2
+        # TTL starts counting only once the environment is RUNNING (successful
+        # provision), so at creation (PROVISIONING) ttl_expires_at is not yet set.
+        assert result.ttl_expires_at is None
 
 
 @pytest.mark.asyncio
@@ -473,6 +467,7 @@ async def test_retry_failed_environment_requeues_provision(
             enqueue.assert_called_once_with(
                 environment_id=str(env_id),
                 correlation_id="corr-retry",
+                regenerate_dockerfile=False,
             )
 
         assert result.status == EnvironmentStatus.PROVISIONING.value or result.status == EnvironmentStatus.PROVISIONING
@@ -953,4 +948,46 @@ async def test_auto_pause_oldest_when_exceeding_max_concurrent_limit(
         await session.refresh(oldest)
         assert oldest.status == EnvironmentStatus.PAUSED
         assert new_env.name == f"app-env-{limit+1}"
+
+
+@pytest.mark.asyncio
+async def test_extend_ttl_resets_to_full_window(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    """Clicking extend RESETS the TTL to the full window (default_ttl_hours) from now,
+    even when it was nearly expired - not just a small append."""
+    from app.schemas.environment import EnvironmentExtendRequest
+
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        env = await repo.create(
+            owner_id=test_user.id,
+            name="ttl-reset",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-ttl",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=2),
+            cost_estimate_hourly=Decimal("0.10"),
+        )
+        # Simulate a running env that is about to expire (5 minutes left).
+        env.status = EnvironmentStatus.RUNNING
+        env.ttl_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+
+        service = EnvironmentService(session)
+        result = await service.extend_ttl(
+            env.id,
+            EnvironmentExtendRequest(),
+            owner=test_user,
+            correlation_id="corr-reset",
+        )
+
+        expires = result.ttl_expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        remaining_hours = (expires - datetime.now(UTC)).total_seconds() / 3600
+        default_hours = get_settings().default_ttl_hours
+        # Reset to ~default window (well beyond the 5 minutes it had left).
+        assert default_hours - 0.1 <= remaining_hours <= default_hours + 0.1
 

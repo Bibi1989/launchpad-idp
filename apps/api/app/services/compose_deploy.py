@@ -115,16 +115,31 @@ def compose_needs_core_scaffold_repair(compose_text: str, services: list[dict[st
     return False
 
 
-def repair_compose_for_scaffolded_apps(workspace_root: Path) -> Path | None:
+def repair_compose_for_scaffolded_apps(
+    workspace_root: Path,
+    *,
+    connection_env: dict[str, str] | None = None,
+) -> Path | None:
     """Rewrite compose when CoreScaffold apps exist but compose uses repo-root context.
 
     Older provision flows wrote ``apps/<slug>/`` correctly, then the web client
     overwrote ``docker-compose.yml`` with ``context: .`` + ``dockers/Dockerfile.*``,
     which fails with ``COPY package.json: not found``.
+
+    ``connection_env`` (inter-service HTTP/gRPC targets derived from the connection
+    graph) is merged into every service so linked repos configured to talk to each
+    other are actually wired when the compose stack is regenerated.
     """
     services = discover_scaffolded_app_services(workspace_root)
     if not services:
         return None
+
+    if connection_env:
+        for service in services:
+            merged = dict(service.get("extra_env") or {})
+            for key, value in connection_env.items():
+                merged.setdefault(key, value)
+            service["extra_env"] = merged
 
     compose_file = find_compose_file(workspace_root)
     existing = ""
@@ -702,11 +717,14 @@ def deploy_compose(
     image: str | None = None,
     settings: Settings | None = None,
     primary_host_preference: int | None = None,
+    connection_env: dict[str, str] | None = None,
 ) -> ProvisionedResources:
     """Bring up the workspace compose stack and return preview resources."""
     cfg = settings or get_settings()
     root = workspace_root.expanduser().resolve()
-    compose_file = repair_compose_for_scaffolded_apps(root) or find_compose_file(root)
+    compose_file = repair_compose_for_scaffolded_apps(
+        root, connection_env=connection_env
+    ) or find_compose_file(root)
     if compose_file is None:
         raise ComposeDeployError(
             "No docker-compose.yml (or compose.yml) found in the workspace root"

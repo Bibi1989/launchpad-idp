@@ -22,6 +22,7 @@ import type {
   KubernetesWorkloadOptions,
   RunningInstanceConfig,
   WorkloadDependenciesConfig,
+  WorkspaceEnvVar,
   WorkspaceRuntimeMode,
   WorkspaceWizardConfig,
 } from '~/types/provisioning'
@@ -101,6 +102,7 @@ const form = reactive({
   container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
   dependencies: defaultWorkloadDependencies() as WorkloadDependenciesConfig,
   ansible: defaultAnsibleConfig() as AnsibleConfig,
+  env_vars: [] as WorkspaceEnvVar[],
   local: {
     cluster_name: 'launchpad',
     context: 'kind-launchpad',
@@ -275,6 +277,7 @@ function applyConfig(config: WorkspaceWizardConfig) {
   if (config.dependencies) {
     Object.assign(form.dependencies, defaultWorkloadDependencies(), config.dependencies)
   }
+  form.env_vars = Array.isArray(config.env_vars) ? config.env_vars.map((e) => ({ ...e })) : []
   Object.assign(form.ansible, defaultAnsibleConfig(), config.ansible ?? {})
   hasStoredCredentials.value = config.has_credentials
   clearCredentials()
@@ -475,6 +478,7 @@ function buildPayload(): ProvisioningWizardInput {
           ? (running_instance.process_strategy || 'docker') === 'docker'
           : form.ansible.install_docker,
     },
+    env_vars: form.env_vars.filter((e) => e.key.trim() !== ''),
   }
 
   if (provider.value === 'local') {
@@ -699,6 +703,32 @@ onMounted(async () => {
             :workspace-id="workspaceId"
             :disabled="saving"
           />
+          <WorkloadDependenciesPicker
+            v-model:dependencies="form.dependencies"
+            :provider="provider"
+            :gcp-cloud-sql="form.gcp.cloud_sql"
+            :gcp-cloud-sql-engine="form.gcp.cloud_sql_engine"
+            :gcp-memorystore="form.gcp.memorystore"
+            :gcp-memorystore-engine="form.gcp.memorystore_engine"
+            :aws-rds="form.aws.rds"
+            :aws-rds-engine="form.aws.rds_engine"
+            :aws-elasticache="form.aws.elasticache"
+            :aws-elasticache-engine="form.aws.elasticache_engine"
+            :azure-cosmos-db="form.azure.cosmos_db"
+            :azure-cosmos-api="form.azure.cosmos_api"
+            :azure-redis-cache="form.azure.redis_cache"
+            :disabled="saving"
+          />
+
+          <ServiceGraphPanel :workspace-id="workspaceId" />
+
+          <div class="space-y-2 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-surface)]/40 p-4">
+            <div>
+              <h4 class="text-sm font-semibold">{{ t('envVars.customTitle') }}</h4>
+              <p class="mt-1 text-xs text-[var(--lp-muted)]">{{ t('envVars.customBlurb') }}</p>
+            </div>
+            <EnvVarsEditor v-model="form.env_vars" />
+          </div>
           <AnsibleConfigurator
             v-if="form.runtime_mode === 'running_instance' || form.runtime_mode === 'docker_compose'"
             ref="ansibleConfiguratorRef"
