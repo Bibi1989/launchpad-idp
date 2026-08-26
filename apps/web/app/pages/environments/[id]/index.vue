@@ -16,6 +16,8 @@ import {
   coerceRegionForProvider,
   isRegionForProvider,
 } from '~/utils/cloudRegions'
+import type { CloudPluginSelection } from '~/types/cloudPluginSelection'
+import { emptyCloudPluginSelection } from '~/types/cloudPluginSelection'
 import { emptyCloudCredentials, defaultImageSecurityScanConfig } from '~/utils/cloudValidation'
 import {
   ttlCanExtend,
@@ -103,6 +105,7 @@ const promoteForm = reactive({
   create_subnets: false,
   image_scan: defaultImageSecurityScanConfig(),
 })
+const promotePlugin = ref<CloudPluginSelection>(emptyCloudPluginSelection())
 
 type CloudNetworkOption = {
   id: string
@@ -320,6 +323,11 @@ function hasStoredCredsForProvider(provider: CloudProvider) {
   if (provider === 'aws') return storedCredentialsStatus.value.has_aws
   if (provider === 'azure') return storedCredentialsStatus.value.has_azure
   return storedCredentialsStatus.value.has_cloudflare
+}
+
+function onPromoteTypedProvider(next: 'local' | CloudProvider) {
+  if (next === 'local') return
+  promoteForm.provider = next
 }
 
 const storedCredsLabel = computed(() => {
@@ -719,7 +727,7 @@ const destroyAction = define(
     title: t('environments.toasts.destroyFailed'),
     message: toastError(err, t('common.failed')),
   }),
-  onSuccess: (env) => { environment.value = env; connect(env.id) },
+  onSuccess: (env) => { environment.value = env; reconnectStreams(env.id) },
   onError: (msg) => { loadError.value = msg },
 })
 
@@ -734,7 +742,7 @@ const stopProvisionAction = define(
       title: t('environments.toasts.stopFailed'),
       message: toastError(err, t('common.failed')),
     }),
-    onSuccess: (env) => { environment.value = env; connect(env.id) },
+    onSuccess: (env) => { environment.value = env; reconnectStreams(env.id) },
     onError: (msg) => { loadError.value = msg },
   },
 )
@@ -815,6 +823,7 @@ const promoteAction = define(
         ? promoteForm.existing_security_group_id
         : null,
     kubernetes_image_scan: { ...promoteForm.image_scan },
+    cloud_plugin: promotePlugin.value.provider ? { ...promotePlugin.value } : null,
   }),
   {
     success: () => ({ title: t('environments.detail.launchCloudPreview'), message: t('environments.detail.deployingToCloud', { provider: promoteForm.provider.toUpperCase() }) }),
@@ -1304,22 +1313,12 @@ onUnmounted(() => {
               </button>
             </div>
           </div>
-          <div class="flex flex-wrap gap-2">
-            <button
-              v-for="p in (['gcp', 'aws', 'azure', 'cloudflare'] as CloudProvider[])"
-              :key="p"
-              type="button"
-              class="rounded-lg border px-3 py-1.5 text-sm uppercase"
-              :class="
-                promoteForm.provider === p
-                  ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-                  : 'border-[var(--lp-line)]'
-              "
-              @click="promoteForm.provider = p"
-            >
-              {{ p }}
-            </button>
-          </div>
+          <CloudDeployTargetGrid
+            :typed-provider="promoteForm.provider"
+            v-model:plugin="promotePlugin"
+            :include-local="false"
+            @update:typed-provider="onPromoteTypedProvider"
+          />
           <CloudPromoteDeployTargets
             :targets="promoteDeployTargets"
             :provider="promoteForm.provider"
@@ -1520,6 +1519,7 @@ onUnmounted(() => {
             <CloudCredentialsFields
               :credentials="promoteCredentials"
               :provider="promoteForm.provider"
+              override-mode
             />
           </template>
           <button

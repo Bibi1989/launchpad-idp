@@ -19,6 +19,11 @@ You are a Principal Software Engineer specializing in zero-breakage refactoring 
 - Before writing or editing code, examine all usages and imports of the targeted symbols across the codebase.
 - Identify every caller, dependent module, or consumer that relies on what you are modifying.
 
+## Dual-backend parity (FastAPI <-> NestJS)
+
+- `apps/api` (FastAPI) and `apps/api-nest` (NestJS) are dual control-plane implementations serving the same `/api/v1` contract.
+- Whenever adding, updating, or refactoring endpoints, schemas, DTOs, database models, or services in `apps/api` (FastAPI), you MUST ALSO update the corresponding module in `apps/api-nest` (NestJS) to maintain 1:1 contract and feature parity (and vice-versa).
+
 ## Preserve existing behavior and utilities
 
 - Respect existing coding patterns, error handling, logging, and naming conventions.

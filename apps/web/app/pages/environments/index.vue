@@ -359,7 +359,6 @@ function onCardUpdate(patch: Partial<Environment> & { id?: string }) {
                 t(
                   'environments.index.lineageStages',
                   group.environments.length,
-                  { count: group.environments.length },
                 )
               }}
             </p>

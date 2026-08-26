@@ -4,6 +4,7 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly correlationId: string | null
+  readonly details: Record<string, unknown> | null
 
   constructor(status: number, body: ApiErrorBody | null, fallback: string) {
     super(body?.error.message ?? fallback)
@@ -11,6 +12,7 @@ export class ApiError extends Error {
     this.status = status
     this.code = body?.error.code ?? 'unknown_error'
     this.correlationId = body?.error.correlation_id ?? null
+    this.details = body?.error.details ?? null
   }
 }
 
@@ -50,7 +52,9 @@ export function useApi() {
     ) {
       body = JSON.stringify(body)
     }
-    if (body && !headers.has('Content-Type')) {
+    // Only JSON (string) bodies get a JSON content-type. FormData/Blob must keep their
+    // own content-type (the browser sets the multipart boundary), so never override them.
+    if (typeof body === 'string' && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
     if (token.value) {

@@ -11,6 +11,7 @@ alwaysApply: false
 - Keep HTTP handlers fast: offload IaC runs and K8s API work to Celery/Redis workers.
 - DB: SQLAlchemy 2.0 async sessions + Alembic. Enforce PostgreSQL FKs and indexes on queried IDs.
 - Errors: custom HTTPException handlers with structured schemas. Log full stack traces internally; return clean client messages.
+- **Dual-Backend Synchronization**: Whenever adding, modifying, or refactoring endpoints, schemas, database models, or services in `apps/api` (FastAPI), you MUST ALSO update the corresponding module in `apps/api-nest` (NestJS) to maintain 1:1 API contract and feature parity.
 
 ```python
 # ❌ BAD - blocking work in the request path

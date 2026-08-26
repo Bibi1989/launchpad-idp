@@ -177,6 +177,60 @@ def test_push_aws_uses_account_registry_for_login() -> None:
         )
 
     assert login_hosts == ["851725202898.dkr.ecr.eu-central-1.amazonaws.com"]
-    assert remote.startswith(
-        "851725202898.dkr.ecr.eu-central-1.amazonaws.com/launchpad-previews:launch-web-"
-    )
+    assert "launchpad-previews:aaaaaaaabbbb-launch-web-latest" in remote
+
+
+def test_build_and_push_cloud_image_autoscaffolds_missing_dockerfile(tmp_path) -> None:
+    """No workspace Dockerfile + detectable stack: scaffold one instead of failing."""
+    from pathlib import Path
+
+    # Detectable Node stack at the workspace root, but no Dockerfile shipped.
+    (tmp_path / "package.json").write_text('{"name": "web"}', encoding="utf-8")
+
+    build_cmds: list[list[str]] = []
+
+    def fake_run(cmd, *, timeout, check=True, env=None, input_text=None):
+        build_cmds.append(cmd)
+        return _completed("")
+
+    with (
+        patch.object(cic, "_run_cmd", side_effect=fake_run),
+        patch.object(cic, "_credential_env", return_value={}),
+        patch.object(cic, "resolve_gcp_project_id", return_value="acme-prod-123"),
+        patch.object(cic, "_ensure_gcp_artifact_repo"),
+        patch.object(cic, "_docker_auth_gcp"),
+    ):
+        remote = cic.build_and_push_cloud_image(
+            workspace_root=Path(tmp_path),
+            environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            cloud_provider="gcp",
+            credentials=None,
+            region="europe-west3",
+        )
+
+    assert (tmp_path / "Dockerfile").is_file()
+    assert any(c[:2] == ["docker", "build"] for c in build_cmds)
+    assert remote.startswith("europe-west3-docker.pkg.dev/acme-prod-123/launchpad-previews/")
+
+
+def test_build_and_push_cloud_image_raises_when_stack_undetectable(tmp_path) -> None:
+    """No Dockerfile and no recognizable stack still aborts the cloud deploy."""
+    from pathlib import Path
+
+    (tmp_path / "notes.txt").write_text("just some text", encoding="utf-8")
+
+    with (
+        patch.object(cic, "_credential_env", return_value={}),
+    ):
+        try:
+            cic.build_and_push_cloud_image(
+                workspace_root=Path(tmp_path),
+                environment_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                cloud_provider="gcp",
+                credentials=None,
+                region="europe-west3",
+            )
+        except cic.CloudInstanceComputeError as exc:
+            assert "no Dockerfile" in str(exc)
+        else:  # pragma: no cover - defensive
+            raise AssertionError("expected CloudInstanceComputeError")

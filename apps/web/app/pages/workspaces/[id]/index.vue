@@ -44,7 +44,8 @@ const formStatusMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 
 const showsKubernetesSuite = computed(() => {
-  return (workspace.value?.runtime_mode ?? 'kubernetes') === 'kubernetes'
+  if (!workspace.value) return false
+  return (workspace.value.runtime_mode ?? 'kubernetes') === 'kubernetes'
 })
 
 const primarySuiteLabel = computed(() => {
@@ -559,7 +560,7 @@ watch(advancedMode, async (enabled) => {
       </div>
 
       <!-- Kubernetes Management & Visual Execution Suite -->
-      <ClientOnly v-if="showsKubernetesSuite && activeTabMode === 'k8s' && !advancedMode">
+      <ClientOnly v-if="workspace && showsKubernetesSuite && activeTabMode === 'k8s' && !advancedMode">
         <KubernetesSuite :workspace-id="workspace.workspace_id" />
         <template #fallback>
           <div class="lp-glass flex min-h-[300px] items-center justify-center rounded-xl p-8 text-sm text-[var(--lp-muted)]">

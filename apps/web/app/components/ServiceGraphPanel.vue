@@ -20,15 +20,13 @@ const protocols: ServiceConnection['protocol'][] = [
   'http', 'grpc', 'kafka', 'rabbitmq', 'redis', 'postgres', 'mysql', 'mariadb', 'mongodb',
 ]
 
-const serviceNodes = computed(() => (graph.value?.nodes ?? []).filter((n) => n.type === 'service'))
-// Targets can be a service OR an infra node (broker / database / cache).
-const targetNodes = computed(() => graph.value?.nodes ?? [])
-const targetNode = computed(() => targetNodes.value.find((n) => n.id === newTarget.value) ?? null)
-// When wiring to a database/broker/cache, the protocol IS the datastore kind - detect
-// it automatically and lock the field so it can't be mismatched.
-const isInfraTarget = computed(() => Boolean(targetNode.value && targetNode.value.type !== 'service'))
+// FROM: all nodes (datastores, brokers, services). TO: services (consumers).
+const fromNodes = computed(() => graph.value?.nodes ?? [])
+const toNodes = computed(() => (graph.value?.nodes ?? []).filter((n) => n.type === 'service'))
+const fromNode = computed(() => fromNodes.value.find((n) => n.id === newSource.value) ?? null)
+const isInfraSource = computed(() => Boolean(fromNode.value && fromNode.value.type !== 'service'))
 
-watch(targetNode, (node) => {
+watch(fromNode, (node) => {
   if (node && node.type !== 'service' && protocols.includes(node.label as ServiceConnection['protocol'])) {
     newProtocol.value = node.label as ServiceConnection['protocol']
   }
@@ -74,7 +72,7 @@ async function addConnection() {
   if (!newSource.value || !newTarget.value || newSource.value === newTarget.value) return
   await persist([
     ...currentConnections(),
-    { source: newSource.value, target: newTarget.value, protocol: newProtocol.value },
+    { source: newTarget.value, target: newSource.value, protocol: newProtocol.value },
   ])
   newSource.value = ''
   newTarget.value = ''
@@ -121,9 +119,9 @@ function nodeLabel(id: string): string {
           class="flex items-center justify-between rounded-md border border-[var(--lp-line)] px-3 py-1.5 text-sm"
         >
           <span class="text-[var(--lp-text)]">
-            {{ nodeLabel(edge.source) }}
-            <span class="mx-1 text-[var(--lp-muted)]">-{{ edge.protocol }}-&gt;</span>
             {{ nodeLabel(edge.target) }}
+            <span class="mx-1 text-[var(--lp-muted)]">-{{ edge.protocol }}-&gt;</span>
+            {{ nodeLabel(edge.source) }}
             <span
               class="ml-2 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide"
               :class="edge.configured
@@ -154,12 +152,14 @@ function nodeLabel(id: string): string {
           <span class="lp-label mb-1 block">{{ t('serviceGraph.source') }}</span>
           <select v-model="newSource" class="lp-input w-full">
             <option value="">-</option>
-            <option v-for="n in serviceNodes" :key="n.id" :value="n.id">{{ n.label }}</option>
+            <option v-for="n in fromNodes" :key="n.id" :value="n.id">
+              {{ n.label }}<template v-if="n.type !== 'service'"> ({{ n.type }})</template>
+            </option>
           </select>
         </label>
         <label class="min-w-[7rem]">
           <span class="lp-label mb-1 block">{{ t('serviceGraph.protocol') }}</span>
-          <select v-model="newProtocol" class="lp-input w-full" :disabled="isInfraTarget" :title="isInfraTarget ? t('serviceGraph.protocolAuto') : ''">
+          <select v-model="newProtocol" class="lp-input w-full" :disabled="isInfraSource" :title="isInfraSource ? t('serviceGraph.protocolAuto') : ''">
             <option v-for="p in protocols" :key="p" :value="p">{{ p }}</option>
           </select>
         </label>
@@ -167,9 +167,7 @@ function nodeLabel(id: string): string {
           <span class="lp-label mb-1 block">{{ t('serviceGraph.target') }}</span>
           <select v-model="newTarget" class="lp-input w-full">
             <option value="">-</option>
-            <option v-for="n in targetNodes" :key="n.id" :value="n.id">
-              {{ n.label }}<template v-if="n.type !== 'service'"> ({{ n.type }})</template>
-            </option>
+            <option v-for="n in toNodes" :key="n.id" :value="n.id">{{ n.label }}</option>
           </select>
         </label>
         <button

@@ -10,6 +10,8 @@ import {
   runningInstanceSchema,
   ansibleConfigSchema,
   emptyCloudCredentials,
+  ansibleWantedForWorkspace,
+  DEFAULT_INSTANCE_CONFIG_TOOL,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
@@ -22,6 +24,7 @@ import type {
   GitHubRepoResult,
   IaCBundleSummary,
   IaCEngine,
+  InstanceConfigTool,
   InfraGenerationConfig,
   KubernetesPackaging,
   KubernetesWorkloadOptions,
@@ -37,6 +40,8 @@ import type {
 } from '~/types/provisioning'
 import type { PendingWorkspaceRepoLink } from '~/types/workspaceRepo'
 import type { UserCloudCredentialsStatus } from '~/types/userCredentials'
+import type { CloudPluginSelection } from '~/types/cloudPluginSelection'
+import { emptyCloudPluginSelection } from '~/types/cloudPluginSelection'
 import { defaultKubernetesWorkloadOptions } from '~/utils/cloudValidation'
 import {
   applyCostOptimizationToWorkloadOptions,
@@ -65,6 +70,8 @@ import {
 } from '~/utils/workspaceRepoScaffold'
 import { AWS_REGIONS, AZURE_LOCATIONS, AZURE_VM_SIZES, AWS_INSTANCE_TYPES, GCP_MACHINE_TYPES, GCP_REGIONS } from '~/utils/cloudRegions'
 import { applyPreferredCloudRegions } from '~/utils/preferredCloudRegions'
+import { applyPluginServiceDefaults } from '~/utils/applyPluginServiceDefaults'
+import { applyPluginManifestDefaults } from '~/utils/applyPluginManifestDefaults'
 import {
   AWS_SERVICE_OPTIONS,
   AZURE_SERVICE_OPTIONS,
@@ -123,10 +130,12 @@ const ansibleConfiguratorRef = ref<{
 const { listProjects, projects: launchpadProjects } = useProjects()
 const launchpadProjectId = ref<string>('')
 const { getStatus: getCloudCredentialStatus } = useUserCloudCredentials()
+const { getProvider: getCloudPluginEntry } = useCloudProviders()
+const iacEngineTouched = ref(false)
 
 const form = reactive({
   name: '',
-  iac_engine: 'terraform' as IaCEngine,
+  iac_engine: 'launchpad' as IaCEngine,
   provider: 'local' as CloudProvider,
   runtime_mode: 'kubernetes' as WorkspaceRuntimeMode,
   running_instance: defaultRunningInstanceConfig() as RunningInstanceConfig,
@@ -137,7 +146,9 @@ const form = reactive({
   cost_optimization: defaultCostOptimizationConfig() as CostOptimizationConfig,
   container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
   ansible: defaultAnsibleConfig() as AnsibleConfig,
+  config_tool: DEFAULT_INSTANCE_CONFIG_TOOL as InstanceConfigTool,
   dependencies: defaultWorkloadDependencies() as WorkloadDependenciesConfig,
+  cloudPlugin: emptyCloudPluginSelection() as CloudPluginSelection,
   local: {
     cluster_name: 'launchpad',
     context: 'kind-launchpad',
@@ -148,6 +159,7 @@ const form = reactive({
     network_topology: 'simple' as 'simple' | 'standard',
     gke: false,
     artifact_registry: false,
+    compute_instance: false,
     secret_backend: 'secret_manager' as 'secret_manager' | 'native_k8s',
     cloud_run: false,
     cloud_functions: false,
@@ -417,6 +429,12 @@ watch(
   },
 )
 
+function onIacEngineChange(event: Event) {
+  const value = (event.target as HTMLSelectElement).value as IaCEngine
+  iacEngineTouched.value = true
+  form.iac_engine = value
+}
+
 watch(
   () => form.kubernetes_packaging,
   (packaging) => {
@@ -437,6 +455,10 @@ watch(
       infraGeneration.value = defaultInfraGenerationConfig({ isLocal: true })
       form.github.set_cloud_secrets = false
       hasStoredCredentials.value = false
+      if (!iacEngineTouched.value || form.iac_engine === 'launchpad') {
+        form.iac_engine = 'terraform'
+        infraGeneration.value.provision.engine = 'terraform'
+      }
       return
     }
     if (!infraGeneration.value.provision.enabled && !infraGeneration.value.kubernetes.enabled) {
@@ -447,7 +469,33 @@ watch(
         provision: { ...infraGeneration.value.provision, enabled: true },
       }
     }
+    if (!iacEngineTouched.value) {
+      form.iac_engine = 'launchpad'
+      infraGeneration.value.provision.engine = 'launchpad'
+    }
     void refreshCredentialDetection()
+  },
+)
+
+watch(
+  () => ({ ...form.cloudPlugin }),
+  (plugin) => {
+    if (!plugin.provider || form.provider === 'local') return
+    applyPluginServiceDefaults(form, plugin, form.kubernetes_options.image_source)
+    const entry = getCloudPluginEntry(plugin.provider)
+    applyPluginManifestDefaults(form, entry, { iacEngineTouched: iacEngineTouched.value })
+    if (!iacEngineTouched.value && entry?.defaults?.iacEngine) {
+      infraGeneration.value.provision.engine = entry.defaults.iacEngine as typeof form.iac_engine
+    }
+  },
+  { deep: true },
+)
+
+watch(
+  () => form.kubernetes_options.image_source,
+  (imageSource) => {
+    if (!form.cloudPlugin.provider || form.provider === 'local') return
+    applyPluginServiceDefaults(form, form.cloudPlugin, imageSource)
   },
 )
 
@@ -540,44 +588,6 @@ function onGithubAppUpdated(status: GitHubAppStatus) {
   applyGithubDefaults(status)
 }
 
-const providers = computed(() => [
-  {
-    id: 'local' as CloudProvider,
-    label: t('provision.providers.local'),
-    badge: 'LOCAL',
-    icon: 'developer_board',
-    blurb: t('provision.sandbox.blurb'),
-  },
-  {
-    id: 'aws' as CloudProvider,
-    label: t('provision.providers.aws'),
-    badge: 'AWS',
-    icon: 'cloud',
-    blurb: t('provision.providerBlurbs.aws'),
-  },
-  {
-    id: 'gcp' as CloudProvider,
-    label: t('provision.providers.gcp'),
-    badge: 'GCP',
-    icon: 'deployed_code',
-    blurb: t('provision.providerBlurbs.gcp'),
-  },
-  {
-    id: 'azure' as CloudProvider,
-    label: t('provision.providers.azure'),
-    badge: 'AZURE',
-    icon: 'grid_view',
-    blurb: t('provision.providerBlurbs.azure'),
-  },
-  {
-    id: 'cloudflare' as CloudProvider,
-    label: t('provision.providers.cloudflare'),
-    badge: 'EDGE',
-    icon: 'bolt',
-    blurb: t('provision.providerBlurbs.cloudflare'),
-  },
-])
-
 const progressPct = computed(() => (currentStep.value / TOTAL_STEPS) * 100)
 
 const stepTitle = computed(() => {
@@ -606,6 +616,30 @@ const runInitBlurb = computed(() => {
   if (form.runtime_mode === 'running_instance') return t('provision.runInit.instanceBlurb')
   return t('provision.runInit.localBlurb')
 })
+
+const showInstanceConfigTool = computed(
+  () => form.runtime_mode === 'running_instance' && form.running_instance.kind === 'vm',
+)
+const showAnsibleConfigurator = computed(() =>
+  ansibleWantedForWorkspace({
+    ansibleEnabled: form.config_tool === 'ansible',
+    iacEngine: form.iac_engine,
+    configTool: form.config_tool,
+  }),
+)
+
+watch(
+  () => form.config_tool,
+  (tool) => {
+    if (tool === 'ansible') {
+      form.ansible.enabled = true
+      return
+    }
+    if (form.iac_engine !== 'ansible') {
+      form.ansible.enabled = false
+    }
+  },
+)
 
 const gcpResourceOptions = GCP_SERVICE_OPTIONS
 const awsResourceOptions = AWS_SERVICE_OPTIONS
@@ -643,11 +677,21 @@ function applyWizardConfig(config: WorkspaceWizardConfig) {
     Object.assign(form.container_scaffold, config.container_scaffold)
   }
   Object.assign(form.ansible, defaultAnsibleConfig(), config.ansible ?? {})
+  form.config_tool = (config.config_tool
+    ?? (config.ansible?.enabled ? 'ansible' : DEFAULT_INSTANCE_CONFIG_TOOL)) as InstanceConfigTool
   if (config.dependencies) {
     Object.assign(form.dependencies, config.dependencies)
   }
   form.provider = config.cloud.provider
   hasStoredCredentials.value = config.has_credentials
+  if (config.cloud_plugin?.provider) {
+    form.cloudPlugin = {
+      provider: config.cloud_plugin.provider,
+      service: config.cloud_plugin.service ?? null,
+      region: config.cloud_plugin.region ?? null,
+      tier: config.cloud_plugin.tier ?? null,
+    }
+  }
   clearCredentials()
 
   const resources = config.cloud.resources as Record<string, unknown>
@@ -844,6 +888,9 @@ function buildWizardPayload(): ProvisioningWizardInput {
     launchpad_project_id: launchpadProjectId.value || null,
     iac_engine: form.iac_engine,
     credentials: form.credentials,
+    // The provision wizard does not collect service env vars (that is done in the
+    // workspace/import forms); default to none to satisfy the schema shape.
+    env_vars: [] as { key: string; value: string }[],
     run_init: form.run_init,
     runtime_mode: form.runtime_mode,
     running_instance: runningInstanceSchema.parse(form.running_instance),
@@ -852,16 +899,17 @@ function buildWizardPayload(): ProvisioningWizardInput {
     cost_optimization: form.cost_optimization,
     container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
     dependencies: workloadDependenciesSchema.parse(form.dependencies),
+    config_tool: form.config_tool,
     ansible: ansibleConfigSchema.parse({
       ...form.ansible,
-      enabled:
-        form.ansible.enabled
-        || form.iac_engine === 'ansible'
-        || infraGeneration.value.provision.engine === 'ansible'
-        || (
-          form.runtime_mode === 'running_instance'
-          && form.running_instance.kind === 'vm'
-        ),
+      enabled: ansibleWantedForWorkspace({
+        ansibleEnabled: form.ansible.enabled,
+        iacEngine:
+          form.iac_engine === 'ansible' || infraGeneration.value.provision.engine === 'ansible'
+            ? 'ansible'
+            : form.iac_engine,
+        configTool: form.config_tool,
+      }),
       hosts:
         form.ansible.hosts
         || form.running_instance.host
@@ -873,6 +921,7 @@ function buildWizardPayload(): ProvisioningWizardInput {
       app_listen_port: form.running_instance.listen_port || form.ansible.app_listen_port || 8080,
       reverse_proxy: form.ansible.reverse_proxy || 'none',
     }),
+    cloud_plugin: form.cloudPlugin.provider ? form.cloudPlugin : null,
   }
   if (form.provider === 'local') {
     const isK8s = form.runtime_mode === 'kubernetes'
@@ -1126,13 +1175,11 @@ async function enhanceProvisionedInfraFiles(workspaceId: string) {
 }
 
 async function scaffoldAnsibleFiles(workspaceId: string) {
-  const ansibleWanted =
-    form.ansible.enabled
-    || form.iac_engine === 'ansible'
-    || (
-      form.runtime_mode === 'running_instance'
-      && form.running_instance.kind === 'vm'
-    )
+  const ansibleWanted = ansibleWantedForWorkspace({
+    ansibleEnabled: form.ansible.enabled,
+    iacEngine: form.iac_engine,
+    configTool: form.config_tool,
+  })
   if (!ansibleWanted) return
   const targets =
     ansibleConfiguratorRef.value?.buildWritableFiles()
@@ -1602,54 +1649,24 @@ async function onPrimaryAction() {
             </div>
           </div>
 
-          <div class="grid gap-4 sm:grid-cols-2">
-            <button
-              v-for="p in providers"
-              :key="p.id"
-              type="button"
-              class="group rounded-xl border p-5 text-left transition active:scale-[0.98]"
-              :class="
-                form.provider === p.id
-                  ? 'border-2 border-[var(--lp-accent)] bg-[var(--lp-panel-2)]'
-                  : 'border-[var(--lp-line)] bg-[var(--lp-panel)]/60 hover:border-[var(--lp-accent)]/50 hover:bg-[var(--lp-panel-2)]/60'
-              "
-              :disabled="loadingConfig"
-              @click="form.provider = p.id"
-            >
-              <div class="mb-4 flex items-center justify-between">
-                <span
-                  class="material-symbols-outlined text-3xl"
-                  :class="form.provider === p.id ? 'text-[var(--lp-accent)]' : 'text-[var(--lp-muted)] group-hover:text-[var(--lp-accent)]'"
-                >
-                  {{ p.icon }}
-                </span>
-                <span
-                  class="rounded px-2 py-1 font-mono text-[10px] uppercase tracking-wide"
-                  :class="
-                    form.provider === p.id
-                      ? 'bg-[var(--lp-accent)] text-[var(--lp-ink)]'
-                      : 'bg-[var(--lp-panel-2)] text-[var(--lp-muted)]'
-                  "
-                >
-                  {{ p.badge }}
-                </span>
-              </div>
-              <h3 class="text-base font-semibold">{{ p.label }}</h3>
-              <p class="mt-2 text-xs text-[var(--lp-muted)]">{{ p.blurb }}</p>
-            </button>
-          </div>
+          <CloudDeployTargetGrid v-model:typed-provider="form.provider" v-model:plugin="form.cloudPlugin" />
 
           <label class="block space-y-2">
               <span class="lp-label">{{ t('provision.iacEngine') }}</span>
               <select
-                v-model="form.iac_engine"
+                :value="form.iac_engine"
                 class="lp-input"
                 :disabled="loadingConfig || (isLocalProvider && form.runtime_mode === 'kubernetes')"
+                @change="onIacEngineChange"
               >
+                <option v-if="!isLocalProvider" value="launchpad">{{ t('provision.iacEngines.launchpad') }}</option>
                 <option value="terraform">Terraform</option>
                 <option value="opentofu">OpenTofu</option>
                 <option value="pulumi">Pulumi</option>
               </select>
+              <p v-if="!isLocalProvider && form.iac_engine === 'launchpad'" class="text-xs text-[var(--lp-muted)]">
+                {{ t('provision.iacEngineLaunchpadHint') }}
+              </p>
               <p
                 v-if="isLocalProvider && form.runtime_mode === 'kubernetes'"
                 class="text-xs text-[var(--lp-muted)]"
@@ -1669,6 +1686,12 @@ async function onPrimaryAction() {
             v-model:running-instance="form.running_instance"
             :provider="form.provider"
             :resources="currentProviderResources"
+            :disabled="loadingConfig"
+          />
+          <InstanceConfigToolPicker
+            v-if="showInstanceConfigTool"
+            v-model="form.config_tool"
+            :provider="form.provider"
             :disabled="loadingConfig"
           />
         </div>
@@ -1849,7 +1872,9 @@ async function onPrimaryAction() {
               :disabled="loadingConfig"
             />
             <AnsibleConfigurator
-              v-if="form.runtime_mode === 'running_instance' && form.running_instance.kind === 'vm'"
+              v-if="showAnsibleConfigurator
+                && form.runtime_mode === 'running_instance'
+                && form.running_instance.kind === 'vm'"
               ref="ansibleConfiguratorRef"
               v-model="form.ansible"
               class="mt-4"
@@ -1990,6 +2015,7 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
               <AnsibleConfigurator
+                v-if="showAnsibleConfigurator"
                 ref="ansibleConfiguratorRef"
                 v-model="form.ansible"
                 class="mt-4"
@@ -2041,6 +2067,7 @@ async function onPrimaryAction() {
             <CloudCredentialsFields
               :credentials="form.credentials"
               provider="gcp"
+              override-mode
               :sa-placeholder="hasStoredCredentials ? t('provision.credentialsHints.leaveBlank') : t('provision.credentialsHints.pasteSaJson')"
             />
           </template>
@@ -2069,7 +2096,7 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
             </div>
-            <CloudCredentialsFields :credentials="form.credentials" provider="aws" />
+            <CloudCredentialsFields :credentials="form.credentials" provider="aws" override-mode />
           </template>
 
           <template v-if="form.provider === 'azure'">
@@ -2095,11 +2122,11 @@ async function onPrimaryAction() {
                 :disabled="loadingConfig"
               />
             </div>
-            <CloudCredentialsFields :credentials="form.credentials" provider="azure" />
+            <CloudCredentialsFields :credentials="form.credentials" provider="azure" override-mode />
           </template>
 
           <template v-if="form.provider === 'cloudflare'">
-            <CloudCredentialsFields :credentials="form.credentials" provider="cloudflare" />
+            <CloudCredentialsFields :credentials="form.credentials" provider="cloudflare" override-mode />
           </template>
 
           <div

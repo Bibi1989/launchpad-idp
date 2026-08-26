@@ -36,6 +36,21 @@ def test_write_local_runtime_terraform(tmp_path: Path) -> None:
     )
 
 
+def test_write_local_runtime_launch_script(tmp_path: Path) -> None:
+    files = write_local_runtime_iac(
+        tmp_path,
+        name="local-script-demo",
+        engine=IaCEngine.LAUNCH_SCRIPT,
+        runtime_mode=WorkspaceRuntimeMode.DOCKER_COMPOSE,
+    )
+    assert "infra/launchProvision.sh" in files
+    script = (tmp_path / "infra" / "launchProvision.sh").read_text(encoding="utf-8")
+    assert "LaunchProvision" in script
+    assert "local-script-demo" in script
+    assert "docker compose up --build" in script
+
+
+
 def test_local_compose_multi_service_writes_apps_and_compose_contexts(tmp_path: Path) -> None:
     """Frontend + backend services must each get CoreScaffold sources and compose
     build contexts under apps/<slug>/ (not repo-root context with bare Dockerfiles)."""

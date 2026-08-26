@@ -91,6 +91,7 @@ def _request_from_wizard_snapshot(raw: dict[str, object]):
                 raw.get("dependencies") or {}
             ),
             ansible=AnsibleConfig.model_validate(raw.get("ansible") or {}),
+            config_tool=str(raw.get("config_tool") or "cloud-init"),
         )
     except Exception as exc:  # noqa: BLE001 - best-effort heal path
         logger.warning("scaffold_wizard_rebuild_failed", error=str(exc))
@@ -136,6 +137,8 @@ def ensure_scaffold_vm_compute(workspace_root: Path) -> bool:
         request.ansible,
         runtime_mode=request.runtime_mode,
         running_instance=request.running_instance,
+        iac_engine=request.iac_engine.value,
+        config_tool=request.config_tool.value,
     )
     request = request.model_copy(
         update={"cloud": patched_cloud, "ansible": patched_ansible}
@@ -165,7 +168,12 @@ def ensure_scaffold_vm_compute(workspace_root: Path) -> bool:
         )
     elif engine in {"terraform", "opentofu"} and tf_main.is_file():
         already = "google_compute_instance" in tf_main.read_text(encoding="utf-8")
-    ansible_ready = ansible_site.is_file()
+    ansible_wanted = (
+        request.ansible.enabled
+        or engine == "ansible"
+        or request.config_tool.value == "ansible"
+    )
+    ansible_ready = ansible_site.is_file() if ansible_wanted else True
     cloud_unchanged = before == request.cloud.model_dump(mode="json")
     ansible_unchanged = before_ansible == request.ansible.model_dump(mode="json")
     if already and ansible_ready and cloud_unchanged and ansible_unchanged:

@@ -537,6 +537,7 @@ async function applyAiFix(payload: { path: string; content: string }) {
                 v-if="provider !== 'local'"
                 :credentials="credentials"
                 :provider="(provider as 'gcp' | 'aws' | 'azure' | 'cloudflare')"
+                override-mode
               />
             </div>
 

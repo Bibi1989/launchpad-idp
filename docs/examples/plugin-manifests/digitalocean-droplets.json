@@ -1,0 +1,50 @@
+{
+  "id": "digitalocean-droplets",
+  "displayName": "DigitalOcean Droplets",
+  "docsUrl": "https://docs.digitalocean.com/products/droplets/",
+  "runtimeTargets": ["vm", "docker_host"],
+  "capabilities": ["provision", "destroy", "status"],
+  "credentialFields": [
+    {
+      "name": "do_token",
+      "displayName": "DigitalOcean API Token",
+      "secret": true,
+      "required": true,
+      "help": "Personal access token with read+write scope (API > Tokens)."
+    }
+  ],
+  "regions": [
+    { "value": "nyc3", "displayName": "New York 3 (nyc3)" },
+    { "value": "fra1", "displayName": "Frankfurt 1 (fra1)" },
+    { "value": "sgp1", "displayName": "Singapore 1 (sgp1)" }
+  ],
+  "tiers": [
+    { "id": "s-1vcpu-1gb", "displayName": "Basic - 1 vCPU / 1 GB", "vcpus": 1, "memory_mb": 1024, "monthly_usd": 6.0 },
+    { "id": "s-2vcpu-4gb", "displayName": "Basic - 2 vCPU / 4 GB", "vcpus": 2, "memory_mb": 4096, "monthly_usd": 24.0 }
+  ],
+  "credentialsSchema": {
+    "type": "object",
+    "required": ["do_token"],
+    "properties": { "do_token": { "type": "string", "format": "password" } }
+  },
+  "deploymentConfigSchema": {
+    "type": "object",
+    "properties": {
+      "region": { "type": "string", "default": "nyc3" },
+      "size": { "type": "string", "default": "s-1vcpu-1gb" }
+    }
+  },
+  "hooks": {
+    "postProvision": "scripts/register-dns.sh"
+  },
+  "runtime": {
+    "engine": "terraform",
+    "workingDir": "digitalocean",
+    "varMapping": {
+      "do_token": "${credentials.do_token}",
+      "region": "${spec.region}",
+      "size": "${spec.tier}",
+      "image": "${spec.image}"
+    }
+  }
+}

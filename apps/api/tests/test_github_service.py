@@ -315,3 +315,23 @@ def test_skip_workflow_still_pushes_infra() -> None:
     assert "infra/main.tf" not in committed
     assert not any(path.startswith(".github/workflows/") for path in committed)
     assert "dockers/Dockerfile" not in committed
+
+
+def test_workflow_auth_steps_use_preferred_region() -> None:
+    from app.services.github_service import _render_workflow
+    workflow = _render_workflow(
+        provider=CloudProvider.GCP,
+        engine=IaCEngine.TERRAFORM,
+        workflow_path=".github/workflows/deploy.yml",
+        region="europe-west3",
+    )
+    assert "gcloud config set compute/region europe-west3" in workflow
+
+    aws_workflow = _render_workflow(
+        provider=CloudProvider.AWS,
+        engine=IaCEngine.TERRAFORM,
+        workflow_path=".github/workflows/deploy.yml",
+        region="eu-central-1",
+    )
+    assert "aws-region: eu-central-1" in aws_workflow
+    assert "aws-region: us-east-1" not in aws_workflow

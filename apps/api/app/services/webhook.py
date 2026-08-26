@@ -423,7 +423,10 @@ class GitHubWebhookService:
                 message="Push event missing repository/branch/commit details (or tag/delete)",
             )
 
-        matches = await self._environments.list_active_for_repo_branch(
+        # Match the pushed repo against each environment's primary repo AND any
+        # repo linked into its workspace, so a push to the frontend OR the backend
+        # (or any linked repo) re-provisions the environment with the new commit.
+        matches = await self._environments.list_active_for_any_linked_repo(
             repo_full_name=details.repository_full_name,
             branch=details.branch,
         )
@@ -554,7 +557,7 @@ class GitHubWebhookService:
                 message="Missing repository, branch, or commit",
             )
 
-        matches = await self._environments.list_active_for_repo_branch(
+        matches = await self._environments.list_active_for_any_linked_repo(
             repo_full_name=full_name,
             branch=branch_name,
         )
@@ -762,7 +765,7 @@ class GitLabWebhookService:
                 message="Push event missing repository/branch/commit details (or tag/delete)",
             )
 
-        matches = await self._environments.list_active_for_repo_branch(
+        matches = await self._environments.list_active_for_any_linked_repo(
             repo_full_name=details.repository_full_name,
             branch=details.branch,
         )

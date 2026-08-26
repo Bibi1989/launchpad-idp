@@ -238,8 +238,20 @@ def _systemd_unit(*, unit: str, port: int, start_command: str) -> str:
 
 
 def _pm2_ecosystem(*, name: str, port: int, start_command: str) -> str:
-    # Prefer npm start style; allow override via start_command.
-    script = start_command.replace("\\", "\\\\").replace("'", "\\'")
+    # Prefer npm start / npm run dev / npx style; export node_modules/.bin in PATH.
+    cmd = (start_command or "npm start").strip()
+    if cmd == "vite" or cmd.startswith("vite "):
+        cmd = f"npx {cmd} --host 0.0.0.0 --port {port}"
+    elif not (
+        cmd.startswith("npm ")
+        or cmd.startswith("npx ")
+        or cmd.startswith("node ")
+        or cmd.startswith("yarn ")
+        or cmd.startswith("pnpm ")
+    ):
+        cmd = f"npm run dev || npm start || npx {cmd}"
+
+    script = cmd.replace("\\", "\\\\").replace("'", "\\'")
     return (
         "/** Launchpad PM2 ecosystem - generated for running_instance */\n"
         "module.exports = {\n"
@@ -247,15 +259,17 @@ def _pm2_ecosystem(*, name: str, port: int, start_command: str) -> str:
         "    {\n"
         f"      name: '{name}',\n"
         "      cwd: '.',\n"
-        f"      script: 'bash',\n"
-        f"      args: ['-lc', '{script}'],\n"
+        "      script: 'bash',\n"
+        f"      args: ['-lc', 'export PATH=./node_modules/.bin:$PATH; {script}'],\n"
         "      instances: 1,\n"
         "      autorestart: true,\n"
         "      max_memory_restart: '512M',\n"
         "      env: {\n"
         f"        PORT: '{port}',\n"
         "        HOST: '0.0.0.0',\n"
-        "        NODE_ENV: 'production',\n"
+        f"        VITE_PORT: '{port}',\n"
+        "        PATH: './node_modules/.bin:' + (process.env.PATH || ''),\n"
+        "        NODE_ENV: 'development',\n"
         "      },\n"
         "    },\n"
         "  ],\n"

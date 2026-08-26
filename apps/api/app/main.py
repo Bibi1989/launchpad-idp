@@ -33,11 +33,10 @@ from app.routers.integrations import router as integrations_router
 from app.routers.nodes import router as nodes_router
 from app.routers.nodes import ws_router as nodes_ws_router
 from app.routers.ai_provisioner import router as ai_provisioner_router
+from app.routers.cloud_providers import router as cloud_providers_router
 
 configure_logging()
 logger = get_logger(__name__)
-
-
 
 async def _ttl_reaper_loop(stop: asyncio.Event) -> None:
     """Mark TTL-expired environments EXPIRED in-process so it works without Celery beat."""
@@ -116,6 +115,7 @@ def create_app() -> FastAPI:
     app.include_router(nodes_router, prefix="/api/v1")
     app.include_router(nodes_ws_router, prefix="/api/v1")
     app.include_router(ai_provisioner_router, prefix="/api/v1")
+    app.include_router(cloud_providers_router, prefix="/api/v1")
     app.include_router(well_known_router)
     return app
 

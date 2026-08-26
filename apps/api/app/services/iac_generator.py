@@ -868,6 +868,8 @@ class IaCGenerator:
                 files.extend(self._write_terraform(workspace_dir, request))
             elif request.iac_engine == IaCEngine.PULUMI:
                 files.extend(self._write_pulumi(workspace_dir, request))
+            elif request.iac_engine == IaCEngine.LAUNCHPAD:
+                files.extend(self._write_launchpad_script(workspace_dir, request))
             elif request.iac_engine == IaCEngine.ANSIBLE:
                 from app.services.local_runtime_iac import write_local_runtime_iac
 
@@ -889,17 +891,12 @@ class IaCGenerator:
 
         # Ansible under infra/ansible whenever the checkbox/engine asks for it,
         # including manifest-only workspaces (not gated on Terraform/Pulumi mode).
-        # Cloud VM running-instance always gets playbooks (auto-enabled in validator).
         ansible_already = any(path.startswith("infra/ansible/") for path in files)
         ansible_wanted = (
-            request.iac_engine == IaCEngine.ANSIBLE or request.ansible.enabled
+            request.iac_engine == IaCEngine.ANSIBLE
+            or request.ansible.enabled
+            or request.config_tool.value == "ansible"
         )
-        if (
-            not ansible_wanted
-            and request.runtime_mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
-            and request.running_instance.kind.value == "vm"
-        ):
-            ansible_wanted = True
         if ansible_wanted and not ansible_already:
             from app.services.local_runtime_iac import write_local_runtime_iac
             from app.services.scaffold_cloud_deploy import ansible_config_for_runtime
@@ -965,7 +962,7 @@ class IaCGenerator:
                 WorkspaceArtifactsMode.BOTH,
             }
             and request.iac_engine
-            in {IaCEngine.TERRAFORM, IaCEngine.OPENTOFU, IaCEngine.PULUMI}
+            in {IaCEngine.TERRAFORM, IaCEngine.OPENTOFU, IaCEngine.PULUMI, IaCEngine.LAUNCHPAD}
             and not isinstance(request.cloud, LocalCloudConfig)
         ):
             from app.services.cloud_deploy_makefile import write_cloud_deploy_makefile
@@ -1605,8 +1602,10 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
         from app.services.local_runtime_iac import write_local_runtime_iac
 
         ansible_cfg = request.ansible
-        # Auto-enable Ansible artifacts when engine is ansible or VM-targeted instance.
+        # Write Ansible artifacts when the engine or config tool is Ansible.
         if request.iac_engine == IaCEngine.ANSIBLE and not ansible_cfg.enabled:
+            ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
+        if request.config_tool.value == "ansible" and not ansible_cfg.enabled:
             ansible_cfg = ansible_cfg.model_copy(update={"enabled": True})
         if mode == WorkspaceRuntimeMode.RUNNING_INSTANCE:
             from app.schemas.cloud import AnsibleAppDeployMode
@@ -1623,7 +1622,8 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
                 }
             )
         if (
-            mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
+            ansible_cfg.enabled
+            and mode == WorkspaceRuntimeMode.RUNNING_INSTANCE
             and request.running_instance.kind.value == "vm"
         ):
             ansible_cfg = ansible_cfg.model_copy(
@@ -1791,6 +1791,13 @@ Kubernetes runtime with a cloud provider (or local Kubernetes).
                 )
                 continue
         return files
+
+    def _write_launchpad_script(
+        self, workspace_dir: Path, request: ProvisioningWizardRequest
+    ) -> list[str]:
+        from app.services.launchpad_script import write_launchpad_script
+
+        return write_launchpad_script(workspace_dir, request)
 
     def _write_terraform(
         self, workspace_dir: Path, request: ProvisioningWizardRequest

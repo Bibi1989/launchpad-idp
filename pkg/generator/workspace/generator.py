@@ -80,6 +80,7 @@ class WorkspaceGenerator:
                 workspace_dir,
                 workspace_name=workspace_name,
                 services=active,
+                datastores=detection.datastores,
             )
             if compose:
                 result.files.append(compose)
@@ -181,6 +182,7 @@ class WorkspaceGenerator:
         *,
         workspace_name: str,
         services: list[DetectedService],
+        datastores: list[str] | None = None,
     ) -> str | None:
         """Write a root docker-compose.yml when missing."""
         existing = workspace_dir / "docker-compose.yml"
@@ -204,6 +206,30 @@ class WorkspaceGenerator:
                     f'      - "{port}:{port}"',
                 ]
             )
+            
+        if datastores:
+            for ds in datastores:
+                if ds == "postgres":
+                    lines.extend([
+                        "  postgres:",
+                        "    image: postgres:15-alpine",
+                        "    environment:",
+                        "      POSTGRES_USER: launchpad",
+                        "      POSTGRES_PASSWORD: launchpad",
+                        "      POSTGRES_DB: launchpad",
+                        "    ports:",
+                        '      - "5432:5432"',
+                        "    restart: unless-stopped"
+                    ])
+                elif ds == "redis":
+                    lines.extend([
+                        "  redis:",
+                        "    image: redis:7-alpine",
+                        "    ports:",
+                        '      - "6379:6379"',
+                        "    restart: unless-stopped"
+                    ])
+
         existing.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return "docker-compose.yml"
 

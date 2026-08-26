@@ -436,6 +436,12 @@ class EnvironmentService:
         elif payload.workspace_id is not None:
             workspace = await provisioning.get_workspace_for_owner(payload.workspace_id, owner)
             workspace_id = payload.workspace_id
+            if payload.cloud_plugin is not None:
+                await provisioning.apply_cloud_plugin_to_workspace(
+                    workspace_id,
+                    owner=owner,
+                    cloud_plugin=payload.cloud_plugin,
+                )
             if not workspace.encrypted_credentials:
                 payload = payload.model_copy(
                     update={
@@ -449,6 +455,8 @@ class EnvironmentService:
             if cost_from_template is not None:
                 cost_override = cost_from_template
         else:
+            from app.services.cloud_plugin_defaults import apply_cloud_plugin_defaults
+
             cloud = self._cloud_config_for_provider(CloudProvider(payload.provider.value))
             workspace_req = ProvisioningWizardRequest(
                 name=f"cloud-{payload.name}"[:64],
@@ -456,7 +464,10 @@ class EnvironmentService:
                 cloud=cloud,
                 credentials=payload.credentials,
                 run_init=False,
+                cloud_plugin=payload.cloud_plugin,
             )
+            if payload.cloud_plugin is not None:
+                workspace_req = apply_cloud_plugin_defaults(workspace_req, payload.cloud_plugin)
             workspace_bundle = await provisioning.generate_bundle(workspace_req, owner=owner)
             workspace_id = UUID(workspace_bundle.workspace_id)
             if cost_from_template is not None:
@@ -561,16 +572,21 @@ class EnvironmentService:
                 )
 
         project_id: UUID | None = None
+        effective_provider = payload.provider
         if payload.workspace_id is not None:
             provisioning = ProvisioningService(self._session)
             workspace = await provisioning.get_workspace_for_owner(payload.workspace_id, owner)
             project_id = workspace.project_id
+            if not effective_provider:
+                effective_provider = workspace.provider or "local"
             if project_id is None:
                 project_id = (
                     await ProjectService(self._session, self._settings).ensure_default_project(org=org, actor=owner)
                 ).id
             deploy_mode, manifest_packaging = self._resolve_deploy_mode(payload, workspace, provisioning)
         else:
+            if not effective_provider:
+                effective_provider = "local"
             deploy_mode = payload.deploy_mode or DeployMode.PREVIEW
             manifest_packaging = None
             project_id = (
@@ -654,7 +670,12 @@ class EnvironmentService:
                     error=str(exc),
                 )
 
-        if deploy_mode in {DeployMode.ATTACH, DeployMode.COMPOSE} and _is_placeholder_workload_image(
+        if deploy_mode in {
+            DeployMode.ATTACH,
+            DeployMode.COMPOSE,
+            DeployMode.DOCKER_COMPOSE,
+            DeployMode.DOCKER_COMPOSE_UNDERSCORE,
+        } and _is_placeholder_workload_image(
             workload_image,
             default_image=self._settings.default_workload_image,
         ):
@@ -669,7 +690,12 @@ class EnvironmentService:
         ):
             # For MANIFEST deploys, the real image is resolved later from workspace manifests.
             workload_image_for_log = "from workspace manifests"
-        elif deploy_mode in {DeployMode.ATTACH, DeployMode.COMPOSE} and not workload_image:
+        elif deploy_mode in {
+            DeployMode.ATTACH,
+            DeployMode.COMPOSE,
+            DeployMode.DOCKER_COMPOSE,
+            DeployMode.DOCKER_COMPOSE_UNDERSCORE,
+        } and not workload_image:
             workload_image_for_log = "linked repo / workspace"
 
         if reuse_row is not None:
@@ -680,7 +706,7 @@ class EnvironmentService:
             environment.git_branch = payload.git_branch
             environment.git_repo_url = payload.git_repo_url
             environment.template_id = payload.template_id
-            environment.provider = payload.provider
+            environment.provider = effective_provider
             environment.workload_image = workload_image
             environment.github_pr_number = payload.github_pr_number
             environment.github_pr_url = payload.github_pr_url
@@ -722,7 +748,7 @@ class EnvironmentService:
                 cost_estimate_hourly=hourly,
                 workspace_id=payload.workspace_id,
                 template_id=payload.template_id,
-                provider=payload.provider,
+                provider=effective_provider,
                 workload_image=workload_image,
                 github_pr_number=payload.github_pr_number,
                 github_pr_url=payload.github_pr_url,
@@ -996,6 +1022,7 @@ class EnvironmentService:
                 existing_security_group_id=payload.existing_security_group_id,
                 project_id=source_project_id,
                 image_scan=payload.kubernetes_image_scan,
+                cloud_plugin=payload.cloud_plugin,
             )
         elif retarget and source_workspace_id is None:
             from app.schemas.cloud import (
@@ -1048,6 +1075,7 @@ class EnvironmentService:
                 existing_vpc_id=payload.existing_vpc_id,
                 existing_security_group_id=payload.existing_security_group_id,
                 image_scan=payload.kubernetes_image_scan,
+                cloud_plugin=payload.cloud_plugin,
             )
             bundle = await provisioning.generate_bundle(
                 bundle_req,
@@ -1056,6 +1084,17 @@ class EnvironmentService:
                 project_id=source_project_id,
             )
             workspace_id = UUID(bundle.workspace_id)
+
+        if (
+            payload.cloud_plugin is not None
+            and workspace_id is not None
+            and not retarget
+        ):
+            await provisioning.apply_cloud_plugin_to_workspace(
+                workspace_id,
+                owner=owner,
+                cloud_plugin=payload.cloud_plugin,
+            )
 
         cloud_launch_common = {
             "provider": payload.provider,
@@ -1068,6 +1107,7 @@ class EnvironmentService:
             "github_pr_url": source_github_pr_url,
             "deploy_mode": cloud_deploy_mode,
             "kubernetes_image_scan": payload.kubernetes_image_scan,
+            "cloud_plugin": payload.cloud_plugin,
         }
         if workspace_id is not None:
             launch = PreviewLaunchRequest(
@@ -1253,6 +1293,14 @@ class EnvironmentService:
         )
         await self._session.commit()
 
+        released = await force_release_state_lock(environment_id, scope="environment")
+        if released:
+            logger.warning(
+                "cancel_provision_released_state_lock",
+                environment_id=str(environment_id),
+                correlation_id=correlation_id,
+            )
+
         try:
             await publish_env_event(
                 environment.id,
@@ -1320,13 +1368,22 @@ class EnvironmentService:
                 },
             )
         if not force and await is_state_locked(environment_id, scope="environment"):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "provisioning_in_progress",
-                    "message": PROVISIONING_IN_PROGRESS_MESSAGE,
-                },
-            )
+            if environment.status == EnvironmentStatus.FAILED:
+                released = await force_release_state_lock(environment_id, scope="environment")
+                logger.warning(
+                    "teardown_released_stale_lock_after_failed",
+                    environment_id=str(environment_id),
+                    correlation_id=correlation_id,
+                    released=released,
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "provisioning_in_progress",
+                        "message": PROVISIONING_IN_PROGRESS_MESSAGE,
+                    },
+                )
 
         prior_status = environment.status
         from app.services.teardown_context import capture_environment_teardown_context
@@ -1398,7 +1455,11 @@ class EnvironmentService:
             return self._to_read(environment)
 
         deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
-        if deploy_mode == DeployMode.COMPOSE.value:
+        if deploy_mode in {
+            DeployMode.COMPOSE.value,
+            DeployMode.DOCKER_COMPOSE.value,
+            DeployMode.DOCKER_COMPOSE_UNDERSCORE.value,
+        }:
             from app.services.compose_deploy import stop_compose
 
             workspace_root = None
@@ -1523,7 +1584,11 @@ class EnvironmentService:
         await self._auto_pause_if_needed(owner, project_id=environment.project_id, cap=cap, exclude_id=environment.id)
 
         deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
-        if deploy_mode == DeployMode.COMPOSE.value:
+        if deploy_mode in {
+            DeployMode.COMPOSE.value,
+            DeployMode.DOCKER_COMPOSE.value,
+            DeployMode.DOCKER_COMPOSE_UNDERSCORE.value,
+        }:
             from app.services.compose_deploy import start_compose
 
             workspace_root = None
@@ -1969,7 +2034,12 @@ class EnvironmentService:
             return DeployMode.MANIFEST, packaging.value
         if payload.deploy_mode == DeployMode.PREVIEW:
             return DeployMode.PREVIEW, packaging.value if packaging else None
-        if payload.deploy_mode in {DeployMode.COMPOSE, DeployMode.ATTACH}:
+        if payload.deploy_mode in {
+            DeployMode.COMPOSE,
+            DeployMode.DOCKER_COMPOSE,
+            DeployMode.DOCKER_COMPOSE_UNDERSCORE,
+            DeployMode.ATTACH,
+        }:
             return payload.deploy_mode, packaging.value if packaging else None
         if packaging in {KubernetesPackaging.RAW_MANIFESTS, KubernetesPackaging.HELM}:
             return DeployMode.MANIFEST, packaging.value

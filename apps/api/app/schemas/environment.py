@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models.domain import EnvironmentStatus, ExecutionStage, LogLevel
 from app.schemas.k8s import DeployMode
-from app.schemas.cloud import CloudCredentials, ImageSecurityScanConfig, KubernetesImageSource
+from app.schemas.cloud import CloudCredentials, CloudPluginTarget, ImageSecurityScanConfig, KubernetesImageSource
 
 
 class PreviewEndpoint(BaseModel):
@@ -359,6 +359,7 @@ class PreviewLaunchRequest(BaseModel):
     enable_redis: bool = False
     kubernetes_image_source: KubernetesImageSource | None = None
     kubernetes_image_scan: ImageSecurityScanConfig | None = None
+    cloud_plugin: CloudPluginTarget | None = None
 
     @field_validator("name")
     @classmethod
@@ -575,6 +576,7 @@ class EnvironmentPromoteRequest(BaseModel):
         description="Reuse an existing AWS security group (sg-…). AWS only.",
     )
     kubernetes_image_scan: ImageSecurityScanConfig | None = None
+    cloud_plugin: CloudPluginTarget | None = None
 
     @field_validator("name")
     @classmethod

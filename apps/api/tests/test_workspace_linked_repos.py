@@ -331,3 +331,56 @@ async def test_no_frontend_keeps_first_as_primary(
     assert saved.status_code == 200
     assert saved.json()["repos"][0]["git_repo_url"].endswith("orders-api.git")
     assert saved.json()["repos"][0]["primary"] is True
+
+
+@pytest.mark.asyncio
+async def test_update_linked_workspace_does_not_scaffold_internal_app(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+    tmp_path: Path,
+) -> None:
+    """Updating a workspace that has linked repos must never scaffold apps/app internal app."""
+    snapshot = {
+        "name": "multi-ws",
+        "runtime_mode": "docker_compose",
+        "cloud": {"provider": "local", "resources": {}},
+        "container_scaffold": {"enabled": False, "generate_dockerfile": False},
+        "linked_repos": [
+            {
+                "kind": "github",
+                "git_repo_url": "https://github.com/acme/my-linked-frontend.git",
+                "git_branch": "main",
+                "primary": True,
+            }
+        ],
+    }
+    workspace_id = await _make_workspace(session_factory, test_user, tmp_path, snapshot=snapshot)
+    ws_dir = tmp_path / str(workspace_id)
+    # Simulate cloned linked repo under apps/my-linked-frontend
+    repo_dir = ws_dir / "apps" / "my-linked-frontend"
+    repo_dir.mkdir(parents=True)
+    (repo_dir / "package.json").write_text('{"name": "my-linked-frontend"}', encoding="utf-8")
+    (repo_dir / "Dockerfile").write_text("FROM node:20\nCMD [\"npm\", \"start\"]", encoding="utf-8")
+
+    headers = auth_header(test_user)
+    update_res = await client.put(
+        f"/api/v1/provisioning/workspaces/{workspace_id}",
+        headers=headers,
+        json={
+            "name": "multi-ws",
+            "iac_engine": "terraform",
+            "cloud": {"provider": "local", "resources": {}},
+            "runtime_mode": "docker_compose",
+            "running_instance": {"kind": "local_machine"},
+            "container_scaffold": {"enabled": False, "generate_dockerfile": False},
+        },
+    )
+    assert update_res.status_code == 200, update_res.text
+
+    # Verify internal app scaffold apps/app was NOT generated
+    assert not (ws_dir / "apps" / "app").exists()
+    assert not (ws_dir / "app").exists()
+    # Verify linked repo app source was preserved
+    assert (repo_dir / "package.json").is_file()
+

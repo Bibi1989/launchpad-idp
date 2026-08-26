@@ -67,7 +67,9 @@ const blurb = computed(() =>
 function ensureTerminalThen(emitName: 'openProvision' | 'openDestroy' | 'openAnsible') {
   if (props.busy) return
   if (!props.terminalReady) emit('openTerminal')
-  emit(emitName)
+  if (emitName === 'openProvision') emit('openProvision')
+  else if (emitName === 'openDestroy') emit('openDestroy')
+  else emit('openAnsible')
 }
 
 function onProvision() {

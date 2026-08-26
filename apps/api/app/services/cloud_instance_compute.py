@@ -31,6 +31,40 @@ def host_container_platform() -> str:
     return CLOUD_CONTAINER_PLATFORM
 
 
+def workspace_docker_build_timeout_seconds() -> float:
+    """Subprocess timeout for ``docker build`` during workspace/cloud provision."""
+    from app.core.config import get_settings
+
+    cfg = get_settings()
+    raw = getattr(cfg, "workspace_image_build_timeout_seconds", None)
+    if raw is not None and float(raw) > 0:
+        return max(60.0, float(raw))
+    return max(60.0, float(cfg.preview_build_timeout_seconds))
+
+
+def format_docker_build_timeout_message(
+    *,
+    timeout: float,
+    dockerfile: str | Path,
+    platform: str,
+) -> str:
+    import platform as py_platform
+
+    hint = ""
+    if (platform or "").strip() == CLOUD_CONTAINER_PLATFORM:
+        machine = (py_platform.machine() or "").strip().lower()
+        if machine in {"aarch64", "arm64"}:
+            hint = (
+                " Cross-building linux/amd64 on Apple Silicon is slow; "
+                "set WORKSPACE_IMAGE_BUILD_TIMEOUT_SECONDS (default 2100) or use "
+                "a remote amd64 builder."
+            )
+    return (
+        f"docker build timed out after {int(timeout)}s "
+        f"(dockerfile={dockerfile}, platform={platform}).{hint}"
+    )
+
+
 def docker_env_without_attestations(env: dict[str, str] | None = None) -> dict[str, str]:
     """Stop BuildKit from attaching provenance/SBOM indexes on build and push."""
     import os
@@ -38,6 +72,8 @@ def docker_env_without_attestations(env: dict[str, str] | None = None) -> dict[s
     merged = dict(env) if env is not None else dict(os.environ)
     merged["BUILDX_NO_DEFAULT_ATTESTATIONS"] = "1"
     merged["DOCKER_BUILDKIT"] = "1"
+    merged["BUILDKIT_PROGRESS"] = "plain"
+    merged["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
     return merged
 
 
@@ -586,7 +622,7 @@ def push_local_image_to_cloud_registry(
         loc = region.rsplit("-", 1)[0] if region.count("-") >= 2 else region
         _ensure_gcp_artifact_repo(project_id=project_id, region=loc, env=env)
         _docker_auth_gcp(region=loc, env=env)
-        remote = f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{safe_name}:{tag}"
+        remote = f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}/{safe_name}:{tag}"
     elif provider == CloudProvider.AWS.value:
         from app.services.cloud_networks import _normalize_aws_region
 
@@ -596,7 +632,7 @@ def push_local_image_to_cloud_registry(
             raise CloudInstanceComputeError("AWS ECR repository setup failed")
         registry_host = repo_uri.split("/", 1)[0]
         _docker_auth_aws(region=aws_region, env=env, registry_host=registry_host)
-        remote = f"{repo_uri}:{safe_name}-{tag}"
+        remote = f"{repo_uri}:{slug}-{safe_name}-{tag}"
     elif provider == CloudProvider.AZURE.value:
         raise CloudInstanceComputeError(
             "Azure cloud image push is not configured yet; use an external workload_image"
@@ -618,7 +654,6 @@ def push_local_image_to_cloud_registry(
         environment_id=environment_id,
         local_tag=local_tag,
     )
-    _ = slug  # reserved for future per-env package naming
     return pinned
 
 
@@ -720,29 +755,116 @@ def resolve_registry_pull_auth(
     return None
 
 
+def _gcp_image_package_ref(image: str) -> str | None:
+    """Strip tag/digest from an Artifact Registry image to the deletable package path."""
+    raw = (image or "").strip()
+    if not raw or "-docker.pkg.dev/" not in raw.lower():
+        return None
+    # Drop digest first, then tag.
+    if "@" in raw:
+        raw = raw.split("@", 1)[0]
+    # Tag is after the last colon that is not part of the host (host has no colon after scheme).
+    host_and_path = raw
+    if ":" in host_and_path:
+        # europe-west3-docker.pkg.dev/proj/repo/pkg:tag
+        maybe_repo, maybe_tag = host_and_path.rsplit(":", 1)
+        if "/" in maybe_repo and maybe_tag and "/" not in maybe_tag:
+            host_and_path = maybe_repo
+    return host_and_path or None
+
+
 def _delete_gcp_artifact_image(*, image: str, env: dict[str, str]) -> bool:
+    """Delete a GCP Artifact Registry image (prefer exact digest/tag, then package)."""
     if shutil.which("gcloud") is None:
         return False
+    cleaned = (image or "").strip()
+    if not cleaned:
+        return False
+    package = _gcp_image_package_ref(cleaned)
+    # Env-scoped packages (``.../launchpad-previews/{envSlug}/...``) are exclusive to
+    # one preview: deleting the whole package is correct. Legacy flat packages
+    # (``.../launchpad-previews/launch-web``) may be shared: only delete the exact
+    # digest/tag reference collected from the environment.
+    env_scoped = bool(package and f"/{_REPO_NAME}/" in package)
+    slug_scoped = False
+    if package and env_scoped:
+        # .../launchpad-previews/<something>  where something contains a slash => nested
+        after = package.split(f"/{_REPO_NAME}/", 1)[-1]
+        slug_scoped = "/" in after
+
+    refs: list[str] = []
+    if slug_scoped and package:
+        refs.append(package)
+    if cleaned not in refs:
+        refs.append(cleaned)
+    if package and package not in refs and slug_scoped:
+        refs.append(package)
+
+    last_detail = ""
+    for ref in refs:
+        completed = _run_cmd(
+            [
+                "gcloud",
+                "artifacts",
+                "docker",
+                "images",
+                "delete",
+                ref,
+                "--quiet",
+                "--delete-tags",
+            ],
+            timeout=180,
+            check=False,
+            env=env,
+        )
+        if completed.returncode == 0:
+            return True
+        last_detail = sanitize_log_message((completed.stderr or completed.stdout or "")[:300])
+        lowered = last_detail.lower()
+        if "not found" in lowered or "was not found" in lowered:
+            return True
+    logger.info("gcp_artifact_image_delete_skipped", image=image, detail=last_detail)
+    return False
+
+
+def _list_gcp_repo_docker_images(
+    *,
+    project_id: str,
+    region: str,
+    env: dict[str, str],
+) -> list[str]:
+    """List every docker image package in the shared preview Artifact Registry repo."""
+    if shutil.which("gcloud") is None:
+        return []
+    loc = region.rsplit("-", 1)[0] if region.count("-") >= 2 else region
+    repo_root = f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}"
     completed = _run_cmd(
         [
             "gcloud",
             "artifacts",
             "docker",
             "images",
-            "delete",
-            image,
-            "--quiet",
-            "--delete-tags",
+            "list",
+            repo_root,
+            "--include-tags",
+            "--format=value(package)",
         ],
         timeout=180,
         check=False,
         env=env,
     )
-    if completed.returncode == 0:
-        return True
-    detail = sanitize_log_message((completed.stderr or completed.stdout or "")[:300])
-    logger.info("gcp_artifact_image_delete_skipped", image=image, detail=detail)
-    return False
+    if completed.returncode != 0:
+        detail = sanitize_log_message((completed.stderr or completed.stdout or "")[:300])
+        logger.info("gcp_artifact_images_list_failed", repo=repo_root, detail=detail)
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in (completed.stdout or "").splitlines():
+        package = line.strip()
+        if package and package not in seen:
+            seen.add(package)
+            out.append(package)
+    return out
 
 
 def _delete_aws_ecr_image(*, image: str, env: dict[str, str]) -> bool:
@@ -766,6 +888,50 @@ def _delete_aws_ecr_image(*, image: str, env: dict[str, str]) -> bool:
         image_tags=[tag],
     )
     return deleted > 0
+
+
+def _list_gcp_env_registry_images(
+    *,
+    project_id: str,
+    region: str,
+    environment_id: str,
+    env: dict[str, str],
+) -> list[str]:
+    """List Artifact Registry images under the env-scoped package prefix."""
+    if shutil.which("gcloud") is None:
+        return []
+    slug = _env_slug(environment_id)
+    loc = region.rsplit("-", 1)[0] if region.count("-") >= 2 else region
+    package_root = f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}"
+    completed = _run_cmd(
+        [
+            "gcloud",
+            "artifacts",
+            "docker",
+            "images",
+            "list",
+            package_root,
+            "--include-tags",
+            "--format=value(package,version,tags)",
+        ],
+        timeout=180,
+        check=False,
+        env=env,
+    )
+    if completed.returncode != 0:
+        return []
+    out: list[str] = []
+    for line in (completed.stdout or "").splitlines():
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        if len(parts) < 2:
+            continue
+        package, version = parts[0], parts[1]
+        tags = parts[2] if len(parts) > 2 else ""
+        tag = next((t for t in tags.split(",") if t.strip()), "") or version
+        ref = f"{package}:{tag}" if tag and not tag.startswith("sha256:") else f"{package}@{version}"
+        if ref not in out:
+            out.append(ref)
+    return out
 
 
 def teardown_cloud_registry_images(
@@ -793,8 +959,7 @@ def teardown_cloud_registry_images(
         if tag and is_cloud_registry_image(tag) and tag not in candidates:
             candidates.append(tag)
 
-    # Fallback: derive env-scoped package on the shared preview repo when callers
-    # only pass environment_id (older rows may lack workload_image).
+    # Fallback: derive env-scoped packages on the shared preview repo.
     if environment_id and provider == CloudProvider.GCP.value:
         slug = _env_slug(environment_id)
         project_id = resolve_gcp_project_id(credentials=credentials, env=env)
@@ -804,11 +969,35 @@ def teardown_cloud_registry_images(
                 if resolved_region.count("-") >= 2
                 else resolved_region
             )
-            fallback = (
-                f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}:latest"
-            )
-            if fallback not in candidates:
-                candidates.append(fallback)
+            for listed in _list_gcp_env_registry_images(
+                project_id=project_id,
+                region=resolved_region,
+                environment_id=environment_id,
+                env=env,
+            ):
+                if listed not in candidates:
+                    candidates.append(listed)
+            # Env-scoped packages (``{repo}/{slug}`` and ``{repo}/{slug}/...``) are safe
+            # to delete entirely. Legacy flat packages (``{repo}/launch-web``) are only
+            # removed via the exact collected digest/tag refs above so sibling envs that
+            # still share those names are not wiped.
+            for package in _list_gcp_repo_docker_images(
+                project_id=project_id,
+                region=resolved_region,
+                env=env,
+            ):
+                package_l = package.lower()
+                slug_token = f"/{_REPO_NAME}/{slug}".lower()
+                if slug_token in package_l or package_l.endswith(f"/{slug}"):
+                    if package not in candidates:
+                        candidates.append(package)
+            for fallback in (
+                f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}",
+                f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}:latest",
+                f"{loc}-docker.pkg.dev/{project_id}/{_REPO_NAME}/{slug}/app:latest",
+            ):
+                if fallback not in candidates:
+                    candidates.append(fallback)
     elif environment_id and provider == CloudProvider.AWS.value:
         from app.services.cloud_networks import _normalize_aws_region
 
@@ -864,7 +1053,30 @@ def build_and_push_cloud_image(
 
     found = _find_workspace_dockerfile(workspace_root)
     if found is None:
-        raise CloudInstanceComputeError("Workspace has no Dockerfile to build for cloud deploy")
+        # Parity with the preview-build path: when the workspace ships no
+        # Dockerfile, scaffold a hardened one from the detected stack instead of
+        # hard-failing. Only an undetectable stack still aborts the deploy.
+        from app.services.preview_build import PreviewBuildError, _ensure_dockerfile
+
+        try:
+            generated = _ensure_dockerfile(workspace_root)
+        except PreviewBuildError as exc:
+            raise CloudInstanceComputeError(
+                "Workspace has no Dockerfile to build for cloud deploy and its stack "
+                "could not be detected to generate one. Add a Dockerfile at the "
+                "workspace root and re-provision."
+            ) from exc
+        if generated is not None:
+            logger.info(
+                "cloud_build_dockerfile_autogenerated",
+                stack=generated,
+                environment_id=environment_id,
+            )
+        found = _find_workspace_dockerfile(workspace_root)
+        if found is None:
+            raise CloudInstanceComputeError(
+                "Workspace has no Dockerfile to build for cloud deploy"
+            )
     dockerfile, context = found
     provider = (cloud_provider or CloudProvider.GCP.value).strip().lower()
     slug = _env_slug(environment_id)
@@ -872,6 +1084,7 @@ def build_and_push_cloud_image(
     build_platform = (platform or "").strip() or CLOUD_CONTAINER_PLATFORM
 
     local_tag = f"lp-cloud-build-{slug}:{tag}"
+    build_timeout = workspace_docker_build_timeout_seconds()
     _run_cmd(
         docker_build_without_attestations_cmd(
             tag=local_tag,
@@ -879,7 +1092,7 @@ def build_and_push_cloud_image(
             context=str(context),
             platform=build_platform,
         ),
-        timeout=900,
+        timeout=int(build_timeout),
         env=docker_env_without_attestations(env),
     )
     try:

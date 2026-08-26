@@ -861,12 +861,36 @@ def test_cloud_resource_name_is_unique_per_environment() -> None:
     assert "bbbbbbbb"[:8] in b.replace("-", "")
 
 
-def test_resolve_attach_cloud_provider_prefers_workspace_over_local_env() -> None:
+def test_resolve_attach_cloud_provider_honors_explicit_local_sandbox() -> None:
+    from app.schemas.cloud import CloudCredentials
     from app.services.attach_deploy import resolve_attach_cloud_provider
 
+    # Explicit Local (Sandbox) must not be upgraded by workspace/wizard/vault.
     assert (
         resolve_attach_cloud_provider(
             environment_provider="local",
+            workspace_provider="gcp",
+            wizard_cloud_provider="aws",
+            credentials=None,
+        )
+        == "local"
+    )
+    assert (
+        resolve_attach_cloud_provider(
+            environment_provider="local",
+            workspace_provider="gcp",
+            wizard_cloud_provider="aws",
+            credentials=CloudCredentials(
+                gcp_project_id="demo",
+                gcp_sa_key_json='{"type":"service_account"}',
+            ),
+        )
+        == "local"
+    )
+    # Unset env provider still falls through to workspace → wizard → creds.
+    assert (
+        resolve_attach_cloud_provider(
+            environment_provider=None,
             workspace_provider="gcp",
             wizard_cloud_provider="aws",
             credentials=None,
@@ -878,6 +902,14 @@ def test_resolve_attach_cloud_provider_prefers_workspace_over_local_env() -> Non
             environment_provider=None,
             workspace_provider=None,
             wizard_cloud_provider="gcp",
+            credentials=None,
+        )
+        == "gcp"
+    )
+    assert (
+        resolve_attach_cloud_provider(
+            environment_provider="gcp",
+            workspace_provider="aws",
             credentials=None,
         )
         == "gcp"

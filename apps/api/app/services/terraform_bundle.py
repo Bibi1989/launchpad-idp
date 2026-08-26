@@ -435,6 +435,12 @@ def _root_variables(cloud: CloudConfig) -> str:
         r = cloud.resources
         lines += [
             "",
+            'variable "project_id" {',
+            '  description = "Project ID (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
+            "",
             'variable "region" {',
             '  description = "AWS region"',
             "  type        = string",
@@ -447,6 +453,12 @@ def _root_variables(cloud: CloudConfig) -> str:
             "  default     = 8080",
             "}",
             "",
+            'variable "app_image" {',
+            '  description = "Container image (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
+            "",
             'variable "ssh_public_key" {',
             '  description = "SSH public key for EC2 (optional)"',
             "  type        = string",
@@ -456,6 +468,12 @@ def _root_variables(cloud: CloudConfig) -> str:
     elif isinstance(cloud, AzureCloudConfig):
         r = cloud.resources
         lines += [
+            "",
+            'variable "project_id" {',
+            '  description = "Project ID (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
             "",
             'variable "location" {',
             '  description = "Azure location"',
@@ -468,10 +486,34 @@ def _root_variables(cloud: CloudConfig) -> str:
             "  type        = string",
             "  default     = " + json.dumps(r.resource_group),
             "}",
+            "",
+            'variable "app_listen_port" {',
+            '  description = "Application listen port (optional)"',
+            "  type        = number",
+            "  default     = 8080",
+            "}",
+            "",
+            'variable "app_image" {',
+            '  description = "Container image (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
+            "",
+            'variable "ssh_public_key" {',
+            '  description = "SSH public key (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
         ]
     else:
         r = cloud.resources
         lines += [
+            "",
+            'variable "project_id" {',
+            '  description = "Project ID (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
             "",
             'variable "cloudflare_account_id" {',
             '  description = "Cloudflare account ID"',
@@ -488,6 +530,26 @@ def _root_variables(cloud: CloudConfig) -> str:
                 "  default     = " + json.dumps(r.zone_name),
                 "}",
             ]
+        lines += [
+            "",
+            'variable "app_listen_port" {',
+            '  description = "Application listen port (optional)"',
+            "  type        = number",
+            "  default     = 8080",
+            "}",
+            "",
+            'variable "app_image" {',
+            '  description = "Container image (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
+            "",
+            'variable "ssh_public_key" {',
+            '  description = "SSH public key (optional)"',
+            "  type        = string",
+            '  default     = ""',
+            "}",
+        ]
 
     return "\n".join(lines) + "\n"
 

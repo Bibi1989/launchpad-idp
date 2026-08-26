@@ -17,11 +17,30 @@ class CloudProvider(str, Enum):
     CLOUDFLARE = "cloudflare"
 
 
+class CloudPluginTarget(BaseModel):
+    """Optional user/org plugin chosen as a deploy target (workspace, provision, launch)."""
+
+    provider: str | None = None
+    service: str | None = None
+    region: str | None = None
+    tier: str | None = None
+
+
 class IaCEngine(str, Enum):
+    LAUNCHPAD = "launchpad"
     TERRAFORM = "terraform"
     OPENTOFU = "opentofu"
     PULUMI = "pulumi"
     ANSIBLE = "ansible"
+
+
+class InstanceConfigTool(str, Enum):
+    """VM configuration tool ids (matches the provisioning-tools catalog)."""
+
+    CLOUD_INIT = "cloud-init"
+    ANSIBLE = "ansible"
+    PUPPET = "puppet"
+    CHEF = "chef"
 
 
 class SecretBackend(str, Enum):
@@ -855,8 +874,10 @@ class ProvisioningWizardRequest(BaseModel):
         default_factory=WorkloadDependenciesConfig
     )
     ansible: AnsibleConfig = Field(default_factory=AnsibleConfig)
+    config_tool: InstanceConfigTool = InstanceConfigTool.CLOUD_INIT
     # User-defined environment variables injected into the workspace's services.
     env_vars: list[WorkspaceEnvVar] = Field(default_factory=list, max_length=200)
+    cloud_plugin: CloudPluginTarget | None = None
 
     @field_validator("name")
     @classmethod
@@ -881,6 +902,8 @@ class ProvisioningWizardRequest(BaseModel):
             self.ansible,
             runtime_mode=self.runtime_mode,
             running_instance=self.running_instance,
+            iac_engine=self.iac_engine.value,
+            config_tool=self.config_tool.value,
         )
         validate_runtime_mode(self.cloud, self.runtime_mode, self.running_instance)
         (
@@ -1288,6 +1311,7 @@ class WorkspaceWizardConfig(BaseModel):
         default_factory=WorkloadDependenciesConfig
     )
     ansible: AnsibleConfig = Field(default_factory=AnsibleConfig)
+    config_tool: InstanceConfigTool = InstanceConfigTool.CLOUD_INIT
     # User-defined environment variables injected into the workspace's services
     # (all services in the workspace, like the datastore connection URLs).
     env_vars: list[WorkspaceEnvVar] = Field(default_factory=list, max_length=200)
@@ -1296,6 +1320,7 @@ class WorkspaceWizardConfig(BaseModel):
     credential_label: str | None = None
     git_repo_url: str | None = None
     git_branch: str | None = None
+    cloud_plugin: CloudPluginTarget | None = None
 
 
 class WorkspacePromotionTarget(str, Enum):

@@ -1,5 +1,6 @@
 export type CloudProvider = 'local' | 'gcp' | 'aws' | 'azure' | 'cloudflare'
-export type IaCEngine = 'terraform' | 'opentofu' | 'pulumi' | 'ansible'
+export type IaCEngine = 'launchpad' | 'terraform' | 'opentofu' | 'pulumi' | 'ansible'
+export type InstanceConfigTool = 'cloud-init' | 'ansible' | 'puppet' | 'chef'
 
 export type AnsibleAppDeployMode = 'docker_run' | 'docker_compose' | 'systemd' | 'pm2' | 'none'
 
@@ -357,12 +358,19 @@ export interface WorkspaceWizardConfig {
   container_scaffold: ContainerScaffoldConfig
   dependencies: WorkloadDependenciesConfig
   ansible: AnsibleConfig
+  config_tool?: InstanceConfigTool
   env_vars?: WorkspaceEnvVar[]
   has_credentials: boolean
   /** Safe display name for the stored cloud key (never the secret). */
   credential_label?: string | null
   git_repo_url?: string | null
   git_branch?: string | null
+  cloud_plugin?: {
+    provider: string | null
+    service: string | null
+    region: string | null
+    tier: string | null
+  } | null
 }
 
 export type WorkspacePromotionTarget = 'staging' | 'prod'

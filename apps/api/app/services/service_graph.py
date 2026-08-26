@@ -50,11 +50,21 @@ class GraphEdge(BaseModel):
 
 
 class ExplicitConnection(BaseModel):
-    """An operator-configured edge between two services (by name)."""
+    """An operator-configured edge between two services (by name).
+
+    ``kind`` is ``service`` (inject target URL into source) or ``cors`` (allow the
+    source origin on the target's CORS policy). ``expose_as`` overrides the env var
+    the URL is published under; ``cors_origin`` overrides the allowed origin. All
+    three are additive and optional (persisted snapshots without them still load).
+    """
 
     source: str
     target: str
     protocol: CommKind
+    kind: str = "service"
+    expose_as: str | None = None
+    cors_origin: str | None = None
+    api_path: str | None = None
 
 
 class ServiceGraph(BaseModel):

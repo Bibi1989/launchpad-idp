@@ -62,7 +62,7 @@ export function defaultInfraGenerationConfig(
     }
   }
   return {
-    provision: { enabled: true, engine: 'terraform' },
+    provision: { enabled: true, engine: 'launchpad' },
     kubernetes: { enabled: false, mode: 'k8s' },
     cicd: {
       enabled: false,
@@ -454,7 +454,10 @@ function dockerComposeForServices(
 /**
  * Scaffold meaningful `dockers/Dockerfile.*` paths (+ root docker-compose.yml).
  */
-export function buildDockerScaffold(cfg: ContainerScaffoldConfig): ScaffoldTarget[] {
+export function buildDockerScaffold(
+  cfg: ContainerScaffoldConfig,
+  datastores?: Array<{ kind: string }>,
+): ScaffoldTarget[] {
   if (!cfg.enabled) return []
   // Multi-service CoreScaffold apps are owned by the API (apps/<slug>/ + compose
   // context). Client-only Dockerfiles assume repo-root context and must not
@@ -700,12 +703,23 @@ export function detectWorkspaceInfraFromPaths(paths: string[]): DetectedWorkspac
       || p.startsWith('ansible/playbooks/')
       || p.startsWith('ansible/inventory/'),
   )
-  const provisionEnabled = hasPulumi || hasTerraform || hasAnsible
+  const hasLaunchpad = filePaths.some(
+    (p) =>
+      p === 'infra/launchProvision.sh'
+      || p.endsWith('/launchProvision.sh')
+      || p.includes('provision/launchpad.sh'),
+  )
+  const provisionEnabled = hasPulumi || hasTerraform || hasAnsible || hasLaunchpad
   let provisionEngine: ProvisionEngine = 'terraform'
-  if (hasAnsible && !hasPulumi && !hasTerraform) {
+  if (hasLaunchpad && !hasPulumi && !hasTerraform && !hasAnsible) {
+    provisionEngine = 'launchpad'
+  } else if (hasAnsible && !hasPulumi && !hasTerraform) {
     provisionEngine = 'ansible'
   } else if (hasPulumi && !hasTerraform) {
     provisionEngine = 'pulumi'
+  }
+  if (hasLaunchpad && !hasPulumi && !hasTerraform) {
+    summary.push('LaunchProvision (infra/launchProvision.sh)')
   }
   if (hasPulumi || hasTerraform) {
     const tfOrPu: ProvisionEngine = hasPulumi && !hasTerraform ? 'pulumi' : 'terraform'
@@ -885,6 +899,12 @@ export type IacRunShortcut = {
  * Works from workspace root or when already inside infra/terraform|pulumi.
  */
 export function iacEnsureDirPrefix(engine: ProvisionEngine): string {
+  if (engine === 'launchpad') {
+    return [
+      'if [ -f infra/launchProvision.sh ] || [ -f provision/launchpad.sh ]; then :;',
+      'else echo "LaunchProvision script not found (expected infra/launchProvision.sh)" >&2; exit 1; fi;',
+    ].join(' ')
+  }
   if (engine === 'pulumi') {
     return [
       'if [ -f Pulumi.yaml ] || [ -f Pulumi.yml ]; then :;',
@@ -904,6 +924,16 @@ export function iacEnsureDirPrefix(engine: ProvisionEngine): string {
     'if ls ./*.tf >/dev/null 2>&1 || [ -d .terraform ]; then :;',
     'elif [ -d infra/terraform ]; then cd infra/terraform;',
     'else echo "Terraform directory not found (expected infra/terraform or *.tf here)" >&2; exit 1; fi;',
+  ].join(' ')
+}
+
+function launchProvisionCmd(action: string): string {
+  return [
+    'if [ -f infra/launchProvision.sh ]; then bash infra/launchProvision.sh',
+    `${action};`,
+    'elif [ -f provision/launchpad.sh ]; then bash provision/launchpad.sh',
+    `${action};`,
+    'else echo "LaunchProvision script not found (expected infra/launchProvision.sh)" >&2; exit 1; fi',
   ].join(' ')
 }
 
@@ -956,6 +986,9 @@ export function iacToolbarActions(engine: ProvisionEngine): {
 
 /** Auto-approved destroy (UI confirms first; no interactive yes prompt in the terminal). */
 export function iacDestroyCommand(engine: ProvisionEngine): string {
+  if (engine === 'launchpad') {
+    return launchProvisionCmd('down')
+  }
   if (engine === 'pulumi') {
     return iacCmd(engine, 'pulumi destroy --yes')
   }
@@ -971,6 +1004,24 @@ export function iacDestroyCommand(engine: ProvisionEngine): string {
 
 /** Terminal shortcuts for Terraform / OpenTofu / Pulumi on the Advanced IDE menus. */
 export function iacRunShortcuts(engine: ProvisionEngine): IacRunShortcut[] {
+  if (engine === 'launchpad') {
+    return [
+      {
+        id: 'lp-up',
+        label: 'up',
+        command: launchProvisionCmd('up'),
+        opensInitWizard: true,
+      },
+      { id: 'lp-outputs', label: 'outputs', command: launchProvisionCmd('outputs') },
+      { id: 'lp-configure', label: 'configure', command: launchProvisionCmd('configure') },
+      {
+        id: 'lp-down',
+        label: 'down',
+        command: iacDestroyCommand(engine),
+        danger: true,
+      },
+    ]
+  }
   if (engine === 'terraform') {
     return [
       {
@@ -1078,6 +1129,23 @@ export function iacInitWizardSteps(
       }
     : null
 
+  if (engine === 'launchpad') {
+    const launchpadSteps: IacRunShortcut[] = [
+      {
+        id: 'lp-up',
+        label: 'up',
+        description: 'Create cloud resources with infra/launchProvision.sh',
+        command: launchProvisionCmd('up'),
+      },
+      {
+        id: 'lp-configure',
+        label: 'configure',
+        description: 'Apply LaunchConfig on the instance (first-boot / startup metadata)',
+        command: launchProvisionCmd('configure'),
+      },
+    ]
+    return enableApisStep ? [enableApisStep, ...launchpadSteps] : launchpadSteps
+  }
   if (engine === 'pulumi') {
     const pulumiSteps: IacRunShortcut[] = [
       {
@@ -1170,6 +1238,7 @@ export function iacDestroyWizardSteps(engine: ProvisionEngine): IacRunShortcut[]
 }
 
 export function iacEngineLabel(engine: ProvisionEngine): string {
+  if (engine === 'launchpad') return 'LaunchProvision'
   if (engine === 'opentofu') return 'OpenTofu'
   if (engine === 'pulumi') return 'Pulumi'
   if (engine === 'ansible') return 'Ansible'

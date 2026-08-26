@@ -53,6 +53,7 @@ export const GCP_SERVICE_OPTIONS: CloudServiceOption[] = [
   { key: 'gke', title: 'GKE', desc: 'Managed Kubernetes cluster' },
   { key: 'artifact_registry', title: 'Artifact Registry', desc: 'Container image storage' },
   { key: 'cloud_run', title: 'Cloud Run', desc: 'Serverless containers' },
+  { key: 'compute_instance', title: 'Compute Engine', desc: 'GCE VM for SSH / Docker workloads' },
   { key: 'cloud_functions', title: 'Cloud Functions', desc: 'Event-driven functions' },
   {
     key: 'cloud_sql',

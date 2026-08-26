@@ -121,7 +121,15 @@ async function onDestroy() {
   }
 }
 
+const importMode = ref<'import' | 'link'>('import')
+
 function openImport() {
+  importMode.value = 'import'
+  importOpen.value = true
+}
+
+function openLink() {
+  importMode.value = 'link'
   importOpen.value = true
 }
 
@@ -167,6 +175,10 @@ watch(
         <button type="button" class="lp-btn-ghost" @click="openImport">
           <span class="material-symbols-outlined text-base">download</span>
           {{ t('workspaces.index.import') }}
+        </button>
+        <button type="button" class="lp-btn-ghost" @click="openLink">
+          <span class="material-symbols-outlined text-base">link</span>
+          {{ t('workspaces.index.link') }}
         </button>
         <NuxtLink :to="provisionHref" class="lp-btn-primary">
           <span class="material-symbols-outlined text-base">add</span>
@@ -245,6 +257,7 @@ watch(
               {{ workspaceStackLabel(ws) }}
             </p>
             <div class="mt-2 flex flex-wrap items-center gap-1.5">
+              <CloudProviderBadge :provider="ws.provider" />
               <WorkspaceRuntimeModeBadge :runtime-mode="ws.runtime_mode" />
               <ProjectBadge
                 :project-id="ws.project_id"
@@ -310,6 +323,7 @@ watch(
     <RepoImporterModal
       v-model:open="importOpen"
       :launchpad-project-id="projectIdFilter"
+      :mode="importMode"
       @saved="onImportSaved"
     />
   </div>

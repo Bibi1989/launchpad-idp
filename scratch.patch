@@ -1,0 +1,50 @@
+--- apps/web/app/utils/workspaceInfraScaffold.ts
++++ apps/web/app/utils/workspaceInfraScaffold.ts
+@@ -419,6 +419,7 @@
+ 
+ function dockerComposeForServices(
+   services: Array<{ name: string; listenPort: number; dockerfilePath: string }>,
++  datastores?: Array<any>
+ ): string {
+   const lines: string[] = ['services:']
+   for (const service of services) {
+@@ -443,6 +444,22 @@
+       '',
+     )
+   }
++  if (datastores) {
++    for (const ds of datastores) {
++      if (ds.kind === 'postgres') {
++        lines.push(
++          '  postgres:',
++          '    image: postgres:15-alpine',
++          '    environment:',
++          '      POSTGRES_USER: launchpad',
++          '      POSTGRES_PASSWORD: launchpad',
++          '      POSTGRES_DB: launchpad',
++          '    ports:',
++          '      - "5432:5432"',
++          '    restart: unless-stopped',
++        )
++      } else if (ds.kind === 'redis') {
++        lines.push(
++          '  redis:',
++          '    image: redis:7-alpine',
++          '    ports:',
++          '      - "6379:6379"',
++          '    restart: unless-stopped',
++        )
++      }
++    }
++  }
+   return lines.join('\n')
+ }
+ 
+@@ -493,7 +510,7 @@
+   if (cfg.generate_docker_compose !== false) {
+     targets.push({
+       path: 'docker-compose.yml',
+-      content: dockerComposeForServices(composeServices),
++      content: dockerComposeForServices(composeServices, cfg.datastores),
+     })
+   }

@@ -18,6 +18,8 @@ function hasIacFiles(files: string[] | undefined): boolean {
     (path) =>
       path.includes('/terraform/')
       || path.includes('/pulumi/')
+      || path.includes('infra/launchProvision.sh')
+      || path.includes('provision/launchpad.sh')
       || path.endsWith('.tf')
       || path.endsWith('Pulumi.yaml')
       || path === 'index.ts',
@@ -60,7 +62,8 @@ export function workspaceStackParts(source: WorkspaceDisplaySource): WorkspaceSt
     stack = `${engine || 'iac'} + k8s`
   } else if (mode === 'iac_only' || (files && hasIacFiles(files))) {
     stack = engine || 'iac'
-  } else if (engine && mode !== 'manifest_only') {
+  } else if (engine) {
+    // mode is neither iac_only nor manifest_only here; engine label stands alone.
     stack = engine
   } else {
     stack = 'k8s'

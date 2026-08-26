@@ -67,6 +67,25 @@ def test_wizard_request_forces_compute_instance_for_gcp_vm() -> None:
     )
     assert isinstance(req.cloud, GcpCloudConfig)
     assert req.cloud.resources.compute_instance is True
+    assert req.ansible.enabled is False
+    assert req.config_tool.value == "cloud-init"
+
+
+def test_wizard_request_enables_ansible_when_config_tool_is_ansible() -> None:
+    req = ProvisioningWizardRequest(
+        name="vm-ansible",
+        iac_engine=IaCEngine.PULUMI,
+        cloud=GcpCloudConfig(
+            provider=CloudProvider.GCP,
+            resources=GcpResources(project_id="demo", compute_instance=False),
+        ),
+        credentials=CloudCredentials(),
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+        artifact_mode=WorkspaceArtifactsMode.IAC_ONLY,
+        kubernetes_packaging=KubernetesPackaging.NONE,
+        config_tool="ansible",
+    )
     assert req.ansible.enabled is True
 
 
@@ -74,10 +93,18 @@ def test_ensure_ansible_for_cloud_vm_without_host() -> None:
     from app.schemas.cloud import AnsibleConfig
     from app.services.runtime_mode import ensure_ansible_for_vm_runtime
 
+    skipped = ensure_ansible_for_vm_runtime(
+        AnsibleConfig(enabled=False),
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+        running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+    )
+    assert skipped.enabled is False
+
     patched = ensure_ansible_for_vm_runtime(
         AnsibleConfig(enabled=False),
         runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
         running_instance=RunningInstanceConfig(kind=RunningInstanceKind.VM),
+        config_tool="ansible",
     )
     assert patched.enabled is True
 
@@ -202,6 +229,45 @@ def test_preview_plan_kubernetes_manifest() -> None:
     plan = resolve_preview_deploy_plan(config)
     assert plan.deploy_mode == DeployMode.MANIFEST
     assert plan.skip_local_cluster is False
+
+
+def test_preview_plan_single_service_defaults_to_preview() -> None:
+    config = WorkspaceWizardConfig(
+        name="single-demo",
+        iac_engine=IaCEngine.TERRAFORM,
+        cloud=LocalCloudConfig(resources=LocalResources()),
+        runtime_mode=WorkspaceRuntimeMode.KUBERNETES,
+        kubernetes_packaging=KubernetesPackaging.NONE,
+    )
+    plan = resolve_preview_deploy_plan(config, deployable_service_count=1)
+    assert plan.deploy_mode == DeployMode.PREVIEW
+
+
+def test_preview_plan_multi_service_forces_manifest() -> None:
+    """Linked frontend + backend (2 services) must use per-service MANIFEST deploy,
+    not the single-app PREVIEW path (which yields one generic ``app`` pod)."""
+    config = WorkspaceWizardConfig(
+        name="linked-demo",
+        iac_engine=IaCEngine.TERRAFORM,
+        cloud=LocalCloudConfig(resources=LocalResources()),
+        runtime_mode=WorkspaceRuntimeMode.KUBERNETES,
+        kubernetes_packaging=KubernetesPackaging.NONE,
+    )
+    plan = resolve_preview_deploy_plan(config, deployable_service_count=2)
+    assert plan.deploy_mode == DeployMode.MANIFEST
+    assert plan.manifest_packaging == KubernetesPackaging.RAW_MANIFESTS.value
+
+
+def test_preview_plan_multi_service_compose_still_compose() -> None:
+    """docker_compose runtime is local Compose regardless of service count."""
+    config = WorkspaceWizardConfig(
+        name="compose-multi",
+        iac_engine=IaCEngine.TERRAFORM,
+        cloud=LocalCloudConfig(resources=LocalResources()),
+        runtime_mode=WorkspaceRuntimeMode.DOCKER_COMPOSE,
+    )
+    plan = resolve_preview_deploy_plan(config, deployable_service_count=3)
+    assert plan.deploy_mode == DeployMode.COMPOSE
 
 
 def test_preview_plan_attach_serverless() -> None:

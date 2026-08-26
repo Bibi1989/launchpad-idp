@@ -160,7 +160,7 @@ class RepoImportSaveRequest(BaseModel):
     @classmethod
     def normalize_iac_engine(cls, value: str) -> str:
         cleaned = value.strip().lower()
-        allowed = {"terraform", "opentofu", "pulumi", "ansible"}
+        allowed = {"launchpad", "terraform", "opentofu", "pulumi", "ansible"}
         if cleaned not in allowed:
             raise ValueError(f"iac_engine must be one of {sorted(allowed)}")
         return cleaned

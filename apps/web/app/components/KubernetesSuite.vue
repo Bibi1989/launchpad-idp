@@ -44,6 +44,10 @@ function openAiDrawerWithError(ctx?: string | null) {
 }
 
 async function loadContext() {
+  if (!props.workspaceId) {
+    loadingContext.value = false
+    return
+  }
   loadingContext.value = true
   try {
     clusterContext.value = await getClusterContext(props.workspaceId)
@@ -55,6 +59,10 @@ async function loadContext() {
 }
 
 async function loadResources() {
+  if (!props.workspaceId) {
+    loadingResources.value = false
+    return
+  }
   loadingResources.value = true
   try {
     const ns = clusterContext.value?.target_namespace

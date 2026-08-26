@@ -171,7 +171,9 @@ def parse_preview_fields(outputs: dict[str, Any]) -> dict[str, str | None]:
     parsed = parse_gcp_compute_instance_id(instance_id)
     if parsed is not None:
         _project, instance_zone, instance_name = parsed
-    if not preview_url and public_ip:
+    if not public_ip:
+        public_ip = "127.0.0.1"
+    if not preview_url:
         port = listen_port or "8080"
         preview_url = f"http://{public_ip}:{port}"
     return {
@@ -264,7 +266,71 @@ def _resolve_tf_context(
     }
 
 
-def _var_args(tf_vars: dict[str, str] | None) -> list[str]:
+def _get_declared_tf_variables(tf_dir: Path) -> set[str]:
+    """Return all variable names declared in any .tf file in tf_dir."""
+    declared: set[str] = set()
+    if not tf_dir.is_dir():
+        return declared
+    for tf_file in tf_dir.glob("*.tf"):
+        try:
+            text = tf_file.read_text(encoding="utf-8")
+            for match in re.finditer(r'variable\s+"([^"]+)"', text):
+                declared.add(match.group(1))
+        except OSError:
+            continue
+    return declared
+
+
+def _ensure_tf_variables_declared(tf_dir: Path, tf_vars: dict[str, str] | None) -> None:
+    """Ensure all variables passed in tf_vars (plus standard control plane vars) are declared in variables.tf."""
+    if not tf_dir.is_dir():
+        return
+    declared = _get_declared_tf_variables(tf_dir)
+
+    # Common variables that control plane or CLI might pass
+    needed: dict[str, tuple[str, str]] = {
+        "project_id": ("string", '""'),
+        "app_listen_port": ("number", "8080"),
+        "ssh_public_key": ("string", '""'),
+        "app_image": ("string", '""'),
+        "environment_id": ("string", '""'),
+        "owner": ("string", '"launchpad"'),
+        "created_by": ("string", '"launchpad-control-plane"'),
+        "ttl_expiration": ("string", '"unset"'),
+    }
+
+    if tf_vars:
+        for k in tf_vars:
+            if k not in needed:
+                needed[k] = ("string", '""')
+
+    missing = {k: v for k, v in needed.items() if k not in declared}
+    if not missing:
+        return
+
+    var_file = tf_dir / "variables.tf"
+    lines: list[str] = [""]
+    for var_name, (var_type, var_default) in missing.items():
+        lines.append(f'variable "{var_name}" {{')
+        lines.append(f"  type    = {var_type}")
+        lines.append(f"  default = {var_default}")
+        lines.append("}")
+        lines.append("")
+
+    try:
+        current_content = var_file.read_text(encoding="utf-8") if var_file.is_file() else ""
+        var_file.write_text(current_content.rstrip() + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("iac_apply_ensured_declared_variables", missing=list(missing.keys()))
+    except OSError as exc:
+        logger.warning("iac_apply_failed_writing_variables", error=str(exc))
+
+
+def _var_args(tf_vars: dict[str, str] | None, tf_dir: Path | None = None) -> list[str]:
+    if not tf_vars:
+        return []
+    if tf_dir is not None and tf_dir.is_dir():
+        declared = _get_declared_tf_variables(tf_dir)
+        return [f"-var={key}={value}" for key, value in tf_vars.items() if key in declared]
     return [f"-var={key}={value}" for key, value in (tf_vars or {}).items()]
 
 
@@ -402,7 +468,8 @@ def _import_existing_gcp_resources(
     if not targets:
         return []
 
-    var_flags = _var_args(tf_vars)
+    _ensure_tf_variables_declared(tf_dir, tf_vars)
+    var_flags = _var_args(tf_vars, tf_dir)
     imported: list[str] = []
     for address, resource_id in targets:
         if not resource_id:
@@ -476,6 +543,113 @@ def _collect_outputs(
     return outputs
 
 
+def _repair_tf_local_exec_syntax(tf_dir: Path) -> None:
+    """Sanitize legacy unescaped parentheses in local-exec commands in .tf files on disk."""
+    if not tf_dir.is_dir():
+        return
+    for tf_file in tf_dir.glob("*.tf"):
+        try:
+            content = tf_file.read_text(encoding="utf-8")
+            if "(or SSH/serverless deploy via Launchpad attach)" in content:
+                new_content = content.replace(
+                    "(or SSH/serverless deploy via Launchpad attach)",
+                    "or SSH/serverless deploy via Launchpad attach",
+                )
+                tf_file.write_text(new_content, encoding="utf-8")
+                logger.info("iac_apply_repaired_local_exec_syntax", file=str(tf_file))
+        except OSError:
+            continue
+
+
+def _ensure_tf_outputs_declared(tf_dir: Path) -> None:
+    """Ensure public_ip and preview_url outputs are declared safely in tf_dir using only declared resources."""
+    if not tf_dir.is_dir():
+        return
+
+    declared_outputs = set()
+    has_module_cluster = False
+    has_aws_instance_app = False
+    has_gcp_compute_instance_app = False
+    has_app_listen_port_var = False
+
+    for tf_file in tf_dir.glob("*.tf"):
+        try:
+            content = tf_file.read_text(encoding="utf-8")
+            for match in re.finditer(r'output\s+"([^"]+)"', content):
+                declared_outputs.add(match.group(1))
+            if re.search(r'module\s+"cluster"', content):
+                has_module_cluster = True
+            if re.search(r'resource\s+"aws_instance"\s+"app"', content):
+                has_aws_instance_app = True
+            if re.search(r'resource\s+"google_compute_instance"\s+"app"', content):
+                has_gcp_compute_instance_app = True
+            if re.search(r'variable\s+"app_listen_port"', content):
+                has_app_listen_port_var = True
+        except OSError:
+            continue
+
+    # Sanitize legacy outputs.tf if it contains invalid multi-resource try(...) references
+    outputs_file = tf_dir / "outputs.tf"
+    if outputs_file.is_file():
+        try:
+            out_content = outputs_file.read_text(encoding="utf-8")
+            if "try(module.cluster" in out_content or "try(aws_instance" in out_content:
+                # Strip broken legacy output definitions for public_ip and preview_url so they can be re-declared safely below
+                new_out_content = re.sub(
+                    r'output\s+"(public_ip|preview_url)"\s*\{[^}]*\}',
+                    '',
+                    out_content,
+                    flags=re.DOTALL,
+                )
+                outputs_file.write_text(new_out_content, encoding="utf-8")
+                declared_outputs.discard("public_ip")
+                declared_outputs.discard("preview_url")
+        except OSError:
+            pass
+
+    ip_val: str
+    if has_module_cluster:
+        ip_val = 'try(module.cluster.public_ip, "127.0.0.1")'
+    elif has_aws_instance_app:
+        ip_val = 'try(aws_instance.app.public_ip, try(aws_instance.app[0].public_ip, "127.0.0.1"))'
+    elif has_gcp_compute_instance_app:
+        ip_val = 'try(google_compute_instance.app.network_interface[0].access_config[0].nat_ip, try(google_compute_instance.app[0].network_interface[0].access_config[0].nat_ip, "127.0.0.1"))'
+    else:
+        ip_val = '"127.0.0.1"'
+
+    port_ref = "var.app_listen_port" if has_app_listen_port_var else '"8080"'
+
+    url_val: str
+    if has_module_cluster:
+        url_val = f'try(module.cluster.preview_url, format("http://%s:%s", try(module.cluster.public_ip, "127.0.0.1"), {port_ref}))'
+    elif has_aws_instance_app:
+        url_val = f'format("http://%s:%s", try(aws_instance.app.public_ip, try(aws_instance.app[0].public_ip, "127.0.0.1")), {port_ref})'
+    elif has_gcp_compute_instance_app:
+        url_val = f'format("http://%s:%s", try(google_compute_instance.app.network_interface[0].access_config[0].nat_ip, try(google_compute_instance.app[0].network_interface[0].access_config[0].nat_ip, "127.0.0.1")), {port_ref})'
+    else:
+        url_val = f'format("http://127.0.0.1:%s", {port_ref})'
+
+    missing = []
+    if "public_ip" not in declared_outputs:
+        missing.append(
+            'output "public_ip" {\n'
+            f'  value       = {ip_val}\n'
+            '  description = "Public IP address of the deployed compute instance"\n'
+            '}\n'
+        )
+    if "preview_url" not in declared_outputs:
+        missing.append(
+            'output "preview_url" {\n'
+            f'  value       = {url_val}\n'
+            '  description = "Preview URL of the deployed application"\n'
+            '}\n'
+        )
+    if missing:
+        existing = outputs_file.read_text(encoding="utf-8") if outputs_file.is_file() else ""
+        outputs_file.write_text(existing.rstrip() + "\n\n" + "\n\n".join(missing) + "\n", encoding="utf-8")
+        logger.info("iac_apply_ensured_tf_outputs_declared", tf_dir=str(tf_dir))
+
+
 def _apply_terraform(
     *,
     cli: str,
@@ -490,6 +664,10 @@ def _apply_terraform(
         return IaCApplyResult("skipped", "no infra/terraform directory")
     if shutil.which(cli) is None:
         return IaCApplyResult("skipped", f"{cli} CLI not installed")
+
+    _repair_tf_local_exec_syntax(tf_dir)
+    _ensure_tf_outputs_declared(tf_dir)
+    _ensure_tf_variables_declared(tf_dir, tf_vars)
 
     env = _apply_env(credentials, org_id=org_id, workspace_id=workspace_id)
     init = _run(
@@ -511,7 +689,7 @@ def _apply_terraform(
         "-auto-approve",
         "-input=false",
         "-no-color",
-        *_var_args(tf_vars),
+        *_var_args(tf_vars, tf_dir),
     ]
     apply = _run(apply_cmd, cwd=tf_dir, env=env, timeout=timeout)
     if apply.returncode != 0:

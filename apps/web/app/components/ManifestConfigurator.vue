@@ -615,7 +615,7 @@ onBeforeUnmount(() => {
           type="button"
           class="lp-btn-primary py-2 text-xs uppercase tracking-wide"
           :disabled="!selectedPath || saving || !hasChanges || (!isRawEditor && !supported)"
-          @click="saveChanges"
+          @click="saveChanges()"
         >
           <span class="material-symbols-outlined text-sm">save</span>
           {{ saving ? t('common.saving') : t('manifest.configurator.saveChanges') }}
@@ -707,7 +707,7 @@ onBeforeUnmount(() => {
         </ClientOnly>
       </div>
 
-      <div v-else class="mx-auto max-w-4xl space-y-10 pb-16">
+      <div v-else-if="model" class="mx-auto max-w-4xl space-y-10 pb-16">
         <!-- Namespace -->
         <section v-if="isNamespace" class="space-y-4">
           <div class="flex items-center gap-2 border-b border-[var(--lp-line)] pb-2">
@@ -1378,7 +1378,7 @@ onBeforeUnmount(() => {
                     </option>
                   </select>
                   <span class="block font-mono text-[10px] text-[var(--lp-muted)]">
-                    {{ containerScanToolOptions.find((o) => o.id === model.cicdSecurity.containerScan.tool)?.hint }}
+                    {{ containerScanToolOptions.find((o) => o.id === model?.cicdSecurity.containerScan.tool)?.hint }}
                   </span>
                 </label>
                 <label class="block space-y-1.5">
@@ -1435,7 +1435,7 @@ onBeforeUnmount(() => {
                     </option>
                   </select>
                   <span class="block font-mono text-[10px] text-[var(--lp-muted)]">
-                    {{ sastToolOptions.find((o) => o.id === model.cicdSecurity.sastGuardrails.sastTool)?.hint }}
+                    {{ sastToolOptions.find((o) => o.id === model?.cicdSecurity.sastGuardrails.sastTool)?.hint }}
                   </span>
                 </label>
                 <label

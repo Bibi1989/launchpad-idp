@@ -74,7 +74,6 @@ async function installWorkers(language: string): Promise<void> {
     TsWorkerCtor = (await import('monaco-editor/esm/vs/language/typescript/ts.worker?worker')).default
   }
 
-  // @ts-expect-error Monaco global worker factory
   self.MonacoEnvironment = {
     getWorker(_: string, label: string) {
       if (label === 'json' && JsonWorkerCtor) return new JsonWorkerCtor()

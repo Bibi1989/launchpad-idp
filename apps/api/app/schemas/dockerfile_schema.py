@@ -235,6 +235,38 @@ class DockerfileBuildRequest(BaseModel):
     )
 
 
+class DockerfileVerifyServiceSpec(BaseModel):
+    """A single service to build+run+probe during advisory verification."""
+
+    name: str = Field(default="app", max_length=100)
+    path: str = Field(default=".", max_length=500, description="Relative to the workspace root")
+    dockerfile_path: str = Field(default="Dockerfile", max_length=500)
+    listen_port: int | None = Field(default=None, ge=1, le=65535)
+
+
+class DockerfileVerifyRequest(BaseModel):
+    """When ``services`` is empty the primary workspace Dockerfile is resolved automatically."""
+
+    services: list[DockerfileVerifyServiceSpec] = Field(default_factory=list, max_length=40)
+
+
+class DockerfileVerifyResultModel(BaseModel):
+    service: str
+    status: str = Field(description="verified | warning | skipped")
+    used_repo_dockerfile: bool = False
+    generated_stack: str | None = None
+    built: bool = False
+    ran: bool = False
+    probe_ok: bool = False
+    listen_port: int | None = None
+    warning: str | None = None
+    logs_tail: str | None = None
+
+
+class DockerfileVerifyResponse(BaseModel):
+    results: list[DockerfileVerifyResultModel] = Field(default_factory=list)
+
+
 class DockerfileBuildJobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"

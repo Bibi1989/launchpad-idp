@@ -23,7 +23,7 @@ function normalizeDiagram(raw: string): string {
   const nonEmpty = lines.filter((line) => line.trim().length > 0)
   if (!nonEmpty.length) return ''
   const indent = Math.min(
-    ...nonEmpty.map((line) => line.match(/^(\s*)/)?.[1].length ?? 0),
+    ...nonEmpty.map((line) => line.match(/^(\s*)/)?.[1]?.length ?? 0),
   )
   return lines
     .map((line) => line.slice(indent))

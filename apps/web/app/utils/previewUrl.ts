@@ -115,7 +115,7 @@ export function localizePreviewUrl(input: LocalizePreviewUrlInput): string {
     return url
   }
 
-  if ((provider === 'local' || !provider) && isLocalViewer && port) {
+  if (isLocalViewer && port) {
     return `http://${viewerHost}:${port}`
   }
 

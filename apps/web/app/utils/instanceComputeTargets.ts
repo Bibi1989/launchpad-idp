@@ -51,8 +51,8 @@ export function computeTargetDisplay(
     }
   }
 
-  const effective: InstanceProcessStrategy =
-    target.kind === 'serverless' ? 'docker' : strategy
+  // Serverless targets are handled and returned earlier; here kind is vm/local_machine.
+  const effective: InstanceProcessStrategy = strategy
   const scope = target.kind === 'local_machine' ? 'localByStrategy' : 'vmByStrategy'
   const icon =
     effective === 'pm2' ? 'bolt' : effective === 'systemd' ? 'terminal' : target.icon

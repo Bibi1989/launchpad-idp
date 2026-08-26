@@ -49,7 +49,7 @@ export function useRepoImport() {
     services: ServiceOverride[]
     ensure_local_cluster?: boolean
     runtime_mode?: 'kubernetes' | 'docker_compose' | 'running_instance'
-    iac_engine?: 'terraform' | 'opentofu' | 'pulumi'
+    iac_engine?: 'launch_script' | 'launchpad' | 'terraform' | 'opentofu' | 'pulumi' | 'ansible'
     enable_iac?: boolean
     enable_cicd?: boolean
     cicd_platform?: 'github' | 'gitlab'
@@ -58,6 +58,9 @@ export function useRepoImport() {
     datastores?: DatastoreImportConfig[]
     process_strategy?: 'docker' | 'systemd' | 'pm2'
     reverse_proxy?: 'none' | 'nginx' | 'caddy'
+    // Link mode: reference the repos (track changes, re-clone on deploy) instead of
+    // freezing the imported source. The workspace owns only the generated infra.
+    link_mode?: boolean
   }): Promise<RepoImportSaveResult> {
     return apiFetch<RepoImportSaveResult>(`/imports/${input.importId}/save`, {
       method: 'POST',
@@ -66,7 +69,7 @@ export function useRepoImport() {
         services: input.services,
         ensure_local_cluster: input.ensure_local_cluster ?? input.runtime_mode === 'kubernetes',
         runtime_mode: input.runtime_mode ?? 'kubernetes',
-        iac_engine: input.iac_engine ?? 'terraform',
+        iac_engine: input.iac_engine ?? 'launch_script',
         enable_iac: input.enable_iac ?? true,
         enable_cicd: input.enable_cicd ?? false,
         cicd_platform: input.cicd_platform ?? 'github',
@@ -75,6 +78,7 @@ export function useRepoImport() {
         datastores: input.datastores ?? [],
         process_strategy: input.process_strategy ?? 'docker',
         reverse_proxy: input.reverse_proxy ?? 'none',
+        link_mode: input.link_mode ?? false,
       }),
       timeoutMs: IMPORT_TIMEOUT_MS,
     })

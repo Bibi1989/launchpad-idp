@@ -1,3 +1,11 @@
+// Calculate active backend target dynamically (ACTIVE_BACKEND=nest | fastapi)
+const activeBackend = (process.env.ACTIVE_BACKEND || process.env.NUXT_ACTIVE_BACKEND || "").toLowerCase();
+const isNest = activeBackend === "nest" || activeBackend === "nestjs";
+const backendPort = process.env.BACKEND_PORT || (isNest ? 8001 : 8000);
+const backendHost = process.env.BACKEND_HOST || "127.0.0.1";
+const apiTarget = isNest ? process.env.NUXT_PUBLIC_API_TARGET_NEST : process.env.NUXT_PUBLIC_API_TARGET;;
+// const apiTarget = process.env.NUXT_PUBLIC_API_TARGET || `http://${backendHost}:${backendPort}`;
+
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
   compatibilityDate: "2025-07-15",
@@ -57,9 +65,8 @@ export default defineNuxtConfig({
       // Same-origin proxy in dev avoids browser CORS for REST; override for direct API access.
       apiBase: process.env.NUXT_PUBLIC_API_BASE || "/api/v1",
       // Prefer 127.0.0.1 over localhost: on macOS localhost often resolves to ::1 first.
-      // Docker Desktop may still bind *:8000 on IPv6 after a compose stack stops, which
-      // makes Nuxt's proxy get ECONNRESET while local `make api` (IPv4-only) is healthy.
-      wsBase: process.env.NUXT_PUBLIC_WS_BASE || "ws://127.0.0.1:8000",
+      wsBase: process.env.NUXT_PUBLIC_WS_BASE || `ws://${backendHost}:${backendPort}`,
+      activeBackend: isNest ? "nest" : "fastapi",
     },
   },
   nitro: {
@@ -67,7 +74,7 @@ export default defineNuxtConfig({
     sourceMap: false,
     devProxy: {
       "/api/v1": {
-        target: "http://127.0.0.1:8000/api/v1",
+        target: `${apiTarget}/api/v1`,
         changeOrigin: true,
         ws: true,
       },
@@ -82,7 +89,7 @@ export default defineNuxtConfig({
       allowedHosts: [".trycloudflare.com", ".ngrok-free.dev", "ngrok.io", "importer-proud-robust.ngrok-free.dev"],
       proxy: {
         "/api/v1": {
-          target: "http://127.0.0.1:8000",
+          target: apiTarget,
           changeOrigin: true,
           ws: true,
         },

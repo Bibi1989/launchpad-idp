@@ -29,6 +29,7 @@ from app.schemas.cloud import (
     CloudflareCloudConfig,
     CloudflareResources,
     CloudCredentials,
+    CloudPluginTarget,
     CloudProvider,
     CostEstimateLineItem,
     GcpCloudConfig,
@@ -692,7 +693,9 @@ class ProvisioningService:
             container_scaffold=config.container_scaffold,
             dependencies=config.dependencies,
             ansible=config.ansible,
+            config_tool=config.config_tool,
             env_vars=config.env_vars,
+            cloud_plugin=config.cloud_plugin,
         )
         return await self.generate_bundle(
             promoted_request,
@@ -719,6 +722,7 @@ class ProvisioningService:
         existing_security_group_id: str | None = None,
         project_id: UUID | None = None,
         image_scan: object | None = None,
+        cloud_plugin: CloudPluginTarget | None = None,
     ) -> UUID:
         """Copy a local workspace tree and re-target wizard config for cloud serverless."""
         from app.core.config import get_settings
@@ -757,6 +761,7 @@ class ProvisioningService:
             existing_vpc_id=existing_vpc_id,
             existing_security_group_id=existing_security_group_id,
             image_scan=image_scan,
+            cloud_plugin=cloud_plugin,
         )
         request = await self._with_account_credentials(request, owner)
         request = self._with_gcp_project_from_sa(request)
@@ -1251,6 +1256,61 @@ class ProvisioningService:
             status=row.status,
             created_at=row.created_at,
             starred=row.starred_at is not None,
+        )
+
+    async def apply_cloud_plugin_to_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        owner: User,
+        cloud_plugin: CloudPluginTarget,
+    ) -> None:
+        """Persist launch/promote plugin target onto the workspace (region + VM flags)."""
+        from app.core.secrets import decrypt_secret
+        from app.schemas.cloud import CloudCredentials, ProvisioningWizardRequest
+        from app.services.cloud_plugin_defaults import apply_cloud_plugin_defaults
+
+        row = await self.get_workspace_for_owner(workspace_id, owner)
+        config = await self.get_wizard_config(workspace_id, owner)
+        credentials = CloudCredentials()
+        if row.encrypted_credentials:
+            try:
+                credentials = CloudCredentials.model_validate_json(
+                    decrypt_secret(row.encrypted_credentials)
+                )
+            except Exception:
+                logger.warning(
+                    "cloud_plugin_credentials_unreadable",
+                    workspace_id=str(workspace_id),
+                )
+
+        request = ProvisioningWizardRequest(
+            name=config.name,
+            iac_engine=config.iac_engine,
+            cloud=config.cloud,
+            credentials=credentials,
+            run_init=config.run_init,
+            runtime_mode=config.runtime_mode,
+            running_instance=config.running_instance,
+            artifact_mode=config.artifact_mode,
+            kubernetes_packaging=config.kubernetes_packaging,
+            kubernetes_options=config.kubernetes_options,
+            cost_optimization=config.cost_optimization,
+            container_scaffold=config.container_scaffold,
+            dependencies=config.dependencies,
+            ansible=config.ansible,
+            config_tool=config.config_tool,
+            env_vars=config.env_vars,
+            cloud_plugin=config.cloud_plugin,
+        )
+        updated = apply_cloud_plugin_defaults(request, cloud_plugin)
+        if updated.model_dump(mode="json") == request.model_dump(mode="json"):
+            return
+        await self.update_workspace(workspace_id, updated, owner=owner)
+        logger.info(
+            "cloud_plugin_applied_to_workspace",
+            workspace_id=str(workspace_id),
+            plugin=cloud_plugin.model_dump(mode="json"),
         )
 
     @staticmethod
@@ -1844,7 +1904,7 @@ class ProvisioningService:
             )
             return
         snapshot = self._load_wizard_snapshot(workspace)
-        region = region_from_wizard(provider, snapshot)
+        region = region_from_wizard(provider, snapshot, credentials=credentials)
         try:
             await asyncio.to_thread(
                 teardown_shared_preview_cluster,
@@ -2547,8 +2607,11 @@ class ProvisioningService:
             "container_scaffold": request.container_scaffold.model_dump(mode="json"),
             "dependencies": request.dependencies.model_dump(mode="json"),
             "ansible": request.ansible.model_dump(mode="json"),
+            "config_tool": request.config_tool.value,
             "env_vars": [e.model_dump(mode="json") for e in request.env_vars],
         }
+        if request.cloud_plugin is not None:
+            payload["cloud_plugin"] = request.cloud_plugin.model_dump(mode="json")
         if preserve:
             for key in (
                 "git_repo_url",
@@ -2568,6 +2631,7 @@ class ProvisioningService:
                 "service_connections",
                 "service_graph",
                 "service_graph_mermaid",
+                "cloud_plugin",
             ):
                 if key in preserve and key not in payload:
                     payload[key] = preserve[key]
@@ -2703,7 +2767,9 @@ class ProvisioningService:
             container_scaffold=config.container_scaffold,
             dependencies=config.dependencies,
             ansible=config.ansible,
+            config_tool=config.config_tool,
             env_vars=config.env_vars,
+            cloud_plugin=config.cloud_plugin,
         )
 
     async def restore_workspace_files(

@@ -7,12 +7,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import json
+
 from app.models.domain import (
     DeploymentLog,
     Environment,
     EnvironmentStatus,
     ExecutionStage,
     LogLevel,
+    ProvisioningWorkspace,
 )
 from app.services.git_urls import normalize_git_repo_full_name
 
@@ -247,6 +250,88 @@ class EnvironmentRepository:
             env_repo = normalize_git_repo_full_name(environment.git_repo_url)
             if env_repo == normalized_target:
                 matched.append(environment)
+        return matched
+
+    async def list_active_for_any_linked_repo(
+        self,
+        *,
+        repo_full_name: str,
+        branch: str,
+    ) -> list[Environment]:
+        """Active environments to rebuild for a push to ANY of a workspace's repos.
+
+        Matches when the pushed repo+branch is the environment's own primary repo
+        (git_repo_url/git_branch) OR when the environment's workspace links the pushed
+        repo in ``wizard_config_json.linked_repos`` (branch matched against that linked
+        repo's branch). This realizes "a push to any linked repo re-provisions the env",
+        not just the primary repo.
+        """
+        normalized_target = normalize_git_repo_full_name(repo_full_name)
+        if normalized_target is None:
+            return []
+
+        result = await self._session.execute(
+            select(Environment, ProvisioningWorkspace)
+            .join(
+                ProvisioningWorkspace,
+                Environment.workspace_id == ProvisioningWorkspace.id,
+                isouter=True,
+            )
+            .where(Environment.status.in_(ACTIVE_REBUILD_STATUSES))
+        )
+        matched: list[Environment] = []
+        for environment, workspace in result.all():
+            # Primary repo match (branch-scoped) - same as list_active_for_repo_branch.
+            if (
+                environment.git_branch == branch
+                and normalize_git_repo_full_name(environment.git_repo_url) == normalized_target
+            ):
+                matched.append(environment)
+                continue
+            snapshot: dict | None = None
+            if workspace is not None and workspace.wizard_config_json:
+                try:
+                    snapshot = json.loads(workspace.wizard_config_json)
+                except (json.JSONDecodeError, TypeError):
+                    snapshot = None
+            if (snapshot is None or not isinstance(snapshot, dict)) and workspace is not None and workspace.root_dir:
+                try:
+                    from pathlib import Path
+                    from app.services.iac_generator import IaCGenerator
+
+                    snapshot = IaCGenerator().read_wizard_snapshot(Path(workspace.root_dir))
+                except Exception:
+                    snapshot = None
+
+            if not isinstance(snapshot, dict):
+                continue
+
+            linked_entries: list[dict] = []
+            raw_linked = snapshot.get("linked_repos")
+            if isinstance(raw_linked, list):
+                linked_entries.extend(item for item in raw_linked if isinstance(item, dict))
+            raw_app_repo = snapshot.get("linked_app_repo")
+            if isinstance(raw_app_repo, dict):
+                linked_entries.append(raw_app_repo)
+            raw_repo_import = snapshot.get("repo_import")
+            if isinstance(raw_repo_import, dict):
+                linked_entries.append(raw_repo_import)
+            if snapshot.get("git_repo_url"):
+                linked_entries.append({
+                    "git_repo_url": snapshot.get("git_repo_url"),
+                    "git_branch": snapshot.get("git_branch") or "main",
+                })
+
+            for entry in linked_entries:
+                repo = normalize_git_repo_full_name(
+                    entry.get("full_name") or entry.get("git_repo_url") or entry.get("repo_url")
+                )
+                if repo != normalized_target:
+                    continue
+                linked_branch = str(entry.get("git_branch") or "").strip()
+                if not linked_branch or linked_branch == branch:
+                    matched.append(environment)
+                    break
         return matched
 
     async def create(

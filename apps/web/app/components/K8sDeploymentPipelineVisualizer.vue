@@ -131,12 +131,12 @@ function getStageState(stageId: string) {
           class="mt-2.5 rounded bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 text-[11px] font-mono text-emerald-300 truncate"
         >
           <a
-            :href="getStageState('ingress_ready').details.ingress_url"
+            :href="getStageState('ingress_ready').details?.ingress_url"
             target="_blank"
             class="hover:underline flex items-center gap-1"
           >
             <span class="material-symbols-outlined text-xs">open_in_new</span>
-            {{ getStageState('ingress_ready').details.ingress_url }}
+            {{ getStageState('ingress_ready').details?.ingress_url }}
           </a>
         </div>
       </div>

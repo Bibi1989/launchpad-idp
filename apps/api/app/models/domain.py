@@ -18,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -930,6 +931,95 @@ class UserCloudCredentialStore(Base):
         nullable=False,
     )
     encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ProviderCredentialStore(Base):
+    """Per-user encrypted credential vault for plugin cloud providers.
+
+    Complements UserCloudCredentialStore (which is typed to the built-in GCP/AWS/Azure/
+    Cloudflare fields). This holds the flexible key/value credentials the plugin registry
+    declares per provider (hetzner api_token, digitalocean api_token, railway token, ...)
+    as a single encrypted JSON object mapping provider_id -> {field: value}.
+    """
+
+    __tablename__ = "provider_credentials"
+    __table_args__ = (Index("ix_provider_credentials_user_id", "user_id", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PluginManifestStore(Base):
+    """A user- or org-registered declarative cloud plugin (manifest + optional IaC bundle).
+
+    The manifest is stored as JSON (metadata + runner spec); the bundle (Terraform /
+    Pulumi / Ansible files) lives on disk under a per-owner plugins directory referenced by
+    ``bundle_path``. No executable code is stored here - only data + a pointer to the IaC.
+
+    Ownership is exclusive: either ``org_id`` (organization plugin) or ``owner_user_id``
+    (personal plugin). ``visibility`` is ``private`` or ``public`` (usable by every user).
+    """
+
+    __tablename__ = "plugin_manifests"
+    __table_args__ = (
+        Index(
+            "ix_plugin_manifests_org_plugin",
+            "org_id",
+            "plugin_id",
+            unique=True,
+            postgresql_where=text("org_id IS NOT NULL"),
+            sqlite_where=text("org_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_plugin_manifests_user_plugin",
+            "owner_user_id",
+            "plugin_id",
+            unique=True,
+            postgresql_where=text("owner_user_id IS NOT NULL"),
+            sqlite_where=text("owner_user_id IS NOT NULL"),
+        ),
+        Index("ix_plugin_manifests_visibility", "visibility"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    # The manifest's own id (unique within an owner), e.g. "my-hetzner".
+    plugin_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    bundle_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visibility: Mapped[str] = mapped_column(String(16), nullable=False, default="private", server_default="private")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

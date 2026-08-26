@@ -107,9 +107,35 @@ def test_connection_env_from_snapshot_http_target() -> None:
                 "protocol": "http",
             }
         ],
+        "detection": {
+            "services": [
+                {"name": "virtual-office-frontend", "framework": "react_vite"},
+                {"name": "virtual-office-backend", "framework": "nestjs"},
+            ]
+        },
     }
     env = connection_env_from_snapshot(snapshot)
     assert env.get("VIRTUAL_OFFICE_BACKEND_URL") == "http://virtual-office-backend:8080"
+    assert env.get("VITE_API_URL") == "http://virtual-office-backend:8080"
+
+
+def test_connection_env_linked_repos_connector_only() -> None:
+    snapshot = {
+        "linked_repos": [
+            {"git_repo_url": "https://github.com/acme/frontend.git", "git_branch": "main"},
+            {
+                "git_repo_url": "https://github.com/acme/backend.git",
+                "git_branch": "main",
+                "full_name": "acme/backend",
+            },
+        ],
+        "service_connections": [
+            {"source": "frontend", "target": "backend", "protocol": "http"},
+        ],
+    }
+    env = connection_env_from_snapshot(snapshot)
+    assert env.get("BACKEND_URL") == "http://backend:8080"
+    assert env.get("VITE_API_URL") == "http://backend:8080"
 
 
 def test_connection_env_from_snapshot_empty() -> None:

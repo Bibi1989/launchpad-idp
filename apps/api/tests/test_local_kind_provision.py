@@ -75,3 +75,39 @@ def test_local_kind_writes_multi_framework_launch_manifests(tmp_path: Path) -> N
         assert img == f"shop-{stack}:latest"
         assert "nginx" not in img
     assert "docker-compose.yml" in bundle.files
+
+
+def test_scaffold_local_runtime_iac_terraform_apply_succeeds(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    from app.schemas.cloud import IaCEngine, WorkspaceRuntimeMode
+    from app.services.local_runtime_iac import write_local_runtime_iac
+
+    write_local_runtime_iac(
+        workspace_dir=tmp_path,
+        name="test-workspace",
+        engine=IaCEngine.TERRAFORM,
+        runtime_mode=WorkspaceRuntimeMode.RUNNING_INSTANCE,
+    )
+
+    tf_dir = tmp_path / "infra" / "terraform"
+    assert (tf_dir / "main.tf").is_file()
+
+    if shutil.which("terraform") is not None:
+        init_res = subprocess.run(
+            ["terraform", "init", "-input=false", "-no-color"],
+            cwd=tf_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert init_res.returncode == 0, f"terraform init failed: {init_res.stderr}"
+
+        apply_res = subprocess.run(
+            ["terraform", "apply", "-auto-approve", "-input=false", "-no-color"],
+            cwd=tf_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert apply_res.returncode == 0, f"terraform apply failed: {apply_res.stderr}\n{apply_res.stdout}"
+        assert "Launchpad local runtime ready" in apply_res.stdout
+

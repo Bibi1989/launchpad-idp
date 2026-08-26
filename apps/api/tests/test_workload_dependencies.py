@@ -105,3 +105,39 @@ def test_managed_redis_requires_elasticache() -> None:
     )
     with pytest.raises(ValueError, match="ElastiCache"):
         validate_managed_dependencies(cloud, deps)
+
+
+def test_external_secret_ref_is_not_inlined() -> None:
+    from app.services.workload_dependencies import external_secret_names
+
+    deps = WorkloadDependenciesConfig(
+        postgres=DataStoreDependency(
+            enabled=True,
+            placement=DependencyPlacement.EXTERNAL,
+            secret_ref="my-db-secret",
+        ),
+        redis=DataStoreDependency(
+            enabled=True,
+            placement=DependencyPlacement.EXTERNAL,
+            connection_url="redis://cache:6379/0",
+        ),
+    )
+    data = dependency_secret_string_data(deps, name="demo")
+    # secret_ref datastore is injected via envFrom, so it is NOT inlined here.
+    assert "DATABASE_URL" not in data
+    # A plain external URL is still inlined.
+    assert data["REDIS_URL"] == "redis://cache:6379/0"
+    # The referenced secret name is surfaced for envFrom wiring.
+    assert external_secret_names(deps) == ["my-db-secret"]
+
+
+def test_external_connection_url_still_inlined_without_secret_ref() -> None:
+    deps = WorkloadDependenciesConfig(
+        postgres=DataStoreDependency(
+            enabled=True,
+            placement=DependencyPlacement.EXTERNAL,
+            connection_url="postgresql://u:p@host:5432/db",
+        ),
+    )
+    data = dependency_secret_string_data(deps, name="demo")
+    assert data["DATABASE_URL"] == "postgresql://u:p@host:5432/db"

@@ -1,4 +1,4 @@
-.PHONY: up down api worker beat web test migrate kind-up kind-down k3s-up k3s-down cluster-up cluster-down oci-up oci-down oci-logs agent-build
+.PHONY: up down api api-nest api-nest-install api-nest-build worker worker-nest beat web test migrate kind-up kind-down k3s-up k3s-down cluster-up cluster-down oci-up oci-down oci-logs agent-build up-all up-all-nest
 
 # Local cluster engine: k3s (default, via k3d) or kind. Override: LOCAL_K8S_ENGINE=kind make cluster-up
 LOCAL_K8S_ENGINE ?= k3s
@@ -22,8 +22,22 @@ agent-build:
 	docker build -t $(AGENT_IMAGE) agent/
 
 # Applies pending Alembic revisions, then starts the API (same as Docker image entrypoint).
+# This is the DEFAULT backend (ACTIVE_BACKEND=fastapi).
 api: migrate
 	cd apps/api && .venv/bin/uvicorn app.main:app --reload --port 8000
+
+# Alternative NestJS backend (opt-in). Runs on port 8001 alongside FastAPI.
+# To point the web app at it: NUXT_PUBLIC_API_BASE=http://localhost:8001/api/v1 make web
+api-nest: migrate
+	cd apps/api-nest && npm run dev
+
+# One-time install of NestJS backend dependencies.
+api-nest-install:
+	cd apps/api-nest && npm install
+
+# Build NestJS production bundle.
+api-nest-build:
+	cd apps/api-nest && npm run build
 
 worker:
 	cd apps/api && .venv/bin/celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
@@ -35,13 +49,19 @@ worker-dev:
 	cd apps/api && .venv/bin/watchmedo auto-restart --directory=./app --pattern='*.py' --recursive -- \
 		.venv/bin/celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
 
+# NestJS BullMQ background queue worker.
+worker-nest:
+	cd apps/api-nest && npm run dev
+
 beat:
 	cd apps/api && .venv/bin/celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
 
 web:
 	cd apps/web && npm run dev
 
-up-all: up api worker beat web test
+up-all: up api worker beat test
+
+up-all-nest: up api-nest worker-nest web test
 
 kind-up:
 	bash scripts/kind-up.sh

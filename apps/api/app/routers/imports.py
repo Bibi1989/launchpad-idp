@@ -58,6 +58,7 @@ async def save_import(
         body,
         owner=user,
         org_id=org.org_id,
+        link_mode=body.link_mode,
     )
 
 

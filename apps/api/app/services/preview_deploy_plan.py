@@ -57,8 +57,15 @@ def resolve_preview_deploy_plan(
     config: WorkspaceWizardConfig,
     *,
     requested_deploy_mode: DeployMode | None = None,
+    deployable_service_count: int = 1,
 ) -> PreviewDeployPlan:
-    """Map provider + runtime_mode + services/deps → preview deploy plan."""
+    """Map provider + runtime_mode + services/deps → preview deploy plan.
+
+    ``deployable_service_count`` is the number of app workloads the workspace will
+    deploy (linked repos + scaffolded services). The single-app control-plane
+    PREVIEW path can only deploy ONE workload, so a multi-service workspace must use
+    the MANIFEST path (per-service Deployments) even without explicit k8s packaging.
+    """
     runtime = config.runtime_mode
     enable_postgres = _deps_want_postgres(config.dependencies)
     enable_redis = _deps_want_redis(config.dependencies)
@@ -152,6 +159,23 @@ def resolve_preview_deploy_plan(
             skip_local_cluster=False,
             reason="Workspace has Kubernetes packaging; using manifest deploy",
             manifest_packaging=packaging_value,
+        )
+
+    # Multi-service workspaces (e.g. linked frontend + backend repos) cannot use the
+    # single-app PREVIEW path - it would deploy only one generic ``app`` pod. Use the
+    # MANIFEST path so each service gets its own Deployment/Service.
+    if deployable_service_count > 1:
+        return PreviewDeployPlan(
+            deploy_mode=DeployMode.MANIFEST,
+            runtime_mode=runtime,
+            enable_postgres=enable_postgres,
+            enable_redis=enable_redis,
+            skip_local_cluster=False,
+            reason=(
+                f"Workspace has {deployable_service_count} services; using per-service "
+                "manifest deploy"
+            ),
+            manifest_packaging=packaging_value or KubernetesPackaging.RAW_MANIFESTS.value,
         )
 
     return PreviewDeployPlan(

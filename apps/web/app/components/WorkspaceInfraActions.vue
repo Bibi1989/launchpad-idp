@@ -452,6 +452,7 @@ function downloadWorkflowYaml() {
             :disabled="disabled || (mode === 'selection' && !config.provision.enabled)"
             @change="setProvisionEngine(($event.target as HTMLSelectElement).value as ProvisionEngine)"
           >
+            <option value="launch_script">LaunchProvision.sh</option>
             <option value="terraform">{{ t('workspaceIde.engines.terraform') }}</option>
             <option value="opentofu">{{ t('workspaceIde.engines.opentofu') }}</option>
             <option value="pulumi">{{ t('workspaceIde.engines.pulumi') }}</option>

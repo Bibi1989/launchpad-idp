@@ -13,6 +13,7 @@ from app.schemas.cloud import (
     AzureResources,
     CloudConfig,
     CloudCredentials,
+    CloudPluginTarget,
     CloudProvider,
     CloudflareCloudConfig,
     CloudflareResources,
@@ -62,7 +63,12 @@ def needs_cloud_retarget(
     mode = (deploy_mode or DeployMode.PREVIEW.value).strip().lower()
     if provider == CloudProvider.LOCAL.value:
         return True
-    return mode in {DeployMode.ATTACH.value, DeployMode.COMPOSE.value}
+    return mode in {
+        DeployMode.ATTACH.value,
+        DeployMode.COMPOSE.value,
+        DeployMode.DOCKER_COMPOSE.value,
+        DeployMode.DOCKER_COMPOSE_UNDERSCORE.value,
+    }
 
 
 def promote_cloud_deploy_mode(
@@ -149,11 +155,11 @@ def apply_primary_service_selection(
 
 def default_region(provider: CloudProvider) -> str:
     if provider == CloudProvider.GCP:
-        return "us-central1"
+        return "europe-west3"
     if provider == CloudProvider.AWS:
-        return "us-east-1"
+        return "eu-central-1"
     if provider == CloudProvider.AZURE:
-        return "eastus"
+        return "westeurope"
     return "auto"
 
 
@@ -313,6 +319,7 @@ def build_cloud_promote_wizard_request(
     existing_vpc_id: str | None = None,
     existing_security_group_id: str | None = None,
     image_scan: ImageSecurityScanConfig | None = None,
+    cloud_plugin: CloudPluginTarget | None = None,
 ) -> ProvisioningWizardRequest:
     kubernetes = source.runtime_mode == WorkspaceRuntimeMode.KUBERNETES
     target_kind = promote_runtime_target(source)
@@ -330,7 +337,10 @@ def build_cloud_promote_wizard_request(
     services = list(source.container_scaffold.services or [])
     services = apply_primary_service_selection(services, primary_service)
     # Kubernetes promote must not rewrite imported apps into the Express
-    # status-dashboard scaffold. Instance/VM promote still scaffolds Dockerfiles.
+    # status-dashboard scaffold. Instance/VM promote still scaffolds Dockerfiles for fresh templates.
+    from app.services.iac_generator import is_linked_or_imported_workspace
+
+    is_imported_or_linked = is_linked_or_imported_workspace(request=source)
     scaffold = source.container_scaffold.model_copy(
         update={
             "generate_docker_compose": source.runtime_mode
@@ -338,7 +348,7 @@ def build_cloud_promote_wizard_request(
             "services": services,
             **(
                 {"enabled": False, "generate_dockerfile": False}
-                if kubernetes
+                if (kubernetes or is_imported_or_linked)
                 else {"enabled": True, "generate_dockerfile": True}
             ),
         },
@@ -385,19 +395,27 @@ def build_cloud_promote_wizard_request(
         container_scaffold=scaffold,
         running_instance=running_instance,
     )
+    from app.services.runtime_mode import wants_ansible_config
     from app.services.scaffold_cloud_deploy import ansible_config_for_runtime
 
-    ansible = ansible_config_for_runtime(
-        source=source.ansible,
-        runtime_mode=runtime_mode,
-        running_instance=running_instance,
-    )
+    if wants_ansible_config(
+        source.ansible,
+        iac_engine=(source.iac_engine.value if source.iac_engine else None),
+        config_tool=source.config_tool.value,
+    ):
+        ansible = ansible_config_for_runtime(
+            source=source.ansible,
+            runtime_mode=runtime_mode,
+            running_instance=running_instance,
+        )
+    else:
+        ansible = source.ansible
     if kubernetes:
         ansible = source.ansible
 
-    return ProvisioningWizardRequest(
+    request = ProvisioningWizardRequest(
         name=workspace_name,
-        iac_engine=source.iac_engine or IaCEngine.TERRAFORM,
+        iac_engine=source.iac_engine or IaCEngine.LAUNCH_SCRIPT,
         cloud=cloud,
         credentials=credentials,
         run_init=False,
@@ -410,7 +428,14 @@ def build_cloud_promote_wizard_request(
         container_scaffold=scaffold,
         dependencies=source.dependencies,
         ansible=ansible,
+        config_tool=source.config_tool,
+        cloud_plugin=cloud_plugin or source.cloud_plugin,
     )
+    if cloud_plugin is not None:
+        from app.services.cloud_plugin_defaults import apply_cloud_plugin_defaults
+
+        return apply_cloud_plugin_defaults(request, cloud_plugin)
+    return request
 
 
 def resolve_attach_running_instance(

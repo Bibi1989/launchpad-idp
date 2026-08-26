@@ -6,27 +6,73 @@ import type {
   DependencyPlacement,
   MessageBrokerKind,
   WorkloadDependenciesConfig,
+  WorkspaceRuntimeMode,
 } from '~/types/provisioning'
 
 const dependencies = defineModel<WorkloadDependenciesConfig>('dependencies', { required: true })
 
 const { t } = useI18n()
 
-const props = defineProps<{
-  provider: CloudProvider
-  gcpCloudSql?: boolean
-  gcpCloudSqlEngine?: 'postgres' | 'mysql' | 'mariadb'
-  gcpMemorystore?: boolean
-  gcpMemorystoreEngine?: 'redis' | 'memcached'
-  awsRds?: boolean
-  awsRdsEngine?: 'postgres' | 'mysql' | 'mariadb'
-  awsElasticache?: boolean
-  awsElasticacheEngine?: 'redis' | 'memcached'
-  azureCosmosDb?: boolean
-  azureCosmosApi?: 'mongodb' | 'sql'
-  azureRedisCache?: boolean
-  disabled?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    provider: CloudProvider
+    /** Runtime mode gates which placements are offered (see availablePlacements). */
+    runtimeMode?: WorkspaceRuntimeMode
+    gcpCloudSql?: boolean
+    gcpCloudSqlEngine?: 'postgres' | 'mysql' | 'mariadb'
+    gcpMemorystore?: boolean
+    gcpMemorystoreEngine?: 'redis' | 'memcached'
+    awsRds?: boolean
+    awsRdsEngine?: 'postgres' | 'mysql' | 'mariadb'
+    awsElasticache?: boolean
+    awsElasticacheEngine?: 'redis' | 'memcached'
+    azureCosmosDb?: boolean
+    azureCosmosApi?: 'mongodb' | 'sql'
+    azureRedisCache?: boolean
+    disabled?: boolean
+  }>(),
+  {
+    runtimeMode: 'kubernetes',
+  },
+)
+
+/**
+ * Placement options offered per runtime mode:
+ *  - running_instance: external only (managed URL / bring-your-own).
+ *  - docker_compose:   in-cluster (compose service) or external.
+ *  - local kubernetes: in-cluster (local Docker pod) or external.
+ *  - cloud kubernetes: in-cluster pod, managed cloud (when available), external.
+ */
+function availablePlacements(key: DataStoreKind): DependencyPlacement[] {
+  if (props.runtimeMode === 'running_instance') return ['external']
+  if (props.runtimeMode === 'docker_compose') return ['in_cluster', 'external']
+  const placements: DependencyPlacement[] = ['in_cluster']
+  if (managedAvailable(key)) placements.push('managed')
+  placements.push('external')
+  return placements
+}
+
+function placementAvailable(key: DataStoreKind, placement: DependencyPlacement): boolean {
+  return availablePlacements(key).includes(placement)
+}
+
+/** In-cluster reads as a local Docker datastore for local/compose runtimes. */
+const inClusterLabelKey = computed(() =>
+  props.provider === 'local' || props.runtimeMode === 'docker_compose'
+    ? 'scaffold.dependencies.localDocker'
+    : 'scaffold.dependencies.inCluster',
+)
+
+function setStoreSecretRef(key: DataStoreKind, ref: string) {
+  dependencies.value = {
+    ...dependencies.value,
+    [key]: { ...dependencies.value[key], secret_ref: ref || null },
+  }
+}
+
+const showKubernetesSecret = computed(
+  () => props.runtimeMode === 'kubernetes' && props.provider !== 'local',
+)
 
 const stores: Array<{
   key: DataStoreKind
@@ -139,13 +185,14 @@ function storeUrlPlaceholder(key: DataStoreKind): string {
 
 function toggleStore(key: DataStoreKind, enabled: boolean) {
   const current = storeRef(key)
+  // On enable, coerce placement into what this runtime mode allows (e.g. instance
+  // mode only offers external, so a stale in_cluster/managed choice is corrected).
+  const allowed = availablePlacements(key)
+  const placement =
+    enabled && !allowed.includes(current.placement) ? allowed[0] : current.placement
   dependencies.value = {
     ...dependencies.value,
-    [key]: {
-      ...current,
-      enabled,
-      placement: enabled && !managedAvailable(key) ? 'in_cluster' : current.placement,
-    },
+    [key]: { ...current, enabled, placement },
   }
 }
 
@@ -217,6 +264,7 @@ function setBrokerUrl(key: MessageBrokerKind, url: string) {
           class="mt-3 flex flex-wrap gap-2 border-t border-[var(--lp-line)] pt-3"
         >
           <button
+            v-if="placementAvailable(store.key, 'in_cluster')"
             type="button"
             class="rounded-lg border px-3 py-1.5 text-xs transition"
             :class="
@@ -227,9 +275,10 @@ function setBrokerUrl(key: MessageBrokerKind, url: string) {
             :disabled="disabled"
             @click="setPlacement(store.key, 'in_cluster')"
           >
-            {{ t('scaffold.dependencies.inCluster') }}
+            {{ t(inClusterLabelKey) }}
           </button>
           <button
+            v-if="placementAvailable(store.key, 'managed')"
             type="button"
             class="rounded-lg border px-3 py-1.5 text-xs transition"
             :class="
@@ -237,12 +286,13 @@ function setBrokerUrl(key: MessageBrokerKind, url: string) {
                 ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10 text-[var(--lp-text)]'
                 : 'border-[var(--lp-line)] text-[var(--lp-muted)] hover:bg-[var(--lp-panel-2)]'
             "
-            :disabled="disabled || !managedAvailable(store.key)"
+            :disabled="disabled"
             @click="setPlacement(store.key, 'managed')"
           >
             {{ t('scaffold.dependencies.managedCloud') }}
           </button>
           <button
+            v-if="placementAvailable(store.key, 'external')"
             type="button"
             class="rounded-lg border px-3 py-1.5 text-xs transition"
             :class="
@@ -256,34 +306,38 @@ function setBrokerUrl(key: MessageBrokerKind, url: string) {
             {{ t('scaffold.dependencies.bringYourOwn') }}
           </button>
           <p
-            v-if="store.key !== 'redis' && storeRef(store.key).placement === 'managed' && !managedAvailable(store.key)"
-            class="text-xs text-amber-400"
-          >
-            {{ t('scaffold.dependencies.enableManagedFirst', { service: store.managedLabel }) }}
-          </p>
-          <p
-            v-else-if="store.key === 'redis' && storeRef(store.key).placement === 'managed' && !managedAvailable(store.key)"
-            class="text-xs text-amber-400"
-          >
-            {{ t('scaffold.dependencies.enableManagedFirst', { service: store.managedLabel }) }}
-          </p>
-          <p
-            v-else-if="storeRef(store.key).placement === 'managed'"
+            v-if="storeRef(store.key).placement === 'managed'"
             class="text-xs text-[var(--lp-muted)]"
           >
             {{ t('scaffold.dependencies.managedHint') }}
           </p>
-          <label v-if="storeRef(store.key).placement === 'external'" class="block w-full space-y-1">
-            <span class="lp-label">{{ t('scaffold.dependencies.connectionUrl') }}</span>
-            <input
-              :value="storeRef(store.key).connection_url || ''"
-              type="text"
-              class="lp-input font-mono text-xs"
-              :placeholder="storeUrlPlaceholder(store.key)"
-              :disabled="disabled"
-              @input="setStoreUrl(store.key, ($event.target as HTMLInputElement).value)"
-            >
-          </label>
+          <template v-if="storeRef(store.key).placement === 'external'">
+            <label class="block w-full space-y-1">
+              <span class="lp-label">{{ t('scaffold.dependencies.connectionUrl') }}</span>
+              <input
+                :value="storeRef(store.key).connection_url || ''"
+                type="text"
+                class="lp-input font-mono text-xs"
+                :placeholder="storeUrlPlaceholder(store.key)"
+                :disabled="disabled"
+                @input="setStoreUrl(store.key, ($event.target as HTMLInputElement).value)"
+              >
+            </label>
+            <label v-if="showKubernetesSecret" class="block w-full space-y-1">
+              <span class="lp-label">{{ t('scaffold.dependencies.secretRef') }}</span>
+              <input
+                :value="storeRef(store.key).secret_ref || ''"
+                type="text"
+                class="lp-input font-mono text-xs"
+                placeholder="my-db-secret"
+                :disabled="disabled"
+                @input="setStoreSecretRef(store.key, ($event.target as HTMLInputElement).value)"
+              >
+              <span class="block text-[11px] text-[var(--lp-muted)]">
+                {{ t('scaffold.dependencies.secretRefHint') }}
+              </span>
+            </label>
+          </template>
           <p
             v-else-if="storeRef(store.key).placement === 'in_cluster' && storeRef(store.key).enabled"
             class="flex items-start gap-1.5 text-xs text-[var(--lp-muted)]"

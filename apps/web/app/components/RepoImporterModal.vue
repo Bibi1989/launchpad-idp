@@ -21,9 +21,13 @@ const props = withDefaults(
   defineProps<{
     /** Prefill Launchpad project (from project detail / query). */
     launchpadProjectId?: string | null
+    /** 'import' copies the source; 'link' references the repos (tracks changes,
+     *  re-clones on deploy) and the workspace owns only the generated infra. */
+    mode?: 'import' | 'link'
   }>(),
   {
     launchpadProjectId: null,
+    mode: 'import',
   },
 )
 
@@ -53,7 +57,7 @@ const error = ref<string | null>(null)
 const runtimeMode = ref<'kubernetes' | 'docker_compose' | 'running_instance'>('kubernetes')
 const processStrategy = ref<'docker' | 'systemd' | 'pm2'>('docker')
 const reverseProxy = ref<'none' | 'nginx' | 'caddy'>('none')
-const iacEngine = ref<'terraform' | 'opentofu' | 'pulumi'>('terraform')
+const iacEngine = ref<'launch_script' | 'launchpad' | 'terraform' | 'opentofu' | 'pulumi' | 'ansible'>('launch_script')
 const enableIac = ref(true)
 const enableCicd = ref(false)
 const cicdPlatform = ref<'github' | 'gitlab'>('github')
@@ -316,6 +320,7 @@ async function save() {
       project_id: selectedLaunchpadProjectId.value || null,
       env_vars: envVars.value,
       datastores: datastoreConfigs.value,
+      link_mode: props.mode === 'link',
     })
     open.value = false
     emit('saved', result.workspace_id)
@@ -360,9 +365,11 @@ async function close() {
       <div class="lp-glass my-4 w-full max-w-3xl space-y-5 rounded-2xl border border-[var(--lp-line)] p-6 shadow-2xl">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <h2 class="text-xl font-semibold">{{ t('import.modalTitle') }}</h2>
+            <h2 class="text-xl font-semibold">
+              {{ props.mode === 'link' ? t('import.linkModalTitle') : t('import.modalTitle') }}
+            </h2>
             <p class="mt-1 text-sm text-[var(--lp-muted)]">
-              {{ t('import.modalBlurbFull') }}
+              {{ props.mode === 'link' ? t('import.linkModalBlurb') : t('import.modalBlurbFull') }}
             </p>
           </div>
           <button type="button" class="lp-btn-ghost px-2" :aria-label="t('common.close')" @click="close">
@@ -560,9 +567,11 @@ async function close() {
                 class="lp-input"
                 :disabled="!enableIac || runtimeMode === 'kubernetes'"
               >
+                <option value="launch_script">LaunchProvision.sh (Default)</option>
                 <option value="terraform">Terraform</option>
                 <option value="opentofu">OpenTofu</option>
                 <option value="pulumi">Pulumi</option>
+                <option value="ansible">Ansible</option>
               </select>
             </label>
           </div>

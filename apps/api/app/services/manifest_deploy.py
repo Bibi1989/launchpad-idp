@@ -79,6 +79,12 @@ _HTTP_PORT_PREFERENCE: tuple[int, ...] = (
     15672,
 )
 _NON_HTTP_PORTS = frozenset({5672, 6379, 5432, 3306, 27017, 9092, 9200})
+# Detector/scaffold often stamps Vite/Angular *dev* ports into manifests while the
+# production image is nginx-unprivileged on 8080. When EXPOSE inspect is empty
+# (common after registry remap), keep probing those ports and Ready never succeeds.
+_FRONTEND_DEV_LISTEN_PORTS = frozenset({5173, 5174, 4200})
+_PLATFORM_SPA_LISTEN_PORT = 8080
+_nginx_image_cache: dict[str, bool] = {}
 
 # kubernetes.utils.create_from_dict incorrectly maps autoscaling.k8s.io → AutoscalingV1Api
 # (HPA only). These kinds must go through DynamicClient / CustomObjectsApi.
@@ -659,6 +665,12 @@ def plan_workspace_image_builds(
                 _add(context, df, f"api-server:{tag_suffix}")
                 _add(context, df, f"api:{tag_suffix}")
                 _add(context, df, f"launch-server:{tag_suffix}")
+        # Ensure generic ``app:latest`` alias from the root Dockerfile (if present)
+        # so manifests using the default image name are always buildable.
+        root_df = workspace_root / "Dockerfile"
+        if root_df.is_file():
+            _add(workspace_root, root_df, "app:latest")
+            _add(workspace_root, root_df, "launch-app:latest")
         return builds, required_tags
 
     # Also map detected-stack services when plan is missing but stack metadata exists.
@@ -769,6 +781,26 @@ def collect_workspace_image_tags(workspace_root: Path) -> list[str]:
     return [tag for _, _, tag in builds]
 
 
+def _docker_build_arg_flags(context: Path) -> list[str]:
+    """``--build-arg KEY=VALUE`` flags from Launchpad-written build env in ``context``."""
+    from app.services.env_blueprint import docker_build_args_from_env
+    from app.services.preview_build import (
+        collect_context_build_env,
+        force_frontend_api_build_context,
+    )
+
+    ctx = Path(context)
+    name = ctx.name.lower()
+    is_frontend = any(
+        token in name for token in ("frontend", "web-ui", "web", "client", "ui", "vite", "nuxt")
+    )
+    if is_frontend or (ctx / "index.html").is_file() or (ctx / "vite.config.ts").is_file() or (
+        ctx / "vite.config.js"
+    ).is_file():
+        force_frontend_api_build_context(ctx, api_base="/api")
+    return docker_build_args_from_env(collect_context_build_env(ctx))
+
+
 def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = None) -> list[str]:
     """Build workspace app image(s) and load them into the local cluster so pods pull cleanly.
 
@@ -833,6 +865,7 @@ def build_and_load_kind_images(workspace_root: Path, cluster_name: str | None = 
                         str(df),
                         "--label",
                         f"{BUILD_FINGERPRINT_LABEL}={fingerprint}",
+                        * _docker_build_arg_flags(context),
                         str(context),
                     ],
                     capture_output=True,
@@ -938,13 +971,50 @@ def remap_manifest_image_references(
                 continue
             # Match by repository name when tags differ (launch-web:latest -> remote:tag).
             base = current.split("@", 1)[0]
+            matched = False
             for local_tag, remote_uri in image_map.items():
                 if base.split(":")[0] == local_tag.split(":")[0]:
                     container["image"] = remote_uri
                     container["imagePullPolicy"] = (
                         "IfNotPresent" if "@sha256:" in remote_uri else "Always"
                     )
+                    matched = True
                     break
+            # Fallback: if the manifest uses a generic unqualified name like
+            # ``app:latest`` that doesn't match any planned build tag by repo
+            # name, remap it to the first pushed image. This covers linked-repo
+            # workspaces where IaC generates ``app:latest`` but the build plan
+            # uses the actual service name (e.g. ``launch-test-backend:latest``).
+            if not matched and is_unqualified_local_image(current):
+                tag_suffix = "latest"
+                if ":" in current:
+                    try:
+                        tag_suffix = current.rsplit(":", 1)[1] or "latest"
+                    except Exception:
+                        tag_suffix = "latest"
+                deployment_name = str((doc.get("metadata") or {}).get("name") or "").strip()
+                candidates: list[str] = []
+                if deployment_name:
+                    candidates.append(f"{deployment_name}:{tag_suffix}")
+                    if deployment_name.startswith("launch-"):
+                        candidates.append(
+                            f"{deployment_name.removeprefix('launch-')}:{tag_suffix}"
+                        )
+
+                fallback: str | None = None
+                for cand in candidates:
+                    if cand in image_map:
+                        fallback = image_map[cand]
+                        break
+
+                if fallback is None:
+                    fallback = next(iter(image_map.values()), None)
+
+                if fallback:
+                    container["image"] = fallback
+                    container["imagePullPolicy"] = (
+                        "IfNotPresent" if "@sha256:" in fallback else "Always"
+                    )
 
 
 def _unqualified_deployment_images(documents: list[dict[str, Any]]) -> list[str]:
@@ -1055,8 +1125,10 @@ def build_and_push_workspace_images(
         CloudInstanceComputeError,
         docker_build_without_attestations_cmd,
         docker_env_without_attestations,
+        format_docker_build_timeout_message,
         host_container_platform,
         push_local_image_to_cloud_registry,
+        workspace_docker_build_timeout_seconds,
     )
     from app.services.image_security_scan import (
         ImageSecurityScanError,
@@ -1098,19 +1170,42 @@ def build_and_push_workspace_images(
             provider=cloud_provider,
             platform=build_platform,
         )
-        build_res = subprocess.run(
-            docker_build_without_attestations_cmd(
-                tag=primary,
-                dockerfile=str(df),
-                context=str(context),
+        build_timeout = workspace_docker_build_timeout_seconds()
+        try:
+            build_res = subprocess.run(
+                docker_build_without_attestations_cmd(
+                    tag=primary,
+                    dockerfile=str(df),
+                    context=str(context),
+                    platform=build_platform,
+                    extra_args=[
+                        "--label",
+                        f"{BUILD_FINGERPRINT_LABEL}={fingerprint}",
+                        *_docker_build_arg_flags(context),
+                    ],
+                ),
+                capture_output=True,
+                text=True,
+                timeout=int(build_timeout),
+                env=docker_env_without_attestations(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            detail = format_docker_build_timeout_message(
+                timeout=build_timeout,
+                dockerfile=rel,
                 platform=build_platform,
-                extra_args=["--label", f"{BUILD_FINGERPRINT_LABEL}={fingerprint}"],
-            ),
-            capture_output=True,
-            text=True,
-            timeout=900,
-            env=docker_env_without_attestations(),
-        )
+            )
+            logger.warning(
+                "workspace_docker_build_timeout",
+                image=primary,
+                dockerfile=str(rel),
+                platform=build_platform,
+                timeout=int(build_timeout),
+            )
+            for image_tag in tags:
+                if image_tag in required_tags:
+                    failed_required.append(f"{image_tag} ({rel}): {detail}")
+            continue
         if build_res.returncode != 0:
             detail = (build_res.stderr or build_res.stdout or "").strip()[-800:]
             for image_tag in tags:
@@ -1522,67 +1617,76 @@ def resolve_manifest_workload_image(
     return default_image
 
 
-def inspect_image_exposed_ports(image: str) -> list[int]:
-    """Return EXPOSE ports from a local Docker image (empty if unavailable)."""
+def _local_image_inspect_candidates(image: str) -> list[str]:
+    """Local tag aliases after cloud remap (AR URI → short build tag)."""
+    raw = (image or "").strip()
+    if not raw:
+        return []
+    out: list[str] = [raw]
+    if "/" not in raw:
+        return out
+    short = raw.rsplit("/", 1)[-1]
+    if short and short not in out:
+        out.append(short)
+    name, _, tag = short.partition(":")
+    tag = tag or "latest"
+    if name and not name.startswith("launch-"):
+        launch_tag = f"launch-{name}:{tag}"
+        if launch_tag not in out:
+            out.append(launch_tag)
+    return out
+
+
+def _docker_inspect_format(image: str, fmt: str, *, allow_pull: bool) -> str | None:
+    """Return docker inspect --format output, or None when unavailable."""
     try:
         completed = subprocess.run(
-            [
-                "docker",
-                "image",
-                "inspect",
-                image,
-                "--format",
-                "{{json .Config.ExposedPorts}}",
-            ],
+            ["docker", "image", "inspect", image, "--format", fmt],
             capture_output=True,
             text=True,
             timeout=45,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.info("image_expose_inspect_unavailable", image=image, error=str(exc))
-        return []
+        logger.info("image_inspect_unavailable", image=image, error=str(exc))
+        return None
 
-    if completed.returncode != 0:
-        # Unqualified short names (launch-web:latest, app:latest, <slug>:latest) are built
-        # locally and never exist in a registry - `docker pull` would resolve them to
-        # docker.io/library/<name> and hang for the full timeout. Skip the pull for those;
-        # only registry-qualified images (with a host/) are worth pulling.
-        if is_unqualified_local_image(image):
-            return []
-        # Image may not be local yet - best-effort pull then re-inspect.
-        pull = subprocess.run(
-            ["docker", "pull", image],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
+    if completed.returncode == 0:
+        return (completed.stdout or "").strip()
+
+    if not allow_pull or is_unqualified_local_image(image):
+        return None
+
+    pull = subprocess.run(
+        ["docker", "pull", image],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    if pull.returncode != 0:
+        logger.info(
+            "image_expose_pull_failed",
+            image=image,
+            error=(pull.stderr or pull.stdout or "").strip()[:300],
         )
-        if pull.returncode != 0:
-            logger.info(
-                "image_expose_pull_failed",
-                image=image,
-                error=(pull.stderr or pull.stdout or "").strip()[:300],
-            )
-            return []
+        return None
+    try:
         completed = subprocess.run(
-            [
-                "docker",
-                "image",
-                "inspect",
-                image,
-                "--format",
-                "{{json .Config.ExposedPorts}}",
-            ],
+            ["docker", "image", "inspect", image, "--format", fmt],
             capture_output=True,
             text=True,
             timeout=45,
             check=False,
         )
-        if completed.returncode != 0:
-            return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return (completed.stdout or "").strip()
 
-    raw = (completed.stdout or "").strip()
+
+def _parse_exposed_ports_json(raw: str | None) -> list[int]:
     if not raw or raw == "null":
         return []
     try:
@@ -1598,6 +1702,38 @@ def inspect_image_exposed_ports(image: str) -> list[int]:
         except ValueError:
             continue
     return sorted(set(ports))
+
+
+def inspect_image_exposed_ports(image: str) -> list[int]:
+    """Return EXPOSE ports from a local Docker image (empty if unavailable).
+
+    After cloud push, manifests reference a registry URI while the worker still has
+    the short local tag. Try those aliases before giving up (avoids Vite 5173 probes
+    against nginx :8080 when inspect of the remapped URI alone fails).
+    """
+    candidates = _local_image_inspect_candidates(image)
+    for idx, candidate in enumerate(candidates):
+        allow_pull = idx == 0 and not is_unqualified_local_image(candidate)
+        raw = _docker_inspect_format(
+            candidate,
+            "{{json .Config.ExposedPorts}}",
+            allow_pull=allow_pull,
+        )
+        ports = _parse_exposed_ports_json(raw)
+        if ports:
+            return ports
+    return []
+
+
+def _image_config_runs_nginx(image: str) -> bool:
+    """True when image Entrypoint/Cmd references nginx (name may omit 'nginx')."""
+    fmt = "{{json .Config.Entrypoint}}|{{json .Config.Cmd}}"
+    for idx, candidate in enumerate(_local_image_inspect_candidates(image)):
+        allow_pull = idx == 0 and not is_unqualified_local_image(candidate)
+        raw = _docker_inspect_format(candidate, fmt, allow_pull=allow_pull)
+        if raw and "nginx" in raw.lower():
+            return True
+    return False
 
 
 def _manifest_container_port(container: dict[str, Any]) -> int | None:
@@ -1644,12 +1780,45 @@ def resolve_workload_listen_port(
     Helm charts often keep Deployment containerPort at the chart default while
     ``service.targetPort`` already carries the real listen port - honor that too.
     """
+    exposed = exposed_ports if exposed_ports is not None else inspect_image_exposed_ports(image)
+
+    if _is_nginx_image(image):
+        for preferred in (8080, 80):
+            if preferred in exposed:
+                return preferred
+        if manifest_port in _FRONTEND_DEV_LISTEN_PORTS and not exposed:
+            return _PLATFORM_SPA_LISTEN_PORT
+        if manifest_port == 8080 and 80 not in exposed and 8080 not in exposed:
+            # Linked-repo Dockerfiles often use nginx:alpine on 80 while scaffold
+            # manifests still declare 8080 (nginx-unprivileged default).
+            return 80
+        if not exposed:
+            return _PLATFORM_SPA_LISTEN_PORT
+
+    # When the manifests declare a port, but the image actually exposes a
+    # different HTTP port, prefer the image to avoid probe/traffic
+    # mismatches (common for generated/link-repo frontends).
     if manifest_port is not None and manifest_port != 80:
+        if manifest_port in exposed:
+            return manifest_port
+        httpish = [p for p in exposed if p not in _NON_HTTP_PORTS]
+        if httpish:
+            for preferred in _HTTP_PORT_PREFERENCE:
+                if preferred in httpish:
+                    return preferred
+            return httpish[0]
+        # Empty EXPOSE inspect + Vite/Angular scaffold port → platform SPA default.
+        # Import-repo images that truly listen on 5173 still win when EXPOSE lists it.
+        if manifest_port in _FRONTEND_DEV_LISTEN_PORTS:
+            return _PLATFORM_SPA_LISTEN_PORT
         return manifest_port
     if service_target_port is not None and service_target_port != 80:
+        if service_target_port in exposed:
+            return service_target_port
+        if service_target_port in _FRONTEND_DEV_LISTEN_PORTS and not exposed:
+            return _PLATFORM_SPA_LISTEN_PORT
         return service_target_port
 
-    exposed = exposed_ports if exposed_ports is not None else inspect_image_exposed_ports(image)
     for preferred in _HTTP_PORT_PREFERENCE:
         if preferred in exposed:
             return preferred
@@ -1663,8 +1832,31 @@ def resolve_workload_listen_port(
 
 
 def _is_nginx_image(image: str) -> bool:
-    return "nginx" in image.lower()
-
+    """True for nginx runtimes, including remapped SPA tags without 'nginx' in the name."""
+    key = (image or "").strip()
+    if not key:
+        return False
+    cached = _nginx_image_cache.get(key)
+    if cached is not None:
+        return cached
+    if "nginx" in key.lower():
+        _nginx_image_cache[key] = True
+        return True
+    # Platform SPA Dockerfiles use nginxinc/nginx-unprivileged but push as
+    # ``…/test-frontend:latest``. Detect via image config when docker is available.
+    result = _image_config_runs_nginx(key)
+    if not result:
+        # Heuristic: frontend-named image that only EXPOSEs 80/8080 is the SPA runtime.
+        exposed = inspect_image_exposed_ports(key)
+        short = key.rsplit("/", 1)[-1].lower()
+        if exposed and set(exposed).issubset({80, 8080}):
+            if any(
+                token in short
+                for token in ("frontend", "web", "ui", "client", "vite", "spa", "nuxt")
+            ):
+                result = True
+    _nginx_image_cache[key] = result
+    return result
 
 def _align_container_port_and_probes(
     container: dict[str, Any],
@@ -1703,7 +1895,7 @@ def _align_container_port_and_probes(
         http_get = probe.get("httpGet")
         if isinstance(http_get, dict):
             http_get["port"] = listen_port
-            http_get.setdefault("path", "/")
+            http_get["path"] = _nginx_probe_path(str(http_get.get("path") or ""))
             continue
         tcp = probe.get("tcpSocket")
         if isinstance(tcp, dict):
@@ -1823,6 +2015,13 @@ def _ensure_non_nginx_runtime_resources(container: dict[str, Any], *, image: str
     if lim_cpu is None or lim_cpu < 500:
         limits["cpu"] = "500m"
 
+
+def _nginx_probe_path(path: str | None) -> str:
+    cleaned = (path or "").strip()
+    if cleaned in {"", "/health", "/healthz"}:
+        return "/"
+    return cleaned or "/"
+
 def patch_manifest_documents(
     documents: list[dict[str, Any]],
     *,
@@ -1929,6 +2128,7 @@ def patch_manifest_documents(
         if kind == "Service":
             _patch_service_for_preview(doc, target_port=listen_port)
         patched.append(doc)
+    _align_launch_service_ports(patched)
     return patched
 
 
@@ -2025,6 +2225,21 @@ _CORS_ENV_NAMES: tuple[str, ...] = (
     "CORS_ALLOW_ORIGIN",
 )
 
+# Conventional public API-base keys for SPA/SSR frontends (mirrors service_connection_env).
+_FRONTEND_API_ENV_KEYS: tuple[str, ...] = (
+    "API_URL",
+    "BACKEND_URL",
+    "VITE_API_URL",
+    "VITE_API_BASE_URL",
+    "VUE_APP_API_URL",
+    "PUBLIC_API_URL",
+    "NG_APP_API_URL",
+    "NEXT_PUBLIC_API_URL",
+    "NEXT_PUBLIC_API_BASE_URL",
+    "NUXT_PUBLIC_API_URL",
+    "NUXT_PUBLIC_API_BASE",
+)
+
 
 def merge_preview_cors_origin(
     extra_env: dict[str, str] | None, origin: str | None
@@ -2053,10 +2268,281 @@ def merge_preview_cors_origin(
     return merged
 
 
-def inject_extra_env_into_documents(
-    documents: list[dict[str, Any]], extra_env: dict[str, str] | None
+def _is_frontend_workload_name(name: str) -> bool:
+    lowered = (name or "").strip().lower()
+    return any(token in lowered for token in ("frontend", "web", "ui", "client", "nuxt", "vite", "next"))
+
+
+def _is_backend_workload_name(name: str) -> bool:
+    lowered = (name or "").strip().lower()
+    if _is_frontend_workload_name(lowered):
+        return False
+    return any(token in lowered for token in ("backend", "api", "server", "svc"))
+
+
+def discover_backend_service_url(documents: list[dict[str, Any]]) -> str | None:
+    """Pick ``http://<backend-service>:<port>`` from workspace Service manifests."""
+    candidates: list[tuple[int, str]] = []
+    for doc in documents:
+        if not isinstance(doc, dict) or str(doc.get("kind") or "") != "Service":
+            continue
+        name = str((doc.get("metadata") or {}).get("name") or "").strip()
+        if not name or name in {"app", "postgres", "redis", "mysql", "mongodb"}:
+            continue
+        ports = ((doc.get("spec") or {}).get("ports")) or []
+        port: int | None = None
+        for item in ports:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("port")
+            if isinstance(raw, int) and raw > 0:
+                port = raw
+                break
+            if isinstance(raw, str) and raw.strip().isdigit():
+                port = int(raw.strip())
+                break
+        if port is None:
+            continue
+        score = 0
+        if _is_backend_workload_name(name):
+            score += 2
+        if name.endswith("-service"):
+            score += 1
+        if _is_frontend_workload_name(name):
+            score -= 3
+        candidates.append((score, f"http://{name}:{port}"))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1] if candidates[0][0] >= 0 else None
+
+
+def frontend_api_env_from_backend_url(backend_url: str | None) -> dict[str, str]:
+    """Map a backend base URL onto conventional frontend public API env keys."""
+    url = (backend_url or "").strip().rstrip("/")
+    if not url:
+        return {}
+    return {key: url for key in _FRONTEND_API_ENV_KEYS}
+
+
+def same_origin_frontend_api_env(path: str = "/api") -> dict[str, str]:
+    """Browser-safe API base for Ingress path routing (``/api`` → backend Service)."""
+    base = (path or "/api").strip() or "/api"
+    if not base.startswith("/"):
+        base = f"/{base}"
+    return {key: base.rstrip("/") or "/api" for key in _FRONTEND_API_ENV_KEYS}
+
+
+_FRONTEND_API_PROXY_CONFIGMAP = "launchpad-frontend-api-proxy"
+_FRONTEND_API_PROXY_VOLUME = "launchpad-api-proxy"
+
+# Rewrite already-baked JS that concatenated a missing Vite env into the literal
+# string "undefined" (e.g. http://host/undefined/health → /api/health).
+_FRONTEND_UNDEFINED_REWRITE_SCRIPT = """\
+ROOT="${LAUNCHPAD_WEB_ROOT:-/usr/share/nginx/html}"
+if [ -d "$ROOT" ]; then
+  find "$ROOT" -type f \\( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.html' \\) 2>/dev/null \\
+    | while IFS= read -r f; do
+        sed -i \\
+          -e 's|undefined/health|/api/health|g' \\
+          -e 's|undefined/api|/api|g' \\
+          -e 's|/undefined/|/api/|g' \\
+          -e 's|"undefined/"|"/api/"|g' \\
+          -e "s|'undefined/'|'/api/'|g" \\
+          -e 's|"undefined"|"/api"|g' \\
+          -e "s|'undefined'|'/api'|g" \\
+          "$f" 2>/dev/null || true
+      done
+fi
+exec nginx -g 'daemon off;'
+"""
+
+
+def _nginx_api_proxy_conf(*, backend_host: str, backend_port: int, listen_port: int = 8080) -> str:
+    """Nginx config that serves the SPA and proxies ``/api`` to the backend Service."""
+    host = (backend_host or "").strip() or "backend"
+    port = int(backend_port) if backend_port else 8080
+    listen = int(listen_port) if listen_port else 8080
+    return f"""\
+server {{
+    listen {listen};
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location = /healthz {{
+        add_header Content-Type text/plain;
+        return 200 'ok';
+    }}
+
+    # Browser calls /api/...; strip the prefix and forward to the in-cluster backend.
+    location /api/ {{
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://{host}:{port}/;
+    }}
+
+    location = /api {{
+        return 302 /api/;
+    }}
+
+    location / {{
+        try_files $uri $uri/ /index.html;
+    }}
+}}
+"""
+
+
+def _frontend_container_listen_port(container: dict[str, Any], *, fallback: int) -> int:
+    port = _manifest_container_port(container)
+    if port is not None and port > 0:
+        return port
+    return fallback if fallback > 0 else _PLATFORM_SPA_LISTEN_PORT
+
+
+def _should_mount_nginx_api_proxy(*, image: str, dep_name: str, listen_port: int) -> bool:
+    """Only override nginx SPA entrypoints - never Node/Next command forms."""
+    if _is_nginx_image(image):
+        return True
+    if listen_port in (80, _PLATFORM_SPA_LISTEN_PORT) and _is_frontend_workload_name(dep_name):
+        return True
+    return False
+
+
+def inject_frontend_api_proxy(
+    documents: list[dict[str, Any]],
+    *,
+    backend_url: str | None,
+    listen_port: int = 8080,
 ) -> None:
-    """Add user-defined env vars to every app workload container (in place).
+    """Fix frontend SPA API base permanently for cloud LoadBalancer previews.
+
+    1. Mount nginx ``/api`` reverse-proxy to the backend ClusterIP (when known).
+    2. Rewrite already-baked JS that turned a missing Vite env into the literal
+       string ``undefined`` (``/undefined/health`` → ``/api/health``).
+
+    Skips non-nginx frontends (e.g. Next on 3000) so import-repo Node images are
+    not crashed by an nginx command override.
+    """
+    from urllib.parse import urlparse
+
+    raw = (backend_url or "").strip()
+    backend_host = ""
+    backend_port = 8080
+    if raw:
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        backend_host = (parsed.hostname or "").strip()
+        backend_port = int(parsed.port or 80)
+
+    if not backend_host:
+        return
+
+    for doc in documents:
+        if not isinstance(doc, dict) or str(doc.get("kind") or "") != "Deployment":
+            continue
+        name = str((doc.get("metadata") or {}).get("name") or "")
+        if not _is_frontend_workload_name(name) or _is_datastore_workload(doc):
+            continue
+        pod_spec = ((doc.get("spec") or {}).get("template") or {}).get("spec")
+        if not isinstance(pod_spec, dict):
+            continue
+        containers = [c for c in (pod_spec.get("containers") or []) if isinstance(c, dict)]
+        if not containers:
+            continue
+        container = containers[0]
+        image = str(container.get("image") or "").strip()
+        fe_listen = _frontend_container_listen_port(container, fallback=listen_port)
+        if not _should_mount_nginx_api_proxy(
+            image=image, dep_name=name, listen_port=fe_listen
+        ):
+            continue
+
+        conf = _nginx_api_proxy_conf(
+            backend_host=backend_host,
+            backend_port=backend_port,
+            listen_port=fe_listen,
+        )
+        cm_suffix = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "frontend"
+        cm_name = f"{_FRONTEND_API_PROXY_CONFIGMAP}-{cm_suffix}"[:63].rstrip("-")
+        documents.append(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": cm_name},
+                "data": {"default.conf": conf},
+            }
+        )
+        volumes = list(pod_spec.get("volumes") or [])
+        volumes = [
+            v
+            for v in volumes
+            if not (isinstance(v, dict) and v.get("name") == _FRONTEND_API_PROXY_VOLUME)
+        ]
+        volumes.append(
+            {
+                "name": _FRONTEND_API_PROXY_VOLUME,
+                "configMap": {"name": cm_name},
+            }
+        )
+        pod_spec["volumes"] = volumes
+        mounts = list(container.get("volumeMounts") or [])
+        mounts = [
+            m
+            for m in mounts
+            if not (isinstance(m, dict) and m.get("name") == _FRONTEND_API_PROXY_VOLUME)
+        ]
+        mounts.append(
+            {
+                "name": _FRONTEND_API_PROXY_VOLUME,
+                "mountPath": "/etc/nginx/conf.d/default.conf",
+                "subPath": "default.conf",
+                "readOnly": True,
+            }
+        )
+        container["volumeMounts"] = mounts
+        # Replace ENTRYPOINT+CMD so docker-entrypoint does not try to rewrite the
+        # read-only ConfigMap mount (that warning used to race readiness).
+        container["command"] = ["/bin/sh", "-c"]
+        container["args"] = [_FRONTEND_UNDEFINED_REWRITE_SCRIPT]
+
+def _datastore_env_from_documents(
+    documents: list[dict[str, Any]],
+    *,
+    app_name: str,
+) -> dict[str, str]:
+    """Derive DATABASE_URL / REDIS_URL when in-cluster datastore Deployments exist."""
+    names = {
+        str((doc.get("metadata") or {}).get("name") or "").strip().lower()
+        for doc in documents
+        if isinstance(doc, dict) and str(doc.get("kind") or "") == "Deployment"
+    }
+    db = re.sub(r"[^a-z0-9_]+", "_", (app_name or "app").lower()).strip("_") or "app"
+    out: dict[str, str] = {}
+    if "postgres" in names:
+        out["DATABASE_URL"] = f"postgresql://launchpad:changeme@postgres:5432/{db}"
+    if "redis" in names:
+        out["REDIS_URL"] = "redis://redis:6379/0"
+    if "mysql" in names:
+        out["MYSQL_URL"] = f"mysql://launchpad:changeme@mysql:3306/{db}"
+        out.setdefault("DATABASE_URL", out["MYSQL_URL"])
+    if "mongodb" in names:
+        out["MONGODB_URI"] = (
+            f"mongodb://launchpad:changeme@mongodb:27017/{db}?authSource=admin"
+        )
+    return out
+
+
+def inject_extra_env_into_documents(
+    documents: list[dict[str, Any]],
+    extra_env: dict[str, str] | None,
+    *,
+    only_frontend: bool = False,
+    only_backend: bool = False,
+) -> None:
+    """Add user-defined env vars to app workload containers (in place).
 
     Datastore companions (postgres/redis/…) keep their own env untouched. Existing
     container env entries with the same name are overwritten so the user's value wins.
@@ -2066,6 +2552,19 @@ def inject_extra_env_into_documents(
     for doc in documents:
         if str(doc.get("kind") or "") != "Deployment" or _is_datastore_workload(doc):
             continue
+        name = str((doc.get("metadata") or {}).get("name") or "")
+        if only_frontend and not _is_frontend_workload_name(name):
+            continue
+        if only_backend and (
+            _is_frontend_workload_name(name) or _is_datastore_workload(doc)
+        ):
+            continue
+        if only_backend and not (
+            _is_backend_workload_name(name) or not _is_frontend_workload_name(name)
+        ):
+            # Prefer backend-named workloads; if ambiguous non-frontend, still allow.
+            if _is_frontend_workload_name(name):
+                continue
         pod_spec = ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
         if not isinstance(pod_spec, dict):
             continue
@@ -2144,9 +2643,11 @@ def _harden_launch_workload(doc: dict[str, Any]) -> None:
             continue
         image = str(container.get("image") or "").strip() or "app:latest"
         manifest_port = _manifest_container_port(container)
+        exposed = inspect_image_exposed_ports(image)
         listen_port = resolve_workload_listen_port(
             image=image,
             manifest_port=manifest_port,
+            exposed_ports=exposed,
             service_target_port=None,
         )
         env = {item["name"]: item for item in container.get("env", []) if isinstance(item, dict) and "name" in item}
@@ -2159,6 +2660,58 @@ def _harden_launch_workload(doc: dict[str, Any]) -> None:
         _ensure_non_nginx_runtime_resources(container, image=image)
         _ensure_non_root_user(pod_spec, container, image=image)
         _strip_nginx_only_mounts(pod_spec, container, image=image)
+
+
+def _deployment_app_label(doc: dict[str, Any]) -> str:
+    spec = doc.get("spec") or {}
+    app_label = str(((spec.get("selector") or {}).get("matchLabels") or {}).get("app") or "")
+    if app_label:
+        return app_label
+    tmpl = ((spec.get("template") or {}).get("metadata") or {}).get("labels") or {}
+    return str(tmpl.get("app") or "")
+
+
+def _align_launch_service_ports(documents: list[dict[str, Any]]) -> None:
+    """Keep launch-* Service targetPort in sync after Deployment harden rewrites ports."""
+    listen_by_app: dict[str, int] = {}
+    for doc in documents:
+        if not isinstance(doc, dict) or str(doc.get("kind") or "") != "Deployment":
+            continue
+        if not _is_launch_workload(doc) or _is_datastore_workload(doc):
+            continue
+        app = _deployment_app_label(doc)
+        if not app:
+            continue
+        containers = (
+            ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+        ).get("containers") or []
+        if not containers or not isinstance(containers[0], dict):
+            continue
+        port = _manifest_container_port(containers[0])
+        if port is not None and port > 0:
+            listen_by_app[app] = port
+
+    if not listen_by_app:
+        return
+
+    for doc in documents:
+        if not isinstance(doc, dict) or str(doc.get("kind") or "") != "Service":
+            continue
+        selector = ((doc.get("spec") or {}).get("selector")) or {}
+        app = str(selector.get("app") or "").strip()
+        if not app or app not in listen_by_app:
+            continue
+        target = listen_by_app[app]
+        ports = ((doc.get("spec") or {}).get("ports")) or []
+        for item in ports:
+            if not isinstance(item, dict):
+                continue
+            item["targetPort"] = target
+            # Keep Service port aligned so in-cluster URLs match the listen port.
+            if isinstance(item.get("port"), int) or (
+                isinstance(item.get("port"), str) and str(item.get("port")).isdigit()
+            ):
+                item["port"] = target
 
 
 def _has_preview_target_annotation(doc: dict[str, Any]) -> bool:
@@ -2436,7 +2989,7 @@ def _ensure_non_root_user(
         container_security.pop("runAsUser", None)
         return
 
-    if "nginx" in image_l:
+    if _is_nginx_image(image):
         if pod_security.get("runAsUser") is None:
             pod_security["runAsUser"] = _NGINX_NON_ROOT_UID
         if pod_security.get("runAsGroup") is None:
@@ -2520,6 +3073,7 @@ class ManifestDeployer:
         extra_env: dict[str, str] | None = None,
         enable_postgres: bool = False,
         enable_redis: bool = False,
+        frontend_api_path: str | None = None,
     ) -> ProvisionedResources:
         workload_image = image or self._settings.default_workload_image
         # In-cluster datastores: deploy Postgres/Redis (+ their app-secrets) and capture
@@ -2608,14 +3162,31 @@ class ManifestDeployer:
         )
 
         image_map: dict[str, str] = {}
+        # When image_source is build_registry, always build and push to the
+        # cloud registry, even when the environment provider is "local".
+        # This covers linked-repo workspaces where the user selected
+        # Artifact Registry / ECR as image source on a local K8s cluster.
+        from app.schemas.cloud import KubernetesImageSource
+
+        wants_registry = (
+            (image_source or "").strip().lower()
+            == KubernetesImageSource.BUILD_REGISTRY.value
+        )
         if not use_external and self._settings.kubernetes_enabled:
-            if provider != CloudProvider.LOCAL.value:
+            if provider != CloudProvider.LOCAL.value or wants_registry:
+                from app.services.cloud_promote import default_region
+
+                registry_provider = provider if provider != CloudProvider.LOCAL.value else "gcp"
+                try:
+                    registry_fallback = default_region(CloudProvider(registry_provider))
+                except ValueError:
+                    registry_fallback = "europe-west3"
                 image_map = build_and_push_workspace_images(
                     workspace_root=workspace_root,
                     environment_id=environment_id,
-                    cloud_provider=provider,
+                    cloud_provider=registry_provider,
                     credentials=credentials,
-                    region=(region or "us-central1").strip() or "us-central1",
+                    region=(region or registry_fallback).strip() or registry_fallback,
                     platform=self._provisioner.container_build_platform(),
                     image_scan=image_scan,
                 )
@@ -2628,16 +3199,38 @@ class ManifestDeployer:
             workspace_root,
             namespace=namespace,
         )
+        # When per-stack ``launch-...`` workloads exist, the generic fallback
+        # ``app`` Deployment/Service/pod should not be deployed. Some linked
+        # repository/IaC flows still generate it, which leads to the extra
+        # nginx-fallback pod (and pod readiness failures) even though real
+        # app workloads are present.
+        has_launch_workloads = any(
+            str(doc.get("kind") or "").lower() == "deployment"
+            and str((doc.get("metadata") or {}).get("name") or "").startswith("launch-")
+            for doc in documents
+            if isinstance(doc, dict)
+        )
+        if has_launch_workloads:
+            documents = [
+                doc
+                for doc in documents
+                if not (
+                    isinstance(doc, dict)
+                    and str(doc.get("kind") or "").lower()
+                    in {"deployment", "service", "pod", "statefulset", "daemonset"}
+                    and str((doc.get("metadata") or {}).get("name") or "") == "app"
+                )
+            ]
         if image_map:
             remap_manifest_image_references(documents, image_map)
-        elif self._settings.kubernetes_enabled and provider == CloudProvider.LOCAL.value:
+        elif self._settings.kubernetes_enabled and provider == CloudProvider.LOCAL.value and not wants_registry:
             ensure_local_deployment_images(
                 workspace_root,
                 documents,
                 cluster_name=self._settings.kubernetes_context,
             )
         if (
-            provider != CloudProvider.LOCAL.value
+            (provider != CloudProvider.LOCAL.value or wants_registry)
             and self._settings.kubernetes_enabled
             and not use_external
         ):
@@ -2657,6 +3250,9 @@ class ManifestDeployer:
             # Prefer first remapped remote URI for preview URL / port resolution.
             workload_image = next(iter(image_map.values()), workload_image)
         resources.image = workload_image
+        resources.registry_images = [
+            uri for uri in image_map.values() if isinstance(uri, str) and uri.strip()
+        ]
         host = self._provisioner.workspace_preview_host(
             name=name, environment_id=environment_id, namespace=namespace
         )
@@ -2679,15 +3275,68 @@ class ManifestDeployer:
         frontend_origin = (
             self._provisioner.ingress_preview_url(host=host) if host else None
         )
-        # Datastore URLs first, then user env (user wins), then CORS wiring on top.
-        combined_env = {**datastore_env, **(extra_env or {})}
-        effective_extra_env = merge_preview_cors_origin(combined_env, frontend_origin)
+        # Per-service .env.example / .env.launchpad blueprint (lowest priority).
+        from app.services.env_blueprint import (
+            inject_blueprints_into_documents,
+        )
+
+        inject_blueprints_into_documents(
+            patched,
+            workspace_root=workspace_root,
+            inject_fn=inject_extra_env_into_documents,
+        )
+
+        # Datastore URLs: prefer ephemeral apply, else infer from in-cluster Deployments.
+        # Inject onto backends only so frontends do not get DATABASE_URL by accident.
+        inferred_datastore = _datastore_env_from_documents(patched, app_name=name)
+        backend_datastore = {**inferred_datastore, **datastore_env}
+        if backend_datastore:
+            inject_extra_env_into_documents(
+                patched,
+                backend_datastore,
+                only_backend=True,
+            )
+
+        # User env + CORS on all app workloads (user wins over blueprint).
+        effective_extra_env = merge_preview_cors_origin(dict(extra_env or {}), frontend_origin)
         inject_extra_env_into_documents(patched, effective_extra_env)
+
+        # Ensure frontends receive a backend base URL even when service_comms was
+        # missing from the wizard snapshot (common for linked-repo imports).
+        # Prefer same-origin /api for browser SPAs (Ingress path or frontend nginx proxy).
+        backend_url = discover_backend_service_url(patched)
+        use_same_origin_api = bool(host) or bool(self._provisioner.remote_cluster)
+        api_path = (frontend_api_path or "").strip() or "/api"
+        frontend_api_env = (
+            same_origin_frontend_api_env(api_path)
+            if use_same_origin_api
+            else frontend_api_env_from_backend_url(backend_url)
+        )
+        if frontend_api_env:
+            logger.info(
+                "manifest_frontend_api_url_injected",
+                backend_url=backend_url,
+                same_origin=use_same_origin_api,
+                environment_id=environment_id,
+            )
+            inject_extra_env_into_documents(
+                patched,
+                frontend_api_env,
+                only_frontend=True,
+            )
         # Resolve which workload the preview NodePort exposes (the annotated
         # preview-target, else "app", else the first app workload) so the Service
         # selector matches real pods and the listen port is that workload's port.
         preview_app_label, listen_port = _resolve_preview_target(patched)
         resources.app_label = preview_app_label
+
+        # Cloud LB and local preview NodePorts only expose the frontend. Always rewrite
+        # baked ``undefined`` API bases and proxy /api → backend ClusterIP when a backend Service exists.
+        inject_frontend_api_proxy(
+            patched,
+            backend_url=backend_url,
+            listen_port=listen_port,
+        )
 
         self._provisioner.apply_governance(
             namespace=namespace,
@@ -2839,12 +3488,83 @@ class ManifestDeployer:
                         self._settings.preview_cloud_url_timeout_seconds
                     ),
                 )
+                # Cloud previews skip ingress hosts, so CORS was empty at apply time.
+                # Once the LoadBalancer URL exists, patch it onto backend workloads.
+                if resources.preview_url:
+                    self._patch_backend_cors_origin(
+                        namespace=namespace,
+                        origin=resources.preview_url,
+                    )
         except TimeoutError as exc:
             # Attach resolved resources for the worker so it can persist preview_url/node_port
             # even when readiness times out.
             setattr(exc, "provisioned_resources", resources)
             raise
         return resources
+
+    def _patch_backend_cors_origin(self, *, namespace: str, origin: str) -> None:
+        """Patch CORS_ALLOWED_ORIGINS / FRONTEND_URL onto backend Deployments in-place."""
+        from kubernetes.client.rest import ApiException
+
+        origin = (origin or "").strip().rstrip("/")
+        if not origin or self._provisioner._apps is None:  # noqa: SLF001
+            return
+        try:
+            deploys = self._provisioner._apps.list_namespaced_deployment(  # noqa: SLF001
+                namespace, _request_timeout=15
+            )
+        except ApiException as exc:
+            logger.warning("backend_cors_list_failed", namespace=namespace, error=str(exc)[:200])
+            return
+        for item in getattr(deploys, "items", None) or []:
+            name = getattr(getattr(item, "metadata", None), "name", "") or ""
+            if not name or _is_frontend_workload_name(name):
+                continue
+            if name in {"postgres", "redis", "mysql", "mongodb"}:
+                continue
+            containers = (
+                (((item.spec or None) and item.spec.template and item.spec.template.spec)
+                 and item.spec.template.spec.containers)
+                or []
+            )
+            if not containers:
+                continue
+            container = containers[0]
+            env_list = list(getattr(container, "env", None) or [])
+            env_map = {
+                getattr(entry, "name", ""): entry
+                for entry in env_list
+                if getattr(entry, "name", None)
+            }
+            from kubernetes import client
+
+            for key, value in (
+                ("CORS_ALLOWED_ORIGINS", origin),
+                ("FRONTEND_URL", origin),
+            ):
+                existing = env_map.get(key)
+                if existing is not None:
+                    existing.value = value
+                else:
+                    env_list.append(client.V1EnvVar(name=key, value=value))
+            container.env = env_list
+            try:
+                self._provisioner._apps.patch_namespaced_deployment(  # noqa: SLF001
+                    name, namespace, item, _request_timeout=20
+                )
+                logger.info(
+                    "backend_cors_patched",
+                    namespace=namespace,
+                    deployment=name,
+                    origin=origin,
+                )
+            except ApiException as exc:
+                logger.warning(
+                    "backend_cors_patch_failed",
+                    namespace=namespace,
+                    deployment=name,
+                    error=str(exc)[:200],
+                )
 
     def _strip_preview_incompatible_controllers(self, *, namespace: str) -> None:
         """Remove leftover HPA/VPA that stall kind control-plane reconciliation."""

@@ -59,6 +59,7 @@ export function useProvisioning() {
         resources: input.resources,
       },
       credentials: input.credentials,
+      cloud_plugin: input.cloud_plugin ?? null,
     }
     const projectQuery = input.launchpad_project_id
       ? `?project_id=${encodeURIComponent(input.launchpad_project_id)}`
@@ -91,6 +92,7 @@ export function useProvisioning() {
         resources: input.resources,
       },
       credentials: input.credentials,
+      cloud_plugin: input.cloud_plugin ?? null,
     }
     return apiFetch<IaCBundleSummary>(`/provisioning/workspaces/${workspaceId}`, {
       method: 'PUT',

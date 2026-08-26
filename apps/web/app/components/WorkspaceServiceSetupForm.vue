@@ -8,6 +8,8 @@ import {
   defaultWorkloadDependencies,
   emptyCloudCredentials,
   runningInstanceSchema,
+  ansibleWantedForWorkspace,
+  DEFAULT_INSTANCE_CONFIG_TOOL,
   type ProvisioningWizardInput,
 } from '~/utils/cloudValidation'
 import type {
@@ -17,6 +19,7 @@ import type {
   CostOptimizationConfig,
   FrameworkOption,
   IaCEngine,
+  InstanceConfigTool,
   InfraGenerationConfig,
   KubernetesPackaging,
   KubernetesWorkloadOptions,
@@ -93,7 +96,7 @@ const provider = ref<CloudProvider>('local')
 const hasStoredCredentials = ref(false)
 
 const form = reactive({
-  iac_engine: 'terraform' as IaCEngine,
+  iac_engine: 'launchpad' as IaCEngine,
   run_init: true,
   runtime_mode: 'kubernetes' as WorkspaceRuntimeMode,
   running_instance: defaultRunningInstanceConfig() as RunningInstanceConfig,
@@ -102,6 +105,7 @@ const form = reactive({
   container_scaffold: defaultContainerScaffold() as ContainerScaffoldConfig,
   dependencies: defaultWorkloadDependencies() as WorkloadDependenciesConfig,
   ansible: defaultAnsibleConfig() as AnsibleConfig,
+  config_tool: DEFAULT_INSTANCE_CONFIG_TOOL as InstanceConfigTool,
   env_vars: [] as WorkspaceEnvVar[],
   local: {
     cluster_name: 'launchpad',
@@ -113,6 +117,7 @@ const form = reactive({
     network_topology: 'simple' as 'simple' | 'standard',
     gke: false,
     artifact_registry: false,
+    compute_instance: false,
     secret_backend: 'secret_manager' as 'secret_manager' | 'native_k8s',
     cloud_run: false,
     cloud_functions: false,
@@ -184,7 +189,7 @@ const form = reactive({
 })
 
 const infraGeneration = ref<InfraGenerationConfig>(
-  artifactModeToInfraConfig('iac_only', 'terraform', 'none'),
+  artifactModeToInfraConfig('iac_only', 'launchpad', 'none'),
 )
 const ansibleConfiguratorRef = ref<{
   buildWritableFiles: () => Array<{ path: string; content: string }>
@@ -192,6 +197,29 @@ const ansibleConfiguratorRef = ref<{
 
 const progressPct = computed(() => (currentStep.value / TOTAL_STEPS) * 100)
 const isLocalProvider = computed(() => provider.value === 'local')
+const showInstanceConfigTool = computed(
+  () => form.runtime_mode === 'running_instance' && form.running_instance.kind === 'vm',
+)
+const showAnsibleConfigurator = computed(() =>
+  ansibleWantedForWorkspace({
+    ansibleEnabled: form.config_tool === 'ansible',
+    iacEngine: form.iac_engine,
+    configTool: form.config_tool,
+  }),
+)
+
+watch(
+  () => form.config_tool,
+  (tool) => {
+    if (tool === 'ansible') {
+      form.ansible.enabled = true
+      return
+    }
+    if (form.iac_engine !== 'ansible') {
+      form.ansible.enabled = false
+    }
+  },
+)
 const hasKubernetesRuntime = computed(() => {
   if (provider.value === 'local') return true
   if (provider.value === 'gcp') {
@@ -279,6 +307,8 @@ function applyConfig(config: WorkspaceWizardConfig) {
   }
   form.env_vars = Array.isArray(config.env_vars) ? config.env_vars.map((e) => ({ ...e })) : []
   Object.assign(form.ansible, defaultAnsibleConfig(), config.ansible ?? {})
+  form.config_tool = (config.config_tool
+    ?? (config.ansible?.enabled ? 'ansible' : DEFAULT_INSTANCE_CONFIG_TOOL)) as InstanceConfigTool
   hasStoredCredentials.value = config.has_credentials
   clearCredentials()
 
@@ -430,14 +460,14 @@ function buildPayload(): ProvisioningWizardInput {
     ...form.running_instance,
   })
 
-  const ansibleWanted =
-    form.ansible.enabled
-    || form.iac_engine === 'ansible'
-    || infraGeneration.value.provision.engine === 'ansible'
-    || (
-      form.runtime_mode === 'running_instance'
-      && running_instance.kind === 'vm'
-    )
+  const ansibleWanted = ansibleWantedForWorkspace({
+    ansibleEnabled: form.ansible.enabled,
+    iacEngine:
+      form.iac_engine === 'ansible' || infraGeneration.value.provision.engine === 'ansible'
+        ? 'ansible'
+        : form.iac_engine,
+    configTool: form.config_tool,
+  })
 
   const base = {
     name: workspaceName.value,
@@ -451,6 +481,7 @@ function buildPayload(): ProvisioningWizardInput {
     cost_optimization: form.cost_optimization,
     container_scaffold: containerScaffoldSchema.parse(form.container_scaffold),
     dependencies: form.dependencies,
+    config_tool: form.config_tool,
     ansible: {
       ...form.ansible,
       enabled: ansibleWanted,
@@ -564,12 +595,11 @@ async function onSave() {
       )
     }
     if (
-      form.ansible.enabled
-      || form.iac_engine === 'ansible'
-      || (
-        form.runtime_mode === 'running_instance'
-        && form.running_instance.kind === 'vm'
-      )
+      ansibleWantedForWorkspace({
+        ansibleEnabled: form.ansible.enabled,
+        iacEngine: form.iac_engine,
+        configTool: form.config_tool,
+      })
     ) {
       const targets =
         ansibleConfiguratorRef.value?.buildWritableFiles()
@@ -671,6 +701,12 @@ onMounted(async () => {
           "
           :disabled="saving"
         />
+        <InstanceConfigToolPicker
+          v-if="showInstanceConfigTool"
+          v-model="form.config_tool"
+          :provider="provider"
+          :disabled="saving"
+        />
         <div
           v-if="detectionSummary.length"
           class="rounded-xl border border-[var(--lp-accent)]/25 bg-[var(--lp-accent)]/5 px-3 py-2.5 text-sm text-[var(--lp-text)]"
@@ -703,6 +739,12 @@ onMounted(async () => {
             :workspace-id="workspaceId"
             :disabled="saving"
           />
+          <p
+            v-else
+            class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-surface)]/40 p-4 text-sm text-[var(--lp-muted)]"
+          >
+            {{ t('scaffold.infra.docker.title') }}: {{ t('scaffold.setup.skipped') }}
+          </p>
           <WorkloadDependenciesPicker
             v-model:dependencies="form.dependencies"
             :provider="provider"
@@ -730,7 +772,9 @@ onMounted(async () => {
             <EnvVarsEditor v-model="form.env_vars" />
           </div>
           <AnsibleConfigurator
-            v-if="form.runtime_mode === 'running_instance' || form.runtime_mode === 'docker_compose'"
+            v-if="form.runtime_mode === 'docker_compose'
+              ? form.iac_engine !== 'launchpad'
+              : showAnsibleConfigurator"
             ref="ansibleConfiguratorRef"
             v-model="form.ansible"
             :cloud-provider="provider"
@@ -749,7 +793,9 @@ onMounted(async () => {
             {{ t('scaffold.setup.selectServicesFirst') }}
           </p>
           <AnsibleConfigurator
-            v-if="form.runtime_mode === 'running_instance' && form.running_instance.kind === 'vm'"
+            v-if="showAnsibleConfigurator
+              && form.runtime_mode === 'running_instance'
+              && form.running_instance.kind === 'vm'"
             ref="ansibleConfiguratorRef"
             v-model="form.ansible"
             :cloud-provider="provider"
@@ -810,7 +856,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields :credentials="form.credentials" provider="gcp" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="gcp" override-mode />
         </template>
 
         <template v-else-if="provider === 'aws'">
@@ -839,7 +885,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields :credentials="form.credentials" provider="aws" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="aws" override-mode />
         </template>
 
         <template v-else-if="provider === 'azure'">
@@ -872,7 +918,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields :credentials="form.credentials" provider="azure" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="azure" override-mode />
         </template>
 
         <template v-else>
@@ -893,7 +939,7 @@ onMounted(async () => {
               :disabled="saving"
             />
           </div>
-          <CloudCredentialsFields :credentials="form.credentials" provider="cloudflare" />
+          <CloudCredentialsFields :credentials="form.credentials" provider="cloudflare" override-mode />
         </template>
 
         <div
@@ -908,13 +954,19 @@ onMounted(async () => {
             :kubernetes-disabled="!hasKubernetesRuntime"
             :disabled="saving"
           />
-          <ContainerScaffoldCard
-            v-if="form.container_scaffold.enabled"
-            v-model="form.container_scaffold"
-            class="mt-4"
-            :workspace-id="workspaceId"
-            :disabled="saving"
-          />
+          <div v-if="form.container_scaffold.enabled" class="mt-4">
+            <ContainerScaffoldCard
+              v-model="form.container_scaffold"
+              :workspace-id="workspaceId"
+              :disabled="saving"
+            />
+          </div>
+          <p
+            v-else
+            class="mt-4 rounded-xl border border-[var(--lp-line)] bg-[var(--lp-surface)]/40 p-4 text-sm text-[var(--lp-muted)]"
+          >
+            {{ t('scaffold.infra.docker.title') }}: {{ t('scaffold.setup.skipped') }}
+          </p>
           <CostOptimizationCard
             v-if="infraGeneration.kubernetes.enabled"
             v-model:cost="form.cost_optimization"

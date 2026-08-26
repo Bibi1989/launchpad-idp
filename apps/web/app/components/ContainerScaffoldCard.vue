@@ -5,6 +5,10 @@ import type {
   ProjectStackOption,
   WorkspaceLinkedRepoItem,
 } from '~/types/provisioning'
+import type {
+  DockerfileVerifyResult,
+  DockerfileVerifyServiceSpec,
+} from '~/types/dockerfileVerify'
 import type { PendingWorkspaceRepoLink, WorkspaceSourceMode } from '~/types/workspaceRepo'
 import { defaultContainerServices } from '~/utils/cloudValidation'
 
@@ -193,7 +197,7 @@ function onAppKindChange(svc: ContainerServiceItem) {
 
 function addService() {
   const isSecond = servicesList.value.length === 1
-  const appKind = isSecond && servicesList.value[0].app_kind === 'frontend' ? 'backend' : 'frontend'
+  const appKind = isSecond && servicesList.value[0]?.app_kind === 'frontend' ? 'backend' : 'frontend'
   const nextNum = servicesList.value.length + 1
 
   servicesList.value.push({
@@ -370,6 +374,37 @@ function downloadFile() {
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
 }
+
+// --- Advisory Dockerfile build+run+probe verification (existing workspaces only) ---
+const { verifyWorkspaceDockerfiles } = useProvisioning()
+const verifying = ref(false)
+const verifyError = ref<string | null>(null)
+const verifyResults = ref<DockerfileVerifyResult[]>([])
+
+async function runDockerfileVerify() {
+  if (!props.workspaceId || verifying.value) return
+  verifying.value = true
+  verifyError.value = null
+  try {
+    const specs: DockerfileVerifyServiceSpec[] = servicesList.value.map(s => ({
+      name: s.name || 'app',
+      dockerfile_path: s.dockerfile_path || 'Dockerfile',
+      listen_port: s.listen_port ?? null,
+    }))
+    const res = await verifyWorkspaceDockerfiles(props.workspaceId, specs)
+    verifyResults.value = res.results
+  } catch (err) {
+    verifyError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    verifying.value = false
+  }
+}
+
+function verifyBadgeClass(status: DockerfileVerifyResult['status']): string {
+  if (status === 'verified') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+  if (status === 'warning') return 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+  return 'border-[var(--lp-line)] bg-[var(--lp-panel-2)]/60 text-[var(--lp-muted)]'
+}
 </script>
 
 <template>
@@ -489,7 +524,7 @@ function downloadFile() {
                 class="lp-input py-1 text-xs"
                 placeholder="app"
                 :disabled="disabled"
-                @input="emitServices"
+                @input="emitServices()"
               >
             </div>
 
@@ -499,7 +534,7 @@ function downloadFile() {
                 v-model="svc.stack"
                 class="lp-input py-1 text-xs"
                 :disabled="disabled"
-                @change="emitServices"
+                @change="emitServices()"
               >
                 <option
                   v-for="st in stacks.filter(s => !svc.app_kind || s.category === svc.app_kind)"
@@ -519,7 +554,7 @@ function downloadFile() {
                 class="lp-input py-1 text-xs"
                 placeholder="8080"
                 :disabled="disabled"
-                @input="emitServices"
+                @input="emitServices()"
               >
             </div>
 
@@ -545,6 +580,62 @@ function downloadFile() {
             >
               <span class="material-symbols-outlined text-sm">delete</span>
             </button>
+          </div>
+        </div>
+
+        <!-- Advisory Dockerfile verification (build + run + probe). Existing workspaces only. -->
+        <div v-if="workspaceId" class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-ink)]/30 p-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-xs font-semibold text-[var(--lp-text)]">
+                {{ t('scaffold.containerCard.verifyTitle') }}
+              </p>
+              <p class="text-[11px] text-[var(--lp-muted)]">
+                {{ t('scaffold.containerCard.verifyHint') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="lp-btn-ghost text-xs py-1 px-2.5 inline-flex items-center gap-1 text-[var(--lp-accent)]"
+              :disabled="disabled || verifying"
+              @click="runDockerfileVerify"
+            >
+              <span class="material-symbols-outlined text-sm" :class="verifying ? 'animate-spin' : ''">
+                {{ verifying ? 'progress_activity' : 'play_circle' }}
+              </span>
+              {{ verifying ? t('scaffold.containerCard.verifying') : t('scaffold.containerCard.verifyAction') }}
+            </button>
+          </div>
+
+          <p v-if="verifyError" class="mt-2 text-[11px] text-red-400">{{ verifyError }}</p>
+
+          <div v-if="verifyResults.length" class="mt-3 space-y-2">
+            <div
+              v-for="r in verifyResults"
+              :key="r.service"
+              class="rounded-lg border p-2.5"
+              :class="verifyBadgeClass(r.status)"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-semibold">{{ r.service }}</span>
+                <span class="text-[10px] uppercase tracking-wide">{{ r.status }}</span>
+              </div>
+              <p class="mt-1 text-[11px] opacity-90">
+                <span v-if="r.used_repo_dockerfile">{{ t('scaffold.containerCard.verifyUsedRepo') }}</span>
+                <span v-else-if="r.generated_stack">
+                  {{ t('scaffold.containerCard.verifyGenerated', { stack: r.generated_stack }) }}
+                </span>
+                <span v-if="r.built"> - {{ t('scaffold.containerCard.verifyBuilt') }}</span>
+                <span v-if="r.probe_ok"> - {{ t('scaffold.containerCard.verifyServed') }}</span>
+              </p>
+              <p v-if="r.warning" class="mt-1 text-[11px]">{{ r.warning }}</p>
+              <details v-if="r.logs_tail" class="mt-1">
+                <summary class="cursor-pointer text-[10px] opacity-75">
+                  {{ t('scaffold.containerCard.verifyLogs') }}
+                </summary>
+                <pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[10px]">{{ r.logs_tail }}</pre>
+              </details>
+            </div>
           </div>
         </div>
       </div>

@@ -38,7 +38,7 @@ export function usePromotions() {
       `/environments/${environmentId}/stage-promote`,
       {
         method: 'POST',
-        body: payload,
+        body: payload as unknown as Record<string, unknown>,
         timeoutMs: 120_000,
       },
     )

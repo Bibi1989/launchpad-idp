@@ -462,6 +462,7 @@ def prepare_preview_compose(
     *,
     extra_busy: set[int] | None = None,
     primary_host_preference: int | None = None,
+    connection_env: dict[str, str] | None = None,
 ) -> tuple[Path, list[str]]:
     """Write a preview compose file with conflict-free host port publishes.
 
@@ -486,11 +487,100 @@ def prepare_preview_compose(
     if not isinstance(prepared_src, dict):
         raise ComposeDeployError("Compose file must be a YAML mapping with services")
 
+    # 1. Inject datastores before port remapping so host port conflicts (5432/6379) are remapped
+    src_services = prepared_src.get("services")
+    if isinstance(src_services, dict):
+        conn_env = connection_env or {}
+        wants_postgres = "postgres" in conn_env.get("DATABASE_URL", "").lower() or "postgresql" in conn_env.get("DATABASE_URL", "").lower()
+        wants_redis = "redis" in conn_env.get("REDIS_URL", "").lower() or "redis" in conn_env
+        
+        if wants_postgres and "postgres" not in src_services:
+            src_services["postgres"] = {
+                "image": "postgres:15-alpine",
+                "environment": {
+                    "POSTGRES_USER": "launchpad",
+                    "POSTGRES_PASSWORD": "changeme",
+                    "POSTGRES_DB": "app",
+                },
+                "ports": ["5432:5432"],
+                "restart": "unless-stopped",
+                "healthcheck": {
+                    "test": ["CMD-SHELL", "pg_isready -U launchpad -d app"],
+                    "interval": "10s",
+                    "timeout": "5s",
+                    "retries": 5,
+                },
+            }
+            
+        if wants_redis and "redis" not in src_services:
+            src_services["redis"] = {
+                "image": "redis:7-alpine",
+                "ports": ["6379:6379"],
+                "restart": "unless-stopped",
+                "healthcheck": {
+                    "test": ["CMD", "redis-cli", "ping"],
+                    "interval": "10s",
+                    "timeout": "5s",
+                    "retries": 5,
+                },
+            }
+
     prepared, notes = remap_compose_publish_ports(
         prepared_src,
         extra_busy=extra_busy,
         primary_host_preference=primary_host_preference,
     )
+    
+    services = prepared.get("services")
+    if isinstance(services, dict):
+        preview_names = _compose_preview_service_names_from_data(prepared)
+        
+        # Declare top-level network so service-level network aliases pass compose validation
+        prepared.setdefault("networks", {"default": None})
+
+        # 2. Attach network aliases (api, backend, server) and connection env to backend services
+        for service_name, service_spec in services.items():
+            if not isinstance(service_spec, dict):
+                continue
+            is_ds = service_name.lower() in _DATASTORE_SERVICE_NAMES
+            is_preview_target = service_name.lower() in preview_names
+            
+            # Merge connection environment variables
+            if connection_env:
+                existing_env = service_spec.get("environment")
+                new_env = {}
+                if isinstance(existing_env, dict):
+                    new_env.update(existing_env)
+                elif isinstance(existing_env, list):
+                    for item in existing_env:
+                        if isinstance(item, str) and "=" in item:
+                            k, _, v = item.partition("=")
+                            new_env[k] = v
+                for k, v in connection_env.items():
+                    new_env.setdefault(k, v)
+                if new_env:
+                    service_spec["environment"] = new_env
+
+            # Non-frontend, non-datastore services get network aliases so frontend Nginx / proxies can resolve them
+            if not is_ds and not is_preview_target:
+                networks = service_spec.setdefault("networks", {})
+                if isinstance(networks, dict):
+                    default_net = networks.setdefault("default", {})
+                    if isinstance(default_net, dict):
+                        existing_aliases = list(default_net.get("aliases") or [])
+                        for alias in ("api", "backend", "server", service_name):
+                            if alias not in existing_aliases:
+                                existing_aliases.append(alias)
+                        default_net["aliases"] = existing_aliases
+                
+                # Add depends_on for datastores
+                depends = list(service_spec.get("depends_on") or [])
+                for ds in ("postgres", "redis"):
+                    if ds in services and ds not in depends:
+                        depends.append(ds)
+                if depends:
+                    service_spec["depends_on"] = depends
+
     dest = compose_file.parent / PREVIEW_COMPOSE_FILENAME
     try:
         dest.write_text(
@@ -766,6 +856,7 @@ def deploy_compose(
             compose_file,
             extra_busy=extra_busy or None,
             primary_host_preference=primary_host_preference,
+            connection_env=connection_env,
         )
         for note in port_notes:
             if note not in all_notes:

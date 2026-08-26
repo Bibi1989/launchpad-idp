@@ -47,8 +47,8 @@ export function useDockerfiles() {
       })
       const parsed = dockerfileScanResponseSchema.parse(raw)
       scanResult.value = parsed
-      if (parsed.dockerfiles.length > 0) {
-        const first = parsed.dockerfiles[0]
+      const first = parsed.dockerfiles[0]
+      if (first) {
         selectedPath.value = first.path
         editorContent.value = first.content
       } else {

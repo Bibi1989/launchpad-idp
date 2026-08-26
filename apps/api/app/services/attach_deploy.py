@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, sanitize_log_message
+from app.services.env_blueprint import load_service_env_blueprint, merge_env_layers
 from app.schemas.cloud import (
     CloudCredentials,
     CloudProvider,
@@ -331,8 +332,9 @@ def _try_build_workspace_image(
             tag=tag,
             dockerfile=str(dockerfile),
         )
-        return tag
     try:
+        from app.services.cloud_instance_compute import workspace_docker_build_timeout_seconds
+
         _run(
             [
                 "docker",
@@ -343,7 +345,7 @@ def _try_build_workspace_image(
                 str(dockerfile),
                 str(context),
             ],
-            timeout=600,
+            timeout=workspace_docker_build_timeout_seconds(),
         )
         return tag
     except AttachDeployError:
@@ -591,6 +593,8 @@ def _build_service_image(plan: _AttachServicePlan, environment_id: str) -> str:
     tag = f"lp-ws-{_env_slug(environment_id)}-{plan.name}:local"
     if not _docker_available():
         return tag
+    from app.services.cloud_instance_compute import workspace_docker_build_timeout_seconds
+
     _run(
         [
             "docker",
@@ -601,7 +605,7 @@ def _build_service_image(plan: _AttachServicePlan, environment_id: str) -> str:
             str(plan.dockerfile),
             str(plan.context),
         ],
-        timeout=600,
+        timeout=workspace_docker_build_timeout_seconds(),
     )
     return tag
 
@@ -760,7 +764,10 @@ def _deploy_local_machine_multi(
         )
         if plan.app_kind == "backend":
             backend_ports[plan.name] = container_port
-        env_vars: dict[str, str] = dict(extra_env or {})
+        plan_blueprint: dict[str, str] = {}
+        if plan.context.is_dir():
+            plan_blueprint = load_service_env_blueprint(plan.context)
+        env_vars: dict[str, str] = merge_env_layers(plan_blueprint, extra_env)
         if plan.app_kind == "frontend" and primary_backend is not None:
             be_port = backend_ports.get(
                 primary_backend.name,
@@ -1058,8 +1065,21 @@ def resolve_attach_cloud_provider(
     wizard_cloud_provider: str | None = None,
     credentials: CloudCredentials | None = None,
 ) -> str:
-    """Resolve cloud provider for attach deploy (env → workspace → wizard → creds)."""
-    for candidate in (environment_provider, workspace_provider, wizard_cloud_provider):
+    """Resolve cloud provider for attach deploy (env → workspace → wizard → creds).
+
+    Explicit environment.provider (including Local / sandbox) always wins.
+    Only when the env provider is unset do we fall through to workspace, wizard,
+    then vault credential inference. This prevents Local (Sandbox) attach from
+    being upgraded to GCP/AWS/Azure because a workspace or vault has cloud creds.
+    """
+    env_raw = environment_provider
+    if hasattr(env_raw, "value"):
+        env_raw = getattr(env_raw, "value")
+    if env_raw is not None and str(env_raw).strip() != "":
+        # Explicit choice: do not infer or fall through (local stays local).
+        return _normalize_cloud_provider(str(env_raw))
+
+    for candidate in (workspace_provider, wizard_cloud_provider):
         provider = _normalize_cloud_provider(candidate)
         if provider != CloudProvider.LOCAL.value:
             return provider
@@ -2204,7 +2224,7 @@ def _native_bootstrap_and_start(
             + f"'export NITRO_PORT={listen}' "
             + "'export NITRO_HOST=0.0.0.0' "
             + "'export NODE_ENV=production' "
-            + "'export PATH=/usr/local/bin:$HOME/.local/bin:$PATH' "
+            + "'export PATH=./node_modules/.bin:$APP_CWD/node_modules/.bin:/usr/local/bin:$HOME/.local/bin:$PATH' "
             + "\"exec bash -lc $(printf %q \"$START_CMD\")\" "
             + f"; }} > {start_wrapper}\n"
             + f"chmod +x {start_wrapper}\n"
@@ -2248,7 +2268,7 @@ def _native_bootstrap_and_start(
                 + f"Environment=NITRO_PORT={listen}\n"
                 + "Environment=NITRO_HOST=0.0.0.0\n"
                 + "Environment=NODE_ENV=production\n"
-                + "Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+                + "Environment=PATH=./node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
                 + f"ExecStart={start_wrapper}\n"
                 + "Restart=always\nRestartSec=3\n\n"
                 + "[Install]\nWantedBy=multi-user.target\n"
@@ -2257,6 +2277,20 @@ def _native_bootstrap_and_start(
                 + f"sudo systemctl enable --now {unit}.service\n"
                 + f"sudo systemctl restart {unit}.service\n"
                 + f"sudo systemctl --no-pager --full status {unit}.service || true\n"
+                + health
+                + _vm_reverse_proxy_script(proxy=reverse_proxy, listen=listen)
+            )
+        if strategy in {InstanceProcessStrategy.NPM, InstanceProcessStrategy.NODE}:
+            return (
+                ensure
+                + resolve_env
+                + install_app
+                + placeholder_setup
+                + write_wrapper
+                + f"pkill -f '{start_wrapper}' >/dev/null 2>&1 || true\n"
+                + f"nohup {start_wrapper} > /tmp/launchpad-{unit}.log 2>&1 &\n"
+                + "sleep 2\n"
+                + f"ps aux | grep -v grep | grep -q '{unit}' || true\n"
                 + health
                 + _vm_reverse_proxy_script(proxy=reverse_proxy, listen=listen)
             )
@@ -2280,7 +2314,7 @@ def _native_bootstrap_and_start(
         f"export NITRO_PORT={listen}\n"
         "export NITRO_HOST=0.0.0.0\n"
         "export NODE_ENV=production\n"
-        "export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\"\n"
+        "export PATH=\"./node_modules/.bin:$APP_CWD/node_modules/.bin:/usr/local/bin:$HOME/.local/bin:$PATH\"\n"
         "if [ -f package.json ]; then\n"
         "  if [ -f package-lock.json ]; then npm ci || npm install; "
         "elif [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then pnpm install --frozen-lockfile || pnpm install; "
@@ -3313,6 +3347,43 @@ def deploy_attach(
             update={"process_strategy": InstanceProcessStrategy.DOCKER}
         )
         strategy = InstanceProcessStrategy.DOCKER
+
+    # Create the cloud VM before a long docker build/push so the instance shows up
+    # in the provider console while the image is building.
+    if (
+        kind == RunningInstanceKind.VM
+        and provider
+        not in {CloudProvider.LOCAL.value, ""}
+        and not (running_instance.host or "").strip()
+    ):
+        try:
+            from app.services.cloud_instance_compute import (
+                CloudInstanceComputeError,
+                provision_cloud_vm,
+            )
+
+            running_instance = provision_cloud_vm(
+                running_instance=running_instance,
+                environment_id=environment_id,
+                environment_name=name,
+                cloud_provider=provider,
+                credentials=credentials,
+                listen_port=running_instance.listen_port,
+                org_slug=org_slug,
+                create_vpc=create_vpc,
+                create_subnets=create_subnets,
+                gcp_project_id=gcp_project_id,
+                existing_vpc_id=existing_vpc_id,
+                existing_security_group_id=existing_security_group_id,
+            )
+            logger.info(
+                "attach_cloud_vm_provisioned_before_image",
+                environment_id=environment_id,
+                host=running_instance.host,
+                provider=provider,
+            )
+        except CloudInstanceComputeError as exc:
+            raise AttachDeployError(str(exc)) from exc
 
     needs_image = (
         kind == RunningInstanceKind.SERVERLESS

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -255,3 +256,116 @@ def test_recreate_service_retries_being_deleted_409() -> None:
 def test_clients_ready_false_when_kubernetes_disabled() -> None:
     provisioner = KubernetesProvisioner(Settings(kubernetes_enabled=False))
     assert provisioner.clients_ready is False
+
+
+def test_local_sandbox_deploy_uses_kind_load_not_gcp_push(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Local Sandbox deployments on a local cluster must build and load images into Kind/k3s
+    rather than pushing to GCP Artifact Registry.
+    """
+    from app.services.manifest_deploy import ManifestDeployer
+
+    provisioner = MagicMock()
+    provisioner.remote_cluster = False
+    provisioner.container_build_platform.return_value = "linux/amd64"
+    settings = Settings(kubernetes_enabled=True, default_workload_image="app:latest")
+    deployer = ManifestDeployer(provisioner=provisioner, settings=settings)
+
+    # Setup minimal workspace files
+    (tmp_path / "package.json").write_text("{}")
+    manifests_dir = tmp_path / "infra" / "k8s" / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    (manifests_dir / "app.yaml").write_text(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web-frontend\nspec:\n"
+        "  selector:\n    matchLabels:\n      app: web\n  template:\n    metadata:\n"
+        "      labels:\n        app: web\n    spec:\n      containers:\n      - name: app\n"
+        "        image: nginx:alpine\n"
+    )
+
+    build_kind_called = []
+    build_push_called = []
+
+    monkeypatch.setattr(
+        "app.services.manifest_deploy.build_and_load_kind_images",
+        lambda *a, **k: build_kind_called.append((a, k)),
+    )
+    monkeypatch.setattr(
+        "app.services.manifest_deploy.build_and_push_workspace_images",
+        lambda *a, **k: build_push_called.append((a, k)),
+    )
+    monkeypatch.setattr(deployer, "_apply_documents", lambda **_: None)
+    monkeypatch.setattr(deployer, "_strip_preview_incompatible_controllers", lambda **_: None)
+    monkeypatch.setattr(provisioner, "list_allocated_node_ports", lambda **_: set())
+    monkeypatch.setattr(provisioner, "read_namespaced_app_node_port", lambda _ns: None)
+
+    deployer.deploy(
+        workspace_root=tmp_path,
+        namespace="launchpad-env-test",
+        environment_id="env-test",
+        name="test-app",
+        git_branch="main",
+        git_repo_url="https://github.com/acme/test.git",
+        ttl_expires_at=None,
+        cloud_provider="local",
+    )
+
+    assert len(build_kind_called) >= 1
+    assert len(build_push_called) == 0
+
+
+def test_local_sandbox_deploy_injects_frontend_api_proxy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Frontend API proxying must be injected whenever a backend Service exists,
+    including for local cluster NodePort previews.
+    """
+    from app.services.manifest_deploy import ManifestDeployer
+
+    provisioner = MagicMock()
+    provisioner.remote_cluster = False
+    provisioner.container_build_platform.return_value = "linux/amd64"
+    settings = Settings(kubernetes_enabled=True, default_workload_image="app:latest")
+    deployer = ManifestDeployer(provisioner=provisioner, settings=settings)
+
+    (tmp_path / "package.json").write_text("{}")
+    manifests_dir = tmp_path / "infra" / "k8s" / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    (manifests_dir / "services.yaml").write_text(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web-frontend\nspec:\n"
+        "  selector:\n    matchLabels:\n      app: web\n  template:\n    metadata:\n"
+        "      labels:\n        app: web\n    spec:\n      containers:\n      - name: app\n"
+        "        image: nginx:alpine\n"
+        "---\n"
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: api-backend\nspec:\n"
+        "  ports:\n  - port: 8080\n"
+    )
+
+    applied_documents: list[list[dict]] = []
+
+    monkeypatch.setattr(
+        "app.services.manifest_deploy.build_and_load_kind_images", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        deployer, "_apply_documents", lambda namespace, documents: applied_documents.append(documents)
+    )
+    monkeypatch.setattr(deployer, "_strip_preview_incompatible_controllers", lambda **_: None)
+    monkeypatch.setattr(provisioner, "list_allocated_node_ports", lambda **_: set())
+    monkeypatch.setattr(provisioner, "read_namespaced_app_node_port", lambda _ns: None)
+
+    deployer.deploy(
+        workspace_root=tmp_path,
+        namespace="launchpad-env-test",
+        environment_id="env-test",
+        name="test-app",
+        git_branch="main",
+        git_repo_url="https://github.com/acme/test.git",
+        ttl_expires_at=None,
+        cloud_provider="local",
+        frontend_api_path="/api",
+    )
+
+    assert len(applied_documents) == 1
+    docs = applied_documents[0]
+    # Check that ConfigMap for Nginx API proxy was appended
+    configmaps = [d for d in docs if isinstance(d, dict) and d.get("kind") == "ConfigMap" and "proxy" in d.get("metadata", {}).get("name", "")]
+    assert len(configmaps) >= 1
+    cm_data = configmaps[0].get("data", {}).get("default.conf", "")
+    assert "proxy_pass http://api-backend:8080/;" in cm_data
+

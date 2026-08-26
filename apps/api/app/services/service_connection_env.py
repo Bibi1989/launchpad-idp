@@ -105,6 +105,73 @@ def build_connection_env(
     return env
 
 
+def _linked_repo_service_name(entry: dict) -> str:
+    """Stable service name for a linked-repo snapshot entry."""
+    base = str(entry.get("full_name") or "").strip()
+    leaf = base.split("/")[-1] if base else ""
+    if not leaf:
+        url = str(entry.get("git_repo_url") or "").strip().rstrip("/")
+        leaf = url.split("/")[-1]
+        if leaf.endswith(".git"):
+            leaf = leaf[:-4]
+    return re.sub(r"[^a-z0-9-]+", "-", leaf.lower()).strip("-")[:63]
+
+
+def _infer_framework_from_service_name(name: str) -> str:
+    """Best-effort frontend framework hint from a service/repo name."""
+    lowered = (name or "").strip().lower()
+    if not lowered:
+        return ""
+    if "nuxt" in lowered:
+        return "nuxtjs"
+    if "next" in lowered:
+        return "nextjs"
+    if "vue" in lowered:
+        return "vuejs"
+    if "angular" in lowered:
+        return "angular"
+    if "svelte" in lowered:
+        return "svelte"
+    if any(token in lowered for token in ("frontend", "web-ui", "web", "client", "ui")):
+        return "react_vite"
+    return ""
+
+
+def _frameworks_from_snapshot(snapshot: dict) -> dict[str, str]:
+    frameworks: dict[str, str] = {}
+    detection = snapshot.get("detection") if isinstance(snapshot.get("detection"), dict) else {}
+    for svc in (detection or {}).get("services", []):
+        if isinstance(svc, dict) and svc.get("name"):
+            frameworks[str(svc["name"])] = str(svc.get("framework") or "")
+    for entry in snapshot.get("linked_repos") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = _linked_repo_service_name(entry)
+        if name and name not in frameworks:
+            frameworks[name] = _infer_framework_from_service_name(name)
+    for entry in snapshot.get("repos") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("service") or "").strip()
+        if name and name not in frameworks:
+            frameworks[name] = _infer_framework_from_service_name(name)
+    return frameworks
+
+
+def _service_ports_from_snapshot(snapshot: dict) -> dict[str, int]:
+    ports: dict[str, int] = {}
+    detection = snapshot.get("detection") if isinstance(snapshot.get("detection"), dict) else {}
+    for svc in (detection or {}).get("services", []):
+        if not isinstance(svc, dict) or not svc.get("name"):
+            continue
+        raw_port = svc.get("port")
+        if isinstance(raw_port, int) and raw_port > 0:
+            ports[str(svc["name"])] = raw_port
+        elif isinstance(raw_port, str) and raw_port.strip().isdigit():
+            ports[str(svc["name"])] = int(raw_port.strip())
+    return ports
+
+
 def connection_env_from_snapshot(snapshot: dict | None) -> dict[str, str]:
     """Derive inter-service connection env from a persisted wizard snapshot.
 
@@ -123,8 +190,6 @@ def connection_env_from_snapshot(snapshot: dict | None) -> dict[str, str]:
             comms.append(ServiceComms.model_validate(entry))
         except Exception:  # noqa: BLE001, S112 - tolerate malformed persisted data
             continue
-    if not comms:
-        return {}
 
     connections: list[ExplicitConnection] = []
     for entry in snapshot.get("service_connections") or []:
@@ -135,15 +200,113 @@ def connection_env_from_snapshot(snapshot: dict | None) -> dict[str, str]:
         except Exception:  # noqa: BLE001, S112 - tolerate malformed persisted data
             continue
 
-    # Service -> framework (from detection), used to expose the backend URL to a frontend
-    # under its framework's conventional key (NEXT_PUBLIC_/VITE_/NUXT_PUBLIC_/...).
-    frameworks: dict[str, str] = {}
-    detection = snapshot.get("detection") if isinstance(snapshot.get("detection"), dict) else {}
-    for svc in (detection or {}).get("services", []):
-        if isinstance(svc, dict) and svc.get("name"):
-            frameworks[str(svc["name"])] = str(svc.get("framework") or "")
+    existing_services = {c.service for c in comms}
+    for entry in snapshot.get("linked_repos") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = _linked_repo_service_name(entry)
+        if name and name not in existing_services:
+            comms.append(ServiceComms(service=name, capabilities=[]))
+            existing_services.add(name)
+    for entry in snapshot.get("repos") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("service") or "").strip()
+        if name and name not in existing_services:
+            comms.append(ServiceComms(service=name, capabilities=[]))
+            existing_services.add(name)
+    for conn in connections:
+        for name in (conn.source, conn.target):
+            cleaned = str(name or "").strip()
+            if cleaned and cleaned not in existing_services:
+                comms.append(ServiceComms(service=cleaned, capabilities=[]))
+                existing_services.add(cleaned)
 
-    return build_connection_env(comms, connections, frameworks=frameworks)
+    if not comms or not connections:
+        return {}
+
+    frameworks = _frameworks_from_snapshot(snapshot)
+    service_ports = _service_ports_from_snapshot(snapshot)
+    # Only plain service connectors inject inter-service URLs; CORS connectors are
+    # applied to the target's CORS policy at deploy (see cors_origins_from_snapshot).
+    service_conns = [c for c in connections if getattr(c, "kind", "service") != "cors"]
+    env = build_connection_env(
+        comms,
+        service_conns,
+        frameworks=frameworks,
+        service_ports=service_ports or None,
+    )
+    # Apply explicit env-key overrides: expose the target URL under a custom key.
+    for conn in service_conns:
+        expose_as = (getattr(conn, "expose_as", None) or "").strip()
+        if not expose_as:
+            continue
+        target = str(conn.target or "").strip()
+        if not target:
+            continue
+        port = service_ports.get(target) or _DEFAULT_HTTP_PORT
+        env[expose_as] = f"http://{target}:{port}"
+
+    # Explicit CORS connectors add allowed origins to the shared CORS var. The
+    # deploy layer later appends the live preview frontend origin to the same var
+    # (manifest_deploy.merge_preview_cors_origin), so the two compose cleanly.
+    cors_by_target = cors_origins_from_snapshot(snapshot)
+    all_origins: list[str] = []
+    for origins in cors_by_target.values():
+        for origin in origins:
+            if origin not in all_origins:
+                all_origins.append(origin)
+    if all_origins:
+        existing = [p.strip() for p in (env.get("CORS_ALLOWED_ORIGINS") or "").split(",") if p.strip()]
+        for origin in all_origins:
+            if origin not in existing:
+                existing.append(origin)
+        env["CORS_ALLOWED_ORIGINS"] = ",".join(existing)
+    return env
+
+
+def frontend_api_path_from_snapshot(snapshot: dict | None) -> str:
+    """Operator-configured API path for the frontend->backend connector.
+
+    Returns "" (the base URL, the default) unless a service connector sets a path.
+    Normalized to a leading-slash, no-trailing-slash path (e.g. ``/api``).
+    """
+    if not isinstance(snapshot, dict):
+        return ""
+    for entry in snapshot.get("service_connections") or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("kind") or "service").strip().lower() == "cors":
+            continue
+        raw = str(entry.get("api_path") or "").strip().strip("/")
+        if raw:
+            return f"/{raw}"
+    return ""
+
+
+def cors_origins_from_snapshot(snapshot: dict | None) -> dict[str, list[str]]:
+    """Explicit CORS origins per target service, from ``cors`` connectors.
+
+    Returns ``{target_service: [origin, ...]}``. Connectors without an explicit
+    ``cors_origin`` are skipped here; the live preview frontend origin is still
+    wired automatically by the deploy layer (merge_preview_cors_origin).
+    """
+    if not isinstance(snapshot, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for entry in snapshot.get("service_connections") or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("kind") or "service").strip().lower() != "cors":
+            continue
+        target = str(entry.get("target") or "").strip()
+        origin = str(entry.get("cors_origin") or "").strip()
+        if not target or not origin:
+            continue
+        out.setdefault(target, [])
+        if origin not in out[target]:
+            out[target].append(origin)
+    return out
 
 
 def custom_env_from_snapshot(snapshot: dict | None) -> dict[str, str]:

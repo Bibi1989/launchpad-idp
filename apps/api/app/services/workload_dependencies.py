@@ -190,9 +190,19 @@ def dependency_secret_string_data(
     name: str,
     cloud: CloudConfig | None = None,
 ) -> dict[str, str]:
-    """Build Secret stringData entries for enabled datastores."""
+    """Build Secret stringData entries for enabled datastores.
+
+    When an external datastore sets ``secret_ref`` (an existing Kubernetes secret),
+    its connection value is injected from that secret via ``envFrom`` at the
+    deployment layer, so it is not inlined here.
+    """
     data: dict[str, str] = {}
     app_db = name.replace("-", "_")
+
+    def _ext_url(store) -> str:
+        if (getattr(store, "secret_ref", None) or "").strip():
+            return ""  # value comes from the referenced secret (envFrom)
+        return (store.connection_url or "").strip()
 
     if dependencies.postgres.enabled:
         if dependencies.postgres.placement == DependencyPlacement.IN_CLUSTER:
@@ -201,7 +211,7 @@ def dependency_secret_string_data(
                 f"postgresql://launchpad:changeme@postgres:5432/{app_db}"
             )
         elif dependencies.postgres.placement == DependencyPlacement.EXTERNAL:
-            url = (dependencies.postgres.connection_url or "").strip()
+            url = _ext_url(dependencies.postgres)
             if url:
                 data["DATABASE_URL"] = url
         else:
@@ -229,7 +239,7 @@ def dependency_secret_string_data(
             data["MYSQL_URL"] = f"mysql://launchpad:changeme@mysql:3306/{app_db}"
             data.setdefault("DATABASE_URL", data["MYSQL_URL"])
         elif dependencies.mysql.placement == DependencyPlacement.EXTERNAL:
-            url = (dependencies.mysql.connection_url or "").strip()
+            url = _ext_url(dependencies.mysql)
             if url:
                 data["MYSQL_URL"] = url
                 data.setdefault("DATABASE_URL", url)
@@ -246,7 +256,7 @@ def dependency_secret_string_data(
             data["MARIADB_URL"] = f"mysql://launchpad:changeme@mariadb:3306/{app_db}"
             data.setdefault("DATABASE_URL", data["MARIADB_URL"])
         elif dependencies.mariadb.placement == DependencyPlacement.EXTERNAL:
-            url = (dependencies.mariadb.connection_url or "").strip()
+            url = _ext_url(dependencies.mariadb)
             if url:
                 data["MARIADB_URL"] = url
                 data.setdefault("DATABASE_URL", url)
@@ -263,7 +273,7 @@ def dependency_secret_string_data(
                 f"mongodb://launchpad:changeme@mongodb:27017/{app_db}?authSource=admin"
             )
         elif dependencies.mongodb.placement == DependencyPlacement.EXTERNAL:
-            url = (dependencies.mongodb.connection_url or "").strip()
+            url = _ext_url(dependencies.mongodb)
             if url:
                 data["MONGODB_URI"] = url
         else:
@@ -275,7 +285,7 @@ def dependency_secret_string_data(
         if dependencies.redis.placement == DependencyPlacement.IN_CLUSTER:
             data["REDIS_URL"] = "redis://redis:6379/0"
         elif dependencies.redis.placement == DependencyPlacement.EXTERNAL:
-            url = (dependencies.redis.connection_url or "").strip()
+            url = _ext_url(dependencies.redis)
             if url:
                 data["REDIS_URL"] = url
         else:
@@ -302,6 +312,30 @@ def dependency_secret_string_data(
             data.setdefault("AMQP_URL", "amqp://guest:guest@rabbitmq:5672/")
 
     return data
+
+
+def external_secret_names(dependencies: WorkloadDependenciesConfig) -> list[str]:
+    """Existing Kubernetes secret names referenced by external datastores.
+
+    Their keys are injected into the workload via ``envFrom`` at the deployment
+    layer (see k8s_bundle), so an operator can supply DATABASE_URL / REDIS_URL etc.
+    from a pre-existing secret instead of an inline connection string.
+    Order-stable and de-duplicated.
+    """
+    names: list[str] = []
+    for store in (
+        dependencies.postgres,
+        dependencies.mysql,
+        dependencies.mariadb,
+        dependencies.mongodb,
+        dependencies.redis,
+    ):
+        if not store.enabled or store.placement != DependencyPlacement.EXTERNAL:
+            continue
+        ref = (getattr(store, "secret_ref", None) or "").strip()
+        if ref and ref not in names:
+            names.append(ref)
+    return names
 
 
 def init_container_wait_blocks(kinds: list[DataStoreKind]) -> str:
@@ -341,11 +375,11 @@ def init_container_wait_blocks(kinds: list[DataStoreKind]) -> str:
               done
           resources:
             requests:
-              cpu: 10m
-              memory: 16Mi
+              cpu: 50m
+              memory: 64Mi
             limits:
               cpu: 50m
-              memory: 32Mi
+              memory: 64Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -35,12 +35,73 @@ const navItems = computed(() => [
   { key: 'workspaces', label: t('nav.workspaces'), to: '/workspaces', icon: 'layers', match: (path: string) => path.startsWith('/workspaces') },
   { key: 'projects', label: t('nav.projects'), to: '/projects', icon: 'folder_managed', match: (path: string) => path.startsWith('/projects') },
   { key: 'provision', label: t('nav.provision'), to: '/provision', icon: 'schema', match: (path: string) => path.startsWith('/provision') },
+  { key: 'cloudPlugins', label: t('nav.cloudPlugins'), to: '/cloud-plugins', icon: 'cloud', match: (path: string) => path.startsWith('/cloud-plugins') },
   { key: 'hybrid', label: t('nav.hybrid'), to: '/fleet', icon: 'dns', match: (path: string) => path.startsWith('/fleet') || path.startsWith('/hybrid') },
   { key: 'integrations', label: t('nav.integrations'), to: '/integrations', icon: 'hub', match: (path: string) => path.startsWith('/integrations') },
   { key: 'organization', label: t('nav.organization'), to: '/org', icon: 'group', match: (path: string) => path.startsWith('/org') },
   { key: 'settings', label: t('nav.settings'), to: '/settings', icon: 'settings', match: (path: string) => path.startsWith('/settings') },
   { key: 'docs', label: t('nav.docs'), to: '/docs', icon: 'menu_book', match: (path: string) => path.startsWith('/docs') },
 ])
+
+// Collapsible nav groups. Non-grouped items render as standalone links (in their
+// original order). Search still operates over the flat navItems list.
+const navGroupDefs: { key: string; labelKey: string; icon: string; itemKeys: string[] }[] = [
+  { key: 'deploy', labelKey: 'nav.groups.deploy', icon: 'rocket_launch', itemKeys: ['environments', 'launch'] },
+  { key: 'build', labelKey: 'nav.groups.build', icon: 'construction', itemKeys: ['projects', 'workspaces', 'provision'] },
+]
+const groupedKeys = new Set(navGroupDefs.flatMap((g) => g.itemKeys))
+
+const navGroups = computed(() =>
+  navGroupDefs.map((g) => ({
+    key: g.key,
+    label: t(g.labelKey),
+    icon: g.icon,
+    items: g.itemKeys
+      .map((k) => navItems.value.find((item) => item.key === k))
+      .filter((item): item is (typeof navItems.value)[number] => Boolean(item)),
+  })),
+)
+const standaloneNavItems = computed(() => navItems.value.filter((item) => !groupedKeys.has(item.key)))
+// Render order: Home first, then the collapsible groups, then the remaining links.
+const homeNavItems = computed(() => standaloneNavItems.value.filter((item) => item.key === 'home'))
+const otherStandaloneNavItems = computed(() =>
+  standaloneNavItems.value.filter((item) => item.key !== 'home'),
+)
+
+const collapsedGroups = ref<Record<string, boolean>>({})
+const NAV_GROUPS_STORAGE_KEY = 'lp.navCollapsedGroups'
+
+onMounted(() => {
+  try {
+    const raw = localStorage.getItem(NAV_GROUPS_STORAGE_KEY)
+    if (raw) collapsedGroups.value = JSON.parse(raw)
+  } catch {
+    // ignore malformed / unavailable storage
+  }
+})
+
+function isGroupActive(groupKey: string): boolean {
+  const group = navGroups.value.find((g) => g.key === groupKey)
+  return Boolean(group?.items.some((item) => isActive(item.match)))
+}
+
+function isGroupCollapsed(groupKey: string): boolean {
+  // A group containing the active route is always expanded.
+  if (isGroupActive(groupKey)) return false
+  return Boolean(collapsedGroups.value[groupKey])
+}
+
+function toggleGroup(groupKey: string): void {
+  collapsedGroups.value = {
+    ...collapsedGroups.value,
+    [groupKey]: !collapsedGroups.value[groupKey],
+  }
+  try {
+    localStorage.setItem(NAV_GROUPS_STORAGE_KEY, JSON.stringify(collapsedGroups.value))
+  } catch {
+    // ignore storage write failures
+  }
+}
 
 type NavSearchHit = {
   id: string
@@ -305,21 +366,92 @@ watch(
         >
           {{ t('shell.noMenuMatches') }}
         </p>
-        <NuxtLink
-          v-for="item in filteredNavItems"
-          :key="item.to"
-          :to="item.to"
-          class="lp-nav-link"
-          :class="{ 'lp-nav-link-active': isActive(item.match) }"
-        >
-          <span
-            class="material-symbols-outlined text-[1.1rem]"
-            :class="{ filled: isActive(item.match) }"
+
+        <!-- Search active: flat filtered list -->
+        <template v-if="searchQuery.trim()">
+          <NuxtLink
+            v-for="item in filteredNavItems"
+            :key="item.to"
+            :to="item.to"
+            class="lp-nav-link"
+            :class="{ 'lp-nav-link-active': isActive(item.match) }"
           >
-            {{ item.icon }}
-          </span>
-          <span>{{ item.label }}</span>
-        </NuxtLink>
+            <span
+              class="material-symbols-outlined text-[1.1rem]"
+              :class="{ filled: isActive(item.match) }"
+            >
+              {{ item.icon }}
+            </span>
+            <span>{{ item.label }}</span>
+          </NuxtLink>
+        </template>
+
+        <!-- Default: Home, then collapsible groups, then remaining standalone links -->
+        <template v-else>
+          <NuxtLink
+            v-for="item in homeNavItems"
+            :key="item.to"
+            :to="item.to"
+            class="lp-nav-link"
+            :class="{ 'lp-nav-link-active': isActive(item.match) }"
+          >
+            <span
+              class="material-symbols-outlined text-[1.1rem]"
+              :class="{ filled: isActive(item.match) }"
+            >
+              {{ item.icon }}
+            </span>
+            <span>{{ item.label }}</span>
+          </NuxtLink>
+
+          <div v-for="group in navGroups" :key="group.key" class="pt-1">
+            <button
+              type="button"
+              class="lp-nav-link w-full text-left"
+              :aria-expanded="!isGroupCollapsed(group.key)"
+              @click="toggleGroup(group.key)"
+            >
+              <span class="material-symbols-outlined text-[1.1rem]">{{ group.icon }}</span>
+              <span class="flex-1">{{ group.label }}</span>
+              <span class="material-symbols-outlined text-[1.1rem] text-[var(--lp-muted)]">
+                {{ isGroupCollapsed(group.key) ? 'chevron_right' : 'expand_more' }}
+              </span>
+            </button>
+            <div v-show="!isGroupCollapsed(group.key)" class="ml-3 space-y-1 border-l border-[var(--lp-line)] pl-2">
+              <NuxtLink
+                v-for="item in group.items"
+                :key="item.to"
+                :to="item.to"
+                class="lp-nav-link"
+                :class="{ 'lp-nav-link-active': isActive(item.match) }"
+              >
+                <span
+                  class="material-symbols-outlined text-[1.1rem]"
+                  :class="{ filled: isActive(item.match) }"
+                >
+                  {{ item.icon }}
+                </span>
+                <span>{{ item.label }}</span>
+              </NuxtLink>
+            </div>
+          </div>
+
+          <NuxtLink
+            v-for="item in otherStandaloneNavItems"
+            :key="item.to"
+            :to="item.to"
+            class="lp-nav-link"
+            :class="{ 'lp-nav-link-active': isActive(item.match) }"
+          >
+            <span
+              class="material-symbols-outlined text-[1.1rem]"
+              :class="{ filled: isActive(item.match) }"
+            >
+              {{ item.icon }}
+            </span>
+            <span>{{ item.label }}</span>
+          </NuxtLink>
+        </template>
 
         <a
           href="http://localhost:8000/docs"

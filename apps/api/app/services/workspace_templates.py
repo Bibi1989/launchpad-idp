@@ -549,6 +549,31 @@ variable "environment_name" {
 variable "region" {
   type        = string
   description = "Primary cloud region"
+  default     = ""
+}
+
+variable "project_id" {
+  type        = string
+  description = "Project ID"
+  default     = ""
+}
+
+variable "app_listen_port" {
+  type        = number
+  description = "Application listen port"
+  default     = 8080
+}
+
+variable "app_image" {
+  type        = string
+  description = "Container image"
+  default     = ""
+}
+
+variable "ssh_public_key" {
+  type        = string
+  description = "SSH public key"
+  default     = ""
 }
 """,
     ),

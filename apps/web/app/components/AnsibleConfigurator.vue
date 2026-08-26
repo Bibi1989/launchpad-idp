@@ -84,7 +84,8 @@ function syncFromRunningInstance() {
   const strategy = resolveProcessStrategy(ri)
   const mode = ansibleDeployModeFromStrategy(strategy)
   const reverse_proxy = ri.reverse_proxy || 'none'
-  const install_docker = mode === 'docker_run' || mode === 'docker_compose'
+  // ansibleDeployModeFromStrategy only ever yields docker_run / systemd / pm2.
+  const install_docker = mode === 'docker_run'
   const listen = ri.listen_port || config.value.app_listen_port || 8080
 
   let groups = [...(config.value.deploy_user_groups || [])]
@@ -329,11 +330,10 @@ function buildWritableFiles(): Array<{ path: string; content: string }> {
     [ADVANCED_PATHS.playbook]: playbookContent.value,
     [ADVANCED_PATHS.groupVars]: groupVarsContent.value,
   }
-  return base.map((file) =>
-    overrides[file.path] != null
-      ? { ...file, content: overrides[file.path] }
-      : file,
-  )
+  return base.map((file) => {
+    const override = overrides[file.path]
+    return override != null ? { ...file, content: override } : file
+  })
 }
 
 defineExpose({ buildWritableFiles, regenerateAdvancedFromForm })

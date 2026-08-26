@@ -594,7 +594,10 @@ async def test_cancel_provision_stops_without_teardown(
         env_id = environment.id
 
         service = EnvironmentService(session)
-        with patch("app.services.environment.enqueue_teardown_environment") as enqueue:
+        with (
+            patch("app.services.environment.enqueue_teardown_environment") as enqueue,
+            patch("app.services.environment.force_release_state_lock", new=AsyncMock(return_value=False)),
+        ):
             result = await service.cancel_provision(
                 env_id, owner=test_user, correlation_id="corr-stop"
             )
@@ -634,6 +637,50 @@ async def test_cancel_provision_rejects_non_provisioning(
             )
         assert exc.value.status_code == 409
         assert exc.value.detail["code"] == "cancel_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_destroy_after_cancel_provision_with_stale_lock(
+    session_factory: async_sessionmaker[AsyncSession],
+    test_user: User,
+) -> None:
+    async with session_factory() as session:
+        repo = EnvironmentRepository(session)
+        environment = await repo.create(
+            owner_id=test_user.id,
+            name="provisioning-env-stop-destroy",
+            git_branch="main",
+            git_repo_url="https://github.com/acme/app.git",
+            namespace_name="launchpad-env-stop-destroy",
+            ttl_expires_at=datetime.now(UTC) + timedelta(hours=24),
+            cost_estimate_hourly=Decimal("0.42"),
+        )
+        await repo.update_status(environment, EnvironmentStatus.PROVISIONING)
+        await session.commit()
+        env_id = environment.id
+
+        service = EnvironmentService(session)
+        with patch("app.services.environment.force_release_state_lock", new=AsyncMock(return_value=True)):
+            await service.cancel_provision(
+                env_id, owner=test_user, correlation_id="corr-stop-destroy"
+            )
+
+        await session.refresh(environment)
+        assert environment.status == EnvironmentStatus.FAILED
+
+        with (
+            patch("app.services.environment.is_state_locked", new=AsyncMock(return_value=True)),
+            patch("app.services.environment.enqueue_teardown_environment") as enqueue,
+        ):
+            result = await service.request_teardown(
+                env_id, owner=test_user, correlation_id="corr-destroy-after-stop"
+            )
+            enqueue.assert_called_once()
+
+        assert result.status in (
+            EnvironmentStatus.TEARDOWN_PENDING,
+            EnvironmentStatus.TEARDOWN_PENDING.value,
+        )
 
 
 @pytest.mark.asyncio

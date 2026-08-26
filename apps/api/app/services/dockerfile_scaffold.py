@@ -485,12 +485,13 @@ def wire_compose_service_links(
 
 
 _DEFAULT_LISTEN_PORTS: Final[dict[ProjectStack, int]] = {
-    ProjectStack.REACT_VITE: 80,
+    # Nginx-unprivileged runtime containers expose 8080 (non-root).
+    ProjectStack.REACT_VITE: 8080,
     ProjectStack.NEXTJS: 3000,
     ProjectStack.NUXTJS: 3000,
-    ProjectStack.VUEJS: 80,
+    ProjectStack.VUEJS: 8080,
     ProjectStack.SVELTE: 3000,
-    ProjectStack.ANGULAR: 80,
+    ProjectStack.ANGULAR: 8080,
     ProjectStack.DOTNET: 8080,
     ProjectStack.FASTAPI: 8000,
     ProjectStack.FLASK: 5000,
@@ -751,6 +752,10 @@ def _vue_dockerfile(app_name: str, port: int) -> str:
 FROM node:22-alpine AS build
 WORKDIR /src
 COPY . .
+ARG VITE_API_URL=/api
+ARG VUE_APP_API_URL=/api
+ENV VITE_API_URL=$VITE_API_URL
+ENV VUE_APP_API_URL=$VUE_APP_API_URL
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f package-lock.json ]; then npm ci; \\
@@ -876,6 +881,12 @@ def _react_vite_dockerfile(app_name: str, port: int) -> str:
 FROM node:22-alpine AS build
 WORKDIR /src
 COPY . .
+# SPA public API base must be present at build time (Vite inlines import.meta.env.*).
+# Default to same-origin /api so the browser never sees the string "undefined".
+ARG VITE_API_URL=/api
+ARG VITE_API_BASE_URL=/api
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 RUN \\
   if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile; \\
   elif [ -f package-lock.json ]; then npm ci; \\
@@ -885,6 +896,18 @@ RUN npm run build || pnpm run build || yarn build
 
 FROM nginxinc/nginx-unprivileged:alpine AS runtime
 COPY --from=build --chown=101:101 /src/dist /usr/share/nginx/html
+# Default SPA config; Launchpad may replace this at deploy time with an /api proxy.
+RUN cat > /etc/nginx/conf.d/default.conf <<'NGINX_EOF'
+server {{
+  listen 8080;
+  server_name _;
+  root /usr/share/nginx/html;
+  index index.html;
+  location /api/ {{ return 502; }}
+  location / {{ try_files $uri $uri/ /index.html; }}
+}}
+NGINX_EOF
+RUN chown 101:101 /etc/nginx/conf.d/default.conf
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
   CMD wget -qO- http://127.0.0.1:8080/ || exit 1

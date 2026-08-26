@@ -175,7 +175,7 @@ def test_react_frontend_generates_dashboard_ui(tmp_path: Path) -> None:
     deployment, container = _deployment_container(root)
     assert container["image"] == "web-app:latest"
     assert container["ports"][0]["containerPort"] == 8080
-    assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
+    assert container["livenessProbe"]["httpGet"]["path"] == "/"
     assert deployment["spec"]["template"]["spec"]["securityContext"]["runAsUser"] == 101
     env = {e["name"]: e.get("value") for e in container["env"]}
     assert env["HAS_DATABASE"] == "true"
@@ -270,7 +270,8 @@ def test_every_core_stack_generates_runnable_app(tmp_path: Path, stack: str) -> 
 
     frontend = stack in _STATIC_FRONTENDS or stack in _SSR_FRONTENDS
     if frontend:
-        assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
+        expected_path = "/" if stack in _STATIC_FRONTENDS else "/healthz"
+        assert container["livenessProbe"]["httpGet"]["path"] == expected_path
     else:
         assert container["livenessProbe"]["httpGet"]["path"] == "/health"
         assert container["readinessProbe"]["httpGet"]["path"] == "/ready"

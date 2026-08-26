@@ -22,6 +22,9 @@ def write_cloud_deploy_makefile(
     elif engine == IaCEngine.PULUMI:
         tf_cli = "pulumi"
         tf_dir = "infra/pulumi"
+    elif engine == IaCEngine.LAUNCHPAD:
+        tf_cli = "bash"
+        tf_dir = "infra"
     else:
         tf_cli = "terraform"
         tf_dir = "infra/terraform"
@@ -34,6 +37,10 @@ def write_cloud_deploy_makefile(
             f"\tcd {tf_dir} && pulumi destroy --yes --skip-preview --non-interactive\n"
         )
         output_recipe = f"\tcd {tf_dir} && pulumi stack output --json\n"
+    elif engine == IaCEngine.LAUNCHPAD:
+        apply_recipe = "\tbash infra/launchProvision.sh up\n"
+        destroy_recipe = "\tbash infra/launchProvision.sh down\n"
+        output_recipe = "\tbash infra/launchProvision.sh outputs\n"
     else:
         apply_recipe = (
             f"\tcd {tf_dir} && {tf_cli} init -input=false\n"
@@ -66,8 +73,10 @@ def write_cloud_deploy_makefile(
         "configure: ansible-galaxy\n"
         "\t@if [ -f infra/ansible/playbooks/site.yml ]; then \\\n"
         "\t  cd infra/ansible && ansible-playbook playbooks/site.yml; \\\n"
+        "\telif [ -f infra/launchProvision.sh ]; then \\\n"
+        "\t  bash infra/launchProvision.sh configure; \\\n"
         "\telse \\\n"
-        "\t  echo 'No infra/ansible playbook (serverless / k8s-only workspace)'; \\\n"
+        "\t  echo 'No infra/ansible playbook or infra/launchProvision.sh'; \\\n"
         "\tfi\n"
         "\n"
         "deploy: cloud-up configure\n"

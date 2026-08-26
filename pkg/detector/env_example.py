@@ -1,4 +1,4 @@
-"""Parse ``.env.example`` / ``.env.sample`` files for import-time env configuration."""
+"""Parse ``.env.example`` / ``.env.launchpad`` files for import-time env configuration."""
 
 from __future__ import annotations
 
@@ -7,12 +7,18 @@ from pathlib import Path
 
 from pkg.detector.models import EnvExampleVar
 
-_ENV_FILE_NAMES = (
+# Preferred first. Renaming the product default later is a one-line reorder:
+# keep ``.env.launchpad`` first when that becomes the documented blueprint.
+ENV_BLUEPRINT_FILENAMES: tuple[str, ...] = (
+    ".env.launchpad",
     ".env.example",
     ".env.sample",
     ".env.template",
     "env.example",
 )
+
+# Back-compat alias used by older call sites / docs.
+_ENV_FILE_NAMES = ENV_BLUEPRINT_FILENAMES
 
 _SECRET_KEY_RE = re.compile(
     r"(password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|auth)",
@@ -79,10 +85,10 @@ def parse_env_example_text(text: str, *, source: str = ".env.example") -> list[E
 
 
 def discover_env_example_files(root: Path, *, max_files: int = 8) -> list[Path]:
-    """Find env example files at repo root and one level of common app dirs."""
+    """Find env blueprint files at repo root and one level of common app dirs."""
     root = root.resolve()
     found: list[Path] = []
-    for name in _ENV_FILE_NAMES:
+    for name in ENV_BLUEPRINT_FILENAMES:
         candidate = root / name
         if candidate.is_file():
             found.append(candidate)
@@ -93,11 +99,11 @@ def discover_env_example_files(root: Path, *, max_files: int = 8) -> list[Path]:
         for child in sorted(base.iterdir()):
             if not child.is_dir():
                 continue
-            for name in _ENV_FILE_NAMES:
+            for name in ENV_BLUEPRINT_FILENAMES:
                 candidate = child / name
                 if candidate.is_file():
                     found.append(candidate)
-        for name in _ENV_FILE_NAMES:
+        for name in ENV_BLUEPRINT_FILENAMES:
             candidate = base / name
             if candidate.is_file():
                 found.append(candidate)
@@ -118,7 +124,7 @@ def discover_env_example_files(root: Path, *, max_files: int = 8) -> list[Path]:
 
 
 def collect_env_example_vars(root: Path) -> list[EnvExampleVar]:
-    """Merge env example vars from discovered files (first key wins)."""
+    """Merge env blueprint vars from discovered files (first key wins)."""
     merged: list[EnvExampleVar] = []
     seen: set[str] = set()
     for path in discover_env_example_files(root):
@@ -136,6 +142,26 @@ def collect_env_example_vars(root: Path) -> list[EnvExampleVar]:
             seen.add(item.key)
             merged.append(item)
     return merged
+
+
+def collect_env_blueprint_map(
+    root: Path,
+    *,
+    include_secrets: bool = False,
+) -> dict[str, str]:
+    """Return ``KEY -> suggested_value`` from the service/repo env blueprint.
+
+    Secrets stay blank unless ``include_secrets`` is True (preview inject should
+    not invent secret values from example placeholders).
+    """
+    out: dict[str, str] = {}
+    for item in collect_env_example_vars(root):
+        if item.is_secret and not include_secrets:
+            continue
+        value = (item.suggested_value or item.example_value or "").strip()
+        if value:
+            out[item.key] = value
+    return out
 
 
 def suggested_datastore_urls(kind: str, *, app_name: str = "app") -> dict[str, str]:

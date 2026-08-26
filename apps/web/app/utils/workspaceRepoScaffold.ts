@@ -1,5 +1,9 @@
-import type { FrameworkOption } from '~/types/provisioning'
-import type { InfraGenerationConfig, ContainerScaffoldConfig } from '~/types/provisioning'
+import type {
+  ContainerScaffoldConfig,
+  FrameworkOption,
+  InfraGenerationConfig,
+  WorkloadDependenciesConfig,
+} from '~/types/provisioning'
 import type { ProjectStack } from '~/types/dockerfileSchema'
 import type {
   WorkspaceAnalysisKind,
@@ -24,7 +28,7 @@ export interface ScaffoldTarget {
   content: string
 }
 
-const PROJECT_STACK_TO_FRAMEWORK: Partial<Record<ProjectStack, FrameworkOption>> = {
+const PROJECT_STACK_TO_FRAMEWORK: Partial<Record<ProjectStack | FrameworkOption, FrameworkOption>> = {
   node: 'node',
   python: 'python',
   go: 'go',
@@ -210,6 +214,7 @@ export function buildRepoScaffoldBundle(options: {
   infra: InfraGenerationConfig
   containerScaffold: ContainerScaffoldConfig
   detectedFramework?: FrameworkOption | null
+  dependencies?: WorkloadDependenciesConfig
 }): ScaffoldTarget[] {
   const appName = options.appName.trim() || 'app'
   const targets: ScaffoldTarget[] = []
@@ -230,7 +235,16 @@ export function buildRepoScaffoldBundle(options: {
   }
 
   if (container.enabled) {
-    targets.push(...buildDockerScaffold(container))
+    let datastores: Array<{ kind: string }> | undefined = undefined
+    if (options.dependencies) {
+      datastores = []
+      for (const [key, val] of Object.entries(options.dependencies)) {
+        if (val?.enabled) {
+          datastores.push({ kind: key })
+        }
+      }
+    }
+    targets.push(...buildDockerScaffold(container, datastores))
   }
   if (options.infra.provision.enabled) {
     targets.push(

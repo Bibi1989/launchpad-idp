@@ -260,6 +260,9 @@ class Settings(BaseSettings):
     preview_image_registry: str | None = None
     preview_build_kind_load: bool = True
     preview_build_timeout_seconds: float = 900.0
+    # Workspace image builds (multi-service monorepos, npm install) can exceed preview
+    # builds. Keep below celery_provision_soft_time_limit_seconds so push/apply still run.
+    workspace_image_build_timeout_seconds: float = 2100.0
     # When true, docker build re-pulls base images (slower; useful for CI freshness).
     preview_build_pull_base: bool = False
 

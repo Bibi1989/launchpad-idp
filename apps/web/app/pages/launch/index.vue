@@ -19,11 +19,15 @@ import {
   launchRequiresWorkloadImage,
   launchShowsWorkloadImageInput,
 } from '~/utils/launchWorkloadImage'
+import { allowedRuntimeTargetsForLaunch } from '~/utils/launchCloudPluginFilter'
+import { resolveCloudPluginFromWizard } from '~/utils/resolveCloudPluginFromWizard'
 import {
   PREVIEW_TTL_DEFAULT_HOURS,
   PREVIEW_TTL_MAX_HOURS,
   PREVIEW_TTL_MAX_MINUTES,
 } from '~/utils/previewTtl'
+import type { CloudPluginSelection } from '~/types/cloudPluginSelection'
+import { emptyCloudPluginSelection } from '~/types/cloudPluginSelection'
 
 type PreviewTarget = PreviewLaunchPayload['provider']
 
@@ -92,17 +96,10 @@ const form = reactive({
   enable_postgres: false,
   enable_redis: false,
   credentials: emptyCloudCredentials(),
+  cloudPlugin: emptyCloudPluginSelection() as CloudPluginSelection,
 })
 
 const PROVIDER_STORAGE_KEY = 'launchpad.lastPreviewProvider'
-
-const providers = computed(() => [
-  { id: 'local' as PreviewTarget, label: t('launch.targets.local'), hint: t('launch.hints.local') },
-  { id: 'gcp' as PreviewTarget, label: t('launch.targets.gcp'), hint: t('launch.hints.gcp') },
-  { id: 'aws' as PreviewTarget, label: t('launch.targets.aws'), hint: t('launch.hints.aws') },
-  { id: 'azure' as PreviewTarget, label: t('launch.targets.azure'), hint: t('launch.hints.azure') },
-  { id: 'cloudflare' as PreviewTarget, label: t('launch.targets.cloudflare'), hint: t('launch.hints.cloudflare') },
-])
 
 const isLocal = computed(() => form.provider === 'local')
 
@@ -188,6 +185,10 @@ const workspaceLaunchDetail = computed(() => {
   return t('launch.workspace.launchingFromDetail')
 })
 
+const launchCloudRuntimeFilter = computed(() =>
+  allowedRuntimeTargetsForLaunch(workspacePlan.value, workspaceWizard.value),
+)
+
 const showLocalClusterBanner = computed(
   () => isLocal.value && !workspacePlan.value?.skip_local_cluster,
 )
@@ -211,10 +212,7 @@ const cloudSteps = computed(() => {
 
 const confirmStep = computed(() => (showSourceStep.value ? 3 : 2))
 
-const providerLabel = computed(() => {
-  const match = providers.value.find((p) => p.id === form.provider)
-  return match?.label ?? form.provider
-})
+const providerLabel = computed(() => t(`launch.targets.${form.provider}`))
 
 const hourlyDisplay = computed(() => {
   if (form.provider === 'local') return '0.00'
@@ -379,6 +377,10 @@ async function applyWorkspacePlan(workspaceId: string) {
     form.enable_redis = plan.enable_redis
     if (config.cloud.provider !== 'local' && isPreviewProvider(config.cloud.provider)) {
       form.provider = config.cloud.provider
+    }
+    const resolvedPlugin = resolveCloudPluginFromWizard(config)
+    if (resolvedPlugin.provider) {
+      form.cloudPlugin = resolvedPlugin
     }
   } catch {
     workspaceWizard.value = null
@@ -619,6 +621,7 @@ async function launch() {
       provider: form.provider,
       enable_postgres: form.enable_postgres,
       enable_redis: form.enable_redis,
+      cloud_plugin: form.cloudPlugin.provider ? form.cloudPlugin : null,
     }
     if (workspacePlan.value?.deploy_mode) {
       payload.deploy_mode = workspacePlan.value.deploy_mode
@@ -786,23 +789,12 @@ async function launch() {
         </p>
       </div>
 
-      <div class="grid gap-2 sm:grid-cols-2">
-        <button
-          v-for="p in providers"
-          :key="p.id"
-          type="button"
-          class="rounded-lg border p-3 text-left transition"
-          :class="
-            form.provider === p.id
-              ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-              : 'border-[var(--lp-line)] hover:bg-[var(--lp-panel-2)]'
-          "
-          @click="form.provider = p.id"
-        >
-          <p class="text-sm font-medium">{{ p.label }}</p>
-          <p class="text-xs text-[var(--lp-muted)]">{{ p.hint }}</p>
-        </button>
-      </div>
+      <CloudDeployTargetGrid
+        v-model:typed-provider="form.provider"
+        v-model:plugin="form.cloudPlugin"
+        :allowed-runtime-targets="launchCloudRuntimeFilter"
+        :disable-auto-select="Boolean(form.workspace_id)"
+      />
 
       <label class="block space-y-2">
         <span class="lp-label">{{ t('provision.workspace') }}</span>
@@ -1031,28 +1023,18 @@ async function launch() {
         </p>
       </label>
 
-      <div class="grid gap-2 sm:grid-cols-2">
-        <button
-          v-for="p in providers"
-          :key="p.id"
-          type="button"
-          class="rounded-lg border p-3 text-left transition"
-          :class="
-            form.provider === p.id
-              ? 'border-[var(--lp-accent)] bg-[var(--lp-accent)]/10'
-              : 'border-[var(--lp-line)] hover:bg-[var(--lp-panel-2)]'
-          "
-          @click="form.provider = p.id"
-        >
-          <p class="text-sm font-medium">{{ p.label }}</p>
-          <p class="text-xs text-[var(--lp-muted)]">{{ p.hint }}</p>
-        </button>
-      </div>
+      <CloudDeployTargetGrid
+        v-model:typed-provider="form.provider"
+        v-model:plugin="form.cloudPlugin"
+        :allowed-runtime-targets="launchCloudRuntimeFilter"
+        :disable-auto-select="Boolean(form.workspace_id)"
+      />
 
       <template v-if="form.provider !== 'local' && !usesStoredWorkspaceCredentials">
         <CloudCredentialsFields
           :credentials="form.credentials"
           :provider="(form.provider as 'gcp' | 'aws' | 'azure' | 'cloudflare')"
+          override-mode
         />
       </template>
 

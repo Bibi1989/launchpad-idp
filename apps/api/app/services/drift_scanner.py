@@ -180,7 +180,12 @@ def scan_environment(
         return None
 
     deploy_mode = (environment.deploy_mode or DeployMode.PREVIEW.value).lower()
-    if deploy_mode in {DeployMode.COMPOSE.value, DeployMode.ATTACH.value}:
+    if deploy_mode in {
+        DeployMode.COMPOSE.value,
+        DeployMode.DOCKER_COMPOSE.value,
+        DeployMode.DOCKER_COMPOSE_UNDERSCORE.value,
+        DeployMode.ATTACH.value,
+    }:
         # Compose / attach previews are not scanned against the Kubernetes API.
         return None
     if deploy_mode == DeployMode.MANIFEST.value:

@@ -167,26 +167,12 @@ def _inspect_image_exposed_ports(image: str) -> list[int]:
 
 def _resolve_listen_port_from_image(image: str) -> int:
     """Best-effort resolve the container's HTTP-like listen port."""
-    image_l = image.lower()
+    from app.services.manifest_deploy import resolve_workload_listen_port
+
+    image_l = (image or "").lower()
     if "http-echo" in image_l:
         return 80
-    if "web-ui" in image_l or "frontend" in image_l or "next" in image_l or "nuxt" in image_l:
-        return 3000
-    if "api-server" in image_l or "backend" in image_l or "express" in image_l:
-        return 8080
-
-    exposed_ports = _inspect_image_exposed_ports(image)
-    for preferred in _HTTP_PORT_PREFERENCE:
-        if preferred in exposed_ports:
-            return preferred
-
-    httpish = [port for port in exposed_ports if port not in _NON_HTTP_PORTS]
-    if httpish:
-        return httpish[0]
-    if exposed_ports:
-        return exposed_ports[0]
-    return 80
-
+    return resolve_workload_listen_port(image=image, manifest_port=None)
 
 # Hard wall-clock cap on how long a preview may sit in PROVISIONING before it is
 # failed with diagnostics (3 minutes). Real failures (ImagePullBackOff /
@@ -281,8 +267,12 @@ class ProvisionedResources:
     notice: str | None = None
     # Exposed preview endpoints (frontend first). Open-app uses preview_url.
     preview_endpoints: list[dict[str, object]] = field(default_factory=list)
+    # Extra exposed app labels (secondary LoadBalancers) when >1 primary is marked.
+    extra_exposed_labels: list[str] = field(default_factory=list)
     # Filled after cloud VM/serverless attach deploy (host, region, instance id).
     running_instance: object | None = None
+    # Cloud registry URIs pushed for this preview (Artifact Registry / ECR).
+    registry_images: list[str] = field(default_factory=list)
 
 
 class KubernetesProvisioner:
@@ -1610,17 +1600,57 @@ class KubernetesProvisioner:
             )
             return False
 
+    def _active_pod_template_hashes(
+        self, namespace: str, app_label: str | None
+    ) -> set[str]:
+        """pod-template-hash(es) of ReplicaSet(s) the current rollout targets.
+
+        Pods from superseded ReplicaSets (previous failed deploys) carry a different
+        hash. Excluding them stops a stale crash-looping pod - one that accumulated
+        restarts on a since-fixed image - from failing a fresh rollout. Returns an
+        empty set when it cannot be determined, in which case no hash filter applies.
+        """
+        apps = getattr(self, "_apps", None)
+        if apps is None:
+            return set()
+        try:
+            rs_items = (
+                apps.list_namespaced_replica_set(
+                    namespace, _request_timeout=(5, 15)
+                ).items
+                or []
+            )
+        except Exception:  # noqa: BLE001 - best-effort scoping
+            return set()
+        wanted = (app_label or "").strip()
+        hashes: set[str] = set()
+        for rs in rs_items:
+            meta = getattr(rs, "metadata", None)
+            labels = getattr(meta, "labels", None) if meta else None
+            if not isinstance(labels, dict):
+                continue
+            if wanted and str(labels.get("app") or "").strip() != wanted:
+                continue
+            spec = getattr(rs, "spec", None)
+            desired = getattr(spec, "replicas", 0) or 0
+            pth = str(labels.get("pod-template-hash") or "").strip()
+            if pth and int(desired) > 0:
+                hashes.add(pth)
+        return hashes
+
     def _pod_matches_wait_scope(
         self,
         pod: object,
         *,
         app_label: str | None,
         expected_image: str | None,
+        active_hashes: set[str] | None = None,
     ) -> bool:
         """True when a pod belongs to the revision we are waiting on.
 
-        Ignores terminating pods and stale ReplicaSets that still show
-        ImagePullBackOff for short names after the Deployment was remapped to ECR.
+        Ignores terminating pods, pods from superseded ReplicaSets (not in
+        ``active_hashes``), and stale ReplicaSets that still show ImagePullBackOff for
+        short names after the Deployment was remapped to ECR.
         """
         from app.services.manifest_deploy import is_unqualified_local_image
 
@@ -1631,6 +1661,11 @@ class KubernetesProvisioner:
         wanted = (app_label or "").strip()
         if wanted and isinstance(labels, dict):
             if str(labels.get("app") or "").strip() != wanted:
+                return False
+        # Only evaluate pods from the current rollout's ReplicaSet(s); stale pods from
+        # earlier failed deploys must not fail (or falsely satisfy) the wait.
+        if active_hashes and isinstance(labels, dict):
+            if str(labels.get("pod-template-hash") or "").strip() not in active_hashes:
                 return False
         expected = (expected_image or "").strip()
         if expected and _is_cloud_registry_image(expected):
@@ -1658,9 +1693,13 @@ class KubernetesProvisioner:
             logger.warning("kubernetes_list_pods_for_image_error_failed", error=str(exc))
             return None
         terminal_reasons = {"ErrImagePull", "ImagePullBackOff", "InvalidImageName"}
+        active_hashes = self._active_pod_template_hashes(namespace, app_label)
         for pod in pods.items or []:
             if not self._pod_matches_wait_scope(
-                pod, app_label=app_label, expected_image=expected_image
+                pod,
+                app_label=app_label,
+                expected_image=expected_image,
+                active_hashes=active_hashes,
             ):
                 continue
             pod_name = pod.metadata.name if pod.metadata else "app"
@@ -1706,9 +1745,13 @@ class KubernetesProvisioner:
             "CreateContainerError",
             "RunContainerError",
         }
+        active_hashes = self._active_pod_template_hashes(namespace, app_label)
         for pod in pods.items or []:
             if not self._pod_matches_wait_scope(
-                pod, app_label=app_label, expected_image=expected_image
+                pod,
+                app_label=app_label,
+                expected_image=expected_image,
+                active_hashes=active_hashes,
             ):
                 continue
             pod_name = pod.metadata.name if pod.metadata else "app"
@@ -2439,6 +2482,32 @@ class KubernetesProvisioner:
                 return None
             _time.sleep(2.0)
 
+    def resolve_service_external_url(
+        self, namespace: str, service_name: str, *, timeout_seconds: float = 60.0
+    ) -> str | None:
+        """Resolve one named LoadBalancer Service's public URL (secondary previews)."""
+        if not self._settings.kubernetes_enabled or self._core is None:
+            return None
+        import time as _time
+        from kubernetes.client.rest import ApiException
+
+        deadline = _time.time() + max(timeout_seconds, 0.0)
+        while True:
+            try:
+                svc = self._core.read_namespaced_service(
+                    service_name, namespace, _request_timeout=15
+                )
+            except ApiException:
+                return None
+            if svc.spec is not None and svc.spec.type == "LoadBalancer":
+                addr = _lb_ingress_address(getattr(svc, "status", None))
+                if addr:
+                    port = svc.spec.ports[0].port if svc.spec.ports else None
+                    return _external_url(addr, port)
+            if _time.time() >= deadline:
+                return None
+            _time.sleep(2.0)
+
     def read_namespaced_app_node_port(self, namespace: str) -> int | None:
         if not self._settings.kubernetes_enabled or self._core is None:
             return None
@@ -2648,9 +2717,12 @@ class KubernetesProvisioner:
                             "done\n"
                         ),
                     ],
+                    # GKE Autopilot enforces a per-container minimum (50m CPU / 64Mi
+                    # memory) on EVERY container, including init containers. Requests
+                    # below that are rejected ("pods ... forbidden: minimum cpu ...").
                     resources=client.V1ResourceRequirements(
-                        requests={"cpu": "10m", "memory": "16Mi"},
-                        limits={"cpu": "50m", "memory": "32Mi"},
+                        requests={"cpu": "50m", "memory": "64Mi"},
+                        limits={"cpu": "50m", "memory": "64Mi"},
                     ),
                     security_context=client.V1SecurityContext(
                         allow_privilege_escalation=False,
@@ -3133,6 +3205,33 @@ class KubernetesProvisioner:
             repo = base
         tag = commit_sha if commit_sha else "latest"
         return f"{repo}:{tag}"
+
+    def list_namespace_container_images(self, namespace: str) -> list[str]:
+        """Return unique container image refs currently used by Deployments in ``namespace``."""
+        if not self._settings.kubernetes_enabled or self._apps is None:
+            return []
+        from kubernetes.client.rest import ApiException
+
+        images: list[str] = []
+        seen: set[str] = set()
+        try:
+            deployments = self._apps.list_namespaced_deployment(
+                namespace, _request_timeout=15
+            )
+        except ApiException:
+            return []
+        for dep in getattr(deployments, "items", None) or []:
+            containers = (
+                (((dep.spec or None) and dep.spec.template and dep.spec.template.spec)
+                 and dep.spec.template.spec.containers)
+                or []
+            )
+            for container in containers:
+                image = str(getattr(container, "image", None) or "").strip()
+                if image and image not in seen:
+                    seen.add(image)
+                    images.append(image)
+        return images
 
     def teardown(self, namespace: str) -> None:
         if not self._settings.kubernetes_enabled:

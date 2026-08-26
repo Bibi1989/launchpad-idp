@@ -32,17 +32,20 @@ def test_default_quota_fits_app_plus_datastores() -> None:
     assert _to_mi(s.kubernetes_memory_request) > 512
 
 
-def test_wait_for_db_init_containers_have_small_resources() -> None:
+def test_wait_for_db_init_containers_meet_autopilot_minimums() -> None:
     blocks = init_container_wait_blocks([DataStoreKind.POSTGRES, DataStoreKind.REDIS])
     # Parse the init container list (wrap into a minimal pod fragment).
     doc = yaml.safe_load("initContainers:" + blocks)
     inits = doc["initContainers"]
     assert len(inits) == 2
     for c in inits:
-        # Small explicit requests so they don't inflate the app pod to the
-        # LimitRange default (256Mi), which pushed the namespace over quota.
-        assert c["resources"]["requests"]["memory"] == "16Mi"
-        assert c["resources"]["limits"]["memory"] == "32Mi"
+        # GKE Autopilot enforces a per-container minimum (50m CPU / 64Mi memory) on
+        # EVERY container, including init containers. Requesting less is rejected
+        # ("pods ... forbidden: minimum cpu ...") and the pod never schedules.
+        assert c["resources"]["requests"]["cpu"] == "50m"
+        assert c["resources"]["requests"]["memory"] == "64Mi"
+        assert c["resources"]["limits"]["cpu"] == "50m"
+        assert c["resources"]["limits"]["memory"] == "64Mi"
 
 
 def test_preview_network_policy_allows_same_namespace_egress() -> None:

@@ -257,6 +257,13 @@ describe('workspaceInfraScaffold', () => {
     expect(detected.provision.engine).toBe('ansible')
   })
 
+  it('detects LaunchProvision under infra/', () => {
+    const detected = detectWorkspaceInfraFromPaths(['infra/launchProvision.sh'])
+    expect(detected.provision.enabled).toBe(true)
+    expect(detected.provision.engine).toBe('launchpad')
+    expect(detected.summary.some((s) => s.includes('LaunchProvision'))).toBe(true)
+  })
+
   it('builds multi-artifact repo scaffold bundle', () => {
     const files = buildRepoScaffoldBundle({
       appName: 'demo',

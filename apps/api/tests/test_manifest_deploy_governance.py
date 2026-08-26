@@ -683,7 +683,7 @@ def test_resolve_workload_listen_port_prefers_image_expose_over_scaffold_80() ->
             manifest_port=3000,
             exposed_ports=[5000],
         )
-        == 3000
+        == 5000
     )
     assert (
         resolve_workload_listen_port(
@@ -694,6 +694,169 @@ def test_resolve_workload_listen_port_prefers_image_expose_over_scaffold_80() ->
         )
         == 5000
     )
+
+
+def test_resolve_workload_listen_port_nginx_defaults_to_80_without_expose() -> None:
+    from app.services.manifest_deploy import resolve_workload_listen_port
+
+    assert (
+        resolve_workload_listen_port(
+            image="nginx:1.31-alpine",
+            manifest_port=8080,
+            exposed_ports=[],
+        )
+        == 80
+    )
+
+
+def test_resolve_workload_listen_port_prefers_image_exposed_port_for_frontends() -> None:
+    from app.services.manifest_deploy import resolve_workload_listen_port
+
+    # Manifest says Vite default (5173), but the generated nginx frontend runtime
+    # actually exposes/serves on 8080 (nginx-unprivileged default).
+    assert (
+        resolve_workload_listen_port(
+            image="launch-test-frontend:latest",
+            manifest_port=5173,
+            exposed_ports=[8080],
+        )
+        == 8080
+    )
+
+
+def test_resolve_workload_listen_port_vite_scaffold_without_expose_uses_spa_8080() -> None:
+    from app.services.manifest_deploy import resolve_workload_listen_port
+
+    # After registry remap, docker inspect often returns no EXPOSE data. Linked-repo
+    # Vite scaffolds still stamp 5173 while the image listens on nginx :8080.
+    assert (
+        resolve_workload_listen_port(
+            image="europe-west3-docker.pkg.dev/acme/launchpad-previews/abc/test-frontend:latest",
+            manifest_port=5173,
+            exposed_ports=[],
+        )
+        == 8080
+    )
+
+
+def test_harden_launch_workload_rewrites_vite_port_when_expose_empty(monkeypatch) -> None:
+    from app.services import manifest_deploy as md
+
+    monkeypatch.setattr(md, "inspect_image_exposed_ports", lambda _image: [])
+    monkeypatch.setattr(md, "_image_config_runs_nginx", lambda _image: False)
+    md._nginx_image_cache.clear()
+
+    doc = {
+        "kind": "Deployment",
+        "metadata": {"name": "launch-test-frontend"},
+        "spec": {
+            "selector": {"matchLabels": {"app": "launch-test-frontend"}},
+            "template": {
+                "metadata": {"labels": {"app": "launch-test-frontend"}},
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "web",
+                            "image": "europe-west3-docker.pkg.dev/acme/x/test-frontend:latest",
+                            "ports": [{"name": "http", "containerPort": 5173}],
+                            "readinessProbe": {
+                                "tcpSocket": {"port": 5173},
+                                "periodSeconds": 5,
+                            },
+                        }
+                    ]
+                },
+            },
+        },
+    }
+    md._harden_launch_workload(doc)
+    container = doc["spec"]["template"]["spec"]["containers"][0]
+    assert container["ports"][0]["containerPort"] == 8080
+    assert container["readinessProbe"]["tcpSocket"]["port"] == 8080
+    env = {item["name"]: item["value"] for item in container["env"]}
+    assert env["PORT"] == "8080"
+
+
+def test_align_launch_service_ports_after_harden(monkeypatch) -> None:
+    from app.services import manifest_deploy as md
+
+    monkeypatch.setattr(md, "inspect_image_exposed_ports", lambda _image: [])
+    monkeypatch.setattr(md, "_image_config_runs_nginx", lambda _image: False)
+    md._nginx_image_cache.clear()
+
+    docs = [
+        {
+            "kind": "Deployment",
+            "metadata": {"name": "launch-test-frontend"},
+            "spec": {
+                "selector": {"matchLabels": {"app": "launch-test-frontend"}},
+                "template": {
+                    "metadata": {"labels": {"app": "launch-test-frontend"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "web",
+                                "image": "test-frontend:latest",
+                                "ports": [{"containerPort": 5173}],
+                            }
+                        ]
+                    },
+                },
+            },
+        },
+        {
+            "kind": "Service",
+            "metadata": {"name": "launch-test-frontend-service"},
+            "spec": {
+                "selector": {"app": "launch-test-frontend"},
+                "ports": [{"port": 5173, "targetPort": 5173}],
+            },
+        },
+    ]
+    patched = md.patch_manifest_documents(
+        docs,
+        target_namespace="ns",
+        environment_id="abc",
+        name="preview",
+        git_branch="main",
+        git_repo_url="https://example.com/app.git",
+        ttl_expires_at="2099-01-01T00:00:00+00:00",
+        owner_label="dev",
+        image="nginx:1.27-alpine",
+    )
+    svc = next(d for d in patched if d["kind"] == "Service")
+    assert svc["spec"]["ports"][0]["targetPort"] == 8080
+    assert svc["spec"]["ports"][0]["port"] == 8080
+
+
+def test_harden_launch_workload_nginx_rewrites_health_probe_path() -> None:
+    from app.services.manifest_deploy import _harden_launch_workload
+
+    doc = {
+        "kind": "Deployment",
+        "metadata": {"name": "launch-test-frontend"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "launch-test-frontend",
+                            "image": "nginx:1.31-alpine",
+                            "ports": [{"name": "http", "containerPort": 8080}],
+                            "readinessProbe": {
+                                "httpGet": {"path": "/health", "port": "http"},
+                            },
+                        }
+                    ]
+                }
+            }
+        },
+    }
+    _harden_launch_workload(doc)
+    container = doc["spec"]["template"]["spec"]["containers"][0]
+    assert container["ports"][0]["containerPort"] == 80
+    assert container["readinessProbe"]["httpGet"]["path"] == "/"
+    assert container["readinessProbe"]["httpGet"]["port"] == 80
 
 
 def test_patch_manifest_documents_aligns_probes_and_service_to_expose(

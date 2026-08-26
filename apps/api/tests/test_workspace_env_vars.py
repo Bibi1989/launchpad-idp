@@ -104,26 +104,44 @@ def test_inject_extra_env_noop_when_empty() -> None:
     assert "env" not in doc["spec"]["template"]["spec"]["containers"][0]
 
 
-def test_write_build_env_file_appends_without_overwriting(tmp_path) -> None:
-    from app.services.preview_build import _write_build_env_file
+def test_write_build_env_file_writes_production_local(tmp_path) -> None:
+    from app.services.preview_build import _LAUNCHPAD_BUILD_ENV_LOCAL, _write_build_env_file
 
-    (tmp_path / ".env.production").write_text("EXISTING=keep\n", encoding="utf-8")
+    (tmp_path / ".env.production").write_text("VITE_API_URL=\nEXISTING=keep\n", encoding="utf-8")
     _write_build_env_file(
-        tmp_path, {"VITE_API_URL": "http://api:8080", "EXISTING": "SHOULD_NOT_WIN"}
+        tmp_path, {"VITE_API_URL": "/api", "EXISTING": "forced"}
     )
+    # Launchpad overwrites dotenv files so empty VITE_* cannot bake as undefined.
     prod = (tmp_path / ".env.production").read_text(encoding="utf-8")
-    assert "EXISTING=keep" in prod
-    assert "SHOULD_NOT_WIN" not in prod  # user's committed value preserved
-    assert "VITE_API_URL=http://api:8080" in prod
-    # .env is created fresh too.
-    assert "VITE_API_URL=http://api:8080" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "VITE_API_URL=/api" in prod
+    assert "EXISTING=forced" in prod
+    local = (tmp_path / _LAUNCHPAD_BUILD_ENV_LOCAL).read_text(encoding="utf-8")
+    assert "VITE_API_URL=/api" in local
+
+
+def test_ensure_dockerfile_bakes_frontend_api(tmp_path) -> None:
+    from app.services.preview_build import ensure_dockerfile_bakes_frontend_api
+
+    df = tmp_path / "Dockerfile"
+    df.write_text(
+        "FROM node:22-alpine\nWORKDIR /src\nCOPY . .\nRUN npm run build\n",
+        encoding="utf-8",
+    )
+    assert ensure_dockerfile_bakes_frontend_api(df) is True
+    text = df.read_text(encoding="utf-8")
+    # Default ARG is the same-origin BASE (empty); the real value is supplied via
+    # --build-arg from the connector's API path (blank = base URL, no forced /api).
+    assert "ARG VITE_API_URL=" in text
+    assert "ARG VITE_API_URL=/api" not in text
+    assert "ENV VITE_API_URL=$VITE_API_URL" in text
+    assert text.index("ARG VITE_API_URL") < text.index("RUN npm run build")
 
 
 def test_write_build_env_file_noop_when_empty(tmp_path) -> None:
-    from app.services.preview_build import _write_build_env_file
+    from app.services.preview_build import _LAUNCHPAD_BUILD_ENV_LOCAL, _write_build_env_file
 
     _write_build_env_file(tmp_path, {})
-    assert not (tmp_path / ".env.production").exists()
+    assert not (tmp_path / _LAUNCHPAD_BUILD_ENV_LOCAL).exists()
 
 
 def test_native_bootstrap_writes_and_sources_env_file() -> None:

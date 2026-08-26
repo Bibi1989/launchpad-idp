@@ -243,6 +243,7 @@ function onCardKeydown(event: KeyboardEvent) {
         <div class="flex flex-col items-end gap-1.5">
         <div class="flex flex-wrap items-center justify-end gap-1.5">
           <LifecycleStageBadge :stage="environment.lifecycle_stage" />
+          <CloudProviderBadge :provider="environment.provider" />
           <DeployKindBadge :deploy-mode="environment.deploy_mode" />
           <StatusBadge :status="displayStatus" :rebuilding="isRebuilding" />
           <a

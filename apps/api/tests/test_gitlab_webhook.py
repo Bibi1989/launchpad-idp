@@ -58,7 +58,7 @@ async def test_process_gitlab_push_enqueues_rebuild() -> None:
 
     service = GitLabWebhookService(session)
     service._environments = MagicMock()
-    service._environments.list_active_for_repo_branch = AsyncMock(
+    service._environments.list_active_for_any_linked_repo = AsyncMock(
         return_value=[environment],
     )
     service._environments.mark_rebuild = AsyncMock(return_value=environment)

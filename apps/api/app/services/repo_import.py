@@ -11,6 +11,8 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -36,6 +38,9 @@ logger = get_logger(__name__)
 
 _DETECTION_FILE = ".launchpad/detection.json"
 _MULTI_REPO_FILE = ".launchpad/multi_repo.json"
+# Original repo refs (url/branch/name/installation) preserved so a "link" save can
+# record ``linked_repos`` for change-tracking + fresh-clone-on-deploy.
+_LINK_REFS_FILE = ".launchpad/link_refs.json"
 # Kept at the workspace container root by GitImporterService.clone; must survive the
 # multi-repo relocation of the primary clone into apps/<name>/ (see git_importer).
 _IMPORT_META_FILE = ".launchpad-import.json"
@@ -143,6 +148,8 @@ class RepoImportService:
         multi_repo = len(refs) > 1
         if multi_repo:
             self._write_multi_repo(primary.root_dir, repo_urls, assembly)
+        # Preserve the original refs so a "link" save can record linked_repos.
+        self._write_link_refs(primary.root_dir, refs)
 
         meta = self._importer.read_meta(primary.import_id)
         created_raw = meta.get("created_at")
@@ -224,6 +231,7 @@ class RepoImportService:
         *,
         owner: User,
         org_id: UUID | None = None,
+        link_mode: bool = False,
     ) -> RepoImportSaveResult:
         try:
             import_root = self._importer.get_root(import_id)
@@ -245,12 +253,47 @@ class RepoImportService:
                 },
             )
 
+        from app.models.domain import Organization
+        from app.services.orgs import OrganizationService
+        from app.services.plans import assert_can_create_workspace
+        from app.services.projects import ProjectService
+
+        orgs = OrganizationService(self._session)
+        personal = await orgs.ensure_personal_org(owner)
+        resolved_org_id = org_id or personal.id
+        org = await self._session.get(Organization, resolved_org_id)
+        if org is not None:
+            await assert_can_create_workspace(self._session, org)
+
+        existing_ws = await self._session.execute(
+            select(ProvisioningWorkspace).where(
+                ProvisioningWorkspace.org_id == resolved_org_id,
+                ProvisioningWorkspace.name == request.name,
+            )
+        )
+        if existing_ws.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "workspace_exists",
+                    "message": f"Workspace '{request.name}' already exists in this organization",
+                },
+            )
+
         workspace_id = uuid.uuid4()
         durable = self._allocate_durable_dir(request.name)
-        # Move clone into durable workspace root (keeps source tree + generated files).
         if durable.exists():
             shutil.rmtree(durable, ignore_errors=True)
-        shutil.copytree(import_root, durable, symlinks=False, ignore_dangling_symlinks=True)
+        if link_mode:
+            # Link mode: the workspace must NOT own the app source (the repos are
+            # re-cloned fresh on every deploy). Generate infra against the temp import
+            # clone, then persist ONLY the generated infra + .launchpad metadata below.
+            gen_dir = import_root
+            durable.mkdir(parents=True, exist_ok=True)
+        else:
+            # Import mode: the workspace owns the source; copy the clone into durable.
+            shutil.copytree(import_root, durable, symlinks=False, ignore_dangling_symlinks=True)
+            gen_dir = durable
 
         adjusted = detection.model_copy(update={"services": services})
         runtime_mode = WorkspaceRuntimeMode(request.runtime_mode)
@@ -275,7 +318,7 @@ class RepoImportService:
         )
         # External datastore URLs without a matching .env.example key still land in .env
         generated = self._generator.generate(
-            durable,
+            gen_dir,
             adjusted,
             workspace_name=request.name,
             services=services,
@@ -288,7 +331,7 @@ class RepoImportService:
             from app.services.local_runtime_iac import write_local_runtime_iac
 
             iac_files = write_local_runtime_iac(
-                durable,
+                gen_dir,
                 name=request.name,
                 engine=IaCEngine(request.iac_engine),
                 runtime_mode=runtime_mode,
@@ -297,7 +340,7 @@ class RepoImportService:
 
         if request.enable_cicd:
             cicd_files = self._write_cicd_stub(
-                durable,
+                gen_dir,
                 platform=request.cicd_platform,
                 name=request.name,
             )
@@ -321,10 +364,19 @@ class RepoImportService:
             )
             generated.files.extend(
                 write_instance_process_scaffold(
-                    durable,
+                    gen_dir,
                     name=request.name,
                     running_instance=running_instance_cfg,
                 )
+            )
+
+        if link_mode:
+            # Persist ONLY the generated infra + .launchpad metadata into the durable
+            # workspace - never the linked repos' source. Skip generated files under
+            # apps/ (Dockerfiles): the deploy re-clones each repo and ensures a
+            # Dockerfile, so no app dirs are scaffolded into the workspace at all.
+            self._persist_link_infra(
+                src=import_root, durable=durable, generated_files=generated.files
             )
 
         cluster_ready = False
@@ -345,17 +397,6 @@ class RepoImportService:
                     error=str(exc),
                 )
 
-        from app.models.domain import Organization
-        from app.services.orgs import OrganizationService
-        from app.services.plans import assert_can_create_workspace
-        from app.services.projects import ProjectService
-
-        orgs = OrganizationService(self._session)
-        personal = await orgs.ensure_personal_org(owner)
-        resolved_org_id = org_id or personal.id
-        org = await self._session.get(Organization, resolved_org_id)
-        if org is not None:
-            await assert_can_create_workspace(self._session, org)
         org_ctx = await orgs.resolve_context(user=owner, org_id=resolved_org_id)
         project = await ProjectService(self._session).resolve_project_for_workspace(
             org=org_ctx,
@@ -412,6 +453,16 @@ class RepoImportService:
             wizard_snapshot["service_graph_mermaid"] = multi_repo.get("mermaid")
             wizard_snapshot["service_comms"] = multi_repo.get("service_comms", [])
             wizard_snapshot["service_connections"] = multi_repo.get("service_connections", [])
+        # Link mode: record linked_repos so (a) a push to ANY repo re-provisions and
+        # (b) the deploy re-clones the latest code per repo (materialize) instead of
+        # freezing the copied source. The generated infra is what the workspace owns.
+        if link_mode:
+            linked_repos = self._build_linked_repos(
+                self._read_link_refs(import_root), meta
+            )
+            if linked_repos:
+                wizard_snapshot["linked_repos"] = linked_repos
+                wizard_snapshot["source"] = "repo_link"
         row = ProvisioningWorkspace(
             id=workspace_id,
             owner_id=owner.id,
@@ -425,8 +476,18 @@ class RepoImportService:
             encrypted_credentials=encrypt_secret(CloudCredentials().model_dump_json()),
             wizard_config_json=json.dumps(wizard_snapshot),
         )
-        self._session.add(row)
-        await self._session.commit()
+        try:
+            self._session.add(row)
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "workspace_exists",
+                    "message": f"Workspace '{request.name}' already exists in this organization",
+                },
+            ) from exc
 
         # Temp import dir can go away after durable copy.
         self._importer.cleanup(import_id)
@@ -874,6 +935,112 @@ class RepoImportService:
                     out[i] = s.model_copy(update={"is_preview_target": True})
                     break
         return out
+
+    @staticmethod
+    def _write_link_refs(root: Path, refs: list[RepoRef]) -> None:
+        path = root / _LINK_REFS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {
+                "git_repo_url": r.git_repo_url,
+                "git_branch": r.git_branch,
+                "name": r.name,
+                "github_installation_id": r.github_installation_id,
+            }
+            for r in refs
+        ]
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _read_link_refs(root: Path) -> list[dict]:
+        path = root / _LINK_REFS_FILE
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        return [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+
+    @staticmethod
+    def _build_linked_repos(refs: list[dict], meta: dict) -> list[dict]:
+        """Build WorkspaceLinkedRepoItem dicts from persisted refs (or the primary meta).
+
+        Marks the frontend-looking repo as primary (Open-app target); else the first.
+        Defaults every repo to webhook CD so a push to ANY of them re-provisions.
+        """
+        from app.services.git_urls import normalize_git_repo_full_name
+        from app.services.service_kind import is_frontend_service_name
+
+        entries: list[dict] = []
+        source = refs or (
+            [{"git_repo_url": meta.get("repo_url"), "git_branch": meta.get("branch")}]
+            if meta.get("repo_url")
+            else []
+        )
+        for ref in source:
+            url = str(ref.get("git_repo_url") or "").strip()
+            if not url:
+                continue
+            full_name = normalize_git_repo_full_name(url)
+            leaf = (full_name or url).rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+            entries.append(
+                {
+                    "kind": "gitlab" if "gitlab" in url.lower() else "github",
+                    "git_repo_url": url,
+                    "git_branch": str(ref.get("git_branch") or "main").strip() or "main",
+                    "full_name": full_name,
+                    "installation_id": ref.get("github_installation_id"),
+                    "cd_mode": "webhook",
+                    "primary": False,
+                    "_leaf": str(ref.get("name") or leaf).lower(),
+                }
+            )
+        if not entries:
+            return []
+        # Primary = frontend-looking repo, else first.
+        primary = next(
+            (e for e in entries if is_frontend_service_name(e["_leaf"])), entries[0]
+        )
+        primary["primary"] = True
+        for entry in entries:
+            entry.pop("_leaf", None)
+        return entries
+
+    @staticmethod
+    def _persist_link_infra(
+        *, src: Path, durable: Path, generated_files: list[str]
+    ) -> None:
+        """Copy generated infra + .launchpad metadata into the durable link workspace.
+
+        Excludes everything under ``apps/`` (the linked repos' source AND their
+        generated Dockerfiles): the deploy re-clones each repo fresh and ensures a
+        Dockerfile, so no app source is ever scaffolded into a linked workspace.
+        """
+        src = Path(src)
+        durable = Path(durable)
+        for rel in generated_files:
+            rel_str = str(rel).replace("\\", "/").strip().lstrip("/")
+            if not rel_str or rel_str.startswith(f"{_APPS_DIR}/") or rel_str == _APPS_DIR:
+                continue
+            source = src / rel_str
+            if not source.is_file():
+                continue
+            dest = durable / rel_str
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+        # Always persist the .launchpad metadata (detection, build plan, link refs,
+        # multi-repo graph) so provision + change-tracking work without the source.
+        meta_dir = src / ".launchpad"
+        if meta_dir.is_dir():
+            for item in meta_dir.rglob("*"):
+                if item.is_file():
+                    dest = durable / item.relative_to(src)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, dest)
+        import_meta = src / _IMPORT_META_FILE
+        if import_meta.is_file():
+            shutil.copy2(import_meta, durable / _IMPORT_META_FILE)
 
     @staticmethod
     def _write_detection(root: Path, detection: DetectionResult) -> None:

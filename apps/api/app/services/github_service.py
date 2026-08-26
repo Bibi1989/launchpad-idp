@@ -113,6 +113,7 @@ class GitHubProvisioningService:
                 provider=provider,
                 engine=engine,
                 workflow_path=workflow_path,
+                region=_workflow_region(provider, files, request.credentials),
             )
             commit_payload[workflow_path] = workflow
 
@@ -516,6 +517,7 @@ class GitHubProvisioningService:
                 provider=use_provider,
                 engine=use_engine,
                 workflow_path=workflow_path,
+                region=_workflow_region(use_provider, files, None),
             )
 
         if include_dockerfiles and not _workspace_has_dockerfile(files):
@@ -678,21 +680,47 @@ class GitHubProvisioningService:
         return f"GitHub API request failed{detail}"
 
 
+def _workflow_region(
+    provider: CloudProvider,
+    files: dict[str, str],
+    credentials: CloudCredentials | None,
+) -> str:
+    from app.services.cloud_region import (
+        preferred_region_from_credentials,
+        region_from_bundle_files,
+    )
+    from app.services.cloud_promote import default_region
+
+    bundled = region_from_bundle_files(files, provider)
+    if bundled:
+        return bundled
+    preferred = preferred_region_from_credentials(provider.value, credentials)
+    if preferred:
+        return preferred
+    return default_region(provider)
+
+
 def _render_workflow(
     *,
     provider: CloudProvider,
     engine: IaCEngine,
     workflow_path: str,
+    region: str | None = None,
 ) -> str:
+    resolved = (region or "").strip() or None
+    if not resolved:
+        from app.services.cloud_promote import default_region
+
+        resolved = default_region(provider)
     if engine == IaCEngine.PULUMI:
-        return _pulumi_workflow(provider, workflow_path=workflow_path)
+        return _pulumi_workflow(provider, workflow_path=workflow_path, region=resolved)
     if engine == IaCEngine.OPENTOFU:
-        return _opentofu_workflow(provider, workflow_path=workflow_path)
-    return _terraform_workflow(provider, workflow_path=workflow_path)
+        return _opentofu_workflow(provider, workflow_path=workflow_path, region=resolved)
+    return _terraform_workflow(provider, workflow_path=workflow_path, region=resolved)
 
 
-def _opentofu_workflow(provider: CloudProvider, *, workflow_path: str) -> str:
-    auth_steps = _auth_steps(provider)
+def _opentofu_workflow(provider: CloudProvider, *, workflow_path: str, region: str) -> str:
+    auth_steps = _auth_steps(provider, region=region)
     return f"""\
 name: Deploy Infrastructure (OpenTofu)
 
@@ -744,8 +772,8 @@ jobs:
 """
 
 
-def _terraform_workflow(provider: CloudProvider, *, workflow_path: str) -> str:
-    auth_steps = _auth_steps(provider)
+def _terraform_workflow(provider: CloudProvider, *, workflow_path: str, region: str) -> str:
+    auth_steps = _auth_steps(provider, region=region)
     return f"""\
 name: Deploy Infrastructure
 
@@ -810,8 +838,8 @@ jobs:
 """
 
 
-def _pulumi_workflow(provider: CloudProvider, *, workflow_path: str) -> str:
-    auth_steps = _auth_steps(provider)
+def _pulumi_workflow(provider: CloudProvider, *, workflow_path: str, region: str) -> str:
+    auth_steps = _auth_steps(provider, region=region)
     return f"""\
 name: Deploy Infrastructure
 
@@ -851,7 +879,8 @@ jobs:
 """
 
 
-def _auth_steps(provider: CloudProvider) -> str:
+def _auth_steps(provider: CloudProvider, *, region: str) -> str:
+    safe_region = region.replace('"', "")
     if provider == CloudProvider.LOCAL:
         return """\
       - name: Use local kubeconfig (kind)
@@ -860,29 +889,33 @@ def _auth_steps(provider: CloudProvider) -> str:
           kubectl config current-context || true
 """
     if provider == CloudProvider.GCP:
-        return """\
+        return f"""\
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          credentials_json: ${{{{ secrets.GCP_SA_KEY }}}}
       - uses: google-github-actions/setup-gcloud@v2
+      - name: Set default GCP region
+        run: gcloud config set compute/region {safe_region}
 """
     if provider == CloudProvider.AWS:
-        return """\
+        return f"""\
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
+          aws-access-key-id: ${{{{ secrets.AWS_ACCESS_KEY_ID }}}}
+          aws-secret-access-key: ${{{{ secrets.AWS_SECRET_ACCESS_KEY }}}}
+          aws-session-token: ${{{{ secrets.AWS_SESSION_TOKEN }}}}
+          aws-region: {safe_region}
 """
     if provider == CloudProvider.AZURE:
-        return """\
+        return f"""\
       - name: Azure Login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{{{ secrets.AZURE_CREDENTIALS }}}}
+      - name: Set Azure location
+        run: echo "AZURE_LOCATION={safe_region}" >> "$GITHUB_ENV"
 """
     return """\
       - name: Configure Cloudflare

@@ -184,3 +184,63 @@ def test_connection_wiring_detects_brokers_and_env() -> None:
 
 def test_connection_wiring_empty_for_single_repo() -> None:
     assert RepoImportService._connection_wiring({}, []) == (set(), {})
+
+
+def test_connectors_expose_as_and_cors_from_snapshot() -> None:
+    """A CORS connector adds an allowed origin; expose_as overrides the FE env key."""
+    from app.services.service_connection_env import (
+        connection_env_from_snapshot,
+        cors_origins_from_snapshot,
+    )
+
+    snapshot = {
+        "service_comms": [
+            {"service": "web", "capabilities": []},
+            {"service": "api", "capabilities": []},
+        ],
+        "detection": {
+            "services": [
+                {"name": "web", "framework": "nextjs", "port": 3000},
+                {"name": "api", "framework": "fastapi", "port": 8080},
+            ]
+        },
+        "service_connections": [
+            {
+                "source": "web",
+                "target": "api",
+                "protocol": "http",
+                "kind": "service",
+                "expose_as": "NEXT_PUBLIC_API_URL",
+            },
+            {
+                "source": "web",
+                "target": "api",
+                "protocol": "http",
+                "kind": "cors",
+                "cors_origin": "https://web.example.com",
+            },
+        ],
+    }
+
+    env = connection_env_from_snapshot(snapshot)
+    assert env["NEXT_PUBLIC_API_URL"] == "http://api:8080"
+    assert env["CORS_ALLOWED_ORIGINS"] == "https://web.example.com"
+    assert cors_origins_from_snapshot(snapshot) == {"api": ["https://web.example.com"]}
+
+
+def test_cors_connector_alone_still_wires_origin() -> None:
+    from app.services.service_connection_env import connection_env_from_snapshot
+
+    snapshot = {
+        "service_connections": [
+            {
+                "source": "web",
+                "target": "api",
+                "protocol": "http",
+                "kind": "cors",
+                "cors_origin": "https://app.example.com",
+            }
+        ],
+    }
+    env = connection_env_from_snapshot(snapshot)
+    assert env.get("CORS_ALLOWED_ORIGINS") == "https://app.example.com"

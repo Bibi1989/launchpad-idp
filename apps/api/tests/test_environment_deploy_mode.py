@@ -65,3 +65,34 @@ def test_resolve_deploy_mode_helm_explicit_manifest_is_allowed() -> None:
     assert deploy_mode == DeployMode.MANIFEST
     assert packaging == KubernetesPackaging.HELM.value
 
+
+def test_environment_read_supports_docker_compose() -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from app.schemas.environment import EnvironmentRead, EnvironmentStatus
+
+    now = datetime.now(timezone.utc)
+    env_dict = {
+        "id": uuid4(),
+        "owner_id": uuid4(),
+        "workspace_id": None,
+        "name": "docker-compose-env",
+        "git_branch": "main",
+        "git_repo_url": "https://example.com/repo",
+        "status": EnvironmentStatus.RUNNING,
+        "namespace_name": "ns-test",
+        "deploy_mode": "docker_compose",
+        "cost_estimate_hourly": Decimal("0.00"),
+        "error_message": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    read_obj = EnvironmentRead.model_validate(env_dict)
+    assert read_obj.deploy_mode == DeployMode.DOCKER_COMPOSE_UNDERSCORE
+
+    env_dict["deploy_mode"] = "docker-compose"
+    read_obj_dash = EnvironmentRead.model_validate(env_dict)
+    assert read_obj_dash.deploy_mode == DeployMode.DOCKER_COMPOSE
+
+
+

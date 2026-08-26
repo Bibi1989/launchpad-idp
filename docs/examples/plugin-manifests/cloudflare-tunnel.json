@@ -1,0 +1,49 @@
+{
+  "id": "cloudflare-tunnel",
+  "displayName": "Cloudflare Tunnel",
+  "docsUrl": "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/",
+  "runtimeTargets": ["paas"],
+  "capabilities": ["provision", "destroy", "status"],
+  "credentialFields": [
+    {
+      "name": "cloudflare_api_token",
+      "displayName": "Cloudflare API Token",
+      "secret": true,
+      "required": true,
+      "help": "Token with Cloudflare Tunnel edit permission."
+    },
+    {
+      "name": "account_id",
+      "displayName": "Account ID",
+      "secret": false,
+      "required": true
+    }
+  ],
+  "regions": [],
+  "tiers": [],
+  "credentialsSchema": {
+    "type": "object",
+    "required": ["cloudflare_api_token", "account_id"],
+    "properties": {
+      "cloudflare_api_token": { "type": "string", "format": "password" },
+      "account_id": { "type": "string" }
+    }
+  },
+  "deploymentConfigSchema": {
+    "type": "object",
+    "properties": {
+      "tunnel_name": { "type": "string", "default": "launchpad-tunnel" },
+      "service_url": { "type": "string", "default": "http://localhost:8080" }
+    }
+  },
+  "hooks": {},
+  "runtime": {
+    "engine": "terraform",
+    "workingDir": "cloudflare-tunnel",
+    "varMapping": {
+      "api_token": "${credentials.cloudflare_api_token}",
+      "account_id": "${credentials.account_id}",
+      "tunnel_name": "${spec.name}"
+    }
+  }
+}

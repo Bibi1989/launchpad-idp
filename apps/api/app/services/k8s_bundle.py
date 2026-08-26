@@ -24,6 +24,7 @@ from app.schemas.cloud import (
 )
 from app.services.workload_dependencies import (
     dependency_secret_string_data,
+    external_secret_names,
     in_cluster_manifest_files,
     init_container_wait_blocks,
     _in_cluster_kinds,
@@ -415,6 +416,14 @@ def _deployment_yaml(
             f"""\
             - secretRef:
                 name: {app}-secrets"""
+        )
+    # External datastores that reference an existing secret inject its keys here.
+    # Placed after {app}-secrets so an operator-supplied DATABASE_URL / REDIS_URL wins.
+    for ref_name in external_secret_names(deps):
+        env_from_items.append(
+            f"""\
+            - secretRef:
+                name: {ref_name}"""
         )
     env_from_block = ""
     if env_from_items:

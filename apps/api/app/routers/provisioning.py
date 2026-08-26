@@ -52,6 +52,10 @@ from app.schemas.cloud import (
     GcpApiEnablementResponse,
     ProvisioningCostEstimate,
 )
+from app.schemas.dockerfile_schema import (
+    DockerfileVerifyRequest,
+    DockerfileVerifyResponse,
+)
 from app.schemas.environment import AuditLogRead
 from app.schemas.repo_import import ServiceConnectionsUpdate, ServiceGraphResponse
 from app.services.audit import AuditService
@@ -223,6 +227,22 @@ async def update_workspace_connections(
 ) -> ServiceGraphResponse:
     """Replace the operator-configured service connections; returns the rebuilt graph."""
     return await service.update_service_connections(workspace_id, user, payload.connections)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/dockerfile-verify",
+    response_model=DockerfileVerifyResponse,
+)
+async def verify_workspace_dockerfiles(
+    workspace_id: UUID,
+    payload: DockerfileVerifyRequest,
+    user: CurrentUser,
+    service: ProvisioningService = Depends(get_provisioning_service),
+) -> DockerfileVerifyResponse:
+    """Advisory build+run+probe of the workspace Dockerfiles (non-blocking)."""
+    specs = [s.model_dump() for s in payload.services]
+    results = await service.verify_workspace_dockerfiles(workspace_id, user, specs)
+    return DockerfileVerifyResponse(results=results)
 
 
 @router.get(

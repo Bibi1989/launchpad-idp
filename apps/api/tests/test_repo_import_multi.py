@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pkg.detector.models import DetectedService, DetectionResult, ProjectLayout
@@ -138,3 +138,155 @@ async def test_start_import_single_repo_unchanged(tmp_path: Path) -> None:
     assert (state["clones"][0].root_dir / "package.json").is_file()
     assert not (state["clones"][0].root_dir / "apps").exists()
     assert not (state["clones"][0].root_dir / "repos").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_as_workspace_duplicate_name_raises_409(tmp_path: Path) -> None:
+    from uuid import uuid4
+    from fastapi import HTTPException
+    from app.schemas.repo_import import RepoImportSaveRequest
+
+    mock_session = MagicMock()
+    svc = RepoImportService(session=mock_session)
+
+    import_root = tmp_path / "import_root"
+    import_root.mkdir(parents=True, exist_ok=True)
+    (import_root / ".launchpad").mkdir(parents=True, exist_ok=True)
+    svc._importer.get_root = lambda import_id: import_root
+    svc._importer.read_meta = lambda import_id: {"repo_url": "https://github.com/acme/test.git", "branch": "main"}
+    svc._read_detection = lambda root: DetectionResult(
+        layout=ProjectLayout.SINGLE,
+        services=[DetectedService(id="test", name="test", path=".")],
+        datastores=[],
+    )
+
+    mock_org = SimpleNamespace(id=uuid4(), plan="free")
+    mock_session.get = AsyncMock(return_value=mock_org)
+
+    # 1. Org membership query -> returns membership with organization
+    res_membership = MagicMock()
+    res_membership.scalar_one_or_none.return_value = SimpleNamespace(organization=mock_org)
+    # 2. Plan quota check query -> count = 0
+    res_count = MagicMock()
+    res_count.scalar_one.return_value = 0
+    # 3. Existing workspace check query -> returns duplicate workspace
+    res_workspace = MagicMock()
+    res_workspace.scalar_one_or_none.return_value = SimpleNamespace(id=uuid4())
+
+    mock_session.execute = AsyncMock(side_effect=[res_membership, res_count, res_workspace])
+
+    owner = SimpleNamespace(id=uuid4(), email="user@example.com")
+    request = RepoImportSaveRequest(name="launch-test", runtime_mode="kubernetes")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc.save_as_workspace("imp-1", request, owner=owner, org_id=mock_org.id)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "workspace_exists"
+
+
+@pytest.mark.asyncio
+async def test_save_as_workspace_integrity_error_raises_409(tmp_path: Path) -> None:
+    from uuid import uuid4
+    from fastapi import HTTPException
+    from sqlalchemy.exc import IntegrityError
+    from app.schemas.repo_import import RepoImportSaveRequest
+
+    mock_session = MagicMock()
+    svc = RepoImportService(session=mock_session)
+
+    import_root = tmp_path / "import_root"
+    import_root.mkdir(parents=True, exist_ok=True)
+    svc._importer.get_root = lambda import_id: import_root
+    svc._importer.read_meta = lambda import_id: {"repo_url": "https://github.com/acme/test.git", "branch": "main"}
+    svc._allocate_durable_dir = lambda name: tmp_path / "durable"
+    svc._read_detection = lambda root: DetectionResult(
+        layout=ProjectLayout.SINGLE,
+        services=[DetectedService(id="test", name="test", path=".")],
+        datastores=[],
+    )
+
+    mock_org = SimpleNamespace(id=uuid4(), plan="free")
+    mock_session.get = AsyncMock(return_value=mock_org)
+
+    # 1. Org membership query -> returns membership with organization
+    res_membership = MagicMock()
+    res_membership.scalar_one_or_none.return_value = SimpleNamespace(organization=mock_org)
+    # 2. Plan quota check query -> count = 0
+    res_count = MagicMock()
+    res_count.scalar_one.return_value = 0
+    # 3. Existing workspace check query -> returns None (no duplicate pre-commit)
+    res_workspace = MagicMock()
+    res_workspace.scalar_one_or_none.return_value = None
+    # 4. Org resolve context query -> returns membership with organization
+    res_membership2 = MagicMock()
+    res_membership2.scalar_one_or_none.return_value = SimpleNamespace(organization=mock_org)
+    # 5. Project resolve query -> returns a project
+    res_project = MagicMock()
+    res_project.scalar_one_or_none.return_value = SimpleNamespace(id=uuid4())
+
+    mock_session.execute = AsyncMock(side_effect=[res_membership, res_count, res_workspace, res_membership2, res_project])
+    mock_session.commit = AsyncMock(side_effect=IntegrityError("stmt", "params", Exception("duplicate key")))
+    mock_session.rollback = AsyncMock()
+
+    owner = SimpleNamespace(id=uuid4(), email="user@example.com")
+    request = RepoImportSaveRequest(name="launch-test", runtime_mode="kubernetes")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc.save_as_workspace("imp-1", request, owner=owner, org_id=mock_org.id)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "workspace_exists"
+    mock_session.rollback.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_save_as_workspace_link_mode_succeeds(tmp_path: Path) -> None:
+    from uuid import uuid4
+    from app.schemas.repo_import import RepoImportSaveRequest
+    from app.models.domain import ProvisioningWorkspace
+
+    mock_session = MagicMock()
+    svc = RepoImportService(session=mock_session)
+
+    import_root = tmp_path / "import_root"
+    import_root.mkdir(parents=True, exist_ok=True)
+    (import_root / ".launchpad").mkdir(parents=True, exist_ok=True)
+    svc._importer.get_root = lambda import_id: import_root
+    svc._importer.read_meta = lambda import_id: {"repo_url": "https://github.com/acme/test.git", "branch": "main"}
+    svc._read_detection = lambda root: DetectionResult(
+        layout=ProjectLayout.SINGLE,
+        services=[DetectedService(id="test", name="test", path=".")],
+        datastores=[],
+    )
+
+    mock_org = SimpleNamespace(id=uuid4(), plan="free")
+    mock_session.get = AsyncMock(return_value=mock_org)
+
+    res_membership = MagicMock()
+    res_membership.scalar_one_or_none.return_value = SimpleNamespace(organization=mock_org)
+    res_count = MagicMock()
+    res_count.scalar_one.return_value = 0
+    res_workspace = MagicMock()
+    res_workspace.scalar_one_or_none.return_value = None
+    res_membership2 = MagicMock()
+    res_membership2.scalar_one_or_none.return_value = SimpleNamespace(organization=mock_org)
+    res_project = MagicMock()
+    res_project.scalar_one_or_none.return_value = SimpleNamespace(id=uuid4())
+
+    mock_session.execute = AsyncMock(side_effect=[res_membership, res_count, res_workspace, res_membership2, res_project])
+    mock_session.commit = AsyncMock()
+
+    owner = SimpleNamespace(id=uuid4(), email="user@example.com")
+    request = RepoImportSaveRequest(name="launch-link-test", runtime_mode="kubernetes")
+
+    import_id = str(uuid4())
+    result = await svc.save_as_workspace(import_id, request, owner=owner, org_id=mock_org.id, link_mode=True)
+    assert result.workspace_id is not None
+    mock_session.add.assert_called_once()
+    added_ws = mock_session.add.call_args[0][0]
+    assert isinstance(added_ws, ProvisioningWorkspace)
+    assert added_ws.name == "launch-link-test"
+
+
+

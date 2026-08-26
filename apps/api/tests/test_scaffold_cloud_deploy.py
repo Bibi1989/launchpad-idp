@@ -148,6 +148,14 @@ def test_makefile_written(tmp_path: Path) -> None:
     assert "terraform apply" in text
 
 
+def test_makefile_launchpad_uses_launch_provision(tmp_path: Path) -> None:
+    write_cloud_deploy_makefile(tmp_path, engine=IaCEngine.LAUNCHPAD)
+    text = (tmp_path / "Makefile").read_text(encoding="utf-8")
+    assert "bash infra/launchProvision.sh up" in text
+    assert "bash infra/launchProvision.sh down" in text
+    assert "bash infra/launchProvision.sh configure" in text
+
+
 def test_iac_apply_runs_init_apply_output(tmp_path: Path) -> None:
     tf = tmp_path / "infra" / "terraform"
     tf.mkdir(parents=True)

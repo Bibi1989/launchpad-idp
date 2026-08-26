@@ -72,6 +72,7 @@ export interface Environment {
   ttl_expires_at: string | null
   ttl_disabled?: boolean
   lifecycle_stage?: LifecycleStage | string
+  stage?: string | null
   promotion_lineage_id?: string | null
   promoted_from_id?: string | null
   can_promote_to_staging?: boolean
@@ -244,6 +245,12 @@ export interface PreviewLaunchPayload {
     on_finding: 'block' | 'warn'
     tool: string
   } | null
+  cloud_plugin?: {
+    provider: string | null
+    service: string | null
+    region: string | null
+    tier: string | null
+  } | null
 }
 
 export interface EnvironmentExtendPayload {
@@ -276,6 +283,12 @@ export interface EnvironmentPromotePayload {
     severity_threshold: 'critical' | 'critical_high'
     on_finding: 'block' | 'warn'
     tool: string
+  } | null
+  cloud_plugin?: {
+    provider: string | null
+    service: string | null
+    region: string | null
+    tier: string | null
   } | null
 }
 

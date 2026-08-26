@@ -501,6 +501,9 @@ const kindBusy = computed(() => kindCreating.value || kindDeleting.value || kind
       <p v-if="successMessage" class="text-sm text-[var(--lp-ok)]">{{ successMessage }}</p>
     </section>
 
+    <!-- Plugin-only clouds (Hetzner, DigitalOcean, Railway, ...) -->
+    <PluginCloudCredentials />
+
     <section class="rounded-xl border border-[var(--lp-line)] bg-[var(--lp-panel)] p-6 text-sm text-[var(--lp-muted)]">
       <h2 class="text-lg font-semibold text-[var(--lp-text)]">{{ t('settings.alsoConfigure') }}</h2>
       <ul class="mt-3 list-disc space-y-2 pl-5">

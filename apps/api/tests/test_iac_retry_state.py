@@ -201,3 +201,61 @@ def test_known_pulumi_gcp_import_includes_vm() -> None:
     assert by_name["lp-vm"].endswith("/instances/lp-pulumi-code-vm")
     assert by_name["lp-vpc"].endswith("/networks/lp-pulumi-code-vpc")
     assert by_name["lp-subnet"].endswith("/subnetworks/lp-pulumi-code-subnet")
+
+
+def test_ensure_tf_variables_declared_appends_missing_vars(tmp_path: Path) -> None:
+    from app.services.iac_apply import _ensure_tf_variables_declared, _get_declared_tf_variables, _var_args
+
+    tf_dir = tmp_path / "infra" / "terraform"
+    tf_dir.mkdir(parents=True)
+    (tf_dir / "variables.tf").write_text('variable "custom_var" {\n  type = string\n}\n', encoding="utf-8")
+
+    tf_vars = {
+        "project_id": "my-gcp-project",
+        "app_listen_port": "8080",
+        "ssh_public_key": "ssh-rsa AAAAB3NzaC1yc2E...",
+        "custom_var": "hello",
+    }
+
+    _ensure_tf_variables_declared(tf_dir, tf_vars)
+
+    declared = _get_declared_tf_variables(tf_dir)
+    assert "project_id" in declared
+    assert "app_listen_port" in declared
+    assert "ssh_public_key" in declared
+    assert "custom_var" in declared
+
+    flags = _var_args(tf_vars, tf_dir)
+    assert "-var=project_id=my-gcp-project" in flags
+    assert "-var=app_listen_port=8080" in flags
+    assert "-var=ssh_public_key=ssh-rsa AAAAB3NzaC1yc2E..." in flags
+    assert "-var=custom_var=hello" in flags
+
+
+def test_ensure_tf_outputs_declared_safe_references(tmp_path: Path) -> None:
+    from app.services.iac_apply import _ensure_tf_outputs_declared
+
+    tf_dir = tmp_path / "infra" / "terraform"
+    tf_dir.mkdir(parents=True)
+    (tf_dir / "main.tf").write_text('resource "null_resource" "dummy" {}\n', encoding="utf-8")
+
+    # Pre-populate outputs.tf with legacy broken references
+    (tf_dir / "outputs.tf").write_text(
+        'output "public_ip" {\n'
+        '  value = try(module.cluster.public_ip, try(aws_instance.app[0].public_ip, "127.0.0.1"))\n'
+        '}\n'
+        'output "preview_url" {\n'
+        '  value = try(module.cluster.preview_url, "http://127.0.0.1:8080")\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    _ensure_tf_outputs_declared(tf_dir)
+
+    content = (tf_dir / "outputs.tf").read_text(encoding="utf-8")
+    assert "module.cluster" not in content
+    assert "aws_instance" not in content
+    assert 'value       = "127.0.0.1"' in content
+    assert 'value       = format("http://127.0.0.1:%s", "8080")' in content
+
+

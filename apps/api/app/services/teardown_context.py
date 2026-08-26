@@ -95,6 +95,8 @@ async def capture_environment_teardown_context(
         if raw_region is not None and str(raw_region).strip():
             region = str(raw_region).strip()
     if region is None:
+        from app.core.secrets import decrypt_secret
+        from app.schemas.cloud import CloudCredentials
         from app.services.cloud_kubernetes import region_from_wizard
 
         provider_for_region = (
@@ -103,7 +105,24 @@ async def capture_environment_teardown_context(
             .lower()
         )
         if provider_for_region and provider_for_region != "local":
-            region = region_from_wizard(provider_for_region, snapshot)
+            credentials = CloudCredentials()
+            if workspace.encrypted_credentials:
+                try:
+                    credentials = CloudCredentials.model_validate_json(
+                        decrypt_secret(workspace.encrypted_credentials)
+                    )
+                except Exception:
+                    credentials = CloudCredentials()
+            credentials = await provisioning._fill_from_account_vault(
+                credentials,
+                environment.owner_id,
+                provider=provider_for_region,
+            )
+            region = region_from_wizard(
+                provider_for_region,
+                snapshot,
+                credentials=credentials,
+            )
 
     payload: dict[str, Any] = {
         "workspace_id": str(workspace_id),
@@ -118,6 +137,15 @@ async def capture_environment_teardown_context(
         "create_subnets": create_subnets,
         "owner_id": str(environment.owner_id),
         "environment_provider": environment.provider,
+        "registry_images": [
+            img
+            for img in (
+                [getattr(environment, "workload_image", None)]
+                if getattr(environment, "workload_image", None)
+                else []
+            )
+            if isinstance(img, str) and img.strip()
+        ],
     }
     # Encrypt the whole blob so workspace SA JSON is not stored plaintext.
     environment.teardown_context_json = encrypt_secret(json.dumps(payload))

@@ -89,3 +89,33 @@ def test_retarget_loads_cloud_kubeconfig_not_local_context(tmp_path) -> None:
     assert captured.get("config_file") == str(kubeconfig)
     assert captured.get("context") == "gke_launchpad-504012_europe-west3_launchpad-previews"
     assert provisioner.remote_cluster is True
+
+
+@pytest.mark.asyncio
+async def test_retarget_provisioner_skips_when_provider_is_local(tmp_path) -> None:
+    """When environment or workspace provider is local, retargeting to cloud must be skipped."""
+    from uuid import UUID
+    from unittest.mock import AsyncMock, MagicMock
+    from app.models.domain import Environment
+    from app.workers.tasks import _retarget_provisioner_for_cloud_k8s
+
+    settings = Settings(kubernetes_enabled=True)
+    provisioner = KubernetesProvisioner(settings)
+    assert provisioner.remote_cluster is False
+
+    session = AsyncMock()
+    env = Environment(
+        id=UUID("11111111-1111-1111-1111-111111111111"),
+        provider="local",
+        deploy_mode="preview",
+    )
+    result = await _retarget_provisioner_for_cloud_k8s(
+        session,
+        environment=env,
+        provisioner=provisioner,
+        deploy_mode="preview",
+        create_cluster=False,
+    )
+    assert result is provisioner
+    assert result.remote_cluster is False
+

@@ -1,7 +1,21 @@
 import { z } from 'zod'
 
 export const cloudProviderSchema = z.enum(['local', 'gcp', 'aws', 'azure', 'cloudflare'])
-export const iacEngineSchema = z.enum(['terraform', 'opentofu', 'pulumi', 'ansible'])
+export const iacEngineSchema = z.enum(['launchpad', 'terraform', 'opentofu', 'pulumi', 'ansible'])
+
+export const instanceConfigToolSchema = z.enum(['cloud-init', 'ansible', 'puppet', 'chef'])
+
+export const DEFAULT_INSTANCE_CONFIG_TOOL = 'cloud-init' as const
+
+export function ansibleWantedForWorkspace(opts: {
+  ansibleEnabled: boolean
+  iacEngine: string
+  configTool?: string | null
+}): boolean {
+  if (opts.ansibleEnabled) return true
+  if (opts.iacEngine === 'ansible') return true
+  return (opts.configTool || DEFAULT_INSTANCE_CONFIG_TOOL) === 'ansible'
+}
 
 export const ansibleConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -321,6 +335,7 @@ export const gcpResourcesSchema = z.object({
   network_topology: networkTopologySchema.default('simple'),
   gke: z.boolean().default(false),
   artifact_registry: z.boolean().default(false),
+  compute_instance: z.boolean().default(false),
   secret_backend: secretBackendSchema.default('secret_manager'),
   cloud_run: z.boolean().default(false),
   cloud_functions: z.boolean().default(false),
@@ -617,7 +632,7 @@ const wizardNameSchema = z
 const wizardCommonFields = {
   name: wizardNameSchema,
   launchpad_project_id: z.string().uuid().optional().nullable(),
-  iac_engine: iacEngineSchema.default('terraform'),
+  iac_engine: iacEngineSchema.default('launchpad'),
   credentials: cloudCredentialsSchema.default({}),
   run_init: z.boolean().default(true),
   runtime_mode: workspaceRuntimeModeSchema.default('kubernetes'),
@@ -642,6 +657,7 @@ const wizardCommonFields = {
   container_scaffold: containerScaffoldSchema.default(defaultContainerScaffold()),
   dependencies: workloadDependenciesSchema.default(defaultWorkloadDependencies()),
   ansible: ansibleConfigSchema.default(defaultAnsibleConfig()),
+  config_tool: instanceConfigToolSchema.default('cloud-init'),
   env_vars: z
     .array(
       z.object({
@@ -651,6 +667,15 @@ const wizardCommonFields = {
     )
     .max(200)
     .default([]),
+  cloud_plugin: z
+    .object({
+      provider: z.string().nullable(),
+      service: z.string().nullable(),
+      region: z.string().nullable(),
+      tier: z.string().nullable(),
+    })
+    .nullable()
+    .optional(),
 }
 
 export const provisioningWizardSchema = z.discriminatedUnion('provider', [

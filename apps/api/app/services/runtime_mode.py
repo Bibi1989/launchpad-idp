@@ -60,19 +60,42 @@ def has_vm_hint(cloud: CloudConfig) -> bool:
     return False
 
 
+def wants_ansible_config(
+    ansible: AnsibleConfig,
+    *,
+    iac_engine: str | None = None,
+    config_tool: str | None = None,
+) -> bool:
+    """True when the user chose Ansible as IaC engine or VM configuration tool."""
+    if ansible.enabled:
+        return True
+    if (iac_engine or "").strip().lower() == "ansible":
+        return True
+    return (config_tool or "cloud-init").strip().lower() == "ansible"
+
+
 def ensure_ansible_for_vm_runtime(
     ansible: AnsibleConfig,
     *,
     runtime_mode: WorkspaceRuntimeMode,
     running_instance: RunningInstanceConfig | None,
+    iac_engine: str | None = None,
+    config_tool: str | None = None,
 ) -> AnsibleConfig:
-    """Enable ``infra/ansible`` for VM running-instance (cloud auto-create or BYO).
+    """Enable ``infra/ansible`` only when Ansible is the chosen VM config tool.
 
-    Terraform/Pulumi create the VM; Ansible (or SSH fallback) configures the app.
-    Without this, cloud wizards leave ``ansible.enabled=false`` and deploy skips
-    playbooks with ``ansible not attempted``.
+    Default instance configuration is LaunchConfig (cloud-init / startup script).
+    Terraform/Pulumi still create the VM; Ansible is opt-in.
     """
+    if not wants_ansible_config(
+        ansible,
+        iac_engine=iac_engine,
+        config_tool=config_tool,
+    ):
+        return ansible
     if runtime_mode != WorkspaceRuntimeMode.RUNNING_INSTANCE:
+        if (iac_engine or "").strip().lower() == "ansible" and not ansible.enabled:
+            return ansible.model_copy(update={"enabled": True})
         return ansible
     instance = running_instance or RunningInstanceConfig()
     if instance.kind != RunningInstanceKind.VM:

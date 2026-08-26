@@ -23,6 +23,60 @@ _GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
 _PLATFORM_LISTEN_PORT = 8080
 
 
+def _dockerfile_looks_unsafe_for_nginx_daemonization(text: str) -> bool:
+    """Best-effort detection: nginx that daemonizes will cause the pod to exit.
+
+    Many nginx images start nginx in the foreground only when
+    ``nginx -g 'daemon off;'`` is used. When a Dockerfile starts nginx without
+    forcing foreground mode, the container's main process exits immediately and
+    Kubernetes reports the pod as ``Completed``.
+    """
+    raw = text or ""
+    low = raw.lower()
+
+    # If we already force foreground, keep the user's Dockerfile.
+    if "daemon off" in low or "daemon-off" in low:
+        return False
+
+    if "nginx" not in low:
+        return False
+
+    # Only override for nginx-based images / entrypoints.
+    nginx_origin = any(
+        marker in low
+        for marker in (
+            "from nginx",
+            "from nginxinc/nginx-unprivileged",
+            "/docker-entrypoint.sh",
+            "/docker-entrypoint.d/",
+        )
+    )
+    if not nginx_origin:
+        return False
+
+    # If CMD/ENTRYPOINT invokes nginx without forcing foreground mode, nginx
+    # will daemonize and the container main process will exit.
+    for line in raw.splitlines():
+        line_low = (line or "").strip().lower()
+        if not line_low.startswith(("cmd", "entrypoint", "command")):
+            continue
+        # If this line calls nginx but does not force foreground, consider it unsafe.
+        if "nginx" in line_low and "daemon off" not in line_low and "daemon-off" not in line_low:
+            return True
+
+    # Also handle Dockerfiles that use a shell entrypoint like:
+    #   CMD nginx
+    for line in raw.splitlines():
+        line_low = (line or "").strip().lower()
+        if "service nginx" in line_low and "start" in line_low:
+            return True
+
+        if line_low.startswith("cmd") and "nginx" in line_low and "daemon off" not in line_low:
+            return True
+
+    return False
+
+
 def _ensure_dockerfile(
     context: Path, *, dockerfile_rel: str = "Dockerfile", force: bool = False
 ) -> str | None:
@@ -36,7 +90,19 @@ def _ensure_dockerfile(
     """
     target = context / dockerfile_rel
     if target.is_file() and not force:
-        return None
+        # Some linked repos ship an nginx Dockerfile that daemonizes (no
+        # ``daemon off``), which causes the pod to exit immediately after startup.
+        try:
+            raw = target.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        if _dockerfile_looks_unsafe_for_nginx_daemonization(raw):
+            logger.info(
+                "preview_build_dockerfile_override_nginx_foreground",
+                file=str(target),
+            )
+        else:
+            return None
 
     from app.schemas.dockerfile_schema import ProjectStack
     from app.services.dockerfile_scaffold import detect_stack, scaffold_dockerfile
@@ -265,10 +331,18 @@ def _clone_repository(
     return resolved_sha
 
 
-def _docker_build(*, context: Path, dockerfile: str, tag: str, platform: str | None = None) -> None:
+def _docker_build(
+    *,
+    context: Path,
+    dockerfile: str,
+    tag: str,
+    platform: str | None = None,
+    build_env: dict[str, str] | None = None,
+) -> None:
     import docker
 
     from app.core.config import get_settings
+    from app.services.env_blueprint import docker_build_args_from_env
 
     client = docker.from_env()
     dockerfile_path = context / dockerfile
@@ -277,6 +351,17 @@ def _docker_build(*, context: Path, dockerfile: str, tag: str, platform: str | N
             f"{dockerfile} not found at repository root - add a Dockerfile to enable preview builds"
         )
     pull_base = bool(get_settings().preview_build_pull_base)
+    merged_env = collect_context_build_env(context)
+    if build_env:
+        from app.services.env_blueprint import merge_env_layers
+
+        merged_env = merge_env_layers(merged_env, build_env)
+    buildargs: dict[str, str] = {}
+    flat = docker_build_args_from_env(merged_env)
+    for i in range(0, len(flat) - 1, 2):
+        if flat[i] == "--build-arg" and "=" in flat[i + 1]:
+            key, value = flat[i + 1].split("=", 1)
+            buildargs[key] = value
     try:
         build_kwargs: dict[str, object] = {
             "path": str(context),
@@ -287,6 +372,8 @@ def _docker_build(*, context: Path, dockerfile: str, tag: str, platform: str | N
         }
         if platform:
             build_kwargs["platform"] = platform
+        if buildargs:
+            build_kwargs["buildargs"] = buildargs
         _, build_logs = client.images.build(**build_kwargs)
         for chunk in build_logs:
             if "stream" in chunk:
@@ -499,38 +586,163 @@ def _read_build_plan_contexts(workspace_root: Path) -> list[tuple[str, str]]:
     return entries
 
 
-def _write_build_env_file(app_dir: Path, build_env: dict[str, str]) -> None:
-    """Merge non-secret build-time vars into ``.env.production`` / ``.env`` in the build
-    context so statically-built frontends (Vite/Next/CRA/Nuxt) bake them at ``npm build``.
+_LAUNCHPAD_BUILD_ENV_LOCAL = ".env.production.local"
 
-    Only keys ABSENT from an existing file are appended, so a value the repo already
-    commits is never overwritten.
+# Keys that must never be missing at Vite/Next/Nuxt build time (undefined in JS).
+_FRONTEND_BUILD_API_KEYS: tuple[str, ...] = (
+    "API_URL",
+    "BACKEND_URL",
+    "VITE_API_URL",
+    "VITE_API_BASE_URL",
+    "VUE_APP_API_URL",
+    "PUBLIC_API_URL",
+    "NG_APP_API_URL",
+    "NEXT_PUBLIC_API_URL",
+    "NEXT_PUBLIC_API_BASE_URL",
+    "NUXT_PUBLIC_API_URL",
+    "NUXT_PUBLIC_API_BASE",
+)
+
+
+def _parse_dotenv_file(path: Path) -> dict[str, str]:
+    from pkg.detector.env_example import parse_env_example_text
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    return {
+        item.key: (item.suggested_value or item.example_value or "")
+        for item in parse_env_example_text(text, source=path.name)
+    }
+
+
+def collect_context_build_env(context: Path) -> dict[str, str]:
+    """Read build-time env from a service context (blueprint + Launchpad local override)."""
+    from app.services.env_blueprint import merge_env_layers, load_service_env_blueprint
+
+    root = Path(context)
+    if not root.is_dir():
+        return {}
+    return merge_env_layers(
+        load_service_env_blueprint(root),
+        _parse_dotenv_file(root / ".env.production"),
+        _parse_dotenv_file(root / ".env"),
+        _parse_dotenv_file(root / _LAUNCHPAD_BUILD_ENV_LOCAL),
+    )
+
+
+def _write_build_env_file(app_dir: Path, build_env: dict[str, str]) -> None:
+    """Force-write Launchpad build-time env into every Vite/Next dotenv filename.
+
+    Always overwrites Launchpad-managed files so empty committed ``VITE_API_URL=``
+    cannot leave ``import.meta.env.VITE_API_URL`` as JS ``undefined``.
     """
     if not build_env:
         return
-    for filename in (".env.production", ".env"):
-        target = app_dir / filename
-        existing_keys: set[str] = set()
-        lines: list[str] = []
-        if target.is_file():
-            try:
-                for raw in target.read_text(encoding="utf-8").splitlines():
-                    lines.append(raw)
-                    stripped = raw.strip()
-                    if stripped and not stripped.startswith("#") and "=" in stripped:
-                        existing_keys.add(stripped.split("=", 1)[0].strip())
-            except OSError:
-                continue
-        appended = [f"{k}={v}" for k, v in build_env.items() if k not in existing_keys]
-        if not appended:
+    lines = [
+        "# Written by Launchpad for preview builds (do not commit).",
+        "# Forces SPA public API base so the browser never sees /undefined/...",
+        "",
+    ]
+    for key in sorted(build_env):
+        value = build_env[key]
+        cleaned_key = str(key or "").strip()
+        if not cleaned_key or value is None:
             continue
-        header = ["", "# Injected by Launchpad (frontend -> backend connection)"]
+        lines.append(f"{cleaned_key}={value}")
+    payload = "\n".join(lines) + "\n"
+    for filename in (
+        _LAUNCHPAD_BUILD_ENV_LOCAL,
+        ".env.production",
+        ".env.local",
+        ".env",
+    ):
+        target = app_dir / filename
         try:
-            target.write_text(
-                "\n".join([*lines, *header, *appended]) + "\n", encoding="utf-8"
-            )
+            target.write_text(payload, encoding="utf-8")
         except OSError as exc:  # noqa: BLE001
             logger.warning("build_env_write_failed", path=str(target), error=str(exc)[:200])
+
+
+def ensure_dockerfile_bakes_frontend_api(dockerfile: Path) -> bool:
+    """Inject ARG/ENV for public API keys before the frontend build RUN.
+
+    Repo Dockerfiles often omit ``ARG VITE_API_URL``, so ``docker build --build-arg``
+    is ignored and Vite still compiles ``undefined``. Returns True when patched.
+    """
+    if not dockerfile.is_file():
+        return False
+    try:
+        text = dockerfile.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if "LAUNCHPAD_FRONTEND_API_BAKE" in text:
+        return False
+    build_markers = (
+        "npm run build",
+        "pnpm run build",
+        "yarn build",
+        "vite build",
+        "nuxt build",
+        "next build",
+        "ng build",
+    )
+    if not any(marker in text for marker in build_markers):
+        return False
+    arg_lines = ["# LAUNCHPAD_FRONTEND_API_BAKE"]
+    for key in _FRONTEND_BUILD_API_KEYS:
+        arg_lines.append(f"ARG {key}=/api")
+    for key in _FRONTEND_BUILD_API_KEYS:
+        arg_lines.append(f"ENV {key}=${key}")
+    inject = "\n".join(arg_lines) + "\n"
+    # Insert immediately before the first build RUN that contains a marker.
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    inserted = False
+    for line in lines:
+        lowered = line.lower()
+        if not inserted and line.lstrip().upper().startswith("RUN") and any(
+            marker in lowered for marker in build_markers
+        ):
+            out.append(inject)
+            inserted = True
+        out.append(line)
+    if not inserted:
+        # Fall back: append before last stage if no RUN build matched.
+        out = [*lines[:-1], inject, lines[-1]] if lines else [inject]
+        inserted = True
+    try:
+        dockerfile.write_text("".join(out), encoding="utf-8")
+    except OSError:
+        return False
+    logger.info("dockerfile_frontend_api_bake_injected", dockerfile=str(dockerfile))
+    return True
+
+
+def force_frontend_api_build_context(
+    context: Path,
+    *,
+    api_base: str = "/api",
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Write dotenv files + patch Dockerfile so SPA builds always bake ``api_base``."""
+    from app.services.env_blueprint import apply_blueprints_to_build_env, merge_env_layers
+    from app.services.manifest_deploy import same_origin_frontend_api_env
+
+    root = Path(context)
+    forced = merge_env_layers(
+        same_origin_frontend_api_env(api_base),
+        extra_env,
+    )
+    merged = apply_blueprints_to_build_env(root, forced)
+    # Platform /api must win over blueprint placeholders that leave keys empty.
+    merged = merge_env_layers(merged, forced)
+    _write_build_env_file(root, merged)
+    df = root / "Dockerfile"
+    if df.is_file():
+        ensure_dockerfile_bakes_frontend_api(df)
+    return merged
 
 
 def materialize_linked_repos_to_apps(
@@ -615,7 +827,19 @@ def materialize_linked_repos_to_apps(
             return None
         # Bake build-time connection vars (backend URL under framework keys) into the
         # context so statically-built frontends pick them up at npm build.
-        _write_build_env_file(dest, build_env or {})
+        from app.services.env_blueprint import merge_env_layers
+
+        slug = _linked_repo_slug(repo)
+        hint = _kind_hint(slug) or _kind_hint(dest.name)
+        is_frontend = hint == "frontend" or any(
+            token in slug for token in ("frontend", "web-ui", "web", "client", "ui")
+        )
+        if is_frontend:
+            force_frontend_api_build_context(dest, api_base="/api", extra_env=build_env)
+        else:
+            from app.services.env_blueprint import apply_blueprints_to_build_env
+
+            _write_build_env_file(dest, apply_blueprints_to_build_env(dest, build_env or {}))
         logger.info("linked_repo_materialized", dest=str(dest), branch=str(repo.get("git_branch") or "main"))
         return dest.name
 

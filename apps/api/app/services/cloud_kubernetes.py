@@ -50,22 +50,14 @@ def is_cloud_kubernetes_deploy(*, provider: str | None, deploy_mode: str | None)
     return is_cloud_kubernetes_provider(provider) and mode in _K8S_DEPLOY_MODES
 
 
-def region_from_wizard(provider: str, snapshot: dict | None) -> str:
-    from app.services.cloud_promote import default_region
+def region_from_wizard(
+    provider: str,
+    snapshot: dict | None,
+    credentials: CloudCredentials | None = None,
+) -> str:
+    from app.services.cloud_region import region_from_wizard as resolve_region
 
-    try:
-        region = default_region(CloudProvider(provider))
-    except ValueError:
-        region = "us-central1"
-    if not isinstance(snapshot, dict):
-        return region
-    cloud = snapshot.get("cloud")
-    if not isinstance(cloud, dict):
-        return region
-    resources = cloud.get("resources")
-    if not isinstance(resources, dict):
-        return region
-    return str(resources.get("region") or resources.get("location") or region).strip() or region
+    return resolve_region(provider, snapshot, credentials)
 
 
 def gke_cluster_has_public_endpoint(cluster: dict[str, object]) -> bool:
@@ -169,11 +161,18 @@ def _teardown_shared_eks(
 ) -> bool:
     from app.services.aws_client import AwsClientError, delete_eks_cluster
     from app.services.cloud_networks import _normalize_aws_region
+    from app.services.cloud_region import region_from_wizard as resolve_region
 
     env = _credential_env(
         credentials, environment_id=environment_id, provider=CloudProvider.AWS.value
     )
-    resolved_region = _normalize_aws_region((region or "").strip() or "us-east-1")
+    resolved_region = _normalize_aws_region(
+        resolve_region(
+            CloudProvider.AWS.value,
+            {"cloud": {"resources": {"region": region}}} if (region or "").strip() else None,
+            credentials,
+        )
+    )
     env = {**env, "AWS_DEFAULT_REGION": resolved_region, "AWS_REGION": resolved_region}
     try:
         delete_eks_cluster(
@@ -207,7 +206,13 @@ def _teardown_shared_gke(
         raise CloudInstanceComputeError(
             "GCP project id is required to delete the shared GKE preview cluster."
         )
-    resolved_region = (region or "").strip() or "us-central1"
+    from app.services.cloud_region import region_from_wizard as resolve_region
+
+    resolved_region = resolve_region(
+        CloudProvider.GCP.value,
+        {"cloud": {"resources": {"region": region}}} if (region or "").strip() else None,
+        credentials,
+    )
     loc_flag = "--zone" if _is_gke_zone(resolved_region) else "--region"
     cmd = [
         "gcloud",
@@ -319,11 +324,18 @@ def _ensure_eks_target(
         write_eks_kubeconfig,
     )
     from app.services.cloud_networks import _normalize_aws_region
+    from app.services.cloud_region import region_from_wizard as resolve_region
 
     env = _credential_env(
         credentials, environment_id=environment_id, provider=CloudProvider.AWS.value
     )
-    resolved_region = _normalize_aws_region((region or "").strip() or "us-east-1")
+    resolved_region = _normalize_aws_region(
+        resolve_region(
+            CloudProvider.AWS.value,
+            {"cloud": {"resources": {"region": region}}} if (region or "").strip() else None,
+            credentials,
+        )
+    )
     env = {**env, "AWS_DEFAULT_REGION": resolved_region, "AWS_REGION": resolved_region}
 
     try:
@@ -486,7 +498,13 @@ def _ensure_gke_target(
         )
     env["CLOUDSDK_CORE_PROJECT"] = project_id
     env["GOOGLE_CLOUD_PROJECT"] = project_id
-    resolved_region = (region or "").strip() or "us-central1"
+    from app.services.cloud_region import region_from_wizard as resolve_region
+
+    resolved_region = resolve_region(
+        CloudProvider.GCP.value,
+        {"cloud": {"resources": {"region": region}}} if (region or "").strip() else None,
+        credentials,
+    )
 
     _enable_container_api(credentials=credentials, project_id=project_id)
 
